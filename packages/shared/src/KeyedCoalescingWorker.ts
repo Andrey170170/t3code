@@ -2,8 +2,9 @@
  * KeyedCoalescingWorker - A keyed worker that keeps only the latest value per key.
  *
  * Enqueues for an active or already-queued key are merged atomically instead of
- * creating duplicate queued items. `drainKey()` resolves only when that key has
- * no queued, pending, or active work left.
+ * creating duplicate queued items. `flushKey()` promotes pending work for one
+ * key and processes it without waiting behind unrelated keys, while
+ * `drainKey()` only waits for work already in flight.
  *
  * @module KeyedCoalescingWorker
  */
@@ -14,45 +15,66 @@ import * as TxRef from "effect/TxRef";
 
 export interface KeyedCoalescingWorker<K, V> {
   readonly enqueue: (key: K, value: V) => Effect.Effect<void>;
+  readonly flushKey: (key: K) => Effect.Effect<void>;
   readonly drainKey: (key: K) => Effect.Effect<void>;
+}
+
+export interface KeyedCoalescingWorkerProcessContext {
+  readonly flush: boolean;
 }
 
 interface KeyedCoalescingWorkerState<K, V> {
   readonly latestByKey: Map<K, V>;
   readonly queuedKeys: Set<K>;
   readonly activeKeys: Set<K>;
+  readonly flushRequestedKeys: Set<K>;
 }
 
 export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
   readonly merge: (current: V, next: V) => V;
-  readonly process: (key: K, value: V) => Effect.Effect<void, E, R>;
+  readonly process: (
+    key: K,
+    value: V,
+    context: KeyedCoalescingWorkerProcessContext,
+  ) => Effect.Effect<void, E, R>;
 }): Effect.Effect<KeyedCoalescingWorker<K, V>, never, Scope.Scope | R> =>
   Effect.gen(function* () {
+    const processContext = yield* Effect.context<R>();
     const queue = yield* Effect.acquireRelease(TxQueue.unbounded<K>(), TxQueue.shutdown);
     const stateRef = yield* TxRef.make<KeyedCoalescingWorkerState<K, V>>({
       latestByKey: new Map(),
       queuedKeys: new Set(),
       activeKeys: new Set(),
+      flushRequestedKeys: new Set(),
     });
 
-    const processKey = (key: K, value: V): Effect.Effect<void, E, R> =>
-      options.process(key, value).pipe(
+    const processKey = (key: K, value: V, flush: boolean): Effect.Effect<void, E> =>
+      options.process(key, value, { flush }).pipe(
+        Effect.provide(processContext),
         Effect.flatMap(() =>
           TxRef.modify(stateRef, (state) => {
             const nextValue = state.latestByKey.get(key);
             if (nextValue === undefined) {
               const activeKeys = new Set(state.activeKeys);
               activeKeys.delete(key);
-              return [null, { ...state, activeKeys }] as const;
+              const flushRequestedKeys = new Set(state.flushRequestedKeys);
+              flushRequestedKeys.delete(key);
+              return [null, { ...state, activeKeys, flushRequestedKeys }] as const;
             }
 
             const latestByKey = new Map(state.latestByKey);
             latestByKey.delete(key);
-            return [nextValue, { ...state, latestByKey }] as const;
+            return [
+              {
+                value: nextValue,
+                flush: state.flushRequestedKeys.has(key),
+              },
+              { ...state, latestByKey },
+            ] as const;
           }).pipe(Effect.tx),
         ),
-        Effect.flatMap((nextValue) =>
-          nextValue === null ? Effect.void : processKey(key, nextValue),
+        Effect.flatMap((next) =>
+          next === null ? Effect.void : processKey(key, next.value, next.flush),
         ),
       );
 
@@ -67,7 +89,9 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
           return [true, { ...state, activeKeys, queuedKeys }] as const;
         }
 
-        return [false, { ...state, activeKeys }] as const;
+        const flushRequestedKeys = new Set(state.flushRequestedKeys);
+        flushRequestedKeys.delete(key);
+        return [false, { ...state, activeKeys, flushRequestedKeys }] as const;
       }).pipe(
         Effect.tx,
         Effect.flatMap((shouldRequeue) =>
@@ -92,7 +116,7 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
           activeKeys.add(key);
 
           return [
-            { key, value } as const,
+            { key, value, flush: state.flushRequestedKeys.has(key) } as const,
             { ...state, latestByKey, queuedKeys, activeKeys },
           ] as const;
         }).pipe(Effect.tx),
@@ -100,7 +124,7 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
       Effect.flatMap((item) =>
         item === null
           ? Effect.void
-          : processKey(item.key, item.value).pipe(
+          : processKey(item.key, item.value, item.flush).pipe(
               Effect.catchCause(() => cleanupFailedKey(item.key)),
             ),
       ),
@@ -138,5 +162,48 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
         Effect.tx,
       );
 
-    return { enqueue, drainKey } satisfies KeyedCoalescingWorker<K, V>;
+    const flushKey: KeyedCoalescingWorker<K, V>["flushKey"] = (key) =>
+      TxRef.modify(stateRef, (state) => {
+        const hasWork =
+          state.latestByKey.has(key) || state.queuedKeys.has(key) || state.activeKeys.has(key);
+        if (!hasWork) {
+          return [null, state] as const;
+        }
+
+        const flushRequestedKeys = new Set(state.flushRequestedKeys);
+        flushRequestedKeys.add(key);
+        const value = state.latestByKey.get(key);
+        if (state.activeKeys.has(key) || value === undefined) {
+          return [null, { ...state, flushRequestedKeys }] as const;
+        }
+
+        const latestByKey = new Map(state.latestByKey);
+        latestByKey.delete(key);
+        const queuedKeys = new Set(state.queuedKeys);
+        queuedKeys.delete(key);
+        const activeKeys = new Set(state.activeKeys);
+        activeKeys.add(key);
+        return [
+          { value },
+          {
+            ...state,
+            latestByKey,
+            queuedKeys,
+            activeKeys,
+            flushRequestedKeys,
+          },
+        ] as const;
+      }).pipe(
+        Effect.tx,
+        Effect.flatMap((item) =>
+          item === null
+            ? Effect.void
+            : processKey(key, item.value, true).pipe(
+                Effect.catchCause(() => cleanupFailedKey(key)),
+              ),
+        ),
+        Effect.andThen(drainKey(key)),
+      );
+
+    return { enqueue, flushKey, drainKey } satisfies KeyedCoalescingWorker<K, V>;
   });

@@ -2,6 +2,9 @@ import { it } from "@effect/vitest";
 import { describe, expect } from "vite-plus/test";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as Scope from "effect/Scope";
 
 import { makeKeyedCoalescingWorker } from "./KeyedCoalescingWorker.ts";
 
@@ -93,5 +96,77 @@ describe("makeKeyedCoalescingWorker", () => {
         expect(processed).toEqual(["terminal-1:first", "terminal-1:second"]);
       }),
     ),
+  );
+
+  it.live("flushes one key without waiting behind unrelated queued work", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const processed: string[] = [];
+        const slowStarted = yield* Deferred.make<void>();
+        const releaseSlow = yield* Deferred.make<void>();
+        const urgentStarted = yield* Deferred.make<void>();
+
+        const worker = yield* makeKeyedCoalescingWorker<string, string, never, never>({
+          merge: (_current, next) => next,
+          process: (key, value, context) =>
+            Effect.gen(function* () {
+              processed.push(`${key}:${value}:${context.flush ? "flush" : "normal"}`);
+              if (key === "slow") {
+                yield* Deferred.succeed(slowStarted, undefined).pipe(Effect.orDie);
+                yield* Deferred.await(releaseSlow);
+              }
+              if (key === "urgent") {
+                yield* Deferred.succeed(urgentStarted, undefined).pipe(Effect.orDie);
+              }
+            }),
+        });
+
+        yield* worker.enqueue("slow", "first");
+        yield* Deferred.await(slowStarted);
+        yield* worker.enqueue("queued", "second");
+        yield* worker.enqueue("urgent", "terminal");
+
+        const flushed = yield* Effect.forkChild(worker.flushKey("urgent"));
+        yield* Deferred.await(urgentStarted);
+
+        expect(processed).toEqual(["slow:first:normal", "urgent:terminal:flush"]);
+
+        yield* Fiber.join(flushed);
+        yield* Deferred.succeed(releaseSlow, undefined);
+        yield* worker.drainKey("queued");
+
+        expect(processed).toEqual([
+          "slow:first:normal",
+          "urgent:terminal:flush",
+          "queued:second:normal",
+        ]);
+      }),
+    ),
+  );
+
+  it.live("stops active processing when its owning scope closes", () =>
+    Effect.gen(function* () {
+      const workerScope = yield* Scope.make();
+      const started = yield* Deferred.make<void>();
+      const interrupted = yield* Deferred.make<void>();
+      const neverRelease = yield* Deferred.make<void>();
+
+      const worker = yield* makeKeyedCoalescingWorker<string, string, never, never>({
+        merge: (_current, next) => next,
+        process: () =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(started, undefined).pipe(Effect.orDie);
+            yield* Deferred.await(neverRelease);
+          }).pipe(
+            Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined).pipe(Effect.orDie)),
+          ),
+      }).pipe(Effect.provideService(Scope.Scope, workerScope));
+
+      yield* worker.enqueue("child", "progress");
+      yield* Deferred.await(started);
+      yield* Scope.close(workerScope, Exit.void);
+
+      expect(yield* Deferred.isDone(interrupted)).toBe(true);
+    }),
   );
 });
