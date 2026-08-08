@@ -1,5 +1,6 @@
 import { it } from "@effect/vitest";
 import { describe, expect } from "vite-plus/test";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -140,6 +141,137 @@ describe("makeKeyedCoalescingWorker", () => {
           "urgent:terminal:flush",
           "queued:second:normal",
         ]);
+      }),
+    ),
+  );
+
+  it.live("does not process the same key concurrently when flushing queued work", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const blockerStarted = yield* Deferred.make<void>();
+        const releaseBlocker = yield* Deferred.make<void>();
+        const firstFlushStarted = yield* Deferred.make<void>();
+        const releaseFirstFlush = yield* Deferred.make<void>();
+        const secondFlushStarted = yield* Deferred.make<void>();
+        const afterStarted = yield* Deferred.make<void>();
+
+        const worker = yield* makeKeyedCoalescingWorker<string, string, never, never>({
+          merge: (_current, next) => next,
+          process: (key, value) =>
+            Effect.gen(function* () {
+              if (key === "blocker") {
+                yield* Deferred.succeed(blockerStarted, undefined).pipe(Effect.orDie);
+                yield* Deferred.await(releaseBlocker);
+              }
+
+              if (key === "target" && value === "first") {
+                yield* Deferred.succeed(firstFlushStarted, undefined).pipe(Effect.orDie);
+                yield* Deferred.await(releaseFirstFlush);
+              }
+
+              if (key === "target" && value === "second") {
+                yield* Deferred.succeed(secondFlushStarted, undefined).pipe(Effect.orDie);
+              }
+
+              if (key === "after") {
+                yield* Deferred.succeed(afterStarted, undefined).pipe(Effect.orDie);
+              }
+            }),
+        });
+
+        yield* worker.enqueue("blocker", "first");
+        yield* Deferred.await(blockerStarted);
+        yield* worker.enqueue("target", "first");
+
+        const flushed = yield* Effect.forkChild(worker.flushKey("target"));
+        yield* Deferred.await(firstFlushStarted);
+        yield* worker.enqueue("target", "second");
+        yield* worker.enqueue("after", "only");
+
+        yield* Deferred.succeed(releaseBlocker, undefined);
+        yield* Deferred.await(afterStarted);
+
+        expect(yield* Deferred.isDone(secondFlushStarted)).toBe(false);
+
+        yield* Deferred.succeed(releaseFirstFlush, undefined);
+        yield* Fiber.join(flushed);
+        expect(yield* Deferred.isDone(secondFlushStarted)).toBe(true);
+      }),
+    ),
+  );
+
+  it.live("requeues normal follow-up work behind other queued keys", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const processed: string[] = [];
+        const firstStarted = yield* Deferred.make<void>();
+        const releaseFirst = yield* Deferred.make<void>();
+
+        const worker = yield* makeKeyedCoalescingWorker<string, string, never, never>({
+          merge: (_current, next) => next,
+          process: (key, value) =>
+            Effect.gen(function* () {
+              processed.push(`${key}:${value}`);
+              if (key === "hot" && value === "first") {
+                yield* Deferred.succeed(firstStarted, undefined).pipe(Effect.orDie);
+                yield* Deferred.await(releaseFirst);
+              }
+            }),
+        });
+
+        yield* worker.enqueue("hot", "first");
+        yield* Deferred.await(firstStarted);
+        yield* worker.enqueue("hot", "second");
+        yield* worker.enqueue("other", "only");
+
+        yield* Deferred.succeed(releaseFirst, undefined);
+        yield* worker.drainKey("hot");
+        yield* worker.drainKey("other");
+
+        expect(processed).toEqual(["hot:first", "other:only", "hot:second"]);
+      }),
+    ),
+  );
+
+  it.live("preserves interruption when direct flush processing is interrupted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const blockerStarted = yield* Deferred.make<void>();
+        const releaseBlocker = yield* Deferred.make<void>();
+        const flushStarted = yield* Deferred.make<void>();
+        const neverReleaseFlush = yield* Deferred.make<void>();
+
+        const worker = yield* makeKeyedCoalescingWorker<string, string, never, never>({
+          merge: (_current, next) => next,
+          process: (key) =>
+            Effect.gen(function* () {
+              if (key === "blocker") {
+                yield* Deferred.succeed(blockerStarted, undefined).pipe(Effect.orDie);
+                yield* Deferred.await(releaseBlocker);
+              }
+
+              if (key === "target") {
+                yield* Deferred.succeed(flushStarted, undefined).pipe(Effect.orDie);
+                yield* Deferred.await(neverReleaseFlush);
+              }
+            }),
+        });
+
+        yield* worker.enqueue("blocker", "first");
+        yield* Deferred.await(blockerStarted);
+        yield* worker.enqueue("target", "terminal");
+
+        const flushed = yield* Effect.forkChild(worker.flushKey("target"));
+        yield* Deferred.await(flushStarted);
+        yield* Fiber.interrupt(flushed);
+        const flushExit = yield* Fiber.await(flushed);
+
+        expect(Exit.isFailure(flushExit)).toBe(true);
+        if (Exit.isFailure(flushExit)) {
+          expect(Cause.hasInterruptsOnly(flushExit.cause)).toBe(true);
+        }
+
+        yield* Deferred.succeed(releaseBlocker, undefined);
       }),
     ),
   );
