@@ -6,10 +6,53 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Scope from "effect/Scope";
+import * as TestClock from "effect/testing/TestClock";
 
 import { makeKeyedCoalescingWorker } from "./KeyedCoalescingWorker.ts";
 
 describe("makeKeyedCoalescingWorker", () => {
+  it.effect("flushes during cooldown while the next normal dequeue remains rate-limited", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const firstProcessed = yield* Deferred.make<void>();
+        const flushedProcessed = yield* Deferred.make<void>();
+        const secondProcessed = yield* Deferred.make<void>();
+
+        const worker = yield* makeKeyedCoalescingWorker<string, string, never, never>({
+          cooldown: "250 millis",
+          merge: (_current, next) => next,
+          process: (key, value) =>
+            Effect.gen(function* () {
+              if (key === "first" && value === "initial") {
+                yield* Deferred.succeed(firstProcessed, undefined).pipe(Effect.orDie);
+                return;
+              }
+              if (key === "first") {
+                yield* Deferred.succeed(flushedProcessed, undefined).pipe(Effect.orDie);
+                return;
+              }
+              yield* Deferred.succeed(secondProcessed, undefined).pipe(Effect.orDie);
+            }),
+        });
+
+        yield* worker.enqueue("first", "initial");
+        yield* Deferred.await(firstProcessed);
+        yield* Effect.yieldNow;
+
+        yield* worker.enqueue("first", "terminal-snapshot");
+        yield* worker.enqueue("second", "queued-during-cooldown");
+        yield* worker.flushKey("first");
+
+        expect(yield* Deferred.isDone(flushedProcessed)).toBe(true);
+        expect(yield* Deferred.isDone(secondProcessed)).toBe(false);
+        yield* TestClock.adjust("249 millis");
+        expect(yield* Deferred.isDone(secondProcessed)).toBe(false);
+        yield* TestClock.adjust("1 millis");
+        yield* Deferred.await(secondProcessed);
+      }),
+    ),
+  );
+
   it.live("waits for latest work enqueued during active processing before draining the key", () =>
     Effect.scoped(
       Effect.gen(function* () {

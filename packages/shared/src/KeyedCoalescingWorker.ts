@@ -4,11 +4,14 @@
  * Enqueues for an active or already-queued key are merged atomically instead of
  * creating duplicate queued items. `flushKey()` promotes pending work for one
  * key and processes it without waiting behind unrelated keys, while
- * `drainKey()` only waits for work already in flight.
+ * `drainKey()` only waits for work already in flight. An optional cooldown
+ * rate-limits the normal background consumer after it releases the active key,
+ * so direct flushes remain delay-free.
  *
  * @module KeyedCoalescingWorker
  */
 import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Scope from "effect/Scope";
 import * as TxQueue from "effect/TxQueue";
@@ -37,6 +40,7 @@ type ProcessKeyNext<V> =
   | null;
 
 export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
+  readonly cooldown?: Duration.Input;
   readonly merge: (current: V, next: V) => V;
   readonly process: (
     key: K,
@@ -53,6 +57,7 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
       activeKeys: new Set(),
       flushRequestedKeys: new Set(),
     });
+    const cooldown = options.cooldown === undefined ? Effect.void : Effect.sleep(options.cooldown);
 
     const processKey = (key: K, value: V, flush: boolean): Effect.Effect<void, E> =>
       options.process(key, value, { flush }).pipe(
@@ -159,6 +164,7 @@ export const makeKeyedCoalescingWorker = <K, V, E, R>(options: {
           ? Effect.void
           : processKey(item.key, item.value, item.flush).pipe(
               Effect.catchCause((cause) => cleanupProcessFailure(item.key, cause)),
+              Effect.andThen(cooldown),
             ),
       ),
       Effect.forever,
