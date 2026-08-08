@@ -64,6 +64,21 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "no rollout found",
 ];
 
+export const emitCodexCollabProgressBatch = Effect.fn("emitCodexCollabProgressBatch")(function* <
+  A,
+  E,
+  R,
+>(emission: Effect.Effect<A, E, R>, flush: boolean): Effect.fn.Return<A, E, R> {
+  // Leading-edge emission keeps a newly active child responsive. The
+  // cooldown follows the batch so updates arriving during it collapse into
+  // the next latest-state snapshot instead of delaying the first one.
+  const result = yield* emission;
+  if (!flush) {
+    yield* Effect.sleep(CODEX_COLLAB_PROGRESS_DEBOUNCE);
+  }
+  return result;
+});
+
 export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | undefined): boolean {
   return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
 }
@@ -1409,20 +1424,17 @@ export const makeCodexSessionRuntime = (
         ...(next.tokenUsage ? { tokenUsage: next.tokenUsage } : {}),
       }),
       process: (agentThreadId, progress, context) =>
-        Effect.gen(function* () {
-          // One scoped processor throttles normal progress across this
-          // session while per-child pending lanes merge. Terminal flushes
-          // bypass the delay so lifecycle events are never stuck behind it.
-          if (!context.flush) {
-            yield* Effect.sleep(CODEX_COLLAB_PROGRESS_DEBOUNCE);
-          }
-          if (progress.item) {
-            yield* emitEvent(progress.item);
-          }
-          if (progress.tokenUsage) {
-            yield* emitEvent(progress.tokenUsage);
-          }
-        }).pipe(
+        emitCodexCollabProgressBatch(
+          Effect.gen(function* () {
+            if (progress.item) {
+              yield* emitEvent(progress.item);
+            }
+            if (progress.tokenUsage) {
+              yield* emitEvent(progress.tokenUsage);
+            }
+          }),
+          context.flush,
+        ).pipe(
           Effect.catch((cause) =>
             Effect.logWarning("Failed to emit coalesced Codex subagent progress.", {
               agentThreadId,
