@@ -1,10 +1,8 @@
 import * as NodeAssert from "node:assert/strict";
 
 import { it } from "@effect/vitest";
-import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import * as TestClock from "effect/testing/TestClock";
 import { describe } from "vite-plus/test";
 import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
@@ -20,7 +18,6 @@ import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
   buildTurnStartParams,
   describeMcpElicitation,
-  emitCodexCollabProgressBatch,
   hasConfiguredMcpServer,
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
@@ -28,38 +25,6 @@ import {
   toMcpElicitationResponse,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
-
-describe("emitCodexCollabProgressBatch", () => {
-  it.effect("emits the leading batch before cooldown and keeps flushes delay-free", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const normalEmitted = yield* Deferred.make<void>();
-        const normalCompleted = yield* Deferred.make<void>();
-        yield* emitCodexCollabProgressBatch(
-          Deferred.succeed(normalEmitted, undefined).pipe(Effect.orDie),
-          false,
-        ).pipe(
-          Effect.andThen(Deferred.succeed(normalCompleted, undefined).pipe(Effect.orDie)),
-          Effect.forkChild,
-        );
-
-        yield* Effect.yieldNow;
-        NodeAssert.equal(yield* Deferred.isDone(normalEmitted), true);
-        NodeAssert.equal(yield* Deferred.isDone(normalCompleted), false);
-
-        yield* TestClock.adjust("250 millis");
-        yield* Deferred.await(normalCompleted);
-
-        const flushEmitted = yield* Deferred.make<void>();
-        yield* emitCodexCollabProgressBatch(
-          Deferred.succeed(flushEmitted, undefined).pipe(Effect.orDie),
-          true,
-        );
-        NodeAssert.equal(yield* Deferred.isDone(flushEmitted), true);
-      }),
-    ),
-  );
-});
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
   it("retains identifier purpose and the random source failure", () => {

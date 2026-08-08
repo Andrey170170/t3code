@@ -64,21 +64,6 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "no rollout found",
 ];
 
-export const emitCodexCollabProgressBatch = Effect.fn("emitCodexCollabProgressBatch")(function* <
-  A,
-  E,
-  R,
->(emission: Effect.Effect<A, E, R>, flush: boolean): Effect.fn.Return<A, E, R> {
-  // Leading-edge emission keeps a newly active child responsive. The
-  // cooldown follows the batch so updates arriving during it collapse into
-  // the next latest-state snapshot instead of delaying the first one.
-  const result = yield* emission;
-  if (!flush) {
-    yield* Effect.sleep(CODEX_COLLAB_PROGRESS_DEBOUNCE);
-  }
-  return result;
-});
-
 export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | undefined): boolean {
   return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
 }
@@ -1418,23 +1403,21 @@ export const makeCodexSessionRuntime = (
       never,
       never
     >({
+      cooldown: CODEX_COLLAB_PROGRESS_DEBOUNCE,
       merge: (current, next) => ({
         ...current,
         ...(next.item ? { item: next.item } : {}),
         ...(next.tokenUsage ? { tokenUsage: next.tokenUsage } : {}),
       }),
-      process: (agentThreadId, progress, context) =>
-        emitCodexCollabProgressBatch(
-          Effect.gen(function* () {
-            if (progress.item) {
-              yield* emitEvent(progress.item);
-            }
-            if (progress.tokenUsage) {
-              yield* emitEvent(progress.tokenUsage);
-            }
-          }),
-          context.flush,
-        ).pipe(
+      process: (agentThreadId, progress) =>
+        Effect.gen(function* () {
+          if (progress.item) {
+            yield* emitEvent(progress.item);
+          }
+          if (progress.tokenUsage) {
+            yield* emitEvent(progress.tokenUsage);
+          }
+        }).pipe(
           Effect.catch((cause) =>
             Effect.logWarning("Failed to emit coalesced Codex subagent progress.", {
               agentThreadId,
