@@ -1194,7 +1194,26 @@ export const makeCodexSessionRuntime = (
             return true;
           case "thread/status/changed":
             if (notification.params.status.type !== "active") {
+              // Idle/systemError is authoritative for both the synthetic
+              // task and Stop targeting. Clear the live-turn evidence before
+              // flushing or emitting so a later stale active notification
+              // cannot resurrect the child without a new turn/started.
+              yield* Ref.update(collabChildLiveTurnsRef, (current) => {
+                const next = new Map(current);
+                next.delete(child.agentThreadId);
+                return next;
+              });
               yield* collabProgressWorker.flushKey(child.agentThreadId);
+            }
+            if (notification.params.status.type === "active") {
+              const liveTurns = yield* Ref.get(collabChildLiveTurnsRef);
+              if (!liveTurns.has(child.agentThreadId)) {
+                // Codex can report a child thread as active after its useful
+                // work has settled. Only turn/started is an authoritative
+                // liveness edge; without a known live turn this status must
+                // not resurrect the synthetic task in T3.
+                return true;
+              }
             }
             yield* emitEvent({
               kind: "notification",
