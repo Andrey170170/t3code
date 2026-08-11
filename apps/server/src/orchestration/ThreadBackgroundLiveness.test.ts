@@ -203,6 +203,123 @@ describe("ThreadBackgroundLiveness", () => {
     expect(liveness.getThreadBackgroundLiveness(threadId)).toBeNull();
   });
 
+  it("status-less progress and updates only continue existing liveness", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const threadId = "t-live-continuation";
+
+    // Telemetry without an authoritative lifecycle edge cannot establish a
+    // task, including after that task has already settled.
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "a1",
+      taskType: "subagent",
+      status: undefined,
+      kind: "progress",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBeNull();
+
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "m1",
+      taskType: "local_bash",
+      status: "running",
+      kind: "started",
+    });
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "m1",
+      taskType: "subagent",
+      status: undefined,
+      kind: "progress",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("monitoring");
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "m1",
+      taskType: undefined,
+      status: "completed",
+      kind: "completed",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBeNull();
+
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "a1",
+      taskType: "subagent",
+      status: "running",
+      kind: "started",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("working");
+
+    // A status-less continuation preserves the established agent bucket,
+    // even if its taskType is missing or newly inferred as a monitor.
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "a1",
+      taskType: "local_bash",
+      status: undefined,
+      kind: "updated",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("working");
+
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "a1",
+      taskType: undefined,
+      status: "idle",
+      kind: "updated",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBeNull();
+
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "a1",
+      taskType: "subagent",
+      status: undefined,
+      kind: "progress",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBeNull();
+  });
+
+  it("terminal and inert transitions remain authoritative over continuations", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    const threadId = "t-live-authoritative";
+
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "m1",
+      taskType: "local_bash",
+      status: "running",
+      kind: "started",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBe("monitoring");
+
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "m1",
+      taskType: "plan",
+      status: undefined,
+      kind: "progress",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBeNull();
+
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "a1",
+      taskType: "subagent",
+      status: "running",
+      kind: "started",
+    });
+    liveness.recordTaskLiveness({
+      threadId,
+      taskId: "a1",
+      taskType: undefined,
+      status: undefined,
+      kind: "completed",
+    });
+    expect(liveness.getThreadBackgroundLiveness(threadId)).toBeNull();
+  });
+
   it("plan tasks are inert; clear removes everything; instances are isolated", () => {
     const a = ThreadBackgroundLiveness.make();
     const b = ThreadBackgroundLiveness.make();

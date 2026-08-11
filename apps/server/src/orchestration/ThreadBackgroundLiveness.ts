@@ -85,10 +85,12 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
     return created;
   };
 
-  // Classification is per-transition, not sticky: a task first seen without
-  // a taskType may later reveal itself as a shell, become inert, or turn out
-  // to be agent-owned. Every path drops any prior entry for the taskId so a
-  // stale bucket assignment can't pin the thread's status (review finding).
+  // Explicit lifecycle transitions may reclassify a task: a task first seen
+  // without a taskType may later reveal itself as a shell, become inert, or
+  // turn out to be agent-owned. Status-less progress/update events are only
+  // continuations, though: they neither establish liveness nor change an
+  // existing bucket. That keeps delayed telemetry from resurrecting a task
+  // after an authoritative terminal transition.
   const drop = (threadId: string, taskId: string) => {
     const state = stateByThreadId.get(threadId);
     if (!state) {
@@ -130,16 +132,13 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
         return;
       }
 
-      // Status-free progress and metadata updates are not restarts. A delayed
-      // row after idle must not put the task back in the live set (#7128).
-      if ((input.kind === "progress" || input.kind === "updated") && input.status === undefined) {
-        const existing = stateByThreadId.get(input.threadId);
-        const stillLive =
-          existing !== undefined &&
-          (existing.agents.has(input.taskId) || existing.monitors.has(input.taskId));
-        if (!stillLive) {
-          return;
-        }
+      const statuslessContinuation =
+        input.status === undefined && (input.kind === "progress" || input.kind === "updated");
+      if (statuslessContinuation) {
+        // Preserve the existing bucket exactly. A later progress row may
+        // omit taskType or carry a different inferred type, but without an
+        // explicit status it is not a lifecycle transition.
+        return;
       }
 
       drop(input.threadId, input.taskId);

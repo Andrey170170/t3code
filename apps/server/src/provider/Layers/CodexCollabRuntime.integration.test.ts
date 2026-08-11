@@ -47,6 +47,32 @@ const decodeMcpElicitationResponse = Schema.decodeUnknownEffect(
  */
 function buildScript() {
   const captured = wireFixture.notifications;
+  const childAActive = captured.find(
+    (entry) =>
+      entry.method === "thread/status/changed" &&
+      (entry.params as { threadId?: string }).threadId === CHILD_A &&
+      (entry.params as { status?: { type?: string } }).status?.type === "active",
+  );
+  if (!childAActive) {
+    throw new Error("wire fixture must contain child A's active status");
+  }
+  const childATurnStarted = captured.find(
+    (entry) =>
+      entry.method === "turn/started" &&
+      (entry.params as { threadId?: string }).threadId === CHILD_A,
+  );
+  if (!childATurnStarted) {
+    throw new Error("wire fixture must contain child A's turn/started");
+  }
+  const childATerminalIdle = captured.findLast(
+    (entry) =>
+      entry.method === "thread/status/changed" &&
+      (entry.params as { threadId?: string }).threadId === CHILD_A &&
+      (entry.params as { status?: { type?: string } }).status?.type === "idle",
+  );
+  if (!childATerminalIdle) {
+    throw new Error("wire fixture must contain child A's terminal idle status");
+  }
   const progressBurst = captured.flatMap((entry) => {
     const item = (entry.params as { item?: { type?: string } }).item;
     const threadId = (entry.params as { threadId?: string }).threadId;
@@ -68,6 +94,11 @@ function buildScript() {
           },
         },
       ];
+    }
+    if (entry === childATerminalIdle) {
+      // Exercise the full stale-status boundary: the first active after idle
+      // must stay suppressed, while a new turn/started authorizes the next.
+      return [entry, childAActive, childATurnStarted, childAActive];
     }
     return [entry];
   });
@@ -508,6 +539,49 @@ describe("CodexSessionRuntime collab integration", () => {
       assert.isTrue(
         childAProgress.every((event) => events.indexOf(event) < childAIdleIndex),
         "latest child progress must be emitted before terminal lifecycle",
+      );
+
+      const childATurnStartedIndexes = events.flatMap((event, index) =>
+        event.method === "collabAgent/turnStarted" &&
+        (event.payload as { agentThreadId?: string }).agentThreadId === CHILD_A
+          ? [index]
+          : [],
+      );
+      const childAActiveIndexes = events.flatMap((event, index) => {
+        const payload = event.payload as {
+          agentThreadId?: string;
+          status?: { type?: string };
+        };
+        return event.method === "collabAgent/statusChanged" &&
+          payload.agentThreadId === CHILD_A &&
+          payload.status?.type === "active"
+          ? [index]
+          : [];
+      });
+      assert.equal(
+        childATurnStartedIndexes.length,
+        2,
+        "child A's initial and resumed turns become agent events",
+      );
+      assert.isBelow(
+        childATurnStartedIndexes[0] ?? Number.MAX_SAFE_INTEGER,
+        childAIdleIndex,
+        "idle follows the initial child turn",
+      );
+      assert.isAbove(
+        childATurnStartedIndexes[1] ?? -1,
+        childAIdleIndex,
+        "a new child turn follows authoritative idle",
+      );
+      assert.equal(
+        childAActiveIndexes.length,
+        1,
+        "active status before a turn or after idle must be suppressed",
+      );
+      assert.isAbove(
+        childAActiveIndexes[0] ?? -1,
+        childATurnStartedIndexes[1] ?? Number.MAX_SAFE_INTEGER,
+        "active status after the new turnStarted remains visible",
       );
 
       const childClosed = events.find(
