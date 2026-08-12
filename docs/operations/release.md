@@ -275,6 +275,24 @@ Checklist:
    - invoke the CLI publish script with npm dist-tag `latest`
 5. Nightly runs invoke the same publish script with npm dist-tag `nightly`.
 
+### Build a local server package without publishing
+
+The server package embeds the complete web client in `apps/server/dist/client`. After building the
+`t3` task, maintainers can create an installable archive without invoking npm publication:
+
+```sh
+vp run --filter t3 build
+node apps/server/scripts/cli.ts pack \
+  --app-version 0.0.34-chpc.1 \
+  --out /tmp/t3-0.0.34-chpc.1.tgz \
+  --verbose
+```
+
+The command temporarily replaces workspace and catalog dependency references with concrete package
+versions, applies the release icon overrides, creates the archive, and restores the checkout even if
+packing fails. Treat the requested version and output archive as release inputs; the command does not
+publish, install, select, or activate the result.
+
 ## 1) Release validation and unsigned builds
 
 There is no dry-run tag path. Pushing any accepted non-nightly tag, including
