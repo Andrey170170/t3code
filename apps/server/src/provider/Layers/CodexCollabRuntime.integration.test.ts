@@ -46,7 +46,11 @@ const decodeMcpElicitationResponse = Schema.decodeUnknownEffect(
  * (must pass through to the parent path, not vanish).
  */
 function buildScript() {
-  const captured = wireFixture.notifications;
+  type CapturedNotification = {
+    readonly method: string;
+    readonly params: Record<string, unknown>;
+  };
+  const captured = wireFixture.notifications as unknown as ReadonlyArray<CapturedNotification>;
   const childAActive = captured.find(
     (entry) =>
       entry.method === "thread/status/changed" &&
@@ -73,7 +77,57 @@ function buildScript() {
   if (!childATerminalIdle) {
     throw new Error("wire fixture must contain child A's terminal idle status");
   }
-  const progressBurst = captured.flatMap((entry) => {
+  const childAActivity = captured.find((entry) => {
+    const item = (
+      entry.params as {
+        item?: { type?: string; agentThreadId?: string };
+      }
+    ).item;
+    return item?.type === "subAgentActivity" && item.agentThreadId === CHILD_A;
+  });
+  if (!childAActivity) {
+    throw new Error("wire fixture must contain child A's subAgentActivity");
+  }
+  const activity = (
+    id: string,
+    kind: "started" | "interacted",
+    method: "item/started" | "item/completed",
+  ): CapturedNotification =>
+    ({
+      ...childAActivity,
+      method,
+      params: {
+        ...childAActivity.params,
+        item: {
+          ...(childAActivity.params as { item: Record<string, unknown> }).item,
+          id,
+          kind,
+        },
+      },
+    }) as CapturedNotification;
+  const staleStartStarted = activity("call_fixture_stale_start", "started", "item/started");
+  const staleStartCompleted = activity("call_fixture_stale_start", "started", "item/completed");
+  const staleInteractionStarted = activity(
+    "call_fixture_stale_interaction",
+    "interacted",
+    "item/started",
+  );
+  const staleInteractionCompleted = activity(
+    "call_fixture_stale_interaction",
+    "interacted",
+    "item/completed",
+  );
+  const liveInteractionStarted = activity(
+    "call_fixture_live_interaction",
+    "interacted",
+    "item/started",
+  );
+  const liveInteractionCompleted = activity(
+    "call_fixture_live_interaction",
+    "interacted",
+    "item/completed",
+  );
+  const progressBurst = captured.flatMap((entry): ReadonlyArray<CapturedNotification> => {
     const item = (entry.params as { item?: { type?: string } }).item;
     const threadId = (entry.params as { threadId?: string }).threadId;
     if (entry.method === "thread/tokenUsage/updated" && threadId === CHILD_A) {
@@ -96,9 +150,23 @@ function buildScript() {
       ];
     }
     if (entry === childATerminalIdle) {
-      // Exercise the full stale-status boundary: the first active after idle
-      // must stay suppressed, while a new turn/started authorizes the next.
-      return [entry, childAActive, childATurnStarted, childAActive];
+      // Exercise the full stale-liveness boundary. Neither a stale active
+      // status nor replayed parent-side interacted activity may resurrect a
+      // settled child. A new turn/started authorizes both the next activity
+      // and active status. Both activity notification phases use one item id
+      // and must produce only one synthetic transition.
+      return [
+        entry,
+        staleStartStarted,
+        staleStartCompleted,
+        staleInteractionStarted,
+        staleInteractionCompleted,
+        childAActive,
+        childATurnStarted,
+        liveInteractionStarted,
+        liveInteractionCompleted,
+        childAActive,
+      ];
     }
     return [entry];
   });
@@ -582,6 +650,42 @@ describe("CodexSessionRuntime collab integration", () => {
         childAActiveIndexes[0] ?? -1,
         childATurnStartedIndexes[1] ?? Number.MAX_SAFE_INTEGER,
         "active status after the new turnStarted remains visible",
+      );
+      const childAInteractionIndexes = events.flatMap((event, index) => {
+        const payload = event.payload as {
+          agentThreadId?: string;
+          activityKind?: string;
+        };
+        return event.method === "collabAgent/activity" &&
+          payload.agentThreadId === CHILD_A &&
+          payload.activityKind === "interacted"
+          ? [index]
+          : [];
+      });
+      assert.equal(
+        childAInteractionIndexes.length,
+        1,
+        "stale activity stays suppressed and started/completed phases are deduplicated",
+      );
+      assert.isAbove(
+        childAInteractionIndexes[0] ?? -1,
+        childATurnStartedIndexes[1] ?? Number.MAX_SAFE_INTEGER,
+        "interaction after the authoritative new turn remains visible",
+      );
+      const childAStartedActivityIndexes = events.flatMap((event, index) => {
+        const payload = event.payload as {
+          agentThreadId?: string;
+          activityKind?: string;
+        };
+        return event.method === "collabAgent/activity" &&
+          payload.agentThreadId === CHILD_A &&
+          payload.activityKind === "started"
+          ? [index]
+          : [];
+      });
+      assert.isTrue(
+        childAStartedActivityIndexes.every((index) => index < childAIdleIndex),
+        "a replayed started activity cannot resurrect an already known idle child",
       );
 
       const childClosed = events.find(
