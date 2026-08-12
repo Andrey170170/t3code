@@ -1817,6 +1817,12 @@ label:has(> select#reasoning-effort) select {
   margin-bottom: 0;
 }
 
+.chat-markdown .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .chat-markdown p,
 .chat-markdown ul,
 .chat-markdown ol,

@@ -162,6 +162,15 @@ function serializeAnchor(anchor: Element): string {
   return `[${label}](${href})`;
 }
 
+function serializeKatex(element: Element): string | null {
+  if (!element.classList.contains("katex")) return null;
+  const tex = element.querySelector('annotation[encoding="application/x-tex"]')?.textContent;
+  if (tex == null) return null;
+  return element.parentElement?.classList.contains("katex-display")
+    ? `$$\n${tex}\n$$\n\n`
+    : `$${tex}$`;
+}
+
 function serializeChildren(node: Node): string {
   let out = "";
   for (const child of node.childNodes) {
@@ -183,6 +192,8 @@ function serializeNode(node: Node): string {
   if (element.hasAttribute("data-markdown-details")) {
     return serializeDetails(element);
   }
+  const katex = serializeKatex(element);
+  if (katex !== null) return katex;
   const markdownCopy = element.getAttribute("data-markdown-copy");
   if (markdownCopy !== null) return markdownCopy;
   if (isSkippedElement(element)) return "";
