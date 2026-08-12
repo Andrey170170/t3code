@@ -54,6 +54,7 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
 const CODEX_COLLAB_PROGRESS_DEBOUNCE = "250 millis" as const;
+const CODEX_COLLAB_ACTIVITY_DEDUPE_CAPACITY = 4_096;
 const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
   "not found",
   "missing thread",
@@ -859,6 +860,12 @@ export const makeCodexSessionRuntime = (
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
     /** Child provider-thread id → its currently running provider turn id. */
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
+    /**
+     * subAgentActivity is reported through both item/started and
+     * item/completed with the same provider item id. Consume it once so a
+     * single Codex activity cannot become duplicate task transitions.
+     */
+    const collabActivityItemIdsRef = yield* Ref.make(new Set<string>());
     const closedRef = yield* Ref.make(false);
 
     // `~` is not shell-expanded when env vars are set via
@@ -1090,9 +1097,30 @@ export const makeCodexSessionRuntime = (
           ) {
             return false;
           }
+          const existingChild = (yield* Ref.get(collabChildAgentsRef)).get(item.agentThreadId);
+          const activityItemKey = `${item.agentThreadId}:${item.id}`;
+          const isFirstActivityNotification = yield* Ref.modify(
+            collabActivityItemIdsRef,
+            (current) => {
+              if (current.has(activityItemKey)) {
+                return [false, current] as const;
+              }
+              const next = new Set(current);
+              if (next.size >= CODEX_COLLAB_ACTIVITY_DEDUPE_CAPACITY) {
+                const oldest = next.values().next().value;
+                if (oldest !== undefined) {
+                  next.delete(oldest);
+                }
+              }
+              next.add(activityItemKey);
+              return [true, next] as const;
+            },
+          );
+          if (!isFirstActivityNotification) {
+            return true;
+          }
           const activitySpawnTurnId = (yield* Ref.get(sessionRef)).activeTurnId ?? undefined;
           yield* Ref.update(collabChildAgentsRef, (current) => {
-            const existing = current.get(item.agentThreadId);
             const next = new Map(current);
             // Merge-late semantics: when thread/started registered first, a
             // later subAgentActivity still carries the real agentPath (and a
@@ -1104,16 +1132,29 @@ export const makeCodexSessionRuntime = (
             next.set(item.agentThreadId, {
               agentThreadId: item.agentThreadId,
               nickname:
-                existing?.nickname ??
+                existingChild?.nickname ??
                 item.agentPath.split("/").findLast((segment) => segment.length > 0),
-              role: existing?.role,
-              agentPath: existing?.agentPath ?? item.agentPath,
-              depth: existing?.depth,
-              parentThreadId: existing?.parentThreadId,
-              spawnTurnId: existing ? existing.spawnTurnId : activitySpawnTurnId,
+              role: existingChild?.role,
+              agentPath: existingChild?.agentPath ?? item.agentPath,
+              depth: existingChild?.depth,
+              parentThreadId: existingChild?.parentThreadId,
+              spawnTurnId: existingChild ? existingChild.spawnTurnId : activitySpawnTurnId,
             });
             return next;
           });
+          if (
+            item.kind === "interacted" ||
+            (item.kind === "started" && existingChild !== undefined)
+          ) {
+            const liveTurns = yield* Ref.get(collabChildLiveTurnsRef);
+            if (!liveTurns.has(item.agentThreadId)) {
+              // Parent-side activity is not authoritative execution state.
+              // Codex can replay old started/interacted items after the
+              // child's turn has completed; only a new child turn/started may
+              // reactivate a known child (and make it interruptible).
+              return true;
+            }
+          }
           const registeredChild = (yield* Ref.get(collabChildAgentsRef)).get(item.agentThreadId);
           yield* emitEvent({
             kind: "notification",
