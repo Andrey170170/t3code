@@ -58,6 +58,18 @@ function writeTextFile(
   });
 }
 
+const makeDirectory = Effect.fn(function* (cwd: string, relativePath: string) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fileSystem.makeDirectory(path.join(cwd, relativePath), { recursive: true });
+});
+
+const removePath = Effect.fn(function* (cwd: string, relativePath: string) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fileSystem.remove(path.join(cwd, relativePath));
+});
+
 const git = (cwd: string, args: ReadonlyArray<string>, env?: NodeJS.ProcessEnv) =>
   Effect.gen(function* () {
     const process = yield* VcsProcess.VcsProcess;
@@ -121,9 +133,179 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         expect(result.truncated).toBe(false);
       }),
     );
+
+    it.effect("falls back when the native workspace index cannot be created", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-fallback-", git: true });
+        yield* writeTextFile(cwd, ".gitignore", "ignored.txt\nnode_modules/\n");
+        yield* writeTextFile(cwd, "src/components/Composer.tsx");
+        yield* writeTextFile(cwd, "README.md");
+        yield* writeTextFile(cwd, "ignored.txt");
+        yield* writeTextFile(cwd, "node_modules/pkg/index.js");
+        vi.spyOn(FileFinder, "create").mockImplementation(() => {
+          throw new Error("native initialization failed");
+        });
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const result = yield* workspaceEntries.list({ cwd });
+
+        expect(result).toEqual({
+          entries: [
+            { path: ".gitignore", kind: "file" },
+            { path: "README.md", kind: "file" },
+            { path: "src", kind: "directory" },
+            { path: "src/components", kind: "directory" },
+            { path: "src/components/Composer.tsx", kind: "file" },
+          ],
+          truncated: false,
+        });
+      }),
+    );
+
+    it.effect("omits deleted tracked files from the fallback listing", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-fallback-deleted-", git: true });
+        yield* writeTextFile(cwd, "deleted.ts");
+        yield* git(cwd, ["add", "deleted.ts"]);
+        yield* removePath(cwd, "deleted.ts");
+        vi.spyOn(FileFinder, "create").mockImplementation(() => {
+          throw new Error("native initialization failed");
+        });
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const result = yield* workspaceEntries.list({ cwd });
+
+        expect(result.entries).toEqual([]);
+      }),
+    );
+
+    it.effect("classifies a checked-out gitlink as a fallback directory", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-fallback-gitlink-", git: true });
+        yield* git(cwd, [
+          "-c",
+          "user.name=T3 Test",
+          "-c",
+          "user.email=t3@example.com",
+          "commit",
+          "--allow-empty",
+          "-m",
+          "initial",
+        ]);
+        const head = yield* git(cwd, ["rev-parse", "HEAD"]);
+        yield* makeDirectory(cwd, "vendor/dependency");
+        yield* git(cwd, [
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          `160000,${head},vendor/dependency`,
+        ]);
+        vi.spyOn(FileFinder, "create").mockImplementation(() => {
+          throw new Error("native initialization failed");
+        });
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const result = yield* workspaceEntries.list({ cwd });
+
+        expect(result.entries).toEqual([
+          { path: "vendor", kind: "directory" },
+          { path: "vendor/dependency", kind: "directory" },
+        ]);
+      }),
+    );
+
+    it.effect("includes empty directories in a git workspace fallback", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({
+          prefix: "t3code-workspace-fallback-empty-dir-",
+          git: true,
+        });
+        yield* makeDirectory(cwd, "notes/drafts");
+        vi.spyOn(FileFinder, "create").mockImplementation(() => {
+          throw new Error("native initialization failed");
+        });
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const result = yield* workspaceEntries.list({ cwd });
+
+        expect(result.entries).toEqual([
+          { path: "notes", kind: "directory" },
+          { path: "notes/drafts", kind: "directory" },
+        ]);
+      }),
+    );
+
+    it.effect("invalidates the cached fallback listing on refresh", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-fallback-refresh-" });
+        yield* writeTextFile(cwd, "before.ts");
+        vi.spyOn(FileFinder, "create").mockImplementation(() => {
+          throw new Error("native initialization failed");
+        });
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const before = yield* workspaceEntries.list({ cwd });
+        yield* writeTextFile(cwd, "after.ts");
+        const cached = yield* workspaceEntries.list({ cwd });
+        yield* workspaceEntries.refresh(cwd);
+        const refreshed = yield* workspaceEntries.list({ cwd });
+
+        expect(before.entries.map((entry) => entry.path)).toEqual(["before.ts"]);
+        expect(cached.entries.map((entry) => entry.path)).toEqual(["before.ts"]);
+        expect(refreshed.entries.map((entry) => entry.path)).toEqual(["after.ts", "before.ts"]);
+      }),
+    );
   });
 
   describe("search", () => {
+    it.effect("searches fallback entries when the native workspace index cannot be created", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-fallback-search-" });
+        yield* writeTextFile(cwd, "src/components/Composer.tsx");
+        yield* writeTextFile(cwd, "docs/composer.tsx-notes.md");
+        vi.spyOn(FileFinder, "create").mockImplementation(() => {
+          throw new Error("native initialization failed");
+        });
+
+        const result = yield* searchWorkspaceEntries({
+          cwd,
+          query: "Composer.tsx",
+          limit: 1,
+        });
+
+        expect(result).toEqual({
+          entries: [{ path: "src/components/Composer.tsx", kind: "file" }],
+          truncated: true,
+        });
+      }),
+    );
+
+    it.effect("applies image filtering to fallback files before limiting", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-fallback-images-" });
+        yield* writeTextFile(cwd, "public/icon.svg/readme.txt");
+        yield* writeTextFile(cwd, "public/logo.png");
+        yield* writeTextFile(cwd, "public/source.ts");
+        vi.spyOn(FileFinder, "create").mockImplementation(() => {
+          throw new Error("native initialization failed");
+        });
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const result = yield* workspaceEntries.search({
+          cwd,
+          query: "",
+          limit: 1,
+          kind: "directory",
+          imageOnly: true,
+        });
+
+        expect(result).toEqual({
+          entries: [{ path: "public/logo.png", kind: "file" }],
+          truncated: false,
+        });
+      }),
+    );
+
     it.effect("returns files and directories relative to cwd", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTempDir();
@@ -357,6 +539,34 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
   });
 
   describe("searchContents", () => {
+    it.effect("keeps native index creation failures visible for content search", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-fallback-content-" });
+        yield* writeTextFile(cwd, "src/index.ts", "export const value = 1;\n");
+        vi.spyOn(FileFinder, "create").mockImplementation(() => {
+          throw new Error("native initialization failed");
+        });
+
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const error = yield* Effect.flip(
+          workspaceEntries.searchContents({
+            cwd,
+            query: "value",
+            limit: 10,
+            caseSensitive: false,
+            wholeWord: false,
+            useRegex: false,
+          }),
+        );
+
+        expect(error).toMatchObject({
+          _tag: "WorkspaceSearchIndexCreateFailed",
+          cwd,
+          reason: "FileFinder.create threw unexpectedly.",
+        });
+      }),
+    );
+
     it.effect("returns content matches with file paths, line numbers, and ranges", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTempDir({ prefix: "t3code-workspace-content-search-" });
