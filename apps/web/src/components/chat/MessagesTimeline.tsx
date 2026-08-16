@@ -135,6 +135,7 @@ interface TimelineRowSharedState {
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
   workspaceRoot: string | undefined;
+  managedAttachmentUrlById: ReadonlyMap<string, string>;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertUserMessage: (messageId: MessageId) => void;
@@ -188,6 +189,7 @@ function TimelineLoadEarlierHeader({
 }
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+const EMPTY_MANAGED_ATTACHMENT_URLS: ReadonlyMap<string, string> = new Map();
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
   animated: false,
   on: {
@@ -224,6 +226,7 @@ interface MessagesTimelineProps {
   resolvedTheme: "light" | "dark";
   timestampFormat: TimestampFormat;
   workspaceRoot: string | undefined;
+  managedAttachmentUrlById?: ReadonlyMap<string, string>;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   anchorMessageId: MessageId | null;
   onAnchorReady: (messageId: MessageId, anchorIndex: number) => void;
@@ -270,6 +273,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   resolvedTheme,
   timestampFormat,
   workspaceRoot,
+  managedAttachmentUrlById = EMPTY_MANAGED_ATTACHMENT_URLS,
   skills = EMPTY_TIMELINE_SKILLS,
   anchorMessageId,
   onAnchorReady,
@@ -508,6 +512,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       markdownCwd,
       resolvedTheme,
       workspaceRoot,
+      managedAttachmentUrlById,
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
@@ -524,6 +529,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       markdownCwd,
       resolvedTheme,
       workspaceRoot,
+      managedAttachmentUrlById,
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
@@ -1118,6 +1124,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           text={messageText}
           cwd={ctx.markdownCwd}
           threadRef={ctx.threadRef ?? undefined}
+          managedAttachmentUrlById={ctx.managedAttachmentUrlById}
           isStreaming={Boolean(row.message.streaming)}
           skills={ctx.skills}
         />
@@ -1178,6 +1185,7 @@ function ProposedPlanTimelineRow({
         threadRef={ctx.threadRef ?? undefined}
         cwd={ctx.markdownCwd}
         workspaceRoot={ctx.workspaceRoot}
+        managedAttachmentUrlById={ctx.managedAttachmentUrlById}
       />
     </div>
   );
@@ -1693,6 +1701,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
             text={content}
             cwd={props.markdownCwd}
             threadRef={ctx.threadRef ?? undefined}
+            managedAttachmentUrlById={ctx.managedAttachmentUrlById}
             skills={props.skills}
             className="text-message-foreground"
             lineBreaks
@@ -1715,6 +1724,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
                   text={segment.text.trim()}
                   cwd={props.markdownCwd}
                   threadRef={ctx.threadRef ?? undefined}
+                  managedAttachmentUrlById={ctx.managedAttachmentUrlById}
                   skills={props.skills}
                   className="text-message-foreground"
                   lineBreaks
@@ -1803,6 +1813,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
           text={props.text}
           cwd={props.markdownCwd}
           threadRef={ctx.threadRef ?? undefined}
+          managedAttachmentUrlById={ctx.managedAttachmentUrlById}
           skills={props.skills}
           className="text-message-foreground"
           lineBreaks
@@ -1828,6 +1839,7 @@ const UserMessageBody = memo(function UserMessageBody(props: {
       text={props.text}
       cwd={props.markdownCwd}
       threadRef={ctx.threadRef ?? undefined}
+      managedAttachmentUrlById={ctx.managedAttachmentUrlById}
       skills={props.skills}
       className="text-message-foreground"
       lineBreaks
@@ -1863,6 +1875,7 @@ function UserMessageReviewCommentCard({ comment }: { comment: ReviewCommentConte
           text={formatReviewCommentFence(fenceLanguage, comment.diff)}
           cwd={ctx.markdownCwd}
           threadRef={ctx.threadRef ?? undefined}
+          managedAttachmentUrlById={ctx.managedAttachmentUrlById}
           skills={ctx.skills}
           className="text-message-foreground"
         />

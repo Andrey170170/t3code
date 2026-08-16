@@ -10,6 +10,10 @@ export const AssetResource = Schema.Union([
     threadId: ThreadId,
     path: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
   }),
+  Schema.TaggedStruct("temporary-image", {
+    threadId: ThreadId,
+    path: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
+  }),
   Schema.TaggedStruct("attachment", {
     attachmentId: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
   }),
@@ -129,6 +133,40 @@ export class AssetWorkspaceResolutionError extends Schema.TaggedErrorClass<Asset
   }
 }
 
+export class AssetTemporaryImagePathValidationError extends Schema.TaggedErrorClass<AssetTemporaryImagePathValidationError>()(
+  "AssetTemporaryImagePathValidationError",
+  {
+    resource: AssetResource,
+  },
+) {
+  override get message(): string {
+    return "Temporary image path must be absolute.";
+  }
+}
+
+export class AssetTemporaryImageInspectionError extends Schema.TaggedErrorClass<AssetTemporaryImageInspectionError>()(
+  "AssetTemporaryImageInspectionError",
+  {
+    resource: AssetResource,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return "Failed to inspect the temporary image.";
+  }
+}
+
+export class AssetTemporaryImageNotFoundError extends Schema.TaggedErrorClass<AssetTemporaryImageNotFoundError>()(
+  "AssetTemporaryImageNotFoundError",
+  {
+    resource: AssetResource,
+  },
+) {
+  override get message(): string {
+    return "Temporary image was not found or is not eligible for preview.";
+  }
+}
+
 export class AssetAttachmentNotFoundError extends Schema.TaggedErrorClass<AssetAttachmentNotFoundError>()(
   "AssetAttachmentNotFoundError",
   {
@@ -196,6 +234,9 @@ export const AssetAccessError = Schema.Union([
   AssetWorkspaceAssetInspectionError,
   AssetWorkspaceAssetNotFoundError,
   AssetWorkspaceResolutionError,
+  AssetTemporaryImagePathValidationError,
+  AssetTemporaryImageInspectionError,
+  AssetTemporaryImageNotFoundError,
   AssetAttachmentNotFoundError,
   AssetProjectFaviconResolutionError,
   AssetProjectFaviconInspectionError,

@@ -39,12 +39,14 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
   threadRef,
   cwd,
   workspaceRoot,
+  managedAttachmentUrlById,
 }: {
   planMarkdown: string;
   environmentId: EnvironmentId;
   threadRef?: ScopedThreadRef | undefined;
   cwd: string | undefined;
   workspaceRoot: string | undefined;
+  managedAttachmentUrlById?: ReadonlyMap<string, string> | undefined;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
@@ -176,6 +178,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
               text={collapsedPreview ?? ""}
               cwd={cwd}
               threadRef={threadRef}
+              managedAttachmentUrlById={managedAttachmentUrlById}
               isStreaming={false}
             />
           ) : (
@@ -183,6 +186,7 @@ export const ProposedPlanCard = memo(function ProposedPlanCard({
               text={displayedPlanMarkdown}
               cwd={cwd}
               threadRef={threadRef}
+              managedAttachmentUrlById={managedAttachmentUrlById}
               isStreaming={false}
             />
           )}

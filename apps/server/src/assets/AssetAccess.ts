@@ -1,4 +1,9 @@
+// @effect-diagnostics nodeBuiltinImport:off - Temporary image redemption needs same-handle O_NOFOLLOW reads.
 import type { AssetResource } from "@t3tools/contracts";
+import * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import {
   AssetAttachmentNotFoundError,
   AssetPreviewTypeValidationError,
@@ -6,6 +11,9 @@ import {
   AssetProjectFaviconNotFoundError,
   AssetProjectFaviconResolutionError,
   AssetSigningKeyLoadError,
+  AssetTemporaryImageInspectionError,
+  AssetTemporaryImageNotFoundError,
+  AssetTemporaryImagePathValidationError,
   AssetWorkspaceAssetInspectionError,
   AssetWorkspaceAssetNotFoundError,
   AssetWorkspaceContextNotFoundError,
@@ -20,8 +28,10 @@ import {
   WORKSPACE_IMAGE_PREVIEW_EXTENSIONS,
 } from "@t3tools/shared/filePreview";
 import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
 import * as FileSystem from "effect/FileSystem";
@@ -48,6 +58,10 @@ const SIGNING_SECRET_NAME = "asset-access-signing-key";
 const ASSET_TOKEN_TTL_MS = 60 * 60 * 1000;
 const PROJECT_FAVICON_TOKEN_BUCKET_MS = 30 * 60 * 1000;
 const PROJECT_FAVICON_VERSION_PREFIX = "v";
+const TEMPORARY_IMAGE_MAX_BYTES = 25 * 1024 * 1024;
+class TemporaryImageReadError extends Data.TaggedError("TemporaryImageReadError")<{
+  readonly cause: unknown;
+}> {}
 const PREVIEW_ASSET_EXTENSIONS = new Set([
   ...WORKSPACE_BROWSER_PREVIEW_EXTENSIONS,
   ...WORKSPACE_IMAGE_PREVIEW_EXTENSIONS,
@@ -77,6 +91,15 @@ const AssetClaimsSchema = Schema.Union([
   }),
   Schema.Struct({
     version: Schema.Literal(1),
+    kind: Schema.Literal("temporary-image"),
+    threadId: Schema.String,
+    path: Schema.String,
+    dev: Schema.Number,
+    ino: Schema.NullOr(Schema.Number),
+    expiresAt: Schema.Number,
+  }),
+  Schema.Struct({
+    version: Schema.Literal(1),
     kind: Schema.Literal("attachment"),
     attachmentId: Schema.String,
     expiresAt: Schema.Number,
@@ -95,7 +118,9 @@ const AssetClaimsJson = Schema.fromJsonString(AssetClaimsSchema);
 const decodeAssetClaims = Schema.decodeUnknownOption(AssetClaimsJson);
 const encodeAssetClaims = Schema.encodeSync(AssetClaimsJson);
 
-export type ResolvedAsset = { readonly kind: "file"; readonly path: string };
+export type ResolvedAsset =
+  | { readonly kind: "file"; readonly path: string }
+  | { readonly kind: "bytes"; readonly path: string; readonly bytes: Uint8Array };
 
 function decodeClaims(encodedPayload: string): AssetClaims | null {
   try {
@@ -165,6 +190,130 @@ const resolveCanonicalWorkspaceFileForRequest = (input: {
     ),
     Effect.orElseSucceed(() => null),
   );
+
+function pathIsWithinRoot(root: string, candidate: string): boolean {
+  const relative = NodePath.relative(root, candidate);
+  return (
+    relative.length > 0 &&
+    relative !== ".." &&
+    !relative.startsWith(`..${NodePath.sep}`) &&
+    !NodePath.isAbsolute(relative)
+  );
+}
+
+const canonicalTemporaryRoots = Effect.fn("AssetAccess.canonicalTemporaryRoots")(function* () {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const platform = yield* HostProcessPlatform;
+  const candidates = [NodeOS.tmpdir(), ...(platform === "win32" ? [] : ["/tmp"])] as const;
+  const roots = yield* Effect.all(
+    candidates.map((candidate) =>
+      optionOnNotFound(fileSystem.realPath(candidate)).pipe(
+        Effect.orElseSucceed(() => Option.none()),
+      ),
+    ),
+  );
+  return [...new Set(roots.flatMap((root) => (Option.isSome(root) ? [root.value] : [])))];
+});
+
+const resolveCanonicalTemporaryImage = Effect.fn("AssetAccess.resolveCanonicalTemporaryImage")(
+  function* (inputPath: string) {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    if (!path.isAbsolute(inputPath)) return null;
+
+    const [temporaryRoots, canonicalImage] = yield* Effect.all([
+      canonicalTemporaryRoots(),
+      optionOnNotFound(fileSystem.realPath(inputPath)),
+    ]);
+    if (Option.isNone(canonicalImage)) return null;
+    if (
+      !temporaryRoots.some((root) => pathIsWithinRoot(root, canonicalImage.value)) ||
+      !isWorkspaceImagePreviewPath(canonicalImage.value)
+    ) {
+      return null;
+    }
+
+    const info = yield* optionOnNotFound(fileSystem.stat(canonicalImage.value));
+    if (Option.isNone(info) || info.value.type !== "File") return null;
+    if (info.value.size > BigInt(TEMPORARY_IMAGE_MAX_BYTES)) return null;
+
+    const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (currentUid !== undefined) {
+      if (Option.isNone(info.value.uid) || info.value.uid.value !== currentUid) return null;
+    }
+
+    return {
+      path: canonicalImage.value,
+      dev: info.value.dev,
+      ino: Option.getOrNull(info.value.ino),
+    };
+  },
+);
+
+const readClaimedTemporaryImage = Effect.fn("AssetAccess.readClaimedTemporaryImage")(function* (
+  claims: Extract<AssetClaims, { readonly kind: "temporary-image" }>,
+) {
+  const platform = yield* HostProcessPlatform;
+  return yield* Effect.tryPromise({
+    try: async () => {
+      const flags =
+        NodeFS.constants.O_RDONLY | (platform === "win32" ? 0 : NodeFS.constants.O_NOFOLLOW);
+      const handle = await NodeFSP.open(claims.path, flags);
+      try {
+        const info = await handle.stat();
+        if (!info.isFile() || info.size > TEMPORARY_IMAGE_MAX_BYTES) return null;
+        const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+        if (currentUid !== undefined && info.uid !== currentUid) return null;
+        if (info.dev !== claims.dev || (claims.ino !== null && info.ino !== claims.ino)) {
+          return null;
+        }
+
+        const [resolvedPath, roots] = await Promise.all([
+          NodeFSP.realpath(claims.path),
+          Promise.all(
+            [NodeOS.tmpdir(), ...(platform === "win32" ? [] : ["/tmp"])].map(async (root) => {
+              try {
+                return await NodeFSP.realpath(root);
+              } catch {
+                return null;
+              }
+            }),
+          ),
+        ]);
+        if (
+          resolvedPath !== claims.path ||
+          !roots.some((root) => root !== null && pathIsWithinRoot(root, resolvedPath))
+        ) {
+          return null;
+        }
+        const resolvedInfo = await NodeFSP.stat(resolvedPath);
+        if (resolvedInfo.dev !== info.dev || resolvedInfo.ino !== info.ino) return null;
+
+        const bytes = new Uint8Array(info.size + 1);
+        let bytesRead = 0;
+        while (bytesRead < bytes.byteLength) {
+          const read = await handle.read(bytes, bytesRead, bytes.byteLength - bytesRead);
+          if (read.bytesRead === 0) break;
+          bytesRead += read.bytesRead;
+        }
+        if (bytesRead !== info.size) return null;
+        return {
+          kind: "bytes" as const,
+          path: claims.path,
+          bytes: bytes.subarray(0, bytesRead),
+        };
+      } finally {
+        await handle.close();
+      }
+    },
+    catch: (cause) => new TemporaryImageReadError({ cause }),
+  }).pipe(
+    Effect.tapError((cause) =>
+      Effect.logError("Failed to read claimed temporary image.", { path: claims.path, cause }),
+    ),
+    Effect.orElseSucceed(() => null),
+  );
+});
 
 export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (input: {
   readonly resource: AssetResource;
@@ -256,6 +405,43 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
             expiresAt,
           };
       fileName = path.basename(resolved.relativePath);
+      break;
+    }
+    case "temporary-image": {
+      if (!path.isAbsolute(input.resource.path)) {
+        return yield* new AssetTemporaryImagePathValidationError({
+          resource: input.resource,
+        });
+      }
+      if (!isWorkspaceImagePreviewPath(input.resource.path)) {
+        return yield* new AssetPreviewTypeValidationError({
+          resource: input.resource,
+        });
+      }
+      const canonicalImage = yield* resolveCanonicalTemporaryImage(input.resource.path).pipe(
+        Effect.mapError(
+          (cause) =>
+            new AssetTemporaryImageInspectionError({
+              resource: input.resource,
+              cause,
+            }),
+        ),
+      );
+      if (!canonicalImage) {
+        return yield* new AssetTemporaryImageNotFoundError({
+          resource: input.resource,
+        });
+      }
+      claims = {
+        version: 1,
+        kind: "temporary-image",
+        threadId: input.resource.threadId,
+        path: canonicalImage.path,
+        dev: canonicalImage.dev,
+        ino: canonicalImage.ino,
+        expiresAt,
+      };
+      fileName = path.basename(canonicalImage.path);
       break;
     }
     case "attachment": {
@@ -444,6 +630,10 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
   const decodedPath = decodeRelativePath(relativePath);
   if (decodedPath === null) return null;
   const path = yield* Path.Path;
+  if (claims.kind === "temporary-image") {
+    if (decodedPath !== path.basename(claims.path)) return null;
+    return yield* readClaimedTemporaryImage(claims);
+  }
   if (claims.kind === "workspace-file-exact") {
     if (decodedPath !== path.basename(claims.relativePath)) return null;
     const exactWorkspaceFile = yield* resolveCanonicalWorkspaceFileForRequest({

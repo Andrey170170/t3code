@@ -14,6 +14,9 @@ import {
   WrapTextIcon,
 } from "lucide-react";
 import type { ScopedThreadRef, ServerProviderSkill } from "@t3tools/contracts";
+import { DEV_PROXIED_PATH_PREFIXES } from "@t3tools/shared/devProxy";
+import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
+import { isWindowsAbsolutePath } from "@t3tools/shared/path";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -76,10 +79,12 @@ import {
 import {
   normalizeMarkdownLinkDestination,
   resolveInlineCodeFileLinkMeta,
+  resolveMarkdownFileLinkTarget,
   resolveMarkdownFileLinkMeta,
   rewriteMarkdownFileUriHref,
   type MarkdownFileLinkMeta,
 } from "../markdown-links";
+import { useAssetUrlState } from "../assets/assetUrls";
 import { readLocalApi } from "../localApi";
 import { cn } from "../lib/utils";
 import { useRightPanelStore } from "../rightPanelStore";
@@ -104,6 +109,7 @@ interface ChatMarkdownProps {
   text: string;
   cwd: string | undefined;
   threadRef?: ScopedThreadRef | undefined;
+  managedAttachmentUrlById?: ReadonlyMap<string, string> | undefined;
   onTaskListChange?: ((input: { markerOffset: number; checked: boolean }) => void) | undefined;
   isStreaming?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
@@ -113,6 +119,243 @@ interface ChatMarkdownProps {
 }
 
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+
+const IMAGE_URL_SCHEME_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+const BROWSER_APP_IMAGE_PATH_PREFIXES = [...DEV_PROXIED_PATH_PREFIXES, "/assets"] as const;
+const BROWSER_APP_IMAGE_PATHS = new Set([
+  "/apple-touch-icon.png",
+  "/favicon-16x16.png",
+  "/favicon-32x32.png",
+  "/favicon.ico",
+]);
+
+type MarkdownImageSource =
+  | { readonly _tag: "Remote" }
+  | {
+      readonly _tag: "Local";
+      readonly path: string | null;
+      readonly absolute: boolean;
+    };
+
+function isBrowserAppImagePath(path: string): boolean {
+  if (BROWSER_APP_IMAGE_PATHS.has(path)) return true;
+  return BROWSER_APP_IMAGE_PATH_PREFIXES.some(
+    (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+  );
+}
+
+function classifyMarkdownImageSource(src: string, cwd: string | undefined): MarkdownImageSource {
+  const normalized = normalizeMarkdownLinkDestination(src);
+  if (normalized.startsWith("//")) {
+    return { _tag: "Remote" };
+  }
+  if (isWindowsAbsolutePath(normalized)) {
+    return {
+      _tag: "Local",
+      path: resolveMarkdownFileLinkTarget(normalized, cwd),
+      absolute: true,
+    };
+  }
+  if (IMAGE_URL_SCHEME_PATTERN.test(normalized)) {
+    return { _tag: "Remote" };
+  }
+  if (normalized.startsWith("/") && isBrowserAppImagePath(normalized)) {
+    return { _tag: "Remote" };
+  }
+  return {
+    _tag: "Local",
+    path: resolveMarkdownFileLinkTarget(normalized, cwd),
+    absolute: normalized.startsWith("/"),
+  };
+}
+
+function extractMarkdownImageDestination(
+  markdown: string,
+  start: number,
+  end: number,
+): string | null {
+  const imageMarkdown = markdown.slice(start, end);
+  const destinationMarker = imageMarkdown.indexOf("](");
+  if (destinationMarker < 0) return null;
+
+  let cursor = destinationMarker + 2;
+  while (/\s/.test(imageMarkdown[cursor] ?? "")) cursor += 1;
+  if (imageMarkdown[cursor] === "<") {
+    const closingBracket = imageMarkdown.indexOf(">", cursor + 1);
+    return closingBracket < 0 ? null : imageMarkdown.slice(cursor + 1, closingBracket);
+  }
+
+  let escaped = false;
+  let nestedParentheses = 0;
+  const destinationStart = cursor;
+  for (; cursor < imageMarkdown.length; cursor += 1) {
+    const character = imageMarkdown[cursor];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === "(") {
+      nestedParentheses += 1;
+      continue;
+    }
+    if (character === ")") {
+      if (nestedParentheses === 0) break;
+      nestedParentheses -= 1;
+      continue;
+    }
+    if (/\s/.test(character ?? "")) break;
+  }
+  return cursor === destinationStart ? null : imageMarkdown.slice(destinationStart, cursor);
+}
+
+function recoverSanitizedLocalImageSource(markdown: string, node: unknown): string | null {
+  const position = (
+    node as
+      | {
+          readonly position?:
+            | {
+                readonly start: { readonly offset?: number | undefined };
+                readonly end: { readonly offset?: number | undefined };
+              }
+            | undefined;
+        }
+      | null
+      | undefined
+  )?.position;
+  const start = position?.start.offset;
+  const end = position?.end.offset;
+  if (typeof start !== "number" || typeof end !== "number") return null;
+  const destination = extractMarkdownImageDestination(markdown, start, end);
+  if (!destination) return null;
+  const fileUriPath = rewriteMarkdownFileUriHref(destination);
+  if (fileUriPath) return fileUriPath;
+  return isWindowsAbsolutePath(destination) ? destination : null;
+}
+
+function resolveManagedAttachmentUrl(
+  source: string,
+  urlById: ReadonlyMap<string, string> | undefined,
+): string | null {
+  if (!urlById || urlById.size === 0) return null;
+  const isWindowsPath = isWindowsAbsolutePath(source);
+  const normalized = source.replaceAll("\\", "/");
+  if (
+    (normalized.startsWith("//") && !isWindowsPath) ||
+    (IMAGE_URL_SCHEME_PATTERN.test(normalized) && !isWindowsPath) ||
+    (!normalized.startsWith("/") && !isWindowsPath)
+  ) {
+    return null;
+  }
+  const segments = normalized.split("/");
+  const fileName = segments.at(-1);
+  if (segments.at(-2) !== "attachments" || !fileName || !isWorkspaceImagePreviewPath(fileName)) {
+    return null;
+  }
+  const extensionIndex = fileName.lastIndexOf(".");
+  if (extensionIndex <= 0) return null;
+  return urlById.get(fileName.slice(0, extensionIndex)) ?? null;
+}
+
+function MarkdownImageUnavailable({ alt }: { readonly alt: string | undefined }) {
+  return (
+    <span
+      role="img"
+      aria-label={alt ? `${alt} (image unavailable)` : "Image unavailable"}
+      className="inline-flex min-h-10 items-center rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+    >
+      {alt ? `${alt} — image unavailable` : "Image unavailable"}
+    </span>
+  );
+}
+
+const MarkdownWorkspaceImage = memo(function MarkdownWorkspaceImage(props: {
+  readonly threadRef: ScopedThreadRef;
+  readonly path: string;
+  readonly alt: string | undefined;
+  readonly title: string | undefined;
+  readonly className: string | undefined;
+}) {
+  const resource = useMemo(
+    () => ({
+      _tag: "workspace-file" as const,
+      threadId: props.threadRef.threadId,
+      path: props.path,
+    }),
+    [props.path, props.threadRef.threadId],
+  );
+  const assetUrl = useAssetUrlState(props.threadRef.environmentId, resource);
+  return <MarkdownAssetImage assetUrl={assetUrl} {...props} />;
+});
+
+const MarkdownAbsoluteImage = memo(function MarkdownAbsoluteImage(props: {
+  readonly threadRef: ScopedThreadRef;
+  readonly path: string;
+  readonly alt: string | undefined;
+  readonly title: string | undefined;
+  readonly className: string | undefined;
+}) {
+  const temporaryResource = useMemo(
+    () => ({
+      _tag: "temporary-image" as const,
+      threadId: props.threadRef.threadId,
+      path: props.path,
+    }),
+    [props.path, props.threadRef.threadId],
+  );
+  const workspaceResource = useMemo(
+    () => ({
+      _tag: "workspace-file" as const,
+      threadId: props.threadRef.threadId,
+      path: props.path,
+    }),
+    [props.path, props.threadRef.threadId],
+  );
+  const temporaryUrl = useAssetUrlState(props.threadRef.environmentId, temporaryResource);
+  const workspaceUrl = useAssetUrlState(props.threadRef.environmentId, workspaceResource);
+  const assetUrl =
+    temporaryUrl._tag === "Success"
+      ? temporaryUrl
+      : workspaceUrl._tag === "Success"
+        ? workspaceUrl
+        : temporaryUrl._tag === "Loading" || workspaceUrl._tag === "Loading"
+          ? ({ _tag: "Loading" } as const)
+          : ({ _tag: "Failure" } as const);
+  return <MarkdownAssetImage assetUrl={assetUrl} {...props} />;
+});
+
+function MarkdownAssetImage(props: {
+  readonly assetUrl: ReturnType<typeof useAssetUrlState>;
+  readonly alt: string | undefined;
+  readonly title: string | undefined;
+  readonly className: string | undefined;
+}) {
+  const assetUrl = props.assetUrl;
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+
+  if (assetUrl._tag === "Failure" || (assetUrl._tag === "Success" && failedUrl === assetUrl.url)) {
+    return <MarkdownImageUnavailable alt={props.alt} />;
+  }
+  if (assetUrl._tag === "Loading") {
+    return (
+      <span className="inline-flex min-h-10 items-center rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        Loading image…
+      </span>
+    );
+  }
+  return (
+    <img
+      src={assetUrl.url}
+      alt={props.alt ?? ""}
+      title={props.title}
+      className={props.className}
+      onError={() => setFailedUrl(assetUrl.url)}
+    />
+  );
+}
 
 const CODE_FENCE_LANGUAGE_REGEX = /(?:^|\s)language-([^\s]+)/;
 const MAX_HIGHLIGHT_CACHE_ENTRIES = 500;
@@ -1231,6 +1474,7 @@ function ChatMarkdown({
   text,
   cwd,
   threadRef,
+  managedAttachmentUrlById,
   onTaskListChange,
   isStreaming = false,
   skills = EMPTY_MARKDOWN_SKILLS,
@@ -1246,6 +1490,7 @@ function ChatMarkdown({
     reportFailure: false,
   });
   const preparedConnection = usePreparedConnection(threadRef?.environmentId ?? null);
+  const canLoadLocalImages = preparedConnection._tag !== "None";
   const environmentId = useActiveEnvironmentId();
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const openInPreferredEditor = useOpenInPreferredEditor(
@@ -1390,6 +1635,38 @@ function ChatMarkdown({
     };
 
     return {
+      img({ node: _node, src, alt, title, className }) {
+        const effectiveSrc = recoverSanitizedLocalImageSource(renderedText, _node) ?? src;
+        if (!effectiveSrc) {
+          return <img src={src} alt={alt} title={title} className={className} />;
+        }
+        const managedAttachmentUrl = resolveManagedAttachmentUrl(
+          effectiveSrc,
+          managedAttachmentUrlById,
+        );
+        if (managedAttachmentUrl) {
+          return <img src={managedAttachmentUrl} alt={alt} title={title} className={className} />;
+        }
+        const source = classifyMarkdownImageSource(effectiveSrc, cwd);
+        if (source._tag === "Remote") {
+          return <img src={effectiveSrc} alt={alt} title={title} className={className} />;
+        }
+        if (source.path === null || !threadRef || !canLoadLocalImages) {
+          return <MarkdownImageUnavailable alt={alt} />;
+        }
+        const imageProps = {
+          threadRef,
+          path: source.path,
+          alt,
+          title,
+          className,
+        };
+        return source.absolute ? (
+          <MarkdownAbsoluteImage {...imageProps} />
+        ) : (
+          <MarkdownWorkspaceImage {...imageProps} />
+        );
+      },
       p({ node: _node, children, ...props }) {
         return <p {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</p>;
       },
@@ -1594,11 +1871,14 @@ function ChatMarkdown({
     inlineCodeFileLinkMetaByText,
     isStreaming,
     markdownFileLinkMetaByHref,
+    managedAttachmentUrlById,
     onTaskListChange,
     openInPreferredEditor,
     openExternalLinkInPreview,
     openMarkdownFileInPreview,
+    canLoadLocalImages,
     resolvedTheme,
+    renderedText,
     skills,
     text,
     threadRef,

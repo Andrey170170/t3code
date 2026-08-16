@@ -217,6 +217,13 @@ export const assetRouteLayer = HttpRouter.add(
     if (!asset) {
       return HttpServerResponse.text("Not Found", { status: 404 });
     }
+    if (asset.kind === "bytes") {
+      return HttpServerResponse.uint8Array(asset.bytes, {
+        status: 200,
+        contentType: Mime.getType(asset.path) ?? "application/octet-stream",
+        headers: assetResponseHeaders(asset.path),
+      });
+    }
     return yield* HttpServerResponse.file(asset.path, {
       status: 200,
       headers: assetResponseHeaders(asset.path),

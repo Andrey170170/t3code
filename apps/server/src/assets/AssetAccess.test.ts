@@ -1,11 +1,15 @@
+// @effect-diagnostics nodeBuiltinImport:off - Security tests need sparse-file mutation after issuance.
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { AssetPreviewTypeValidationError, ThreadId } from "@t3tools/contracts";
 import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { describe, expect, it } from "@effect/vitest";
+import * as NodeFSP from "node:fs/promises";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as TestClock from "effect/testing/TestClock";
@@ -29,8 +33,229 @@ const testLayer = Layer.mergeAll(
   ),
   ServerSecretStore.layer.pipe(Layer.provide(configLayer)),
 ).pipe(Layer.provideMerge(NodeServices.layer));
+const testThreadId = ThreadId.make("thread-1");
 
 describe("AssetAccess", () => {
+  it.effect("issues exact capabilities for owned temporary images", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-temporary-image-",
+      });
+      const imagePath = path.join(root, "preview.png");
+      const siblingPath = path.join(root, "sibling.png");
+      yield* fileSystem.writeFile(imagePath, new Uint8Array([137, 80, 78, 71]));
+      yield* fileSystem.writeFile(siblingPath, new Uint8Array([137, 80, 78, 71]));
+      const canonicalImagePath = yield* fileSystem.realPath(imagePath);
+
+      const result = yield* issueAssetUrl({
+        resource: { _tag: "temporary-image", threadId: testThreadId, path: imagePath },
+      });
+      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const separatorIndex = suffix.indexOf("/");
+      const token = suffix.slice(0, separatorIndex);
+
+      expect(yield* resolveAsset(token, "preview.png")).toEqual({
+        kind: "bytes",
+        path: canonicalImagePath,
+        bytes: new Uint8Array([137, 80, 78, 71]),
+      });
+      expect(yield* resolveAsset(token, "sibling.png")).toBeNull();
+      expect(yield* resolveAsset(token, "../preview.png")).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("serves an owned image from the POSIX /tmp root", () =>
+    Effect.gen(function* () {
+      if ((yield* HostProcessPlatform) === "win32") return;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        directory: "/tmp",
+        prefix: "t3-asset-posix-tmp-",
+      });
+      const imagePath = path.join(root, "preview.png");
+      const bytes = new Uint8Array([137, 80, 78, 71]);
+      yield* fileSystem.writeFile(imagePath, bytes);
+
+      const result = yield* issueAssetUrl({
+        resource: { _tag: "temporary-image", threadId: testThreadId, path: imagePath },
+      });
+      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const separatorIndex = suffix.indexOf("/");
+      const token = suffix.slice(0, separatorIndex);
+
+      expect(yield* resolveAsset(token, "preview.png")).toMatchObject({
+        kind: "bytes",
+        bytes,
+      });
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects temporary images outside the system temporary directory", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const outside = yield* fileSystem.makeTempDirectoryScoped({
+        directory: process.cwd(),
+        prefix: ".t3-asset-outside-temp-",
+      });
+      const imagePath = path.join(outside, "preview.png");
+      yield* fileSystem.writeFile(imagePath, new Uint8Array([137, 80, 78, 71]));
+
+      const error = yield* issueAssetUrl({
+        resource: { _tag: "temporary-image", threadId: testThreadId, path: imagePath },
+      }).pipe(Effect.flip);
+
+      expect(error).toMatchObject({
+        _tag: "AssetTemporaryImageNotFoundError",
+        resource: { _tag: "temporary-image", threadId: testThreadId, path: imagePath },
+      });
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects temporary image symlinks that escape the system temporary directory", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const temporaryRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-temporary-image-link-",
+      });
+      const outside = yield* fileSystem.makeTempDirectoryScoped({
+        directory: process.cwd(),
+        prefix: ".t3-asset-link-target-",
+      });
+      const outsideImagePath = path.join(outside, "outside.png");
+      const linkedImagePath = path.join(temporaryRoot, "linked.png");
+      yield* fileSystem.writeFile(outsideImagePath, new Uint8Array([137, 80, 78, 71]));
+      yield* fileSystem.symlink(outsideImagePath, linkedImagePath);
+
+      const error = yield* issueAssetUrl({
+        resource: { _tag: "temporary-image", threadId: testThreadId, path: linkedImagePath },
+      }).pipe(Effect.flip);
+
+      expect(error._tag).toBe("AssetTemporaryImageNotFoundError");
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects a temporary image replaced after capability issuance", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-temporary-image-replaced-",
+      });
+      const imagePath = path.join(root, "preview.png");
+      yield* fileSystem.writeFile(imagePath, new Uint8Array([137, 80, 78, 71]));
+
+      const result = yield* issueAssetUrl({
+        resource: { _tag: "temporary-image", threadId: testThreadId, path: imagePath },
+      });
+      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const separatorIndex = suffix.indexOf("/");
+      const token = suffix.slice(0, separatorIndex);
+
+      yield* fileSystem.rename(imagePath, path.join(root, "original.png"));
+      yield* fileSystem.writeFile(imagePath, new Uint8Array([137, 80, 78, 72]));
+
+      expect(yield* resolveAsset(token, "preview.png")).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects a temporary image that grows beyond the read limit after issuance", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-temporary-image-grown-",
+      });
+      const imagePath = path.join(root, "preview.png");
+      yield* fileSystem.writeFile(imagePath, new Uint8Array([137, 80, 78, 71]));
+
+      const result = yield* issueAssetUrl({
+        resource: { _tag: "temporary-image", threadId: testThreadId, path: imagePath },
+      });
+      const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+      const separatorIndex = suffix.indexOf("/");
+      const token = suffix.slice(0, separatorIndex);
+
+      yield* Effect.promise(() => NodeFSP.truncate(imagePath, 25 * 1024 * 1024 + 1));
+
+      expect(yield* resolveAsset(token, "preview.png")).toBeNull();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects non-image and non-file temporary paths", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-temporary-image-type-",
+      });
+      const textPath = path.join(root, "notes.txt");
+      const directoryPath = path.join(root, "folder.png");
+      yield* fileSystem.writeFileString(textPath, "not an image");
+      yield* fileSystem.makeDirectory(directoryPath);
+
+      const typeError = yield* issueAssetUrl({
+        resource: { _tag: "temporary-image", threadId: testThreadId, path: textPath },
+      }).pipe(Effect.flip);
+      const fileError = yield* issueAssetUrl({
+        resource: { _tag: "temporary-image", threadId: testThreadId, path: directoryPath },
+      }).pipe(Effect.flip);
+
+      expect(typeError).toBeInstanceOf(AssetPreviewTypeValidationError);
+      expect(fileError._tag).toBe("AssetTemporaryImageNotFoundError");
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects relative temporary image paths", () =>
+    Effect.gen(function* () {
+      const error = yield* issueAssetUrl({
+        resource: { _tag: "temporary-image", threadId: testThreadId, path: "preview.png" },
+      }).pipe(Effect.flip);
+
+      expect(error._tag).toBe("AssetTemporaryImagePathValidationError");
+    }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects temporary images owned by another user when uid is available", () =>
+    Effect.gen(function* () {
+      const getuid = process.getuid;
+      if (typeof getuid !== "function") return;
+      const currentUid = getuid();
+
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-asset-temporary-image-owner-",
+      });
+      const imagePath = path.join(root, "preview.png");
+      yield* fileSystem.writeFile(imagePath, new Uint8Array([137, 80, 78, 71]));
+      const canonicalImagePath = yield* fileSystem.realPath(imagePath);
+      const mismatchedFileSystem = FileSystem.FileSystem.of({
+        ...fileSystem,
+        stat: (target) =>
+          fileSystem
+            .stat(target)
+            .pipe(
+              Effect.map((info) =>
+                target === canonicalImagePath
+                  ? { ...info, uid: Option.some(currentUid + 1) }
+                  : info,
+              ),
+            ),
+      });
+
+      const error = yield* issueAssetUrl({
+        resource: { _tag: "temporary-image", threadId: testThreadId, path: imagePath },
+      }).pipe(Effect.provideService(FileSystem.FileSystem, mismatchedFileSystem), Effect.flip);
+
+      expect(error._tag).toBe("AssetTemporaryImageNotFoundError");
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect("issues workspace URLs that resolve the entry file and sibling assets", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
