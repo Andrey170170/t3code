@@ -23,14 +23,19 @@ function renderMarkdown(markdown: string, lineBreaks = false): string {
 }
 
 describe("chat Markdown math", () => {
-  it("renders inline and display dollar math with KaTeX", () => {
-    const inline = renderMarkdown("Energy is $E = mc^2$.");
+  it("renders display dollar math with KaTeX", () => {
     const display = renderMarkdown("$$\n\\frac{a}{b}\n$$");
 
-    expect(inline).toContain('class="katex"');
-    expect(inline).toContain('encoding="application/x-tex">E = mc^2</annotation>');
     expect(display).toContain('class="katex-display"');
     expect(display).toContain('encoding="application/x-tex">\\frac{a}{b}</annotation>');
+  });
+
+  it("does not treat currency amounts as math delimiters", () => {
+    const html = renderMarkdown("I'll treat up to $10 as the cap; the estimate is about $0.10.");
+
+    expect(html).not.toContain('class="katex"');
+    expect(html).toContain("$10 as the cap");
+    expect(html).toContain("about $0.10");
   });
 
   it("renders paired LaTeX-style delimiters used by coding agents", () => {
@@ -97,7 +102,7 @@ describe("chat Markdown math", () => {
   });
 
   it("sanitizes raw HTML before generating trusted KaTeX output", () => {
-    const html = renderMarkdown('<img src="x" onerror="alert(1)"> $x^2$');
+    const html = renderMarkdown('<img src="x" onerror="alert(1)"> \\(x^2\\)');
 
     expect(html).not.toContain("onerror");
     expect(html).toContain('class="katex"');
@@ -106,7 +111,7 @@ describe("chat Markdown math", () => {
   });
 
   it("renders math through the hard-break pipeline", () => {
-    const html = renderMarkdown("First line\nthen $x$", true);
+    const html = renderMarkdown("First line\nthen \\(x\\)", true);
 
     expect(html).toContain("<br/>");
     expect(html).toContain('class="katex"');
