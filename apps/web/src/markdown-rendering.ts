@@ -84,7 +84,7 @@ export const CHAT_MARKDOWN_SANITIZE_SCHEMA: SanitizeSchema = {
 
 export const CHAT_MARKDOWN_REMARK_PLUGINS: RemarkPlugins = [
   remarkGfm,
-  remarkMath,
+  [remarkMath, { singleDollarTextMath: false }],
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkPreserveCodeMeta,
@@ -93,7 +93,7 @@ export const CHAT_MARKDOWN_REMARK_PLUGINS: RemarkPlugins = [
 
 export const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS: RemarkPlugins = [
   remarkGfm,
-  remarkMath,
+  [remarkMath, { singleDollarTextMath: false }],
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkBreaks,
