@@ -195,6 +195,17 @@ function derivePendingUserInputCountFromActivities(
   return openRequestIds.size;
 }
 
+function activityAffectsThreadShellSummary(kind: string): boolean {
+  return (
+    kind === "approval.requested" ||
+    kind === "approval.resolved" ||
+    kind === "provider.approval.respond.failed" ||
+    kind === "user-input.requested" ||
+    kind === "user-input.resolved" ||
+    kind === "provider.user-input.respond.failed"
+  );
+}
+
 function deriveHasActionableProposedPlan(input: {
   readonly latestTurnId: string | null;
   readonly proposedPlans: ReadonlyArray<ProjectionThreadProposedPlan>;
@@ -887,31 +898,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
-        // A message cannot change any summary field except latestUserMessageAt,
-        // which is a monotonic maximum that folds in directly. The full refresh
-        // would re-read every message body in the thread per user message.
-        case "thread.message-sent": {
-          const existingRow = yield* projectionThreadRepository.getById({
-            threadId: event.payload.threadId,
-          });
-          if (Option.isNone(existingRow)) {
-            return;
-          }
-          const previousLatest = existingRow.value.latestUserMessageAt;
-          yield* projectionThreadRepository.upsert({
-            ...existingRow.value,
-            updatedAt: event.occurredAt,
-            latestUserMessageAt:
-              event.payload.role === "user" &&
-              (previousLatest === null || event.payload.createdAt > previousLatest)
-                ? event.payload.createdAt
-                : previousLatest,
-          });
-          return;
-        }
-
         case "thread.proposed-plan-upserted":
-        case "thread.activity-appended":
         case "thread.approval-response-requested":
         case "thread.user-input-response-requested": {
           const existingRow = yield* projectionThreadRepository.getById({
@@ -925,6 +912,44 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             updatedAt: event.occurredAt,
           });
           if (shouldRefreshThreadShellSummary(event)) {
+            yield* refreshThreadShellSummary(event.payload.threadId);
+          }
+          return;
+        }
+
+        case "thread.message-sent": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          const latestUserMessageAt =
+            event.payload.role === "user" &&
+            (existingRow.value.latestUserMessageAt === null ||
+              event.payload.createdAt > existingRow.value.latestUserMessageAt)
+              ? event.payload.createdAt
+              : existingRow.value.latestUserMessageAt;
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            latestUserMessageAt,
+            updatedAt: event.occurredAt,
+          });
+          return;
+        }
+
+        case "thread.activity-appended": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            updatedAt: event.occurredAt,
+          });
+          if (activityAffectsThreadShellSummary(event.payload.activity.kind)) {
             yield* refreshThreadShellSummary(event.payload.threadId);
           }
           return;
