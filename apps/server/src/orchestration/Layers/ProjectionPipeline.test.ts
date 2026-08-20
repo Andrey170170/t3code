@@ -1807,6 +1807,419 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       }),
   );
 
+  it.effect(
+    "updates routine activity and user-message timestamps without hydrating activity history",
+    () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-shell-summary-routine");
+        const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+          eventStore
+            .append(event)
+            .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+        yield* appendAndProject({
+          type: "thread.created",
+          eventId: EventId.make("evt-shell-routine-1"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-03-01T12:00:00.000Z",
+          commandId: CommandId.make("cmd-shell-routine-1"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-routine-1"),
+          metadata: {},
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-shell-routine"),
+            title: "Routine shell updates",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt: "2026-03-01T12:00:00.000Z",
+            updatedAt: "2026-03-01T12:00:00.000Z",
+          },
+        });
+
+        // A malformed historical payload is a sentinel for any attempt to
+        // reload and JSON-decode the complete activity history.
+        yield* sql`
+          INSERT INTO projection_thread_activities (
+            activity_id,
+            thread_id,
+            turn_id,
+            tone,
+            kind,
+            summary,
+            payload_json,
+            sequence,
+            created_at
+          ) VALUES (
+            'poisoned-shell-history',
+            ${threadId},
+            NULL,
+            'info',
+            'task.progress',
+            'Historical activity',
+            '{not-json',
+            NULL,
+            '2026-03-01T11:59:59.000Z'
+          )
+        `;
+
+        const routineActivityKinds = [
+          "task.progress",
+          "tool.progress",
+          "context-window.updated",
+        ] as const;
+        for (let index = 0; index < routineActivityKinds.length; index += 1) {
+          const kind = routineActivityKinds[index];
+          if (kind === undefined) {
+            continue;
+          }
+          const occurredAt = `2026-03-01T12:00:0${index + 1}.000Z`;
+          yield* appendAndProject({
+            type: "thread.activity-appended",
+            eventId: EventId.make(`evt-shell-routine-activity-${index + 1}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt,
+            commandId: CommandId.make(`cmd-shell-routine-activity-${index + 1}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-shell-routine-activity-${index + 1}`),
+            metadata: {},
+            payload: {
+              threadId,
+              activity: {
+                id: EventId.make(`activity-shell-routine-${index + 1}`),
+                tone: kind === "tool.progress" ? "tool" : "info",
+                kind,
+                summary: `Routine ${kind}`,
+                payload: {},
+                turnId: null,
+                createdAt: occurredAt,
+              },
+            },
+          });
+
+          const rows = yield* sql<{ readonly updatedAt: string }>`
+            SELECT updated_at AS "updatedAt"
+            FROM projection_threads
+            WHERE thread_id = ${threadId}
+          `;
+          assert.deepEqual(rows, [{ updatedAt: occurredAt }]);
+        }
+
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-shell-routine-message"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-03-01T12:00:04.000Z",
+          commandId: CommandId.make("cmd-shell-routine-message"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-routine-message"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-shell-routine-user"),
+            role: "user",
+            text: "Continue",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-01T12:00:04.000Z",
+            updatedAt: "2026-03-01T12:00:04.000Z",
+          },
+        });
+
+        const latestRows = yield* sql<{
+          readonly updatedAt: string;
+          readonly latestUserMessageAt: string | null;
+        }>`
+          SELECT
+            updated_at AS "updatedAt",
+            latest_user_message_at AS "latestUserMessageAt"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+        assert.deepEqual(latestRows, [
+          {
+            updatedAt: "2026-03-01T12:00:04.000Z",
+            latestUserMessageAt: "2026-03-01T12:00:04.000Z",
+          },
+        ]);
+
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-shell-routine-older-message"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-03-01T12:00:05.000Z",
+          commandId: CommandId.make("cmd-shell-routine-older-message"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-shell-routine-older-message"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-shell-routine-older-user"),
+            role: "user",
+            text: "An older imported message",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-01T11:59:58.000Z",
+            updatedAt: "2026-03-01T11:59:58.000Z",
+          },
+        });
+
+        const olderRows = yield* sql<{
+          readonly updatedAt: string;
+          readonly latestUserMessageAt: string | null;
+        }>`
+          SELECT
+            updated_at AS "updatedAt",
+            latest_user_message_at AS "latestUserMessageAt"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+        assert.deepEqual(olderRows, [
+          {
+            updatedAt: "2026-03-01T12:00:05.000Z",
+            latestUserMessageAt: "2026-03-01T12:00:04.000Z",
+          },
+        ]);
+      }),
+  );
+
+  it.effect("refreshes shell summaries for approval, user-input, and plan events", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("thread-shell-summary-relevant");
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+      yield* appendAndProject({
+        type: "thread.created",
+        eventId: EventId.make("evt-shell-relevant-1"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T13:00:00.000Z",
+        commandId: CommandId.make("cmd-shell-relevant-1"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-shell-relevant-1"),
+        metadata: {},
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-shell-relevant"),
+          title: "Relevant shell updates",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-03-01T13:00:00.000Z",
+          updatedAt: "2026-03-01T13:00:00.000Z",
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-shell-relevant-approval"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T13:00:01.000Z",
+        commandId: CommandId.make("cmd-shell-relevant-approval"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-shell-relevant-approval"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-shell-relevant-approval"),
+            tone: "approval",
+            kind: "approval.requested",
+            summary: "Approval requested",
+            payload: { requestId: "approval-shell-relevant" },
+            turnId: null,
+            createdAt: "2026-03-01T13:00:01.000Z",
+          },
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-shell-relevant-user-input"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T13:00:02.000Z",
+        commandId: CommandId.make("cmd-shell-relevant-user-input"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-shell-relevant-user-input"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-shell-relevant-user-input"),
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "User input requested",
+            payload: { requestId: "user-input-shell-relevant" },
+            turnId: null,
+            createdAt: "2026-03-01T13:00:02.000Z",
+          },
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.proposed-plan-upserted",
+        eventId: EventId.make("evt-shell-relevant-plan"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T13:00:03.000Z",
+        commandId: CommandId.make("cmd-shell-relevant-plan"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-shell-relevant-plan"),
+        metadata: {},
+        payload: {
+          threadId,
+          proposedPlan: {
+            id: "plan-shell-relevant",
+            turnId: null,
+            planMarkdown: "# Plan\n\nShip the projection optimization.",
+            implementedAt: null,
+            implementationThreadId: null,
+            createdAt: "2026-03-01T13:00:03.000Z",
+            updatedAt: "2026-03-01T13:00:03.000Z",
+          },
+        },
+      });
+
+      const openRows = yield* sql<{
+        readonly pendingApprovalCount: number;
+        readonly pendingUserInputCount: number;
+        readonly hasActionableProposedPlan: number;
+      }>`
+        SELECT
+          pending_approval_count AS "pendingApprovalCount",
+          pending_user_input_count AS "pendingUserInputCount",
+          has_actionable_proposed_plan AS "hasActionableProposedPlan"
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+      assert.deepEqual(openRows, [
+        {
+          pendingApprovalCount: 1,
+          pendingUserInputCount: 1,
+          hasActionableProposedPlan: 1,
+        },
+      ]);
+
+      yield* appendAndProject({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-shell-relevant-approval-resolved"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T13:00:04.000Z",
+        commandId: CommandId.make("cmd-shell-relevant-approval-resolved"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-shell-relevant-approval-resolved"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-shell-relevant-approval-resolved"),
+            tone: "approval",
+            kind: "approval.resolved",
+            summary: "Approval resolved",
+            payload: { requestId: "approval-shell-relevant", decision: "accept" },
+            turnId: null,
+            createdAt: "2026-03-01T13:00:04.000Z",
+          },
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-shell-relevant-user-input-resolved"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T13:00:05.000Z",
+        commandId: CommandId.make("cmd-shell-relevant-user-input-resolved"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-shell-relevant-user-input-resolved"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-shell-relevant-user-input-resolved"),
+            tone: "info",
+            kind: "user-input.resolved",
+            summary: "User input resolved",
+            payload: { requestId: "user-input-shell-relevant" },
+            turnId: null,
+            createdAt: "2026-03-01T13:00:05.000Z",
+          },
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.proposed-plan-upserted",
+        eventId: EventId.make("evt-shell-relevant-plan-implemented"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T13:00:06.000Z",
+        commandId: CommandId.make("cmd-shell-relevant-plan-implemented"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-shell-relevant-plan-implemented"),
+        metadata: {},
+        payload: {
+          threadId,
+          proposedPlan: {
+            id: "plan-shell-relevant",
+            turnId: null,
+            planMarkdown: "# Plan\n\nShip the projection optimization.",
+            implementedAt: "2026-03-01T13:00:06.000Z",
+            implementationThreadId: threadId,
+            createdAt: "2026-03-01T13:00:03.000Z",
+            updatedAt: "2026-03-01T13:00:06.000Z",
+          },
+        },
+      });
+
+      const resolvedRows = yield* sql<{
+        readonly pendingApprovalCount: number;
+        readonly pendingUserInputCount: number;
+        readonly hasActionableProposedPlan: number;
+      }>`
+        SELECT
+          pending_approval_count AS "pendingApprovalCount",
+          pending_user_input_count AS "pendingUserInputCount",
+          has_actionable_proposed_plan AS "hasActionableProposedPlan"
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
+      assert.deepEqual(resolvedRows, [
+        {
+          pendingApprovalCount: 0,
+          pendingUserInputCount: 0,
+          hasActionableProposedPlan: 0,
+        },
+      ]);
+    }),
+  );
+
   it.effect("clears stale pending approvals from projected shell summaries", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
