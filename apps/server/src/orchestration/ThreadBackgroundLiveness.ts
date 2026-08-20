@@ -137,7 +137,8 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
       if (statuslessContinuation) {
         // Preserve the existing bucket exactly. A later progress row may
         // omit taskType or carry a different inferred type, but without an
-        // explicit status it is not a lifecycle transition.
+        // explicit status it is not a lifecycle transition. In particular,
+        // delayed progress after idle must not restart the task (#7128).
         return;
       }
 
