@@ -213,6 +213,8 @@ export const resolveServerConfig = (
   options?: {
     readonly startupPresentation?: ServerConfig.StartupPresentation;
     readonly forceAutoBootstrapProjectFromCwd?: boolean;
+    readonly userHomeDir?: string;
+    readonly worktreesDir?: string;
   },
 ) =>
   Effect.gen(function* () {
@@ -282,8 +284,14 @@ export const resolveServerConfig = (
     const rawCwd = Option.getOrElse(normalizedFlags.cwd, () => process.cwd());
     const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));
     yield* fs.makeDirectory(cwd, { recursive: true });
+    // Runtime state can be isolated or ephemeral, but generated source checkouts
+    // must remain in the user's durable home unless a caller overrides it.
+    const worktreesDir =
+      options?.worktreesDir ??
+      path.join(options?.userHomeDir ?? (yield* expandHomePath("~")), ".t3", "worktrees");
     const derivedPaths = yield* ServerConfig.deriveServerPaths(baseDir, devUrl, {
       baseDirIsExplicit: Option.isSome(explicitBaseDir),
+      worktreesDir,
     });
     yield* ServerConfig.ensureServerDirectories(derivedPaths);
     const persistedObservabilitySettings = yield* loadPersistedObservabilitySettings(

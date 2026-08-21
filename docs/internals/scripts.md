@@ -46,8 +46,9 @@ authenticated.
   precedence.
 - From the **main checkout**, dev commands implicitly use `~/.t3/dev`, keeping development state
   separate from `~/.t3/userdata`. An explicit `--home-dir <path>` stores state under
-  `<path>/userdata`; the base directory remains available for caches, worktrees, and other shared
-  data.
+  `<path>/userdata`; the base directory remains available for caches and other shared data.
+  Automatically created worktrees remain under `~/.t3/worktrees`, so an isolated or ephemeral T3
+  data directory does not relocate source checkouts.
 
 ## Build, check, test
 

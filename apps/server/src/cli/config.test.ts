@@ -88,6 +88,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServePort: Option.none(),
         },
         Option.none(),
+        { worktreesDir: derivedPaths.worktreesDir },
       ).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -161,6 +162,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServePort: Option.some(8443),
         },
         Option.some("Debug"),
+        { worktreesDir: derivedPaths.worktreesDir },
       ).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -239,6 +241,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServePort: Option.none(),
         },
         Option.none(),
+        { worktreesDir: derivedPaths.worktreesDir },
       ).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -316,6 +319,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServePort: Option.none(),
         },
         Option.none(),
+        { worktreesDir: derivedPaths.worktreesDir },
       ).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -366,7 +370,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-config-dirs-" });
+      const userHome = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-config-home-" });
       const customCwd = path.join(baseDir, "nested", "project");
+      const worktreesDir = path.join(userHome, ".t3", "worktrees");
 
       const resolved = yield* resolveServerConfig(
         {
@@ -384,6 +390,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServePort: Option.none(),
         },
         Option.none(),
+        { userHomeDir: userHome },
       ).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -407,6 +414,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         expect(yield* fs.exists(directory)).toBe(true);
       }
       expect(resolved.cwd).toBe(path.resolve(customCwd));
+      expect(resolved.stateDir).toBe(path.join(baseDir, "userdata"));
+      expect(resolved.worktreesDir).toBe(worktreesDir);
+      expect(resolved.worktreesDir.startsWith(resolved.baseDir)).toBe(false);
     }),
   );
 
@@ -446,6 +456,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServePort: Option.none(),
         },
         Option.some("Debug"),
+        { worktreesDir: derivedPaths.worktreesDir },
       ).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -522,6 +533,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           tailscaleServePort: Option.none(),
         },
         Option.none(),
+        { worktreesDir: derivedPaths.worktreesDir },
       ).pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -581,6 +593,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         Option.none(),
         {
           startupPresentation: "headless",
+          worktreesDir: derivedPaths.worktreesDir,
         },
       ).pipe(
         Effect.provide(
