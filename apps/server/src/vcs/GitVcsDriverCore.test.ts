@@ -26,7 +26,7 @@ const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-git-vcs-driver-test-",
 });
 const TestLayer = GitVcsDriver.layer.pipe(
-  Layer.provide(ServerConfigLayer),
+  Layer.provideMerge(ServerConfigLayer),
   Layer.provideMerge(NodeServices.layer),
 );
 
@@ -1407,6 +1407,36 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
             NodeFS.realpathSync.native(worktreePath),
           );
         }),
+    );
+
+    it.effect("creates an implicit worktree under the configured worktree root", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const { worktreesDir } = yield* ServerConfig;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        const created = yield* driver.createWorktree({
+          cwd,
+          path: null,
+          refName: initialBranch,
+          newRefName: "feature/implicit-worktree",
+        });
+        const expectedPath = pathService.join(
+          worktreesDir,
+          pathService.basename(cwd),
+          "feature-implicit-worktree",
+        );
+
+        assert.equal(created.worktree.path, expectedPath);
+        assert.equal(
+          yield* git(created.worktree.path, ["branch", "--show-current"]),
+          "feature/implicit-worktree",
+        );
+
+        yield* driver.removeWorktree({ cwd, path: created.worktree.path });
+      }),
     );
 
     it.effect("checks out submodules in a new worktree", () =>
