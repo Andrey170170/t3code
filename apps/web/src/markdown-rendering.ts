@@ -11,7 +11,7 @@ import { remarkNormalizeListItemIndentation } from "./markdown-list-indentation"
 
 type RemarkPlugins = NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
 type RehypePlugins = NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
-type SanitizeSchema = Parameters<typeof rehypeSanitize>[0];
+type SanitizeSchema = NonNullable<Parameters<typeof rehypeSanitize>[0]>;
 
 type MarkdownAstNode = {
   type?: string;

@@ -551,7 +551,12 @@ describe("ChatMarkdown temporary images", () => {
         path: "/workspace/project/result.png",
       },
     ]);
-    expect(html).toContain(imageTestState.workspace.url);
+    const workspaceResult = imageTestState.workspace;
+    expect(workspaceResult._tag).toBe("Success");
+    if (workspaceResult._tag !== "Success") {
+      throw new Error("expected workspace image signing to succeed");
+    }
+    expect(html).toContain(workspaceResult.url);
   });
 
   it("falls back to the bounded temporary-image capability after workspace rejection", () => {
