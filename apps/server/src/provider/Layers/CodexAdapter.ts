@@ -70,6 +70,10 @@ import {
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import {
+  type CodexProgressCoalescer,
+  makeCodexProgressCoalescer,
+} from "./CodexProgressCoalescer.ts";
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import { codexRateLimitsToUpdate } from "./codexUsageLimits.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
@@ -99,6 +103,7 @@ interface CodexAdapterSessionContext {
   readonly threadId: ThreadId;
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
+  readonly progress: CodexProgressCoalescer<string, ProviderRuntimeEvent>;
   readonly eventFiber: Fiber.Fiber<void, never>;
   readonly turnTokenUsage: CodexTurnTokenUsageState;
   stopped: boolean;
@@ -1262,6 +1267,75 @@ function mapCollabAgentEvent(
   }
 }
 
+function collabAgentThreadId(event: ProviderEvent): string | undefined {
+  if (event.kind !== "notification" || !event.method.startsWith("collabAgent/")) {
+    return undefined;
+  }
+  const payload =
+    typeof event.payload === "object" && event.payload !== null
+      ? (event.payload as Record<string, unknown>)
+      : undefined;
+  return typeof payload?.agentThreadId === "string" ? payload.agentThreadId : undefined;
+}
+
+function collabProgressLane(event: ProviderEvent): "item" | "tokenUsage" | undefined {
+  switch (event.method) {
+    case "collabAgent/item":
+      return "item";
+    case "collabAgent/tokenUsage":
+      return "tokenUsage";
+    default:
+      return undefined;
+  }
+}
+
+function shouldFlushCollabProgress(event: ProviderEvent): boolean {
+  switch (event.method) {
+    case "collabAgent/turnCompleted":
+    case "collabAgent/closed":
+      return true;
+    case "collabAgent/activity": {
+      const payload =
+        typeof event.payload === "object" && event.payload !== null
+          ? (event.payload as Record<string, unknown>)
+          : undefined;
+      return payload?.activityKind === "interrupted";
+    }
+    case "collabAgent/statusChanged": {
+      const payload =
+        typeof event.payload === "object" && event.payload !== null
+          ? (event.payload as Record<string, unknown>)
+          : undefined;
+      const status =
+        typeof payload?.status === "object" && payload.status !== null
+          ? (payload.status as Record<string, unknown>)
+          : undefined;
+      return status?.type === "idle" || status?.type === "systemError";
+    }
+    default:
+      return false;
+  }
+}
+
+function shouldFlushBeforeCollabIdentityRefinement(event: ProviderEvent): boolean {
+  if (event.method === "collabAgent/metadataUpdated") {
+    return true;
+  }
+  if (event.method !== "collabAgent/activity") {
+    return false;
+  }
+  const payload =
+    typeof event.payload === "object" && event.payload !== null
+      ? (event.payload as Record<string, unknown>)
+      : undefined;
+  if (payload?.activityKind !== "started") {
+    return false;
+  }
+  return [payload.nickname, payload.agentPath, payload.role, payload.model, payload.effort].some(
+    (value) => typeof value === "string" && value.trim().length > 0,
+  );
+}
+
 function mapToRuntimeEvents(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
@@ -2266,6 +2340,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }),
           ),
         );
+        const progress = yield* makeCodexProgressCoalescer<string, ProviderRuntimeEvent>({
+          emit: (events) => Queue.offerAll(runtimeEventQueue, events).pipe(Effect.asVoid),
+        }).pipe(Effect.provideService(Scope.Scope, sessionScope));
 
         // Fork into the session scope, not the calling fiber. `forkChild` makes
         // this a child of `startSession`, and Effect interrupts a fiber's
@@ -2332,6 +2409,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }
               return runtimeEvent;
             });
+            const childThreadId = collabAgentThreadId(event);
+            if (
+              childThreadId &&
+              (shouldFlushCollabProgress(event) || shouldFlushBeforeCollabIdentityRefinement(event))
+            ) {
+              yield* progress.flush(childThreadId);
+            }
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                 method: event.method,
@@ -2339,6 +2423,24 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 turnId: event.turnId,
                 itemId: event.itemId,
               });
+              return;
+            }
+            const progressLane = collabProgressLane(event);
+            const latestProgress = runtimeEvents.findLast(
+              (runtimeEvent) => runtimeEvent.type === "task.progress",
+            );
+            if (childThreadId && progressLane && latestProgress) {
+              if (progressLane === "item") {
+                yield* progress.offerItem(childThreadId, latestProgress);
+              } else {
+                yield* progress.offerTokenUsage(childThreadId, latestProgress);
+              }
+              const passthrough = runtimeEvents.filter(
+                (runtimeEvent) => runtimeEvent !== latestProgress,
+              );
+              if (passthrough.length > 0) {
+                yield* Queue.offerAll(runtimeEventQueue, passthrough);
+              }
               return;
             }
             yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
@@ -2356,7 +2458,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }),
           ),
           Effect.onError(() =>
-            runtime.close.pipe(
+            progress.close.pipe(
+              Effect.andThen(runtime.close),
               Effect.andThen(Effect.ignore(Scope.close(sessionScope, Exit.void))),
               Effect.andThen(Fiber.interrupt(eventFiber)),
               Effect.ignore,
@@ -2368,6 +2471,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           threadId: input.threadId,
           scope: sessionScope,
           runtime,
+          progress,
           eventFiber,
           turnTokenUsage,
           stopped: false,
@@ -2576,6 +2680,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     }
     session.stopped = true;
     sessions.delete(session.threadId);
+    yield* session.progress.close;
     yield* session.runtime.close.pipe(Effect.ignore);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
