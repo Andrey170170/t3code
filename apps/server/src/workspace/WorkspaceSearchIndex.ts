@@ -30,8 +30,8 @@ const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;
 const WORKSPACE_INDEX_SCAN_TIMEOUT = "15 seconds";
 const WORKSPACE_INDEX_SCAN_TIMEOUT_MS = 15_000;
 const WORKSPACE_INDEX_IDLE_TTL = "15 minutes";
-const CONTENT_SEARCH_TIME_BUDGET_MS = 250;
-const CONTENT_SEARCH_MAX_MATCHES_PER_FILE = 100;
+export const CONTENT_SEARCH_TIME_BUDGET_MS = 250;
+export const CONTENT_SEARCH_MAX_MATCHES_PER_FILE = 100;
 
 export class WorkspaceSearchIndexCreateFailed extends Schema.TaggedErrorClass<WorkspaceSearchIndexCreateFailed>()(
   "WorkspaceSearchIndexCreateFailed",
@@ -265,7 +265,7 @@ function mapContentMatchRanges(
  * neighbouring character is not a word character, or the match's own edge
  * character is not a word character.
  */
-function isWholeWordRange(
+export function isWholeWordRange(
   line: string,
   range: { readonly start: number; readonly end: number },
 ): boolean {

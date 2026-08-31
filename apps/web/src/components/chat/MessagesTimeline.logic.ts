@@ -1,4 +1,5 @@
 import * as Equal from "effect/Equal";
+import { renderCodexDirectivesForCopy } from "@t3tools/client-runtime/codex-markdown-directives";
 import {
   formatDuration,
   workEntryDisplayIndicatesToolFailure,
@@ -439,9 +440,10 @@ export function resolveAssistantMessageCopyState({
   streaming: boolean;
 }) {
   const hasText = text !== null && text.trim().length > 0;
+  const visible = showCopyButton && hasText && !streaming;
   return {
-    text: hasText ? text : null,
-    visible: showCopyButton && hasText && !streaming,
+    text: hasText ? (visible ? renderCodexDirectivesForCopy(text) : text) : null,
+    visible,
   };
 }
 
@@ -521,9 +523,9 @@ function timelineEntryTurnId(entry: TimelineEntry): TurnId | null {
 }
 
 /**
- * Settled turns fold their commentary and tool activity behind a
- * "Worked for ..." row anchored at the turn's first foldable entry; the
- * terminal assistant message stays visible below the fold.
+ * Settled turns keep only their terminal assistant message visible.
+ * Everything before it folds behind a "Worked for ..." row anchored at the
+ * first hidden entry, so the duration leads directly into the final response.
  */
 function deriveTurnFolds(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
@@ -611,8 +613,9 @@ function deriveTurnFolds(input: {
     }
 
     const firstEntry = group.entries[0];
+    const firstHiddenEntry = group.entries.find((entry) => hiddenEntryIds.has(entry.id));
     const lastEntry = group.entries.at(-1);
-    if (!firstEntry || !lastEntry) {
+    if (!firstEntry || !firstHiddenEntry || !lastEntry) {
       continue;
     }
 
@@ -641,10 +644,10 @@ function deriveTurnFolds(input: {
         ? `Worked for ${duration}`
         : "Worked";
 
-    foldsByAnchorEntryId.set(firstEntry.id, {
+    foldsByAnchorEntryId.set(firstHiddenEntry.id, {
       turnId,
-      anchorEntryId: firstEntry.id,
-      createdAt: firstEntry.createdAt,
+      anchorEntryId: firstHiddenEntry.id,
+      createdAt: firstHiddenEntry.createdAt,
       hiddenEntryIds,
       label,
     });
@@ -894,9 +897,7 @@ export function deriveMessagesTimelineRows(input: {
             onlyToolEntries: true,
             summary: summarizeToolGroup(visibleGroupedEntries),
             summaryKind,
-            hasFailure: visibleGroupedEntries.some((entry) =>
-              workEntryDisplayIndicatesToolFailure(entry),
-            ),
+            hasFailure: workEntryDisplayIndicatesToolFailure(visibleGroupedEntries.at(-1)!),
           });
           if (expanded) {
             for (const [entryIndex, workEntry] of visibleGroupedEntries.entries()) {
@@ -950,6 +951,8 @@ export function deriveMessagesTimelineRows(input: {
           }
 
           if (hiddenEntries.length > 0) {
+            const latestToolEntry = visibleGroupedEntries.findLast(workLogEntryIsToolLike);
+
             nextRows.push({
               kind: "work-toggle",
               id: `work-toggle:${timelineEntry.id}`,
@@ -960,9 +963,10 @@ export function deriveMessagesTimelineRows(input: {
               onlyToolEntries: hiddenEntries.every(workLogEntryIsToolLike),
               summary: null,
               summaryKind: null,
-              hasFailure: hiddenEntries.some((entry) =>
-                workEntryDisplayIndicatesToolFailure(entry),
-              ),
+              hasFailure:
+                latestToolEntry !== undefined &&
+                workEntryDisplayIndicatesToolFailure(latestToolEntry) &&
+                hiddenEntries.some(workEntryDisplayIndicatesToolFailure),
             });
           }
         }

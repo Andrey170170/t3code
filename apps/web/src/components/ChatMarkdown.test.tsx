@@ -1,332 +1,379 @@
-import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, type ScopedThreadRef, type ThreadId } from "@t3tools/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-const testState = vi.hoisted(() => ({
-  assetState: {
+const imageTestState = vi.hoisted(() => ({
+  workspace: {
     _tag: "Success" as const,
     url: "https://environment.test/api/assets/signed/workspace-image.png",
   } as
     | { readonly _tag: "Loading" }
     | { readonly _tag: "Failure" }
     | { readonly _tag: "Success"; readonly url: string },
-  temporaryAssetState: null as
-    | null
+  temporary: { _tag: "Failure" } as
     | { readonly _tag: "Loading" }
     | { readonly _tag: "Failure" }
     | { readonly _tag: "Success"; readonly url: string },
-  prepared: true,
-  assetRequests: [] as Array<{ readonly environmentId: unknown; readonly resource: unknown }>,
+  requests: [] as Array<{ readonly environmentId: unknown; readonly resource: unknown }>,
 }));
 
-vi.mock("@effect/atom-react", () => ({ useAtomValue: () => undefined }));
+vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
 vi.mock("../assets/assetUrls", () => ({
   useAssetUrlState: (environmentId: unknown, resource: unknown) => {
-    testState.assetRequests.push({ environmentId, resource });
-    if (
-      (resource as { readonly _tag?: string } | null)?._tag === "temporary-image" &&
-      testState.temporaryAssetState
-    ) {
-      return testState.temporaryAssetState;
-    }
-    return testState.assetState;
+    imageTestState.requests.push({ environmentId, resource });
+    return (resource as { readonly _tag?: string })._tag === "temporary-image"
+      ? imageTestState.temporary
+      : imageTestState.workspace;
   },
 }));
 vi.mock("../hooks/useTheme", () => ({ useTheme: () => ({ resolvedTheme: "dark" }) }));
-vi.mock("../editorPreferences", () => ({ useOpenInPreferredEditor: () => undefined }));
-vi.mock("../state/entities", () => ({
-  useActiveEnvironmentId: () => "environment-test",
-}));
-vi.mock("../state/session", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../state/session")>();
-  const Option = await import("effect/Option");
-  return {
-    ...actual,
-    usePreparedConnection: () =>
-      testState.prepared
-        ? Option.some({ httpBaseUrl: "https://environment.test/" })
-        : Option.none(),
-  };
-});
-vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("../state/use-atom-query-runner", () => ({ useAtomQueryRunner: () => vi.fn() }));
-vi.mock("~/lib/openPullRequestLink", () => ({ useOpenChangeRequestLink: () => vi.fn() }));
+vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
+vi.mock("../state/session", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../state/session")>()),
+  usePreparedConnection: () => ({ _tag: "Loading" }),
+}));
+vi.mock("../state/entities", () => ({
+  readThreadShell: () => null,
+  useProjects: () => [],
+}));
+vi.mock("../remoteOpen", () => ({
+  useRemoteOpenResolution: () => ({ state: { mode: "local-exec" }, isResolved: true }),
+}));
+vi.mock("../editorPreferences", () => ({
+  useOpenInPreferredEditor: () => vi.fn(),
+  usePreferredEditor: () => [null, vi.fn()],
+}));
+vi.mock("~/lib/openPullRequestLink", () => ({
+  findProjectForChangeRequest: () => undefined,
+  matchesLinkedPullRequestUrl: () => false,
+  parseChangeRequestUrl: () => null,
+  useOpenChangeRequestLink: () => vi.fn(),
+}));
 
-import ChatMarkdown, { orderedListGutterStyle } from "./ChatMarkdown";
+import ChatMarkdown, {
+  canUseMarkdownFileShellActions,
+  hasMarkdownFilePrimaryAction,
+  orderedListGutterStyle,
+  shouldUseMarkdownFileBrowserPrimaryAction,
+} from "./ChatMarkdown";
 
-const threadRef = {
-  environmentId: "environment-test" as EnvironmentId,
-  threadId: "thread-test" as ThreadId,
-} satisfies ScopedThreadRef;
+describe("canUseMarkdownFileShellActions", () => {
+  const environmentId = EnvironmentId.make("environment-1");
 
-function renderMarkdown(
-  text: string,
-  options: {
-    readonly cwd?: string | undefined;
-    readonly threadRef?: ScopedThreadRef | undefined;
-    readonly managedAttachmentUrlById?: ReadonlyMap<string, string> | undefined;
-  } = {},
-): string {
-  return renderToStaticMarkup(
-    <ChatMarkdown
-      text={text}
-      cwd={options.cwd}
-      threadRef={options.threadRef}
-      managedAttachmentUrlById={options.managedAttachmentUrlById}
-    />,
-  );
-}
-
-describe("ChatMarkdown workspace images", () => {
-  beforeEach(() => {
-    testState.assetState = {
-      _tag: "Success",
-      url: "https://environment.test/api/assets/signed/workspace-image.png",
-    };
-    testState.prepared = true;
-    testState.temporaryAssetState = null;
-    testState.assetRequests = [];
+  it("allows editor and file manager actions for local environments", () => {
+    expect(canUseMarkdownFileShellActions(environmentId, "local-exec", true)).toBe(true);
   });
 
-  it("renders a cwd-relative image through the thread workspace asset capability", () => {
-    const html = renderMarkdown("![Result](artifacts/result.png)", {
-      cwd: "/workspace/project",
-      threadRef,
-    });
-
-    expect(testState.assetRequests).toEqual([
-      {
-        environmentId: threadRef.environmentId,
-        resource: {
-          _tag: "workspace-file",
-          threadId: threadRef.threadId,
-          path: "/workspace/project/artifacts/result.png",
-        },
-      },
-    ]);
-    expect(html).toContain('src="https://environment.test/api/assets/signed/workspace-image.png"');
-    expect(html).toContain('alt="Result"');
+  it("hides shell actions until the environment mode is resolved", () => {
+    expect(canUseMarkdownFileShellActions(environmentId, "local-exec", false)).toBe(false);
   });
 
-  it("renders an absolute image through the thread workspace asset capability without a cwd", () => {
-    renderMarkdown("![Result](/workspace/project/artifacts/result.png)", { threadRef });
-
-    expect(testState.assetRequests).toEqual([
-      {
-        environmentId: threadRef.environmentId,
-        resource: {
-          _tag: "temporary-image",
-          threadId: threadRef.threadId,
-          path: "/workspace/project/artifacts/result.png",
-        },
-      },
-      {
-        environmentId: threadRef.environmentId,
-        resource: {
-          _tag: "workspace-file",
-          threadId: threadRef.threadId,
-          path: "/workspace/project/artifacts/result.png",
-        },
-      },
-    ]);
+  it("hides editor and file manager actions for remote environments", () => {
+    expect(canUseMarkdownFileShellActions(environmentId, "remote-links", true)).toBe(false);
+    expect(canUseMarkdownFileShellActions(environmentId, "remote-unavailable", true)).toBe(false);
   });
 
-  it.each([
-    "/gpfs/projects/team/artifacts/result.png",
-    "/lustre/scratch/team/artifacts/result.png",
-  ])("routes the portable POSIX path %s through workspace assets", (path) => {
-    renderMarkdown(`![Result](${path})`, { threadRef });
-
-    expect(testState.assetRequests).toEqual([
-      {
-        environmentId: threadRef.environmentId,
-        resource: { _tag: "temporary-image", threadId: threadRef.threadId, path },
-      },
-      {
-        environmentId: threadRef.environmentId,
-        resource: {
-          _tag: "workspace-file",
-          threadId: threadRef.threadId,
-          path,
-        },
-      },
-    ]);
+  it("hides shell actions when no environment owns the markdown", () => {
+    expect(canUseMarkdownFileShellActions(null, "local-exec", true)).toBe(false);
+  });
+});
+describe("hasMarkdownFilePrimaryAction", () => {
+  it("keeps the chip interactive when an editor, browser, or panel can open it", () => {
+    expect(
+      hasMarkdownFilePrimaryAction({
+        canOpenInEditor: true,
+        canOpenInBrowser: false,
+        canOpenInPanel: false,
+      }),
+    ).toBe(true);
+    expect(
+      hasMarkdownFilePrimaryAction({
+        canOpenInEditor: false,
+        canOpenInBrowser: true,
+        canOpenInPanel: false,
+      }),
+    ).toBe(true);
+    expect(
+      hasMarkdownFilePrimaryAction({
+        canOpenInEditor: false,
+        canOpenInBrowser: false,
+        canOpenInPanel: true,
+      }),
+    ).toBe(true);
   });
 
-  it.each([
-    {
-      source: "file:///workspace/project/artifacts/result.png",
-      expectedPath: "/workspace/project/artifacts/result.png",
-    },
-    {
-      source: "C:/workspace/project/artifacts/result.png",
-      expectedPath: "C:/workspace/project/artifacts/result.png",
-    },
-  ])("routes the local image URI $source through workspace assets", (input) => {
-    renderMarkdown(`![Result](${input.source})`, { threadRef });
-
-    expect(testState.assetRequests).toEqual([
-      {
-        environmentId: threadRef.environmentId,
-        resource: {
-          _tag: "temporary-image",
-          threadId: threadRef.threadId,
-          path: input.expectedPath,
-        },
-      },
-      {
-        environmentId: threadRef.environmentId,
-        resource: {
-          _tag: "workspace-file",
-          threadId: threadRef.threadId,
-          path: input.expectedPath,
-        },
-      },
-    ]);
+  it("removes the link affordance when no primary action can open the file", () => {
+    expect(
+      hasMarkdownFilePrimaryAction({
+        canOpenInEditor: false,
+        canOpenInBrowser: false,
+        canOpenInPanel: false,
+      }),
+    ).toBe(false);
   });
+});
 
-  it("shows a non-broken unavailable state when a workspace asset request fails", () => {
-    testState.assetState = { _tag: "Failure" };
-
-    const html = renderMarkdown("![Private result](/tmp/private-result.png)", { threadRef });
-
-    expect(testState.assetRequests).toHaveLength(2);
-    expect(html).toContain("Private result — image unavailable");
-    expect(html).toContain('aria-label="Private result (image unavailable)"');
-    expect(html).not.toContain("<img");
-    expect(html).not.toContain("/tmp/private-result.png");
-  });
-
-  it("renders an owned environment temporary image through its exact-file asset", () => {
-    const temporaryUrl = "https://environment.test/api/assets/signed/temporary-image.png";
-    testState.temporaryAssetState = { _tag: "Success", url: temporaryUrl };
-    testState.assetState = { _tag: "Failure" };
-
-    const html = renderMarkdown("![Generated](/tmp/agent-generated.png)", { threadRef });
-
-    expect(testState.assetRequests).toEqual([
-      {
-        environmentId: threadRef.environmentId,
-        resource: {
-          _tag: "temporary-image",
-          threadId: threadRef.threadId,
-          path: "/tmp/agent-generated.png",
-        },
-      },
-      {
-        environmentId: threadRef.environmentId,
-        resource: {
-          _tag: "workspace-file",
-          threadId: threadRef.threadId,
-          path: "/tmp/agent-generated.png",
-        },
-      },
-    ]);
-    expect(html).toContain(`src="${temporaryUrl}"`);
-  });
-
-  it.each([
-    "/srv/t3/userdata/attachments",
-    "C:/Users/test/AppData/Local/T3/userdata/attachments",
-    String.raw`\\server\share\T3\userdata\attachments`,
-  ])(
-    "uses only a current-thread managed attachment URL for an attachment-store path at %s",
-    (dir) => {
-      const attachmentId = "thread-test-00000000-0000-4000-8000-000000000001";
-      const attachmentUrl = "https://environment.test/api/assets/signed/attachment.png";
-      const html = renderMarkdown(`![Attached](${dir}/${attachmentId}.png)`, {
-        threadRef,
-        managedAttachmentUrlById: new Map([[attachmentId, attachmentUrl]]),
-      });
-
-      expect(testState.assetRequests).toEqual([]);
-      expect(html).toContain(`src="${attachmentUrl}"`);
-    },
-  );
-
-  it("does not replace a remote URL that resembles a managed attachment path", () => {
-    const attachmentId = "thread-test-00000000-0000-4000-8000-000000000001";
-    const attachmentUrl = "https://environment.test/api/assets/signed/attachment.png";
-    const remoteUrl = `https://images.example/attachments/${attachmentId}.png`;
-    const html = renderMarkdown(`![Remote](${remoteUrl})`, {
-      threadRef,
-      managedAttachmentUrlById: new Map([[attachmentId, attachmentUrl]]),
-    });
-
-    expect(testState.assetRequests).toEqual([]);
-    expect(html).toContain(`src="${remoteUrl}"`);
-    expect(html).not.toContain(attachmentUrl);
-  });
-
-  it("does not resolve an attachment-store path absent from the current thread", () => {
-    testState.assetState = { _tag: "Failure" };
-    testState.temporaryAssetState = { _tag: "Failure" };
-    const knownUrl = "https://environment.test/api/assets/signed/known-attachment.png";
-
-    const html = renderMarkdown("![Unknown](/srv/t3/userdata/attachments/unknown-attachment.png)", {
-      threadRef,
-      managedAttachmentUrlById: new Map([["known-attachment", knownUrl]]),
-    });
-
-    expect(testState.assetRequests).toHaveLength(2);
-    expect(html).toContain("Unknown — image unavailable");
-    expect(html).not.toContain(knownUrl);
-  });
-
-  it.each([
-    {
-      missing: "thread",
-      cwd: "/workspace/project",
-      threadRef: undefined,
-      prepared: true,
-    },
-    {
-      missing: "environment connection",
-      cwd: "/workspace/project",
-      threadRef,
-      prepared: false,
-    },
-    {
-      missing: "cwd",
-      cwd: undefined,
-      threadRef,
-      prepared: true,
-    },
-  ])("shows an unavailable state without an asset request when $missing is absent", (input) => {
-    testState.prepared = input.prepared;
-
-    const html = renderMarkdown("![Result](artifacts/result.png)", {
-      cwd: input.cwd,
-      threadRef: input.threadRef,
-    });
-
-    expect(testState.assetRequests).toEqual([]);
-    expect(html).toContain("Result — image unavailable");
-    expect(html).not.toContain("<img");
-  });
-
-  it("leaves remote and data images unchanged without requesting workspace assets", () => {
-    const html = renderMarkdown(
-      "![Remote](https://images.example/result.png)\n\n![Inline](data:image/png;base64,AA==)",
-      { cwd: "/workspace/project", threadRef },
+describe("ChatMarkdown file option chips", () => {
+  it("keeps the fallback button text selectable", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown cwd="/tmp/project" text="[Source](/tmp/project/src/main.ts)" />,
     );
 
-    expect(testState.assetRequests).toEqual([]);
-    expect(html).toContain('src="https://images.example/result.png"');
-    // react-markdown's default URL transform strips data URLs. The workspace
-    // image renderer must not reclassify or otherwise change that behavior.
-    expect(html).toContain('<img alt="Inline"');
-    expect(html).not.toContain("data:image/png");
+    expect(html).toContain("<button");
+    expect(html).toContain('aria-haspopup="menu"');
+    expect(html).toContain("select-text");
   });
 
-  it("leaves root-relative app image URLs unchanged", () => {
-    const html = renderMarkdown("![App logo](/assets/brand/logo.png)", {
-      cwd: "/workspace/project",
-      threadRef,
-    });
+  it.each([true, false])(
+    "renders Codex file citations as file chips with parseRawHtml=%s",
+    (parseRawHtml) => {
+      const html = renderToStaticMarkup(
+        <ChatMarkdown
+          cwd="/tmp/project"
+          text={
+            'Created :codex-file-citation{path="/tmp/project/outputs/report.xlsx" purpose="output"}.'
+          }
+          lineBreaks={!parseRawHtml}
+          parseRawHtml={parseRawHtml}
+        />,
+      );
 
-    expect(testState.assetRequests).toEqual([]);
-    expect(html).toContain('src="/assets/brand/logo.png"');
+      expect(html).not.toContain("codex-file-citation");
+      expect(html).toContain("chat-markdown-file-link");
+      expect(html).toContain(
+        'data-markdown-copy="[report.xlsx](/tmp/project/outputs/report.xlsx)"',
+      );
+      expect(html).toContain("report.xlsx");
+    },
+  );
+
+  it("leaves an unfinished streaming citation visible until it is complete", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={'Created :codex-file-citation{path="/tmp/project/outputs/report.xlsx"'}
+        isStreaming
+      />,
+    );
+
+    expect(html).toContain(":codex-file-citation");
+    expect(html).not.toContain("chat-markdown-file-link");
+  });
+
+  it("leaves malformed and similarly named file directives literal", () => {
+    for (const text of [
+      ':codex-file-citation{purpose="output"}',
+      ':codex-file-citation-extra{path="/tmp/project/outputs/report.xlsx"}',
+    ]) {
+      const html = renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} />);
+
+      expect(html).toContain(text.replaceAll('"', "&quot;"));
+      expect(html).not.toContain("chat-markdown-file-link");
+    }
+  });
+
+  it("preserves Codex file citation examples inside code", () => {
+    const directive = ':codex-file-citation{path="/tmp/project/outputs/report.xlsx"}';
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={`Example: \`${directive}\`\n\n\`\`\`text\n${directive}\n\`\`\``}
+      />,
+    );
+
+    expect(html.match(/:codex-file-citation/g)).toHaveLength(2);
+    expect(html).not.toContain("chat-markdown-file-link");
+  });
+
+  it("preserves escaped Codex file citations as literal text", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={'Example: \\:codex-file-citation{path="/tmp/project/outputs/report.xlsx"}'}
+      />,
+    );
+
+    expect(html).toContain(":codex-file-citation");
+    expect(html).not.toContain("chat-markdown-file-link");
+  });
+
+  it("does not create a nested link for citations inside link text", () => {
+    const directive = ':codex-file-citation{path="/tmp/project/outputs/report.xlsx"}';
+    const html = renderToStaticMarkup(
+      <ChatMarkdown cwd="/tmp/project" text={`[See ${directive}](https://example.com)`} />,
+    );
+    const renderedText = html.replace(/<[^>]+>/g, "");
+
+    expect(renderedText).toContain("codex-file-citation");
+    expect(html).not.toContain("chat-markdown-file-link");
+  });
+
+  it("renders file citations created by over-indented list recovery", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={'-       Created :codex-file-citation{path="/tmp/project/outputs/report.xlsx"}'}
+      />,
+    );
+
+    expect(html).not.toContain("<pre>");
+    expect(html).toContain("Created ");
+    expect(html).toContain("chat-markdown-file-link");
+    expect(html).toContain("report.xlsx");
+  });
+
+  it("disambiguates Codex citations with the same basename", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={
+          'Changed :codex-file-citation{path="/tmp/project/src/index.ts"} and :codex-file-citation{path="/tmp/project/test/index.ts"}.'
+        }
+      />,
+    );
+
+    expect(html).toContain("index.ts · project/src");
+    expect(html).toContain("index.ts · project/test");
+  });
+
+  it("preserves rejected citations created by over-indented list recovery", () => {
+    const malformedHtml = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={'Leading text before list.\n\n-       Bad :codex-file-citation{purpose="output"}'}
+      />,
+    );
+    const nestedLinkHtml = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={
+          'Leading text before list.\n\n-       [Bad :codex-file-citation{path="/tmp/project/report.xlsx"}](https://example.com)'
+        }
+      />,
+    );
+    const nestedLinkText = nestedLinkHtml.replace(/<[^>]+>/g, "");
+
+    expect(malformedHtml).toContain(
+      "<li>Bad :codex-file-citation{purpose=&quot;output&quot;}</li>",
+    );
+    expect(nestedLinkText).toContain(
+      "Bad :codex-file-citation{path=&quot;/tmp/project/report.xlsx&quot;}",
+    );
+  });
+});
+
+const ARTIFACT_TEMPLATE_DIRECTIVE =
+  '::artifact-template{skill_name="artifact-template-hello-world" skill_directory="/Users/test/.codex/skills/artifact-template-hello-world" display_name="Hello World" artifact_kind="document"}';
+
+describe("ChatMarkdown artifact-template cards", () => {
+  it.each([true, false])("renders the Codex result card with parseRawHtml=%s", (parseRawHtml) => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={ARTIFACT_TEMPLATE_DIRECTIVE}
+        parseRawHtml={parseRawHtml}
+        onUseArtifactTemplate={() => undefined}
+      />,
+    );
+
+    expect(html).not.toContain("::artifact-template");
+    expect(html).toContain("chat-markdown-artifact-template");
+    expect(html).toContain('data-artifact-kind="document"');
+    expect(html).toContain('data-markdown-copy="Hello World (Document template)\n\n"');
+    expect(html).toContain('data-skill-name="artifact-template-hello-world"');
+    expect(html).toContain("Hello World");
+    expect(html).toContain("Document template");
+    expect(html).toContain("Use template");
+    expect(html).not.toContain("<p><div");
+  });
+
+  it("renders a passive card outside a composer-backed timeline", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown cwd="/tmp/project" text={ARTIFACT_TEMPLATE_DIRECTIVE} />,
+    );
+
+    expect(html).toContain("chat-markdown-artifact-template");
+    expect(html).not.toContain("Use template");
+  });
+
+  it("leaves malformed and unfinished artifact-template directives literal", () => {
+    const malformed =
+      '::artifact-template{skill_name="artifact-template-hello-world" display_name="Hello World" artifact_kind="document"}';
+    const unfinished = ARTIFACT_TEMPLATE_DIRECTIVE.slice(0, -1);
+
+    for (const text of [malformed, unfinished]) {
+      const html = renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} />);
+      expect(html).toContain("::artifact-template");
+      expect(html).not.toContain("chat-markdown-artifact-template");
+    }
+  });
+
+  it("leaves escaped and similarly named artifact-template directives literal", () => {
+    for (const text of [
+      `\\${ARTIFACT_TEMPLATE_DIRECTIVE}`,
+      ARTIFACT_TEMPLATE_DIRECTIVE.replace("::artifact-template", "::artifact-template-extra"),
+    ]) {
+      const html = renderToStaticMarkup(<ChatMarkdown cwd="/tmp/project" text={text} />);
+
+      expect(html).toContain("::artifact-template");
+      expect(html).not.toContain("chat-markdown-artifact-template");
+    }
+  });
+
+  it("preserves artifact-template examples inside code", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/tmp/project"
+        text={`\`${ARTIFACT_TEMPLATE_DIRECTIVE}\`\n\n\`\`\`text\n${ARTIFACT_TEMPLATE_DIRECTIVE}\n\`\`\``}
+      />,
+    );
+
+    expect(html.match(/::artifact-template/g)).toHaveLength(2);
+    expect(html).not.toContain("chat-markdown-artifact-template");
+  });
+});
+
+describe("shouldUseMarkdownFileBrowserPrimaryAction", () => {
+  it("uses the browser when it is the only available primary action", () => {
+    expect(
+      shouldUseMarkdownFileBrowserPrimaryAction({
+        iconPath: "/tmp/report.html",
+        canOpenInEditor: false,
+        canOpenInBrowser: true,
+        canOpenInPanel: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("preserves the normal editor and panel defaults for HTML files", () => {
+    expect(
+      shouldUseMarkdownFileBrowserPrimaryAction({
+        iconPath: "/tmp/report.html",
+        canOpenInEditor: true,
+        canOpenInBrowser: true,
+        canOpenInPanel: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldUseMarkdownFileBrowserPrimaryAction({
+        iconPath: "/tmp/report.html",
+        canOpenInEditor: false,
+        canOpenInBrowser: true,
+        canOpenInPanel: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("continues to open PDF files in the browser by default", () => {
+    expect(
+      shouldUseMarkdownFileBrowserPrimaryAction({
+        iconPath: "/tmp/report.pdf",
+        canOpenInEditor: true,
+        canOpenInBrowser: true,
+        canOpenInPanel: true,
+      }),
+    ).toBe(true);
   });
 });
 
@@ -352,13 +399,188 @@ describe("orderedListGutterStyle", () => {
   it("accounts for a non-default start attribute", () => {
     // start=95 + 9 items => last marker is "103", three digits.
     expect(orderedListGutterStyle(9, 95)).toEqual({ "--list-gutter": "4ch" });
+    expect(orderedListGutterStyle(5, "999995")).toEqual({ "--list-gutter": "7ch" });
   });
 
   it("scales further for four-digit markers", () => {
     expect(orderedListGutterStyle(1000, undefined)).toEqual({ "--list-gutter": "5ch" });
   });
 
+  it("uses the widest marker and includes a negative start's minus sign", () => {
+    expect(orderedListGutterStyle(1001, -1000)).toEqual({ "--list-gutter": "6ch" });
+    expect(orderedListGutterStyle(3, -15)).toEqual({ "--list-gutter": "4ch" });
+    expect(orderedListGutterStyle(3, -5)).toBeUndefined();
+  });
+
   it("treats a missing/zero item count as a single item", () => {
     expect(orderedListGutterStyle(0, undefined)).toBeUndefined();
+    expect(orderedListGutterStyle(0, 100)).toEqual({ "--list-gutter": "4ch" });
+  });
+});
+
+describe("ChatMarkdown Windows file links", () => {
+  const environmentId = EnvironmentId.make("env-windows");
+
+  it.each([true, false])("preserves drive paths with parseRawHtml=%s", (parseRawHtml) => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="C:/Users/shawn/project"
+        environmentId={environmentId}
+        text="[Open](C:/Users/shawn/project/src/main.ts)"
+        lineBreaks={!parseRawHtml}
+        parseRawHtml={parseRawHtml}
+      />,
+    );
+
+    expect(html).toContain('href="C:/Users/shawn/project/src/main.ts"');
+    expect(html).toContain("chat-markdown-file-link");
+  });
+
+  it.each([true, false])("normalizes backslashes with parseRawHtml=%s", (parseRawHtml) => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="C:/Users/shawn/project"
+        environmentId={environmentId}
+        text={String.raw`[Open](C:\Users\shawn\project\src\main.ts)`}
+        lineBreaks={!parseRawHtml}
+        parseRawHtml={parseRawHtml}
+      />,
+    );
+
+    expect(html).toContain('href="C:/Users/shawn/project/src/main.ts"');
+    expect(html).toContain("chat-markdown-file-link");
+  });
+
+  it.each([true, false])(
+    "distinguishes same-named backslash paths with parseRawHtml=%s",
+    (parseRawHtml) => {
+      const html = renderToStaticMarkup(
+        <ChatMarkdown
+          cwd="C:/Users/shawn/project"
+          environmentId={environmentId}
+          text={String.raw`[Source](C:\Users\shawn\project\src\index.ts) and [Test](C:\Users\shawn\project\test\index.ts)`}
+          lineBreaks={!parseRawHtml}
+          parseRawHtml={parseRawHtml}
+        />,
+      );
+
+      expect(html).toContain("index.ts · project/src");
+      expect(html).toContain("index.ts · project/test");
+    },
+  );
+
+  it.each([true, false])(
+    "does not disambiguate the same file in links and inline code with parseRawHtml=%s",
+    (parseRawHtml) => {
+      const path = String.raw`C:\Users\shawn\project\src\main.ts`;
+      const html = renderToStaticMarkup(
+        <ChatMarkdown
+          cwd="C:/Users/shawn/project"
+          environmentId={environmentId}
+          text={`[Source](${path}) and \`${path}\``}
+          lineBreaks={!parseRawHtml}
+          parseRawHtml={parseRawHtml}
+        />,
+      );
+
+      expect(html.match(/chat-markdown-file-link/g)).toHaveLength(2);
+      expect(html).not.toContain("main.ts ·");
+    },
+  );
+
+  it.each([true, false])("preserves reference links with parseRawHtml=%s", (parseRawHtml) => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="C:/Users/shawn/project"
+        environmentId={environmentId}
+        text={"[Open][source]\n\n[source]: C:/Users/shawn/project/src/main.ts"}
+        lineBreaks={!parseRawHtml}
+        parseRawHtml={parseRawHtml}
+      />,
+    );
+
+    expect(html).toContain('href="C:/Users/shawn/project/src/main.ts"');
+    expect(html).toContain("chat-markdown-file-link");
+  });
+
+  it.each([true, false])("still rejects unsafe schemes with parseRawHtml=%s", (parseRawHtml) => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="C:/Users/shawn/project"
+        environmentId={environmentId}
+        text="[unsafe](javascript:alert(1)) and [unknown](d:alert(1))"
+        lineBreaks={!parseRawHtml}
+        parseRawHtml={parseRawHtml}
+      />,
+    );
+
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("d:alert");
+    expect(html).not.toContain("chat-markdown-file-link");
+  });
+});
+
+const imageThreadRef = {
+  environmentId: EnvironmentId.make("environment-image"),
+  threadId: "thread-image" as ThreadId,
+} satisfies ScopedThreadRef;
+
+describe("ChatMarkdown temporary images", () => {
+  beforeEach(() => {
+    imageTestState.workspace = {
+      _tag: "Success",
+      url: "https://environment.test/api/assets/signed/workspace-image.png",
+    };
+    imageTestState.temporary = { _tag: "Failure" };
+    imageTestState.requests = [];
+  });
+
+  it("keeps the workspace capability authoritative when it succeeds", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/workspace/project"
+        threadRef={imageThreadRef}
+        text="![Result](/workspace/project/result.png)"
+      />,
+    );
+
+    expect(imageTestState.requests.map(({ resource }) => resource)).toEqual([
+      {
+        _tag: "workspace-file",
+        threadId: imageThreadRef.threadId,
+        path: "/workspace/project/result.png",
+      },
+    ]);
+    expect(html).toContain(imageTestState.workspace.url);
+  });
+
+  it("falls back to the bounded temporary-image capability after workspace rejection", () => {
+    imageTestState.workspace = { _tag: "Failure" };
+    imageTestState.temporary = {
+      _tag: "Success",
+      url: "https://environment.test/api/assets/signed/temporary-image.png",
+    };
+
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd="/workspace/project"
+        threadRef={imageThreadRef}
+        text="![Generated](/tmp/agent-generated.png)"
+      />,
+    );
+
+    expect(imageTestState.requests.map(({ resource }) => resource)).toEqual([
+      {
+        _tag: "workspace-file",
+        threadId: imageThreadRef.threadId,
+        path: "/tmp/agent-generated.png",
+      },
+      {
+        _tag: "temporary-image",
+        threadId: imageThreadRef.threadId,
+        path: "/tmp/agent-generated.png",
+      },
+    ]);
+    expect(html).toContain(imageTestState.temporary.url);
   });
 });

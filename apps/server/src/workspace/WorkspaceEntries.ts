@@ -107,6 +107,44 @@ function scoreWorkspaceFallbackEntry(
   return scores.length > 0 ? Math.min(...scores) : null;
 }
 
+function escapeFallbackContentQuery(query: string): string {
+  return query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function compileFallbackContentPattern(
+  input: Omit<ProjectSearchContentsInput, "cwd">,
+): RegExp | string {
+  try {
+    return new RegExp(
+      input.useRegex ? input.query : escapeFallbackContentQuery(input.query),
+      input.caseSensitive ? "gu" : "giu",
+    );
+  } catch (cause) {
+    return cause instanceof Error ? cause.message : String(cause);
+  }
+}
+
+function fallbackContentMatchRanges(
+  line: string,
+  pattern: RegExp,
+  wholeWord: boolean,
+): Array<{ readonly start: number; readonly end: number }> {
+  pattern.lastIndex = 0;
+  const ranges: Array<{ readonly start: number; readonly end: number }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(line)) !== null) {
+    const range = { start: match.index, end: match.index + match[0].length };
+    if (!wholeWord || WorkspaceSearchIndex.isWholeWordRange(line, range)) {
+      ranges.push(range);
+    }
+    if (match[0].length === 0) {
+      const nextCodePoint = line.codePointAt(pattern.lastIndex);
+      pattern.lastIndex += nextCodePoint !== undefined && nextCodePoint > 0xffff ? 2 : 1;
+    }
+  }
+  return ranges;
+}
+
 export class WorkspaceEntriesWindowsPathUnsupportedError extends Schema.TaggedErrorClass<WorkspaceEntriesWindowsPathUnsupportedError>()(
   "WorkspaceEntriesWindowsPathUnsupportedError",
   {
@@ -333,6 +371,76 @@ export const make = Effect.gen(function* () {
     timeToLive: (exit) => (Exit.isSuccess(exit) ? WORKSPACE_FALLBACK_CACHE_TTL : Duration.zero),
   });
 
+  const searchFallbackContents = Effect.fn("WorkspaceEntries.searchFallbackContents")(function* (
+    normalizedCwd: string,
+    input: Omit<ProjectSearchContentsInput, "cwd">,
+  ) {
+    const pattern = compileFallbackContentPattern(input);
+    if (typeof pattern === "string") {
+      return {
+        matches: [],
+        truncated: false,
+        regexFallbackError: pattern,
+      };
+    }
+
+    const index = yield* Cache.get(workspaceFallbackIndexCache, normalizedCwd);
+    const deadline = performance.now() + WorkspaceSearchIndex.CONTENT_SEARCH_TIME_BUDGET_MS;
+    const matches: Array<ProjectSearchContentsResult["matches"][number]> = [];
+    let truncated = index.truncated;
+
+    for (const entry of index.entries) {
+      if (entry.kind !== "file") continue;
+      if (performance.now() >= deadline) {
+        truncated = true;
+        break;
+      }
+
+      const contents = yield* Effect.tryPromise({
+        try: () => NodeFSP.readFile(path.join(normalizedCwd, entry.path), "utf8"),
+        catch: (cause) =>
+          new WorkspaceSearchIndex.WorkspaceSearchIndexSearchFailed({
+            cwd: normalizedCwd,
+            queryLength: input.query.length,
+            pageSize: input.limit,
+            reason: `Fallback content search could not read '${entry.path}'.`,
+            cause,
+          }),
+      }).pipe(Effect.orElseSucceed(() => null));
+      if (contents === null || contents.includes("\0")) continue;
+
+      let matchesInFile = 0;
+      const lines = contents.split("\n");
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+        if (performance.now() >= deadline) {
+          truncated = true;
+          break;
+        }
+        const rawLine = lines[lineIndex] ?? "";
+        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+        const matchRanges = fallbackContentMatchRanges(line, pattern, input.wholeWord);
+        if (matchRanges.length === 0) continue;
+        if (matchesInFile >= WorkspaceSearchIndex.CONTENT_SEARCH_MAX_MATCHES_PER_FILE) {
+          truncated = true;
+          break;
+        }
+        matchesInFile += 1;
+        if (matches.length >= input.limit) {
+          truncated = true;
+          return { matches, truncated };
+        }
+        matches.push({
+          path: entry.path,
+          lineNumber: lineIndex + 1,
+          lineContent: line,
+          matchRanges,
+        });
+      }
+    }
+
+    return { matches, truncated };
+  });
+
   const normalizeWorkspaceRoot = Effect.fn("WorkspaceEntries.normalizeWorkspaceRoot")(function* (
     cwd: string,
   ): Effect.fn.Return<string, WorkspaceEntriesError> {
@@ -494,6 +602,9 @@ export const make = Effect.gen(function* () {
         workspaceSearchIndexes.get(
           WorkspaceSearchIndex.workspaceSearchIndexKey(normalizedCwd, "content"),
         ),
+      ),
+      Effect.catchTag("WorkspaceSearchIndexCreateFailed", () =>
+        searchFallbackContents(normalizedCwd, input),
       ),
     );
   });

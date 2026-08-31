@@ -270,6 +270,23 @@ describe("resolveAssistantMessageCopyState", () => {
       visible: false,
     });
   });
+
+  it("copies the rendered representation of Codex directives", () => {
+    expect(
+      resolveAssistantMessageCopyState({
+        showCopyButton: true,
+        text: [
+          'Created :codex-file-citation{path="outputs/report.xlsx" purpose="output"}.',
+          "",
+          '::artifact-template{skill_name="artifact-template-hello-world" skill_directory="/Users/test/.codex/skills/artifact-template-hello-world" display_name="Hello World" artifact_kind="document"}',
+        ].join("\n"),
+        streaming: false,
+      }),
+    ).toEqual({
+      text: "Created [report.xlsx](<outputs/report.xlsx>).\n\nHello World (Document template)",
+      visible: true,
+    });
+  });
 });
 
 describe("deriveMessagesTimelineRows", () => {
@@ -452,7 +469,7 @@ describe("deriveMessagesTimelineRows", () => {
     expect(assistantRow?.assistantTurnDiffSummary).toBe(assistantTurnDiffSummary);
   });
 
-  it("folds settled-turn commentary and work behind a Worked-for row", () => {
+  it("folds the first assistant message and settled work before the terminal response", () => {
     const timelineEntries = [
       {
         id: "user-entry",
@@ -469,13 +486,13 @@ describe("deriveMessagesTimelineRows", () => {
         },
       },
       {
-        id: "assistant-thought-entry",
+        id: "assistant-first-entry",
         kind: "message" as const,
         createdAt: "2026-01-01T00:00:05Z",
         message: {
-          id: "assistant-thought" as never,
+          id: "assistant-first" as never,
           role: "assistant" as const,
-          text: "Looking around first.",
+          text: "Synthetic deployment checklist\n1. Confirm the deployment is ready.",
           turnId: "turn-1" as never,
           createdAt: "2026-01-01T00:00:05Z",
           updatedAt: "2026-01-01T00:00:06Z",
@@ -544,13 +561,70 @@ describe("deriveMessagesTimelineRows", () => {
     expect(expandedRows.map((row) => row.id)).toEqual([
       "user-entry",
       "turn-fold:turn-1",
-      "assistant-thought-entry",
+      "assistant-first-entry",
       "work-toggle:work-entry-1",
       "assistant-final-entry",
     ]);
     expect(
       expandedRows.find((row) => row.kind === "turn-fold" && row.expanded === true),
     ).toBeDefined();
+  });
+
+  it("folds all assistant messages before the terminal message", () => {
+    const timelineEntries = [
+      {
+        id: "assistant-first-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:01Z",
+        message: {
+          id: "assistant-first" as never,
+          role: "assistant" as const,
+          text: "The main result is ready.",
+          turnId: "turn-1" as never,
+          createdAt: "2026-01-01T00:00:01Z",
+          updatedAt: "2026-01-01T00:00:02Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "assistant-middle-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:03Z",
+        message: {
+          id: "assistant-middle" as never,
+          role: "assistant" as const,
+          text: "I am checking one more detail.",
+          turnId: "turn-1" as never,
+          createdAt: "2026-01-01T00:00:03Z",
+          updatedAt: "2026-01-01T00:00:04Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "assistant-final-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:05Z",
+        message: {
+          id: "assistant-final" as never,
+          role: "assistant" as const,
+          text: "Verification finished.",
+          turnId: "turn-1" as never,
+          createdAt: "2026-01-01T00:00:05Z",
+          updatedAt: "2026-01-01T00:00:06Z",
+          streaming: false,
+        },
+      },
+    ];
+
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows.map((row) => row.id)).toEqual(["turn-fold:turn-1", "assistant-final-entry"]);
   });
 
   it("derives a sane duration for a steer-superseded turn with one instant commentary message", () => {
@@ -1374,6 +1448,88 @@ describe("deriveMessagesTimelineRows", () => {
       expanded: true,
     });
   });
+
+  it.each([
+    ["recovered", ["failed", "completed"], false],
+    ["ending in failure", ["completed", "failed"], true],
+    ["failed", ["failed", "failed"], true],
+  ] as const)("uses the final call for %s tool groups", (_, statuses, hasFailure) => {
+    const timelineEntries = statuses.map((status, index) => ({
+      id: `work-entry-${index}`,
+      kind: "work" as const,
+      createdAt: `2026-01-01T00:00:0${index}Z`,
+      entry: {
+        id: `work-${index}`,
+        createdAt: `2026-01-01T00:00:0${index}Z`,
+        label: "Ran command",
+        tone: "tool" as const,
+        itemType: "command_execution" as const,
+        toolLifecycleStatus: status,
+      },
+    }));
+
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+
+    expect(rows.find((row) => row.kind === "work-toggle")).toMatchObject({
+      hiddenCount: 2,
+      hasFailure,
+    });
+  });
+
+  it.each([
+    ["the later success is hidden", ["failed", "completed", "info"], false],
+    ["the later success is visible", ["failed", "info", "completed"], false],
+    ["an error-toned entry recovers", ["error", "info", "completed"], false],
+    ["the final failure is hidden", ["completed", "failed", "info"], true],
+    ["the final failure is visible", ["failed", "info", "failed"], true],
+    ["the only failure is visible", ["completed", "info", "failed"], false],
+  ] as const)(
+    "uses the final tool call for mixed work groups when %s",
+    (_, statuses, hasFailure) => {
+      const timelineEntries = statuses.map((status, index) => {
+        const id = `work-${index}`;
+        const createdAt = `2026-01-01T00:00:0${index}Z`;
+
+        return {
+          id: `work-entry-${index}`,
+          kind: "work" as const,
+          createdAt,
+          entry:
+            status === "info"
+              ? { id, createdAt, label: "Status updated", tone: "info" as const }
+              : status === "error"
+                ? { id, createdAt, label: "Command failed", tone: "error" as const }
+                : {
+                    id,
+                    createdAt,
+                    label: "Ran command",
+                    tone: "tool" as const,
+                    toolLifecycleStatus: status,
+                  },
+        };
+      });
+
+      const rows = deriveMessagesTimelineRows({
+        timelineEntries,
+        isWorking: false,
+        activeTurnStartedAt: null,
+        turnDiffSummaryByAssistantMessageId: new Map(),
+        revertTurnCountByUserMessageId: new Map(),
+      });
+
+      expect(rows.find((row) => row.kind === "work-toggle")).toMatchObject({
+        hiddenCount: 2,
+        summary: null,
+        hasFailure,
+      });
+    },
+  );
 });
 
 describe("computeStableMessagesTimelineRows", () => {

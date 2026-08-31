@@ -536,7 +536,7 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
   });
 
   describe("searchContents", () => {
-    it.effect("keeps native index creation failures visible for content search", () =>
+    it.effect("searches file contents when the native workspace index cannot be created", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTempDir({ prefix: "t3code-workspace-fallback-content-" });
         yield* writeTextFile(cwd, "src/index.ts", "export const value = 1;\n");
@@ -545,21 +545,25 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceEntries", (it) => {
         });
 
         const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
-        const error = yield* Effect.flip(
-          workspaceEntries.searchContents({
-            cwd,
-            query: "value",
-            limit: 10,
-            caseSensitive: false,
-            wholeWord: false,
-            useRegex: false,
-          }),
-        );
-
-        expect(error).toMatchObject({
-          _tag: "WorkspaceSearchIndexCreateFailed",
+        const result = yield* workspaceEntries.searchContents({
           cwd,
-          reason: "FileFinder.create threw unexpectedly.",
+          query: "value",
+          limit: 10,
+          caseSensitive: false,
+          wholeWord: false,
+          useRegex: false,
+        });
+
+        expect(result).toEqual({
+          matches: [
+            {
+              path: "src/index.ts",
+              lineNumber: 1,
+              lineContent: "export const value = 1;",
+              matchRanges: [{ start: 13, end: 18 }],
+            },
+          ],
+          truncated: false,
         });
       }),
     );
