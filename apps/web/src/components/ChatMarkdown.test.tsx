@@ -72,6 +72,27 @@ function codeButton(renderer: ReactTestRenderer, label: string) {
   return button.props as ComponentProps<typeof Button>;
 }
 
+describe("ChatMarkdown math integration", () => {
+  it("renders math while preserving currency and sanitizing raw HTML", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown text={String.raw`Price $5 to $10; \(x^2\) <script>alert(1)</script>`} />,
+    );
+    expect(html).toContain("Price $5 to $10;");
+    expect(html).toContain('class="katex"');
+    expect(html).toContain("<msup>");
+    expect(html).not.toContain("<script>");
+  });
+
+  it("renders math without enabling raw HTML in literal mode", () => {
+    const html = renderToStaticMarkup(
+      <ChatMarkdown parseRawHtml={false} text={String.raw`<b>literal</b> \(x^2\)`} />,
+    );
+    expect(html).toContain("&lt;b&gt;literal&lt;/b&gt;");
+    expect(html).toContain('class="katex"');
+    expect(html).not.toContain("<b>literal</b>");
+  });
+});
+
 describe("ChatMarkdown streaming", () => {
   it("preserves code controls and details without highlighting an unchanged fence again", async () => {
     const highlighter = await getSyntaxHighlighterPromise("text");
