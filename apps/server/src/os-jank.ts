@@ -30,7 +30,11 @@ function hydratePosixPath(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): vo
   }
 
   const launchctlPath = platform === "darwin" && !shellPath ? readPathFromLaunchctl() : undefined;
-  const mergedPath = mergePathEntries(shellPath ?? launchctlPath, env.PATH, platform);
+  // CHPC supplies a validated custom runtime at the front of the inherited PATH.
+  // Keep it ahead of independently installed CLIs from the login shell.
+  const mergedPath = env.CHPC_CODEX_BIN
+    ? mergePathEntries(env.PATH, shellPath ?? launchctlPath, platform)
+    : mergePathEntries(shellPath ?? launchctlPath, env.PATH, platform);
   if (mergedPath) {
     env.PATH = mergedPath;
   }
