@@ -75,7 +75,10 @@ function codeButton(renderer: ReactTestRenderer, label: string) {
 describe("ChatMarkdown math integration", () => {
   it("renders math while preserving currency and sanitizing raw HTML", () => {
     const html = renderToStaticMarkup(
-      <ChatMarkdown text={String.raw`Price $5 to $10; \(x^2\) <script>alert(1)</script>`} />,
+      <ChatMarkdown
+        cwd="/workspace"
+        text={String.raw`Price $5 to $10; \(x^2\) <script>alert(1)</script>`}
+      />,
     );
     expect(html).toContain("Price $5 to $10;");
     expect(html).toContain('class="katex"');
@@ -85,7 +88,11 @@ describe("ChatMarkdown math integration", () => {
 
   it("renders math without enabling raw HTML in literal mode", () => {
     const html = renderToStaticMarkup(
-      <ChatMarkdown parseRawHtml={false} text={String.raw`<b>literal</b> \(x^2\)`} />,
+      <ChatMarkdown
+        cwd="/workspace"
+        parseRawHtml={false}
+        text={String.raw`<b>literal</b> \(x^2\)`}
+      />,
     );
     expect(html).toContain("&lt;b&gt;literal&lt;/b&gt;");
     expect(html).toContain('class="katex"');
