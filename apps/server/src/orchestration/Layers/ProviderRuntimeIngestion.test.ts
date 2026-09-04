@@ -212,6 +212,9 @@ function providerServiceFromCodexAdapter(
   return {
     startSession: (threadId, input) => adapter.startSession({ ...input, threadId }),
     sendTurn: adapter.sendTurn,
+    compactThread: () => Effect.die(new Error("Unexpected compaction in ingestion test")),
+    assertConversationRollbackSupported: () =>
+      Effect.die(new Error("Unexpected rollback check in ingestion test")),
     interruptTurn: ({ threadId, turnId }) => adapter.interruptTurn(threadId, turnId),
     respondToRequest: ({ threadId, requestId, decision }) =>
       adapter.respondToRequest(threadId, requestId, decision),
