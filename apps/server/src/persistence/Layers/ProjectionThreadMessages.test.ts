@@ -12,6 +12,31 @@ const layer = it.layer(
 );
 
 layer("ProjectionThreadMessageRepository", (it) => {
+  it.effect("retains agent origin when a message is updated and read again", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionThreadMessageRepository;
+      const threadId = ThreadId.make("target");
+      const message = {
+        messageId: MessageId.make("delegated"),
+        threadId,
+        turnId: null,
+        role: "user" as const,
+        text: "Review this",
+        isStreaming: false,
+        createdAt: "2026-09-08T00:00:00.000Z",
+        updatedAt: "2026-09-08T00:00:00.000Z",
+      };
+      const agentOrigin = { threadId: ThreadId.make("source"), operationId: "operation-1" };
+      yield* repository.upsert({ ...message, agentOrigin });
+      yield* repository.upsert({ ...message, turnId: TurnId.make("assigned-turn") });
+      const messages = yield* repository.listByThreadId({ threadId });
+      assert.deepStrictEqual(messages[0]?.agentOrigin, agentOrigin);
+      assert.strictEqual(messages[0]?.turnId, "assigned-turn");
+      yield* repository.upsert({ ...message, messageId: MessageId.make("human") });
+      const human = yield* repository.getByMessageId({ messageId: MessageId.make("human") });
+      assert.strictEqual(human._tag === "Some" ? human.value.agentOrigin : "missing", undefined);
+    }),
+  );
   it.effect("finds the latest live user-message time within one thread", () =>
     Effect.gen(function* () {
       const repository = yield* ProjectionThreadMessageRepository;

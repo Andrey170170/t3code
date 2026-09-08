@@ -1,3 +1,12 @@
+import {
+  CodexThreadError,
+  CodexThreadsListInput,
+  CodexThreadsListResult,
+  CodexThreadsImportInput,
+  CodexThreadsImportResult,
+  CodexThreadsHistoryInput,
+  CodexThreadsHistoryResult,
+} from "./codexThreads.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
@@ -253,6 +262,9 @@ export const WS_METHODS = {
   filesystemBrowse: "filesystem.browse",
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
+  codexThreadsList: "codexThreads.list",
+  codexThreadsImport: "codexThreads.import",
+  codexThreadsHistory: "codexThreads.history",
   assetsCreateUrl: "assets.createUrl",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -822,6 +834,22 @@ const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
   error: Schema.Union([FilesystemBrowseError, EnvironmentAuthorizationError]),
 });
 
+const WsCodexThreadsListRpc = Rpc.make(WS_METHODS.codexThreadsList, {
+  payload: CodexThreadsListInput,
+  success: CodexThreadsListResult,
+  error: Schema.Union([CodexThreadError, EnvironmentAuthorizationError]),
+});
+const WsCodexThreadsImportRpc = Rpc.make(WS_METHODS.codexThreadsImport, {
+  payload: CodexThreadsImportInput,
+  success: CodexThreadsImportResult,
+  error: Schema.Union([CodexThreadError, EnvironmentAuthorizationError]),
+});
+const WsCodexThreadsHistoryRpc = Rpc.make(WS_METHODS.codexThreadsHistory, {
+  payload: CodexThreadsHistoryInput,
+  success: CodexThreadsHistoryResult,
+  error: Schema.Union([CodexThreadError, EnvironmentAuthorizationError]),
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1249,6 +1277,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsWriteFileRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
+  WsCodexThreadsListRpc,
+  WsCodexThreadsImportRpc,
+  WsCodexThreadsHistoryRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,

@@ -18,6 +18,10 @@
     "./errors": {
       "types": "./src/errors.ts",
       "import": "./src/errors.ts"
+    },
+    "./thread-history": {
+      "types": "./src/thread-history.ts",
+      "import": "./src/thread-history.ts"
     }
   },
   "scripts": {

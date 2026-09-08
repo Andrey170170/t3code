@@ -1027,6 +1027,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               turnId: event.payload.turnId,
               role: event.payload.role,
               text: event.payload.text,
+              ...(event.payload.agentOrigin ? { agentOrigin: event.payload.agentOrigin } : {}),
               ...(attachments !== undefined ? { attachments: [...attachments] } : {}),
               createdAt: event.payload.createdAt,
               updatedAt: event.payload.updatedAt,
@@ -1055,6 +1056,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             turnId: event.payload.turnId,
             role: event.payload.role,
             text: nextText,
+            ...((event.payload.agentOrigin ?? previousMessage?.agentOrigin)
+              ? { agentOrigin: event.payload.agentOrigin ?? previousMessage?.agentOrigin }
+              : {}),
             ...(nextAttachments !== undefined ? { attachments: [...nextAttachments] } : {}),
             isStreaming: false,
             createdAt: previousMessage?.createdAt ?? event.payload.createdAt,

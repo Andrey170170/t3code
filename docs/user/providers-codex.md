@@ -4,6 +4,44 @@ For one account, use the default Codex provider with your normal Codex login.
 [Provider setup](./install.md#providers) covers installation, Settings > Providers,
 and custom binaries or environment variables.
 
+## Import existing conversations
+
+Open **Import conversations** in a project's settings or from the sidebar while
+that project is selected. On mobile, use **Settings > Import Codex Chats**. Choose
+the Codex account on the environment that holds the conversations, then browse or
+search and import an individual conversation. Enable archived conversations to
+find older archived work; importing one restores it in Codex.
+
+Finish work in the original client before importing. Import does not synchronize
+with a conversation still running elsewhere. Keep its original project folder, or
+explicitly choose to continue in the selected project's folder.
+
+The conversation keeps its Codex context when you continue it in T3 Code. Open
+**Original Codex history** above the chat to read its earlier messages and tool
+results, and load older pages as needed. Conversations previously imported through
+onboarding can use **Load full history** in the import picker. The original-history
+panel replaces their short imported text preview while open; new T3 messages stay
+in the chat.
+
+**Import recent conversations** remains available for the previous batch import:
+it selects recent Claude/Codex conversations and retains a limited text preview.
+Use individual Codex import for complete, paginated history.
+
+## Ask Codex to start another chat
+
+Ask explicitly, for example: “Start a separate chat to review the parser, and keep
+working on the UI here.” Approve the task action when prompted. The new chat appears
+in the same project's sidebar and uses the current workspace, Codex account, model,
+and permission mode. It shares that workspace; it does not create a new worktree.
+
+You can open the new chat and continue it yourself, or ask the original agent to
+read its progress and send a follow-up. Messages sent by another agent are labeled
+in the receiving chat. Each chat handles its own questions and approvals.
+
+**Agent task access** in Settings controls these tools for new Codex sessions,
+independently of browser access. Task tools operate within the current T3 project;
+other providers do not yet receive agent-authored task messages.
+
 ## Use multiple accounts
 
 A shared Codex home with a shadow home lets work and personal accounts continue

@@ -391,6 +391,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     providerSettingsOnly: true,
   },
   {
+    id: "agent-task-access",
+    title: "Agent task access",
+    to: "/settings/projects",
+    searchTerms: ["codex separate chats create tasks follow-ups approval"],
+  },
+  {
     id: "agent-browser-access",
     title: "Agent browser access",
     to: "/settings/projects",

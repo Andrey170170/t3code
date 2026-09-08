@@ -315,6 +315,7 @@ export function applyThreadDetailEvent(
     case "thread.message-sent": {
       const message: OrchestrationMessage = {
         id: event.payload.messageId,
+        ...(event.payload.agentOrigin ? { agentOrigin: event.payload.agentOrigin } : {}),
         role: event.payload.role,
         text: event.payload.text,
         ...(event.payload.attachments !== undefined

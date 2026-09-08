@@ -1,4 +1,5 @@
 import {
+  type AgentOrigin,
   type ChatAttachment,
   CommandId,
   EventId,
@@ -840,6 +841,7 @@ const make = Effect.gen(function* () {
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
+    readonly agentOrigin?: AgentOrigin;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
@@ -891,6 +893,7 @@ const make = Effect.gen(function* () {
     return {
       threadId: input.threadId,
       ...(normalizedInput ? { input: normalizedInput } : {}),
+      ...(input.agentOrigin ? { agentOrigin: input.agentOrigin } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
@@ -1248,6 +1251,7 @@ const make = Effect.gen(function* () {
       );
 
     const authCommandHandled = yield* Effect.gen(function* () {
+      if (event.payload.agentOrigin) return false;
       // Native account commands belong to the thread's existing provider session.
       const instanceId =
         thread.session?.providerInstanceId ??
@@ -1300,7 +1304,7 @@ const make = Effect.gen(function* () {
 
     yield* ensureThreadWorktree(thread);
 
-    const isCompactCommand = isCompactCommandMessage(message);
+    const isCompactCommand = !event.payload.agentOrigin && isCompactCommandMessage(message);
     if (!hasOtherUserMessages && !isCompactCommand) {
       const project = yield* resolveProject(thread.projectId);
       const generationCwd =
@@ -1423,6 +1427,7 @@ const make = Effect.gen(function* () {
       );
     }
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
+      ...(event.payload.agentOrigin ? { agentOrigin: event.payload.agentOrigin } : {}),
       threadId: event.payload.threadId,
       messageText: message.text,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),

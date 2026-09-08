@@ -1,3 +1,5 @@
+import { withoutReplacedImportedMessages } from "./imported-history-feed";
+import { CodexImportedHistory } from "./CodexImportedHistory";
 import * as Haptics from "expo-haptics";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-native";
@@ -1488,6 +1490,11 @@ function renderFeedEntry(
                   : null),
             }}
           >
+            {message.agentOrigin ? (
+              <Text className="text-xs text-muted-foreground">
+                Agent message · {message.agentOrigin.threadId}
+              </Text>
+            ) : null}
             {message.text.trim().length > 0 ? (
               <MarkdownImageAvailableWidthContext
                 value={props.userBubbleMaxWidth - USER_BUBBLE_HORIZONTAL_PADDING * 2}
@@ -1567,6 +1574,11 @@ function renderFeedEntry(
               >
                 <SymbolView name="pencil" size={14} tintColor={iconSubtleColor} />
               </Pressable>
+            ) : null}
+            {message.agentOrigin ? (
+              <Text className="text-xs text-muted-foreground">
+                Agent message · {message.agentOrigin.threadId}
+              </Text>
             ) : null}
             {message.text.trim().length > 0 ? (
               <CopyTextButton
@@ -2428,17 +2440,35 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     }
     return ids;
   }, [expandedWorkGroups]);
+  const [legacyHistoryVisibility, setLegacyHistoryVisibility] = useState<{
+    key: string;
+    hidden: boolean;
+  } | null>(null);
+  const reportLegacyHistoryVisibility = useCallback(
+    (hidden: boolean) => {
+      setLegacyHistoryVisibility((old) =>
+        old?.key === feedThreadKey && old.hidden === hidden ? old : { key: feedThreadKey, hidden },
+      );
+    },
+    [feedThreadKey],
+  );
+  const hideLegacyHistory =
+    legacyHistoryVisibility?.key === feedThreadKey && legacyHistoryVisibility.hidden;
+  const visibleFeed = useMemo(
+    () => withoutReplacedImportedMessages(props.feed, hideLegacyHistory),
+    [hideLegacyHistory, props.feed],
+  );
   const presentedFeed = useMemo(
     () =>
       appendPendingThreadMessages(
         deriveThreadFeedPresentation(
-          props.feed,
+          visibleFeed,
           props.latestTurn,
           expandedTurnIds,
           expandedWorkGroupIds,
           props.activeWorkStartedAt,
         ),
-        props.feed,
+        visibleFeed,
         props.queuedMessages,
       ),
     [
@@ -2446,7 +2476,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       expandedTurnIds,
       expandedWorkGroupIds,
       props.activeWorkStartedAt,
-      props.feed,
+      visibleFeed,
       props.latestTurn,
     ],
   );
@@ -2454,7 +2484,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   // content-inset override. Seed the fresh instance synchronously with the
   // current overlay height before the scroll integration's next reaction;
   // on Android the declarative contentInset floor covers this same window.
-  const listMountKey = `${feedThreadKey}:${presentedFeed.length === 0 ? "empty" : "filled"}`;
+  const listMountKey = `${feedThreadKey}:${presentedFeed.length === 0 && !(hideLegacyHistory && props.feed.length > 0) ? "empty" : "filled"}`;
   useLayoutEffect(() => {
     const bottom = props.contentInsetEndAdjustment.value;
     if (bottom > 0) {
@@ -2912,6 +2942,12 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             ListHeaderComponent={
               <>
                 {usesNativeAutomaticInsets ? null : <View style={{ height: topContentInset }} />}
+                <CodexImportedHistory
+                  key={feedThreadKey}
+                  environmentId={props.environmentId}
+                  threadId={props.threadId}
+                  onLegacyHistoryVisibilityChange={reportLegacyHistoryVisibility}
+                />
                 {props.loadEarlier != null ? (
                   <Pressable
                     onPress={props.loadEarlier.onLoadEarlier}
@@ -2932,6 +2968,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           />
         </View>
         {presentedFeed.length === 0 &&
+        !hideLegacyHistory &&
         props.activeWorkStartedAt === null &&
         props.contentPresentation.kind === "ready" ? (
           <View pointerEvents="none" style={StyleSheet.absoluteFill}>

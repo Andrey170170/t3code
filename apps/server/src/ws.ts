@@ -127,6 +127,8 @@ import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
+import { CodexThreadClient } from "./project/CodexThreadClient.ts";
+import { CodexThreadImport } from "./project/CodexThreadImport.ts";
 import { importRecentAgentThreads } from "./project/AgentSessionImporter.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
@@ -572,6 +574,8 @@ const makeWsRpcLayer = (
       });
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
+      const codexThreadImport = yield* CodexThreadImport;
+      const codexThreadClient = yield* CodexThreadClient;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
@@ -2362,6 +2366,9 @@ const makeWsRpcLayer = (
             deletePendingAttachment(input.attachmentId),
             { "rpc.aggregate": "workspace" },
           ),
+        [WS_METHODS.codexThreadsList]: (input) => codexThreadImport.list(input),
+        [WS_METHODS.codexThreadsImport]: (input) => codexThreadImport.adopt(input),
+        [WS_METHODS.codexThreadsHistory]: (input) => codexThreadImport.history(input),
         [WS_METHODS.agentSessionsScan]: () =>
           observeRpcEffect(WS_METHODS.agentSessionsScan, agentSessionScanner.scan, {
             "rpc.aggregate": "workspace",
@@ -2370,6 +2377,7 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.agentSessionsImport,
             importRecentAgentThreads(input).pipe(
+              Effect.provideService(CodexThreadClient, codexThreadClient),
               Effect.provideService(AgentSessionScanner.AgentSessionScanner, agentSessionScanner),
               Effect.provideService(
                 OrchestrationEngine.OrchestrationEngineService,
@@ -2932,6 +2940,8 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         ),
     });
     const pullRequests = yield* PullRequestService.PullRequestService;
+    const codexThreadImport = yield* CodexThreadImport;
+    const codexThreadClient = yield* CodexThreadClient;
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -2972,6 +2982,8 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               // One server-lifetime service means clients share the same PR caches, and a WS
               // mutation invalidates the HTTP diff cache that every client reads from.
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
+              Layer.provide(Layer.succeed(CodexThreadImport, codexThreadImport)),
+              Layer.provide(Layer.succeed(CodexThreadClient, codexThreadClient)),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(

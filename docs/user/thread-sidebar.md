@@ -20,6 +20,13 @@ on Windows and Linux to start a new thread and immediately open another draft. T
 next draft keeps the workspace mode and base branch you selected. With **New
 worktree**, each background submission creates its own worktree.
 
+## Import conversations
+
+Use **Import conversations** from project settings or the sidebar when a project
+is selected. On mobile, use the import action in Settings. See
+[Codex conversations](./providers-codex.md#import-existing-conversations) for
+individual imports, complete history, and conversations started by another agent.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.

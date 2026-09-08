@@ -96,6 +96,10 @@ export function ProjectDefaultsSettings({
       target.serverConfig?.settings.enableAgentBrowserAccess !==
       serverSettings.enableAgentBrowserAccess,
   );
+  const mixedTask = targets.some(
+    (target) =>
+      target.serverConfig?.settings.enableAgentTaskAccess !== serverSettings.enableAgentTaskAccess,
+  );
   const disabled = (key: keyof ServerSettingsPatch) => targets.length === 0 || saving.has(key);
   const mixedAutoPull = targets.some(
     (target) => target.serverConfig?.settings.defaultAutoPull !== serverSettings.defaultAutoPull,
@@ -377,6 +381,54 @@ export function ProjectDefaultsSettings({
                     : mixedBrowser
                       ? "Differs by machine"
                       : serverSettings.enableAgentBrowserAccess
+                        ? "Enabled"
+                        : "Disabled"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem value="enabled">Enabled</SelectItem>
+                <SelectItem value="disabled">Disabled</SelectItem>
+              </SelectPopup>
+            </Select>
+          }
+        />
+        <SettingsRow
+          id={searchableSetting("agent-task-access").id}
+          title="Agent task access"
+          description="Allow Codex agents to create chats and send follow-ups with approval. Applies to new sessions."
+          resetAction={
+            mixedTask ||
+            serverSettings.enableAgentTaskAccess !==
+              DEFAULT_SERVER_SETTINGS.enableAgentTaskAccess ? (
+              <SettingResetButton
+                label="default task access"
+                disabled={disabled("enableAgentTaskAccess")}
+                onClick={() =>
+                  void save({
+                    enableAgentTaskAccess: DEFAULT_SERVER_SETTINGS.enableAgentTaskAccess,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              disabled={disabled("enableAgentTaskAccess")}
+              value={
+                mixedTask ? "mixed" : serverSettings.enableAgentTaskAccess ? "enabled" : "disabled"
+              }
+              onValueChange={(value) => {
+                if (value === "enabled" || value === "disabled")
+                  void save({ enableAgentTaskAccess: value === "enabled" });
+              }}
+            >
+              <SelectTrigger size="sm" aria-label="Default agent task access">
+                <SelectValue>
+                  {targets.length === 0
+                    ? "Unavailable"
+                    : mixedTask
+                      ? "Differs by machine"
+                      : serverSettings.enableAgentTaskAccess
                         ? "Enabled"
                         : "Disabled"}
                 </SelectValue>

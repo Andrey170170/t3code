@@ -55,6 +55,7 @@ import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsCl
 import { SettingsAuthRouteScreen } from "./features/settings/SettingsAuthRouteScreen";
 import { SettingsEnvironmentsRouteScreen } from "./features/settings/SettingsEnvironmentsRouteScreen";
 import { SettingsLegalRouteScreen } from "./features/settings/SettingsLegalRouteScreen";
+import { SettingsCodexImportRouteScreen } from "./features/settings/SettingsCodexImportRouteScreen";
 import { SettingsProjectGroupingRouteScreen } from "./features/settings/SettingsProjectGroupingRouteScreen";
 import { UsageLimitAccountScreen } from "./features/usage/UsageLimitsPooled";
 import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
@@ -178,6 +179,11 @@ const SettingsContentStack = createNativeStackNavigator({
       options: {
         title: "Appearance",
       },
+    }),
+    SettingsCodexImport: createNativeStackScreen({
+      screen: SettingsCodexImportRouteScreen,
+      linking: "codex-import",
+      options: { title: "Import Codex Chats" },
     }),
     SettingsProjectGrouping: createNativeStackScreen({
       screen: SettingsProjectGroupingRouteScreen,

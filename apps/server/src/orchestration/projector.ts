@@ -568,6 +568,7 @@ export function projectEvent(
           OrchestrationMessage,
           {
             id: payload.messageId,
+            ...(payload.agentOrigin ? { agentOrigin: payload.agentOrigin } : {}),
             role: payload.role,
             text: payload.text,
             ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),

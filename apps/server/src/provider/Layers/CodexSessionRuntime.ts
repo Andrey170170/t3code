@@ -1,4 +1,5 @@
 import {
+  type AgentOrigin,
   ApprovalRequestId,
   DEFAULT_MODEL,
   EventId,
@@ -131,6 +132,13 @@ const isMcpElicitationForm = Schema.is(McpElicitationForm);
 // `V2TurnStartParams` schema includes `collaborationMode` directly.
 const CodexTurnStartParamsWithCollaborationMode = EffectCodexSchema.V2TurnStartParams.pipe(
   Schema.fieldsAssign({
+    toolOutput: Schema.optionalKey(
+      Schema.Struct({
+        name: Schema.String,
+        namespace: Schema.String,
+        output: Schema.String,
+      }),
+    ),
     collaborationMode: Schema.optionalKey(EffectCodexSchema.V2TurnStartParams__CollaborationMode),
   }),
 );
@@ -169,6 +177,7 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly agentOrigin?: AgentOrigin;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
@@ -594,6 +603,7 @@ export function buildTurnStartParams(input: {
   readonly threadId: string;
   readonly runtimeMode: RuntimeMode;
   readonly prompt?: string;
+  readonly agentOrigin?: AgentOrigin;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
     readonly url: string;
@@ -609,13 +619,13 @@ export function buildTurnStartParams(input: {
   CodexErrors.CodexAppServerProtocolParseError
 > {
   const turnInput: Array<EffectCodexSchema.V2TurnStartParams__UserInput> = [];
-  if (input.prompt) {
+  if (input.prompt && !input.agentOrigin) {
     turnInput.push({
       type: "text",
       text: input.prompt,
     });
   }
-  for (const attachment of input.attachments ?? []) {
+  for (const attachment of input.agentOrigin ? [] : (input.attachments ?? [])) {
     turnInput.push(attachment);
   }
 
@@ -630,6 +640,22 @@ export function buildTurnStartParams(input: {
   return decodeCodexTurnStartParamsWithCollaborationMode({
     threadId: input.threadId,
     input: turnInput,
+    // Delegation is tool data, never a user instruction. Older providers must
+    // reject this request rather than silently receive a promoted user prompt.
+    ...(input.agentOrigin
+      ? {
+          toolOutput: {
+            name: "task_message",
+            namespace: "t3-code",
+            output: JSON.stringify({
+              source: "t3-agent",
+              threadId: input.agentOrigin.threadId,
+              operationId: input.agentOrigin.operationId,
+              message: input.prompt ?? "",
+            }),
+          },
+        }
+      : {}),
     approvalPolicy: config.approvalPolicy,
     approvalsReviewer: config.approvalsReviewer,
     sandboxPolicy: runtimeModeToTurnSandboxPolicy(input.runtimeMode),
@@ -2344,6 +2370,7 @@ export const makeCodexSessionRuntime = (
             threadId: providerThreadId,
             runtimeMode: options.runtimeMode,
             ...(input.input ? { prompt: input.input } : {}),
+            ...(input.agentOrigin ? { agentOrigin: input.agentOrigin } : {}),
             ...(input.attachments ? { attachments: input.attachments } : {}),
             ...(normalizedModel ? { model: normalizedModel } : {}),
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),

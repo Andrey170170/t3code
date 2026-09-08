@@ -1601,6 +1601,33 @@ routing.layer("ProviderServiceLive routing", (it) => {
       }),
   );
 
+  it.effect("rejects agent messages for non-Codex sessions before sending", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("agent-message-unsupported");
+      yield* provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      routing.claude.sendTurn.mockClear();
+      const failure = yield* Effect.flip(
+        provider.sendTurn({
+          threadId,
+          input: "Delegated task",
+          agentOrigin: { threadId: asThreadId("source"), operationId: "op" },
+        }),
+      );
+      assert.instanceOf(failure, ProviderValidationError);
+      assert.include(failure.issue, "Agent messages require a Codex provider");
+      assert.equal(routing.claude.sendTurn.mock.calls.length, 0);
+      yield* provider.stopSession({ threadId });
+      routing.claude.startSession.mockClear();
+      routing.claude.stopSession.mockClear();
+    }),
+  );
+
   it.effect("allows promptless continuation only for capable providers", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
@@ -4804,6 +4831,7 @@ describe("agent browser access", () => {
     enableAgentBrowserAccess: boolean,
     threadId: ThreadId,
     projectOverride?: boolean,
+    enableAgentTaskAccess = false,
   ) =>
     Effect.gen(function* () {
       const issued: Array<ThreadId> = [];
@@ -4876,6 +4904,7 @@ describe("agent browser access", () => {
         Layer.provide(
           ServerSettings.ServerSettingsService.layerTest({
             enableAgentBrowserAccess,
+            enableAgentTaskAccess,
             projectAgentBrowserAccessOverrides:
               projectOverride === undefined ? {} : { [projectId]: projectOverride },
           }),
@@ -4911,6 +4940,14 @@ describe("agent browser access", () => {
       const issued = yield* startSessionWith(false, asThreadId("thread-browser-off"));
 
       assert.deepEqual(issued, []);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("retains task access when browser access is disabled", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-tasks-only");
+      const issued = yield* startSessionWith(false, threadId, undefined, true);
+      assert.deepEqual(issued, [threadId]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

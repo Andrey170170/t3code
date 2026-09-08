@@ -212,6 +212,9 @@ export const make = Effect.gen(function* () {
           last_seen_at = excluded.last_seen_at,
           resume_cursor_json = excluded.resume_cursor_json,
           runtime_payload_json = CASE
+            WHEN json_type(CASE WHEN json_valid(provider_session_runtime.runtime_payload_json) THEN provider_session_runtime.runtime_payload_json ELSE '{}' END, '$.codexHistoryImport') IS NOT NULL
+            THEN json_set(
+CASE
             WHEN json_type(
               CASE
                 WHEN json_valid(provider_session_runtime.runtime_payload_json)
@@ -230,6 +233,29 @@ export const make = Effect.gen(function* () {
               json_extract(provider_session_runtime.runtime_payload_json, '$.importedTranscripts')
             )
             ELSE excluded.runtime_payload_json
+          END,
+              '$.codexHistoryImport', json_extract(provider_session_runtime.runtime_payload_json, '$.codexHistoryImport')
+            )
+            ELSE CASE
+            WHEN json_type(
+              CASE
+                WHEN json_valid(provider_session_runtime.runtime_payload_json)
+                THEN provider_session_runtime.runtime_payload_json
+                ELSE '{}'
+              END,
+              '$.importedTranscripts'
+            ) IS NOT NULL
+            THEN json_set(
+              CASE
+                WHEN json_type(excluded.runtime_payload_json) = 'object'
+                THEN excluded.runtime_payload_json
+                ELSE '{}'
+              END,
+              '$.importedTranscripts',
+              json_extract(provider_session_runtime.runtime_payload_json, '$.importedTranscripts')
+            )
+            ELSE excluded.runtime_payload_json
+          END
           END
       `,
   });

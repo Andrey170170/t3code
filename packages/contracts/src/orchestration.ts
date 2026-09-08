@@ -476,7 +476,15 @@ export type OrchestrationProject = typeof OrchestrationProject.Type;
 export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
 export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 
+/** Server-authenticated origin of a message sent by another T3 agent. */
+export const AgentOrigin = Schema.Struct({
+  threadId: ThreadId,
+  operationId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+});
+export type AgentOrigin = typeof AgentOrigin.Type;
+
 export const OrchestrationMessage = Schema.Struct({
+  agentOrigin: Schema.optional(AgentOrigin),
   id: MessageId,
   role: OrchestrationMessageRole,
   text: Schema.String,
@@ -1093,6 +1101,7 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
+  agentOrigin: Schema.optional(AgentOrigin),
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1561,6 +1570,7 @@ export const ThreadInteractionModeSetPayload = Schema.Struct({
 });
 
 export const ThreadMessageSentPayload = Schema.Struct({
+  agentOrigin: Schema.optional(AgentOrigin),
   threadId: ThreadId,
   messageId: MessageId,
   role: OrchestrationMessageRole,
@@ -1573,6 +1583,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
 });
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
+  agentOrigin: Schema.optional(AgentOrigin),
   threadId: ThreadId,
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),

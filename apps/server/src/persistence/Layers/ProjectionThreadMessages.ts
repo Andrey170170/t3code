@@ -5,7 +5,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
-import { ChatAttachment } from "@t3tools/contracts";
+import { AgentOrigin, ChatAttachment } from "@t3tools/contracts";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
@@ -22,6 +22,7 @@ import {
 const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
   Struct.assign({
     isStreaming: Schema.Number,
+    agentOrigin: Schema.NullOr(Schema.fromJsonString(AgentOrigin)),
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
   }),
 );
@@ -32,6 +33,7 @@ function toProjectionThreadMessage(
 ): ProjectionThreadMessage {
   return {
     messageId: row.messageId,
+    ...(row.agentOrigin !== null ? { agentOrigin: row.agentOrigin } : {}),
     threadId: row.threadId,
     turnId: row.turnId,
     role: row.role,
@@ -58,6 +60,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           turn_id,
           role,
           text,
+          agent_origin_json,
           attachments_json,
           is_streaming,
           created_at,
@@ -69,6 +72,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           ${row.turnId},
           ${row.role},
           ${row.text},
+          ${row.agentOrigin ? JSON.stringify(row.agentOrigin) : null},
           COALESCE(
             ${nextAttachmentsJson},
             (
@@ -87,6 +91,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           turn_id = excluded.turn_id,
           role = excluded.role,
           text = excluded.text,
+          agent_origin_json = COALESCE(excluded.agent_origin_json, projection_thread_messages.agent_origin_json),
           attachments_json = COALESCE(
             excluded.attachments_json,
             projection_thread_messages.attachments_json
@@ -110,6 +115,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           turn_id,
           role,
           text,
+          agent_origin_json,
           attachments_json,
           is_streaming,
           created_at,
@@ -121,6 +127,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           ${row.turnId},
           ${row.role},
           ${row.text},
+          ${row.agentOrigin ? JSON.stringify(row.agentOrigin) : null},
           ${nextAttachmentsJson},
           1,
           ${row.createdAt},
@@ -132,6 +139,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           turn_id = excluded.turn_id,
           role = excluded.role,
           text = projection_thread_messages.text || excluded.text,
+          agent_origin_json = COALESCE(excluded.agent_origin_json, projection_thread_messages.agent_origin_json),
           attachments_json = COALESCE(
             excluded.attachments_json,
             projection_thread_messages.attachments_json
@@ -153,6 +161,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           turn_id AS "turnId",
           role,
           text,
+          agent_origin_json AS "agentOrigin",
           attachments_json AS "attachments",
           is_streaming AS "isStreaming",
           created_at AS "createdAt",
@@ -191,6 +200,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           turn_id AS "turnId",
           role,
           text,
+          agent_origin_json AS "agentOrigin",
           attachments_json AS "attachments",
           is_streaming AS "isStreaming",
           created_at AS "createdAt",

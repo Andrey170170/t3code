@@ -7,6 +7,7 @@ import {
   ThreadId,
   ProviderInstanceId,
   type ProjectScript,
+  type OrchestrationCommand,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { expect, it } from "@effect/vitest";
@@ -362,6 +363,102 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
     }),
   );
 
+  it.effect("rechecks agent endpoints after queued moves, archives, and deletions", () =>
+    Effect.gen(function* () {
+      const now = "2026-09-08T00:00:00.000Z";
+      let readModel = createEmptyReadModel(now);
+      const commands: OrchestrationCommand[] = [
+        {
+          type: "project.create",
+          commandId: CommandId.make("agent-project"),
+          projectId: ProjectId.make("agent-project"),
+          title: "Project",
+          workspaceRoot: "/tmp/agent-project",
+          createdAt: now,
+        },
+        ...["source", "target"].map((id): OrchestrationCommand => ({
+          type: "thread.create",
+          commandId: CommandId.make(`create-${id}`),
+          threadId: ThreadId.make(id),
+          projectId: ProjectId.make("agent-project"),
+          title: id,
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+        })),
+      ];
+      for (const command of commands) {
+        const decided = yield* decideOrchestrationCommand({ command, readModel });
+        for (const event of Array.isArray(decided) ? decided : [decided]) {
+          readModel = yield* projectEvent(readModel, {
+            ...event,
+            sequence: readModel.snapshotSequence + 1,
+          });
+        }
+      }
+      const command: Extract<OrchestrationCommand, { type: "thread.turn.start" }> = {
+        type: "thread.turn.start",
+        commandId: CommandId.make("queued-agent-turn"),
+        threadId: ThreadId.make("target"),
+        agentOrigin: { threadId: ThreadId.make("source"), operationId: "operation" },
+        message: {
+          messageId: MessageId.make("queued-message"),
+          role: "user",
+          text: "Review",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: now,
+      };
+      const accepted = yield* decideOrchestrationCommand({ command, readModel });
+      expect(Array.isArray(accepted) ? accepted : [accepted]).toHaveLength(2);
+      const targetMoved = {
+        ...readModel,
+        threads: readModel.threads.map((thread) =>
+          thread.id === "target"
+            ? { ...thread, projectId: ProjectId.make("different-project") }
+            : thread,
+        ),
+      };
+      const changedModels = [
+        targetMoved,
+        { ...readModel, threads: readModel.threads.filter((thread) => thread.id !== "source") },
+        ...["source", "target"].flatMap((id) => [
+          {
+            ...readModel,
+            threads: readModel.threads.map((thread) =>
+              thread.id === id ? { ...thread, deletedAt: now } : thread,
+            ),
+          },
+          {
+            ...readModel,
+            threads: readModel.threads.map((thread) =>
+              thread.id === id ? { ...thread, archivedAt: now } : thread,
+            ),
+          },
+        ]),
+      ];
+      for (const changed of changedModels) {
+        const rejected = yield* decideOrchestrationCommand({ command, readModel: changed }).pipe(
+          Effect.result,
+        );
+        expect(rejected._tag).toBe("Failure");
+        if (rejected._tag === "Failure")
+          expect(rejected.failure._tag).toBe("OrchestrationCommandInvariantError");
+      }
+      const { agentOrigin: _origin, ...humanCommand } = command;
+      const human = yield* decideOrchestrationCommand({
+        command: humanCommand,
+        readModel: targetMoved,
+      });
+      expect(Array.isArray(human) ? human : [human]).toHaveLength(2);
+    }),
+  );
+
   it.effect("emits user message and turn-start-requested events for thread.turn.start", () =>
     Effect.gen(function* () {
       const now = "2026-01-01T00:00:00.000Z";
@@ -441,6 +538,36 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
       const events = Array.isArray(result) ? result : [result];
       expect(events).toHaveLength(2);
       expect(events[0]?.type).toBe("thread.message-sent");
+      expect(events[0]?.payload).not.toHaveProperty("agentOrigin");
+      const agentOrigin = { threadId: ThreadId.make("source-agent"), operationId: "operation-1" };
+      const sourceThread = { ...readModel.threads[0]!, id: agentOrigin.threadId };
+      const delegatedModel = { ...readModel, threads: [...readModel.threads, sourceThread] };
+      const delegated = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("delegated-start"),
+          threadId: ThreadId.make("thread-1"),
+          agentOrigin,
+          message: {
+            messageId: asMessageId("delegated-message"),
+            role: "user",
+            text: "Review this",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        },
+        readModel: delegatedModel,
+      });
+      const delegatedEvents = Array.isArray(delegated) ? delegated : [delegated];
+      expect(delegatedEvents[0]?.payload).toHaveProperty("agentOrigin", agentOrigin);
+      expect(delegatedEvents[1]?.payload).toHaveProperty("agentOrigin", agentOrigin);
+      let replayed = readModel;
+      for (const [index, event] of delegatedEvents.entries()) {
+        replayed = yield* projectEvent(replayed, { ...event, sequence: index + 3 });
+      }
+      expect(replayed.threads[0]?.messages[0]?.agentOrigin).toEqual(agentOrigin);
       const turnStartEvent = events[1];
       expect(turnStartEvent?.type).toBe("thread.turn-start-requested");
       expect(turnStartEvent?.causationEventId).toBe(events[0]?.eventId ?? null);

@@ -9,6 +9,7 @@ import {
   TurnId,
 } from "./baseSchemas.ts";
 import {
+  AgentOrigin,
   ChatAttachment,
   ModelSelection,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -67,6 +68,7 @@ export const ProviderSessionStartInput = Schema.Struct({
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
 export const ProviderSendTurnInput = Schema.Struct({
+  agentOrigin: Schema.optional(AgentOrigin),
   threadId: ThreadId,
   /** Internal recovery signal. Allows an empty turn only for adapters that
       explicitly support promptless continuation. */

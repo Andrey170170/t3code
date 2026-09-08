@@ -1,6 +1,7 @@
 import {
   AgentSessionImportSource,
   ApprovalRequestId,
+  AgentOrigin,
   ChatAttachment,
   CheckpointRef,
   IsoDateTime,
@@ -105,6 +106,7 @@ const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
 const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
   Struct.assign({
     isStreaming: Schema.Number,
+    agentOrigin: Schema.NullOr(Schema.fromJsonString(AgentOrigin)),
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
   }),
 );
@@ -621,6 +623,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           turn_id AS "turnId",
           role,
           text,
+          agent_origin_json AS "agentOrigin",
           attachments_json AS "attachments",
           is_streaming AS "isStreaming",
           created_at AS "createdAt",
@@ -1146,7 +1149,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         turn_id AS "turnId",
         role,
         text,
-        attachments_json AS "attachments",
+        agent_origin_json AS "agentOrigin",
+          attachments_json AS "attachments",
         is_streaming AS "isStreaming",
         created_at AS "createdAt",
         updated_at AS "updatedAt",
@@ -1178,6 +1182,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           turn_id AS "turnId",
           role,
           text,
+          agent_origin_json AS "agentOrigin",
           attachments_json AS "attachments",
           is_streaming AS "isStreaming",
           created_at AS "createdAt",
@@ -1535,6 +1540,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           turn_id AS "turnId",
           role,
           text,
+          agent_origin_json AS "agentOrigin",
           attachments_json AS "attachments",
           is_streaming AS "isStreaming",
           created_at AS "createdAt",
@@ -1933,6 +1939,7 @@ pending_approval_requests AS (
                 threadMessages.push({
                   id: row.messageId,
                   role: row.role,
+                  ...(row.agentOrigin !== null ? { agentOrigin: row.agentOrigin } : {}),
                   text: row.text,
                   ...(row.attachments !== null ? { attachments: row.attachments } : {}),
                   turnId: row.turnId,
@@ -2962,6 +2969,7 @@ pending_approval_requests AS (
       message: {
         id: row.messageId,
         role: row.role,
+        ...(row.agentOrigin !== null ? { agentOrigin: row.agentOrigin } : {}),
         text: row.text,
         turnId: row.turnId,
         streaming: row.isStreaming === 1,
@@ -3206,6 +3214,7 @@ pending_approval_requests AS (
           const message = {
             id: row.messageId,
             role: row.role,
+            ...(row.agentOrigin !== null ? { agentOrigin: row.agentOrigin } : {}),
             text: row.text,
             turnId: row.turnId,
             streaming: row.isStreaming === 1,

@@ -233,6 +233,25 @@ it.effect("rejects command fields that become empty after trim", () =>
   }),
 );
 
+it.effect("accepts authenticated agent origin internally but strips it from client commands", () =>
+  Effect.gen(function* () {
+    const input = {
+      type: "thread.turn.start",
+      commandId: "agent-command",
+      threadId: "target",
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      agentOrigin: { threadId: "source", operationId: "operation-1" },
+      message: { messageId: "agent-message", role: "user", text: "Inspect this", attachments: [] },
+      createdAt: "2026-09-08T00:00:00.000Z",
+    };
+    const internal = yield* decodeThreadTurnStartCommand(input);
+    assert.deepStrictEqual(internal.agentOrigin, input.agentOrigin);
+    const client = yield* decodeClientOrchestrationCommand(input);
+    assert.isFalse(Object.hasOwn(client, "agentOrigin"));
+  }),
+);
+
 it.effect("decodes thread.turn.start defaults for provider and runtime mode", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeThreadTurnStartCommand({

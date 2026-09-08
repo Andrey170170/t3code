@@ -1,3 +1,4 @@
+import { CodexThreadImportButton } from "../CodexThreadImport";
 import { useAtomValue } from "@effect/atom-react";
 import {
   isAtomCommandInterrupted,
@@ -923,6 +924,17 @@ function ProjectDetail({
     <>
       <SettingsPageContainer className="gap-6">
         <SettingsSection title="Project" hideTitle>
+          <SettingsRow
+            title="Conversations"
+            description="Import recent sessions or select existing Codex conversations."
+            control={
+              <CodexThreadImportButton
+                environmentId={selectedCheckout.environmentId}
+                projectId={selectedCheckout.id}
+                workspaceRoot={selectedCheckout.workspaceRoot}
+              />
+            }
+          />
           <SettingsRow
             title="Name"
             description="The shared name for this project group in the sidebar and thread lists."

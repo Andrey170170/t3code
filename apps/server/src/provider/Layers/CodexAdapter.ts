@@ -2282,6 +2282,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
                   "-c",
                   'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+                  "-c",
+                  'mcp_servers.t3-code.tools.task_create.approval_mode="prompt"',
+                  "-c",
+                  'mcp_servers.t3-code.tools.task_send_message.approval_mode="prompt"',
                 ],
               }
             : {}),
@@ -2526,6 +2530,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     return yield* session.runtime
       .sendTurn({
         ...(input.input !== undefined ? { input: input.input } : {}),
+        ...(input.agentOrigin ? { agentOrigin: input.agentOrigin } : {}),
         ...(input.modelSelection?.instanceId === boundInstanceId
           ? { model: input.modelSelection.model }
           : {}),

@@ -742,3 +742,17 @@ describe("ServerSettings environment icon", () => {
     expect(encodeServerSettings(linuxSettings).environmentIcon).toBe("linux");
   });
 });
+
+describe("agent task access", () => {
+  it("defaults on and preserves explicit disablement independently of browser access", () => {
+    expect(decodeServerSettings({}).enableAgentTaskAccess).toBe(true);
+    const settings = decodeServerSettings({
+      enableAgentTaskAccess: false,
+      enableAgentBrowserAccess: true,
+    });
+    expect(encodeServerSettings(settings).enableAgentTaskAccess).toBe(false);
+    expect(decodeServerSettingsPatch({ enableAgentTaskAccess: false })).toEqual({
+      enableAgentTaskAccess: false,
+    });
+  });
+});

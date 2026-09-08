@@ -545,10 +545,44 @@ function GeneralSettingsSection() {
   return (
     <SettingsSection title="General">
       <SettingsRow icon="folder" label="Project Grouping" target="SettingsProjectGrouping" />
+      <SettingsRow
+        icon="square.and.arrow.down"
+        label="Import Codex Chats"
+        target="SettingsCodexImport"
+      />
+      <AgentTaskAccessRows />
       <AutoSettleSettingsRows />
       <SettingsRow icon="chart.bar.xaxis" label="Usage" target="SettingsUsage" />
     </SettingsSection>
   );
+}
+
+/** Task permissions belong to the server where the agent runs. */
+function AgentTaskAccessRows() {
+  const { environments } = useEnvironments();
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "agent task access update",
+    reportFailure: true,
+  });
+  return environments
+    .filter(
+      (environment) => environment.connection.phase === "connected" && environment.serverConfig,
+    )
+    .map((environment) => (
+      <SettingsSwitchRow
+        key={environment.environmentId}
+        icon="arrow.triangle.branch"
+        label="Agent task access"
+        subtitle={`${environment.label}: allow Codex agents to create chats and send follow-ups with approval. Applies to new sessions.`}
+        value={environment.serverConfig?.settings.enableAgentTaskAccess ?? true}
+        onValueChange={(value) => {
+          void updateSettings({
+            environmentId: environment.environmentId,
+            input: { patch: { enableAgentTaskAccess: value } },
+          });
+        }}
+      />
+    ));
 }
 
 const AUTO_SETTLE_DEFAULT_DAYS = DEFAULT_SERVER_SETTINGS.sidebarAutoSettleAfterDays ?? 3;

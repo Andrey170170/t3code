@@ -830,6 +830,42 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
+  effectIt.effect(
+    "keeps delegated slash commands as agent messages instead of account commands",
+    () =>
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            startSessionEffect: (session) =>
+              Deferred.succeed(started, undefined).pipe(Effect.as(session)),
+          }),
+        );
+        const agentOrigin = { threadId: ThreadId.make("thread-1"), operationId: "task-1" };
+        yield* harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("agent-command"),
+          threadId: ThreadId.make("thread-1"),
+          agentOrigin,
+          message: {
+            messageId: MessageId.make("agent-message"),
+            role: "user",
+            text: "/logout",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-09-08T00:00:00.000Z",
+        });
+        yield* Deferred.await(started);
+        yield* Effect.promise(() => harness.drain());
+        expect(harness.tryHandlePromptCommand).not.toHaveBeenCalled();
+        expect(harness.sendTurn).toHaveBeenCalledWith(
+          expect.objectContaining({ input: "/logout", agentOrigin }),
+        );
+      }),
+  );
+
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

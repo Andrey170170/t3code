@@ -63,6 +63,37 @@ function makeThreadOpenResponse(
 }
 
 describe("buildTurnStartParams", () => {
+  it.effect("delivers agent messages as tool output without user input", () =>
+    Effect.gen(function* () {
+      const agentOrigin = { threadId: ThreadId.make("source-thread"), operationId: "task-42" };
+      const params = yield* buildTurnStartParams({
+        threadId: "target-provider-thread",
+        runtimeMode: "approval-required",
+        prompt: "Please inspect the implementation",
+        agentOrigin,
+      });
+      NodeAssert.deepEqual(params.input, []);
+      NodeAssert.equal(params.toolOutput?.name, "task_message");
+      NodeAssert.equal(params.toolOutput?.namespace, "t3-code");
+      NodeAssert.deepEqual(
+        yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))(
+          params.toolOutput!.output,
+        ),
+        {
+          source: "t3-agent",
+          ...agentOrigin,
+          message: "Please inspect the implementation",
+        },
+      );
+      const userParams = yield* buildTurnStartParams({
+        threadId: "target-provider-thread",
+        runtimeMode: "approval-required",
+        prompt: "User request",
+      });
+      NodeAssert.deepEqual(userParams.input, [{ type: "text", text: "User request" }]);
+      NodeAssert.equal(userParams.toolOutput, undefined);
+    }),
+  );
   it("keeps invalid turn values only in the schema cause", () => {
     const secret = "codex-turn-input-secret-sentinel";
     const error = Effect.runSync(

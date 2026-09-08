@@ -7,6 +7,7 @@
  * @module ProjectionThreadMessageRepository
  */
 import {
+  AgentOrigin,
   ChatAttachment,
   MessageId,
   OrchestrationMessageRole,
@@ -23,6 +24,7 @@ import type * as Effect from "effect/Effect";
 import type { ProjectionRepositoryError } from "../Errors.ts";
 
 export const ProjectionThreadMessage = Schema.Struct({
+  agentOrigin: Schema.optional(AgentOrigin),
   messageId: MessageId,
   threadId: ThreadId,
   turnId: Schema.NullOr(TurnId),

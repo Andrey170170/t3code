@@ -192,6 +192,7 @@ export class AgentSessionScanner extends Context.Service<
     readonly recentThreads: (
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
+      options?: { readonly refresh?: boolean },
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
   }
 >()("t3/project/AgentSessionScanner") {}
@@ -1328,6 +1329,7 @@ export const make = Effect.gen(function* () {
   const prepareRecentThreads = Effect.fn("AgentSessionScanner.prepareRecentThreads")(function* (
     workspaceRoot: string,
     completedSources: ReadonlyArray<AgentSessionImportSource>,
+    refresh: boolean,
   ) {
     const root = path.resolve(expandHomePath(workspaceRoot));
     const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
@@ -1336,7 +1338,10 @@ export const make = Effect.gen(function* () {
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
     const cutoffMs = nowMs - RECENT_THREAD_WINDOW_MS;
 
-    const candidates = cachedCandidates ?? (yield* collectCandidates()).candidates;
+    // Explicit imports must rediscover files added since an earlier onboarding scan.
+    const candidates = refresh
+      ? (yield* collectCandidates()).candidates
+      : (cachedCandidates ?? (yield* collectCandidates()).candidates);
     cachedCandidates = candidates;
 
     const eligibleTranscripts: Array<{
@@ -1487,7 +1492,9 @@ export const make = Effect.gen(function* () {
   const recentThreads: AgentSessionScanner["Service"]["recentThreads"] = (
     workspaceRoot,
     completedSources = [],
-  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
+    options = {},
+  ) =>
+    Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources, options.refresh ?? false));
 
   return AgentSessionScanner.of({ scan, recentThreads });
 });

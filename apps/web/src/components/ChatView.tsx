@@ -1,3 +1,5 @@
+import { withoutLegacyHistoryPreviews } from "@t3tools/client-runtime/state/codex-threads";
+import { CodexNativeHistory } from "./CodexNativeHistory";
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
 import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import {
@@ -658,7 +660,12 @@ const SCRIPT_TERMINAL_ROWS = 30;
 
 function isCompactCommandMessage(message: ChatMessage): boolean {
   const text = message.text.trim().toLowerCase();
-  return message.role === "user" && text === "/compact" && !message.attachments?.length;
+  return (
+    message.role === "user" &&
+    !message.agentOrigin &&
+    text === "/compact" &&
+    !message.attachments?.length
+  );
 }
 
 type ChatViewProps =
@@ -3161,8 +3168,21 @@ export default function ChatView(props: ChatViewProps) {
       }
     };
   }, [attachmentPreviewHandoffByMessageId, clearAttachmentPreviewHandoff, displayServerMessages]);
+  const [nativeHistoryReplacingThreadKey, setNativeHistoryReplacingThreadKey] = useState<
+    string | null
+  >(null);
+  const onNativeHistoryVisibilityChange = useCallback(
+    (replacing: boolean) => {
+      setNativeHistoryReplacingThreadKey(replacing ? activeThreadKey : null);
+    },
+    [activeThreadKey],
+  );
   const timelineMessages = useMemo(() => {
-    const messages = displayServerMessages;
+    const messages = withoutLegacyHistoryPreviews(
+      displayServerMessages,
+      nativeHistoryReplacingThreadKey !== null &&
+        nativeHistoryReplacingThreadKey === activeThreadKey,
+    );
     const serverMessagesWithPreviewHandoff =
       Object.keys(attachmentPreviewHandoffByMessageId).length === 0
         ? messages
@@ -3203,6 +3223,8 @@ export default function ChatView(props: ChatViewProps) {
   }, [
     attachmentPreviewHandoffByMessageId,
     displayServerMessages,
+    nativeHistoryReplacingThreadKey,
+    activeThreadKey,
     optimisticUserMessages,
     projectHandoffMessagePreviews,
   ]);
@@ -8208,6 +8230,14 @@ export default function ChatView(props: ChatViewProps) {
             </div>
             {/* Messages Wrapper */}
             <div className="relative flex min-h-0 flex-1 flex-col">
+              {selectedProvider === "codex" ? (
+                <CodexNativeHistory
+                  key={`${activeThread.environmentId}:${activeThread.id}`}
+                  environmentId={activeThread.environmentId}
+                  threadId={activeThread.id}
+                  onLegacyVisibilityChange={onNativeHistoryVisibilityChange}
+                />
+              ) : null}
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
                 citationRequest={citationRequest}

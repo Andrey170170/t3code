@@ -1371,6 +1371,48 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
   });
 
   describe("recentThreads", () => {
+    it.effect("refreshes bounded import candidates after an earlier scan", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-refresh-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-refresh-codex-");
+        const workspace = yield* makeTempDir("t3code-refresh-workspace-");
+        yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          expect((yield* scanner.scan).candidates).toEqual([]);
+          yield* writeTranscript({
+            filePath: path.join(codexHomePath, "sessions", "2026", "08", "24", "rollout-new.jsonl"),
+            contents: [
+              encodeTranscriptRecord({
+                type: "session_meta",
+                payload: { id: "new-after-scan", cwd: workspace },
+              }),
+              encodeTranscriptRecord({
+                type: "event_msg",
+                payload: { type: "user_message", message: "A newly started conversation" },
+              }),
+            ].join("\n"),
+            mtimeMs: nowMs,
+          });
+          expect(yield* scanner.recentThreads(workspace).pipe(Stream.runCollect)).toEqual([]);
+          const refreshed = yield* scanner
+            .recentThreads(workspace, [], { refresh: true })
+            .pipe(Stream.runCollect);
+          expect(refreshed).toMatchObject([
+            {
+              _tag: "Importable",
+              thread: {
+                providerSessionId: "new-after-scan",
+                messages: [{ text: "A newly started conversation" }],
+              },
+            },
+          ]);
+        }).pipe(Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })));
+      }),
+    );
+
     it.effect.each([false, true])(
       "counts terminal newlines correctly with record overflow=%s",
       (overflow) =>

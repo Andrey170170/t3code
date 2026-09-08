@@ -233,7 +233,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           recordImportedTranscript: () => Effect.void,
           getBinding: () => Effect.succeed(Option.none()),
           listThreadIds: () => Effect.die("unused"),
-          listBindings: () => Effect.die("unused"),
+          listBindings: () => Effect.succeed([]),
         });
 
         const result = yield* runImport({
@@ -283,6 +283,56 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
             runtimePayload: { cwd: WORKSPACE_ROOT },
           },
         ]);
+      }),
+    );
+
+    it.effect("skips a native conversation already owned by an ordinary T3 thread", () =>
+      Effect.gen(function* () {
+        const source = makeThread("codex");
+        const commands: Array<OrchestrationCommand> = [];
+        const recorded: Array<ThreadId> = [];
+        const normalThreadId = ThreadId.make("ordinary-t3-thread");
+        const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+          upsert: () => Effect.die("must not replace an existing binding"),
+          getProvider: () => Effect.die("unused"),
+          getBinding: () => Effect.die("must detect the native binding first"),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () =>
+            Effect.succeed([
+              {
+                threadId: normalThreadId,
+                provider: ProviderDriverKind.make("codex"),
+                providerInstanceId: source.providerInstanceId,
+                resumeCursor: { threadId: source.providerSessionId },
+                lastSeenAt: source.updatedAt,
+              },
+            ]),
+          recordImportedTranscript: ({ threadId }) =>
+            Effect.sync(() => {
+              recorded.push(threadId);
+            }),
+        });
+        const engine = OrchestrationEngine.OrchestrationEngineService.of({
+          dispatch: (command) => Effect.sync(() => ({ sequence: commands.push(command) })),
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          latestSequence: Effect.succeed(0),
+        });
+        const result = yield* runImport({
+          directory,
+          engine,
+          scanner: AgentSessionScanner.AgentSessionScanner.of({
+            scan: Effect.die("unused"),
+            recentThreads: () => Stream.succeed(makeThreadOutcome(source)),
+          }),
+          snapshots: makeSnapshotsLayer({ project: makeProject() }),
+        });
+        expect(result).toEqual({ importedCount: 0, skippedCount: 1 });
+        expect(commands).toEqual([]);
+        expect(recorded).toEqual([normalThreadId]);
       }),
     );
 
@@ -338,7 +388,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           recordImportedTranscript: () => Effect.die("unused"),
           getBinding: () => Effect.die("must not read a scanner skip binding"),
           listThreadIds: () => Effect.die("unused"),
-          listBindings: () => Effect.die("unused"),
+          listBindings: () => Effect.succeed([]),
         });
 
         const result = yield* runImport({
@@ -416,7 +466,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           getBinding: () =>
             Effect.succeed(bindings[0] === undefined ? Option.none() : Option.some(bindings[0])),
           listThreadIds: () => Effect.die("unused"),
-          listBindings: () => Effect.die("unused"),
+          listBindings: () => Effect.succeed([]),
         });
         const snapshots = makeSnapshotsLayer({
           project: makeProject(),
@@ -457,7 +507,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           recordImportedTranscript: () => Effect.void,
           getBinding: () => Effect.succeed(Option.some(runningBinding)),
           listThreadIds: () => Effect.die("unused"),
-          listBindings: () => Effect.die("unused"),
+          listBindings: () => Effect.succeed([]),
         });
         const engine = OrchestrationEngine.OrchestrationEngineService.of({
           dispatch: () => Effect.die("must not replay history or settle active work"),
@@ -512,7 +562,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           recordImportedTranscript: () => Effect.die("unused"),
           getBinding: () => Effect.succeed(Option.none()),
           listThreadIds: () => Effect.die("unused"),
-          listBindings: () => Effect.die("unused"),
+          listBindings: () => Effect.succeed([]),
         });
 
         const result = yield* runImport({

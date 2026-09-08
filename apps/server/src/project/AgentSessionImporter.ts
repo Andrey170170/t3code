@@ -27,7 +27,14 @@ import * as Stream from "effect/Stream";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ProviderSessionDirectory from "../provider/Services/ProviderSessionDirectory.ts";
+import { agentSessionImportLock } from "./AgentSessionImportLock.ts";
+import { CodexThreadClient } from "./CodexThreadClient.ts";
+import { findNativeBinding } from "./CodexThreadImport.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
+
+const decodeClaudeResumeCursor = Schema.decodeUnknownOption(
+  Schema.Struct({ resume: Schema.String }),
+);
 
 const CLAUDE_SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -105,6 +112,7 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const crypto = yield* Crypto.Crypto;
+  const nativeClient = yield* Effect.serviceOption(CodexThreadClient);
   const project = yield* snapshots.getProjectShellById(input.projectId).pipe(
     Effect.mapError((cause) => new AgentSessionScanError({ operation: "read-projects", cause })),
     Effect.flatMap(
@@ -131,6 +139,7 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
   const threads = scanner.recentThreads(
     workspaceRoot,
     completedSources.map((entry) => entry.source),
+    { refresh: true },
   );
   const importedThreadIds = new Set<ThreadId>();
   let importedCount = 0;
@@ -168,6 +177,35 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
         `import:${thread.providerInstanceId}:${thread.providerSessionId}`,
       );
       const imported = yield* Effect.gen(function* () {
+        const currentBindings = yield* directory.listBindings();
+        const matchingBinding =
+          thread.source === "codex"
+            ? yield* findNativeBinding(
+                currentBindings,
+                thread.providerInstanceId,
+                thread.providerSessionId,
+                Option.isSome(nativeClient)
+                  ? nativeClient.value.resolveNativeHomeIdentity
+                  : (id) => Effect.succeed(String(id)),
+              )
+            : Option.fromUndefinedOr(
+                currentBindings.find(
+                  (binding) =>
+                    binding.provider === "claudeAgent" &&
+                    binding.providerInstanceId === thread.providerInstanceId &&
+                    Option.getOrUndefined(decodeClaudeResumeCursor(binding.resumeCursor))
+                      ?.resume === thread.providerSessionId,
+                ),
+              );
+        if (Option.isSome(matchingBinding) && matchingBinding.value.threadId !== threadId) {
+          // A normal T3 thread may already own this native conversation. Never
+          // create a second local identity or overwrite that thread's history.
+          yield* directory.recordImportedTranscript({
+            threadId: matchingBinding.value.threadId,
+            source: outcome.source,
+          });
+          return false;
+        }
         const provider = ProviderDriverKind.make(thread.source);
         const model = thread.model ?? DEFAULT_MODEL_BY_PROVIDER[provider] ?? DEFAULT_MODEL;
         const existingThread = yield* snapshots.getThreadDetailById(threadId);
@@ -294,4 +332,4 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
   );
 
   return { importedCount, skippedCount } satisfies AgentSessionImportResult;
-});
+}, agentSessionImportLock.withPermit);

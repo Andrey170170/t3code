@@ -1060,6 +1060,31 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.agentOrigin) {
+        // The source credential was authenticated before dispatch. Recheck mutable
+        // thread state here, after earlier queued moves, archives, and deletions.
+        const originThread = yield* requireThreadNotArchived({
+          readModel,
+          command,
+          threadId: command.agentOrigin.threadId,
+        });
+        if (
+          originThread.deletedAt !== null ||
+          targetThread.deletedAt !== null ||
+          targetThread.archivedAt !== null
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "Agent messages require existing, unarchived source and target threads.",
+          });
+        }
+        if (originThread.projectId !== targetThread.projectId) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "Agent messages require source and target threads in the same project.",
+          });
+        }
+      }
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({
@@ -1095,6 +1120,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
+          ...(command.agentOrigin ? { agentOrigin: command.agentOrigin } : {}),
           role: "user",
           text: command.message.text,
           attachments: command.message.attachments,
@@ -1116,6 +1142,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
+          ...(command.agentOrigin ? { agentOrigin: command.agentOrigin } : {}),
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),

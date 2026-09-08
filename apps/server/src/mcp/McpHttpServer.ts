@@ -29,6 +29,9 @@ import {
   PreviewStandardToolkit,
 } from "./toolkits/preview/tools.ts";
 
+import { TaskToolkit } from "./toolkits/tasks/tools.ts";
+import { TaskToolkitHandlersLive } from "./toolkits/tasks/handlers.ts";
+
 const unauthorized = HttpServerResponse.jsonUnsafe(
   {
     error: "invalid_mcp_credential",
@@ -444,4 +447,11 @@ const McpTransportLive = McpServer.layerHttp({
   protocols: [McpProtocol.v2025_06_18],
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
-export const layer = PreviewToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));
+export const TaskToolkitRegistrationLive = McpServer.toolkit(TaskToolkit).pipe(
+  Layer.provide(TaskToolkitHandlersLive),
+);
+
+export const layer = Layer.mergeAll(
+  PreviewToolkitRegistrationLive,
+  TaskToolkitRegistrationLive,
+).pipe(Layer.provideMerge(McpTransportLive));
