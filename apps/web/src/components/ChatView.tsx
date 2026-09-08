@@ -1,5 +1,7 @@
 import { withoutLegacyHistoryPreviews } from "@t3tools/client-runtime/state/codex-threads";
-import { CodexNativeHistory } from "./CodexNativeHistory";
+import { projectCodexHistory } from "@t3tools/client-runtime/state/codex-history-projection";
+import { useCodexHistory } from "../hooks/useCodexHistory";
+import { codexThreads } from "../state/codexThreads";
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
 import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import {
@@ -3168,20 +3170,45 @@ export default function ChatView(props: ChatViewProps) {
       }
     };
   }, [attachmentPreviewHandoffByMessageId, clearAttachmentPreviewHandoff, displayServerMessages]);
-  const [nativeHistoryReplacingThreadKey, setNativeHistoryReplacingThreadKey] = useState<
-    string | null
-  >(null);
-  const onNativeHistoryVisibilityChange = useCallback(
-    (replacing: boolean) => {
-      setNativeHistoryReplacingThreadKey(replacing ? activeThreadKey : null);
+  const readCodexHistory = useAtomCommand(codexThreads.history, { reportFailure: false });
+  const loadNativeHistoryPage = useCallback(
+    async (cursor?: string) => {
+      const response = await readCodexHistory({
+        environmentId,
+        input: { threadId, ...(cursor ? { cursor } : {}) },
+      });
+      if (response._tag !== "Success") throw new Error("Could not load earlier messages");
+      return response.value;
     },
-    [activeThreadKey],
+    [readCodexHistory, environmentId, threadId],
+  );
+  const nativeHistory = useCodexHistory({
+    threadKey: activeThreadKey,
+    enabled: routeKind === "server" && !threadDetailLoading && loadEarlierTurns === null,
+    loadPage: loadNativeHistoryPage,
+  });
+  const nativeProjection = useMemo(
+    () => (nativeHistory.result ? projectCodexHistory(nativeHistory.result) : null),
+    [nativeHistory.result],
+  );
+  const timelineLoadEarlier =
+    loadEarlierTurns ??
+    (!nativeHistory.error && (nativeHistory.loading || nativeHistory.result?.nextCursor)
+      ? {
+          loading: nativeHistory.loading,
+          cursor: nativeHistory.result?.nextCursor ?? null,
+          onLoadEarlier: nativeHistory.loadEarlier,
+        }
+      : null);
+  const timelineWorkEntries = useMemo(
+    () =>
+      nativeProjection ? [...nativeProjection.workEntries, ...workLogEntries] : workLogEntries,
+    [nativeProjection, workLogEntries],
   );
   const timelineMessages = useMemo(() => {
     const messages = withoutLegacyHistoryPreviews(
       displayServerMessages,
-      nativeHistoryReplacingThreadKey !== null &&
-        nativeHistoryReplacingThreadKey === activeThreadKey,
+      nativeHistory.result?.boundary?.replacesLegacyMessages === true,
     );
     const serverMessagesWithPreviewHandoff =
       Object.keys(attachmentPreviewHandoffByMessageId).length === 0
@@ -3212,19 +3239,27 @@ export default function ChatView(props: ChatViewProps) {
 
     const localMessages = optimisticUserMessages;
     if (localMessages.length === 0) {
-      return serverMessagesWithPreviewHandoff;
+      return nativeProjection
+        ? [...nativeProjection.messages, ...serverMessagesWithPreviewHandoff]
+        : serverMessagesWithPreviewHandoff;
     }
     const serverIds = new Set(serverMessagesWithPreviewHandoff.map((message) => message.id));
     const pendingMessages = localMessages.filter((message) => !serverIds.has(message.id));
     if (pendingMessages.length === 0) {
-      return serverMessagesWithPreviewHandoff;
+      return nativeProjection
+        ? [...nativeProjection.messages, ...serverMessagesWithPreviewHandoff]
+        : serverMessagesWithPreviewHandoff;
     }
-    return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
+    return [
+      ...(nativeProjection?.messages ?? []),
+      ...serverMessagesWithPreviewHandoff,
+      ...pendingMessages,
+    ];
   }, [
     attachmentPreviewHandoffByMessageId,
     displayServerMessages,
-    nativeHistoryReplacingThreadKey,
-    activeThreadKey,
+    nativeHistory.result,
+    nativeProjection,
     optimisticUserMessages,
     projectHandoffMessagePreviews,
   ]);
@@ -3237,7 +3272,7 @@ export default function ChatView(props: ChatViewProps) {
     const projection = deriveTimelineEntriesWithState(
       timelineMessages,
       activeThread?.proposedPlans ?? [],
-      workLogEntries,
+      timelineWorkEntries,
       previous?.threadKey === activeThreadKey ? previous.projection : null,
     );
     timelineProjectionRef.current = { threadKey: activeThreadKey, projection };
@@ -3247,7 +3282,7 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadKey,
     activeThread?.proposedPlans,
     timelineMessages,
-    workLogEntries,
+    timelineWorkEntries,
   ]);
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
@@ -8230,18 +8265,18 @@ export default function ChatView(props: ChatViewProps) {
             </div>
             {/* Messages Wrapper */}
             <div className="relative flex min-h-0 flex-1 flex-col">
-              {selectedProvider === "codex" ? (
-                <CodexNativeHistory
-                  key={`${activeThread.environmentId}:${activeThread.id}`}
-                  environmentId={activeThread.environmentId}
-                  threadId={activeThread.id}
-                  onLegacyVisibilityChange={onNativeHistoryVisibilityChange}
-                />
+              {nativeHistory.error ? (
+                <div role="alert" className="shrink-0 px-4 py-2 text-sm text-muted-foreground">
+                  {nativeHistory.error}{" "}
+                  <button type="button" className="underline" onClick={nativeHistory.retry}>
+                    Retry
+                  </button>
+                </div>
               ) : null}
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
                 citationRequest={citationRequest}
-                citationHistoryLoading={threadDetailLoading}
+                citationHistoryLoading={threadDetailLoading || nativeHistory.loading}
                 onCiteAssistantText={citeAssistantText}
                 agentPanelModel={agentPanelModel}
                 onOpenAgents={addAgentsSurface}
@@ -8282,9 +8317,11 @@ export default function ChatView(props: ChatViewProps) {
                 onContentOverflowChange={setTimelineOverflows}
                 onToolOutputCollapsedAtEnd={onToolOutputCollapsedAtEnd}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
-                hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
+                hideEmptyPlaceholder={
+                  isDraftHeroState || threadDetailLoading || nativeHistory.loading
+                }
                 topFadeEnabled={!hasTimelineTopBanner}
-                loadEarlier={loadEarlierTurns}
+                loadEarlier={timelineLoadEarlier}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}

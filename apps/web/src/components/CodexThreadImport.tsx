@@ -638,6 +638,130 @@ export function CodexThreadImportDialog({
       />
     );
   }
+  const catalogControls =
+    !results && providers.length > 0 ? (
+      <div className="shrink-0 space-y-2 px-6 pb-2">
+        {providers.length > 1 ? (
+          <Select
+            value={providerInstanceId}
+            onValueChange={(value) => {
+              if (value) {
+                setSelectedProvider(value as ProviderInstanceId);
+                setSelection(new Map());
+                setCheckoutChoices(new Map());
+                setCatalogProjects(new Map());
+              }
+            }}
+          >
+            <SelectTrigger size="sm" aria-label="Codex provider">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {providers.map((provider) => (
+                <SelectItem key={provider.instanceId} value={provider.instanceId}>
+                  {provider.instanceId}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        ) : null}
+        <div className="flex min-w-0 items-center gap-2">
+          <InputGroup className="w-0 min-w-0 flex-1">
+            <InputGroupAddon>
+              <SearchIcon />
+            </InputGroupAddon>
+            <InputGroupInput
+              ref={searchRef}
+              size="sm"
+              aria-label="Search conversations"
+              placeholder={
+                searchScope === "messages"
+                  ? "Search full messages…"
+                  : "Search projects and conversation titles…"
+              }
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </InputGroup>
+          <Select
+            value={searchScope}
+            onValueChange={(value) => {
+              if (value === "titles" || value === "messages") setSearchScope(value);
+            }}
+          >
+            <SelectTrigger className="w-32 min-w-0 shrink-0" size="sm" aria-label="Search scope">
+              <SelectValue>{searchScope === "titles" ? "Titles" : "Full messages"}</SelectValue>
+            </SelectTrigger>
+            <SelectPopup>
+              <SelectItem value="titles">Titles</SelectItem>
+              <SelectItem value="messages">Full messages</SelectItem>
+            </SelectPopup>
+          </Select>
+          <Menu>
+            <MenuTrigger
+              render={<Button size="icon-sm" variant="outline" aria-label="Filter conversations" />}
+            >
+              <SlidersHorizontalIcon />
+            </MenuTrigger>
+            <MenuPopup align="end">
+              <MenuCheckboxItem checked={archived} onCheckedChange={setArchived}>
+                Archived
+              </MenuCheckboxItem>
+              <MenuCheckboxItem checked={hideImported} onCheckedChange={setHideImported}>
+                Hide already imported
+              </MenuCheckboxItem>
+              <MenuSeparator />
+              <MenuGroup>
+                <MenuGroupLabel>Conversation origin</MenuGroupLabel>
+                {ORIGINS.map((value) => (
+                  <MenuCheckboxItem
+                    key={value}
+                    checked={origin === value}
+                    onCheckedChange={(checked) => setOrigin(checked ? value : undefined)}
+                  >
+                    <span className="flex items-center gap-2">
+                      <OriginIcon origin={value} />
+                      {value === "human"
+                        ? "Human"
+                        : value === "agent"
+                          ? "Agent"
+                          : value === "mixed"
+                            ? "Mixed"
+                            : "Unknown"}
+                    </span>
+                  </MenuCheckboxItem>
+                ))}
+              </MenuGroup>
+            </MenuPopup>
+          </Menu>
+        </div>
+        <div
+          role="status"
+          className="flex min-h-9 items-center justify-between gap-2 border-b px-1 text-xs text-muted-foreground"
+        >
+          <span>
+            {selectingProject
+              ? "Selecting all matching conversations…"
+              : loading || pendingSearch
+                ? query
+                  ? "Searching…"
+                  : "Loading conversations…"
+                : `${data.totalCount}${data.catalogComplete ? "" : "+"} ${query ? "matches" : "conversations"}${cwd === null ? ` in ${data.projects.length} projects` : ""}`}
+          </span>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={locked}
+            onClick={() => {
+              cache.current.clear();
+              void load(undefined, true);
+            }}
+          >
+            Refresh
+          </Button>
+        </div>
+      </div>
+    ) : null;
   return (
     <Dialog
       open={open}
@@ -772,6 +896,7 @@ export function CodexThreadImportDialog({
                 : "Choose projects, or open one to pick conversations."}
           </DialogDescription>
         </DialogHeader>
+        {catalogControls}
         <DialogPanel className="space-y-3" scrollFade={false}>
           {results ? (
             <div className="divide-y divide-border/50">
@@ -847,139 +972,6 @@ export function CodexThreadImportDialog({
             </Empty>
           ) : (
             <>
-              <div className="sticky top-0 z-10 space-y-2 bg-popover pb-2">
-                {providers.length > 1 ? (
-                  <Select
-                    value={providerInstanceId}
-                    onValueChange={(value) => {
-                      if (value) {
-                        setSelectedProvider(value as ProviderInstanceId);
-                        setSelection(new Map());
-                        setCheckoutChoices(new Map());
-                        setCatalogProjects(new Map());
-                      }
-                    }}
-                  >
-                    <SelectTrigger size="sm" aria-label="Codex provider">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectPopup>
-                      {providers.map((provider) => (
-                        <SelectItem key={provider.instanceId} value={provider.instanceId}>
-                          {provider.instanceId}
-                        </SelectItem>
-                      ))}
-                    </SelectPopup>
-                  </Select>
-                ) : null}
-                <div className="flex min-w-0 items-center gap-2">
-                  <InputGroup className="w-0 min-w-0 flex-1">
-                    <InputGroupAddon>
-                      <SearchIcon />
-                    </InputGroupAddon>
-                    <InputGroupInput
-                      ref={searchRef}
-                      size="sm"
-                      aria-label="Search conversations"
-                      placeholder={
-                        searchScope === "messages"
-                          ? "Search full messages…"
-                          : "Search projects and conversation titles…"
-                      }
-                      value={search}
-                      onChange={(event) => setSearch(event.target.value)}
-                    />
-                  </InputGroup>
-                  <Select
-                    value={searchScope}
-                    onValueChange={(value) => {
-                      if (value === "titles" || value === "messages") setSearchScope(value);
-                    }}
-                  >
-                    <SelectTrigger
-                      className="w-32 min-w-0 shrink-0"
-                      size="sm"
-                      aria-label="Search scope"
-                    >
-                      <SelectValue>
-                        {searchScope === "titles" ? "Titles" : "Full messages"}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectPopup>
-                      <SelectItem value="titles">Titles</SelectItem>
-                      <SelectItem value="messages">Full messages</SelectItem>
-                    </SelectPopup>
-                  </Select>
-                  <Menu>
-                    <MenuTrigger
-                      render={
-                        <Button
-                          size="icon-sm"
-                          variant="outline"
-                          aria-label="Filter conversations"
-                        />
-                      }
-                    >
-                      <SlidersHorizontalIcon />
-                    </MenuTrigger>
-                    <MenuPopup align="end">
-                      <MenuCheckboxItem checked={archived} onCheckedChange={setArchived}>
-                        Archived
-                      </MenuCheckboxItem>
-                      <MenuCheckboxItem checked={hideImported} onCheckedChange={setHideImported}>
-                        Hide already imported
-                      </MenuCheckboxItem>
-                      <MenuSeparator />
-                      <MenuGroup>
-                        <MenuGroupLabel>Conversation origin</MenuGroupLabel>
-                        {ORIGINS.map((value) => (
-                          <MenuCheckboxItem
-                            key={value}
-                            checked={origin === value}
-                            onCheckedChange={(checked) => setOrigin(checked ? value : undefined)}
-                          >
-                            <span className="flex items-center gap-2">
-                              <OriginIcon origin={value} />
-                              {value === "human"
-                                ? "Human"
-                                : value === "agent"
-                                  ? "Agent"
-                                  : value === "mixed"
-                                    ? "Mixed"
-                                    : "Unknown"}
-                            </span>
-                          </MenuCheckboxItem>
-                        ))}
-                      </MenuGroup>
-                    </MenuPopup>
-                  </Menu>
-                </div>
-                <div
-                  role="status"
-                  className="flex min-h-9 items-center justify-between gap-2 border-b px-1 text-xs text-muted-foreground"
-                >
-                  <span>
-                    {selectingProject
-                      ? "Selecting all matching conversations…"
-                      : loading || pendingSearch
-                        ? query
-                          ? "Searching…"
-                          : "Loading conversations…"
-                        : `${data.totalCount}${data.catalogComplete ? "" : "+"} ${query ? "matches" : "conversations"}${cwd === null ? ` in ${data.projects.length} projects` : ""}`}
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={locked}
-                    onClick={() => {
-                      cache.current.clear();
-                      void load(undefined, true);
-                    }}
-                  >
-                    Refresh
-                  </Button>
-                </div>
-              </div>
               {[...missingProjectCounts].map(([projectCwd, count]) => {
                 const project = catalogProjects.get(projectCwd);
                 const checkouts = project?.checkouts ?? [];

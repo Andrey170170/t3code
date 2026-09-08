@@ -7,12 +7,14 @@ import {
 import { UserInputAttachmentAnswerPayload, isToolLifecycleItemType } from "@t3tools/contracts";
 import type {
   OrchestrationLatestTurn,
+  OrchestrationMessage,
   OrchestrationThread,
   OrchestrationThreadActivity,
   ToolLifecycleItemType,
-  TurnId,
   UserInputQuestion,
 } from "@t3tools/contracts";
+import { TurnId } from "@t3tools/contracts";
+import type { CodexHistoryWorkEntry } from "@t3tools/client-runtime/state/codex-history-projection";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import {
   commandDetailRepeatsCommand,
@@ -2201,6 +2203,34 @@ export function buildThreadFeed(
       ),
     ],
     (s) => new Date(s.createdAt),
+    Order.Date,
+  );
+
+  return groupAdjacentActivities(entries);
+}
+
+/** Adapt native Codex history to the same message and work rows as a live thread. */
+export function buildCodexHistoryFeed(
+  messages: ReadonlyArray<OrchestrationMessage>,
+  workEntries: ReadonlyArray<CodexHistoryWorkEntry>,
+): ThreadFeedEntry[] {
+  const entries = Arr.sortWith(
+    [
+      ...messages.map((message) => ({
+        type: "message" as const,
+        id: message.id,
+        createdAt: message.createdAt,
+        message,
+      })),
+      ...workEntries.map((entry) =>
+        toThreadFeedActivityEntry({
+          ...entry,
+          turnId: entry.turnId === null ? null : TurnId.make(entry.turnId),
+          sourceActivityKind: "codex-history",
+        }),
+      ),
+    ],
+    (entry) => new Date(entry.createdAt),
     Order.Date,
   );
 

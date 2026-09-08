@@ -3,6 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/codex-history-projection": {
+      "types": "./src/state/codexHistoryProjection.ts",
+      "default": "./src/state/codexHistoryProjection.ts"
+    },
+    "./state/codex-history-reader": {
+      "types": "./src/state/codexHistoryReader.ts",
+      "default": "./src/state/codexHistoryReader.ts"
+    },
     "./state/codexImportSelection": {
       "types": "./src/state/codexImportSelection.ts",
       "default": "./src/state/codexImportSelection.ts"

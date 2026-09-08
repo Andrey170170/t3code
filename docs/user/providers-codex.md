@@ -31,12 +31,11 @@ Finish work in the original client before importing. Import does not synchronize
 with a conversation still running elsewhere. The checkout you continue in must
 exist on the environment.
 
-The conversation keeps its Codex context when you continue it in T3 Code. Open
-**Original Codex history** above the chat to read its earlier messages and tool
-results, and load older pages as needed. Conversations previously imported through
-onboarding can select their **History upgrade** entry in the import picker. The original-history
-panel replaces their short imported text preview while open; new T3 messages stay
-in the chat.
+The conversation keeps its Codex context when you continue it in T3 Code. Earlier
+messages and tool results appear in the conversation alongside new messages. Use
+**Load earlier turns** to read older pages. Conversations previously imported
+through onboarding can select their **History upgrade** entry in the import picker
+to replace the short text preview with complete, paginated history.
 
 **Import recent conversations** remains available for the previous batch import:
 it selects recent Claude/Codex conversations and retains a limited text preview.
