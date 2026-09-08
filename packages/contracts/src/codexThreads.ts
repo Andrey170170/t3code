@@ -19,6 +19,7 @@ export const CodexThreadsListInput = Schema.Struct({
   origin: Schema.optional(CodexConversationOrigin),
   searchScope: Schema.optional(Schema.Literals(["titles", "messages"])),
   refresh: Schema.optional(Schema.Boolean),
+  hideImported: Schema.optional(Schema.Boolean),
 });
 export type CodexThreadsListInput = typeof CodexThreadsListInput.Type;
 export const CodexThreadsListResult = Schema.Struct({

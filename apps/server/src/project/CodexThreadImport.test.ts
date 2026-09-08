@@ -57,6 +57,7 @@ const makeHarness = (
     projectRoot?: string;
     nativeId?: string;
     nativeName?: string;
+    readUpdatedAt?: number;
     archived?: boolean;
     historyLength?: number;
     existingThread?: OrchestrationThreadShell;
@@ -76,7 +77,20 @@ const makeHarness = (
     request: (method, params) =>
       Effect.sync(() => {
         requests.push({ method, params });
-        if (method === "thread/list") return { data: options.catalog ?? [], nextCursor: null };
+        if (method === "thread/list")
+          return {
+            data: options.catalog ?? [
+              {
+                id: options.nativeId ?? "native-1",
+                cwd: options.cwd ?? "/tmp",
+                modelProvider: "openai",
+                preview: "My native thread",
+                createdAt: 1_700_000_000,
+                updatedAt: 1_700_000_001,
+              },
+            ],
+            nextCursor: null,
+          };
         if (method === "thread/search")
           return {
             data: (options.catalog ?? []).map((thread) => ({
@@ -97,7 +111,7 @@ const makeHarness = (
               preview: "My native thread",
               ...(options.nativeName !== undefined ? { name: options.nativeName } : {}),
               createdAt: 1_700_000_000,
-              updatedAt: 1_700_000_001,
+              updatedAt: options.readUpdatedAt ?? 1_700_000_001,
               status: { type: options.active ? "active" : "idle" },
             },
           };
@@ -193,6 +207,128 @@ const makeHarness = (
 };
 
 it.layer(testLayer)("Codex native imports", (it) => {
+  it.effect(
+    "uses fresh list activity when native read(false) incorrectly returns creation time",
+    () =>
+      Effect.gen(function* () {
+        const recent = "2026-09-08T17:00:00.000Z";
+        const harness = makeHarness({
+          nativeId: "read-lags",
+          readUpdatedAt: 1_700_000_000,
+          catalog: [
+            {
+              id: "read-lags",
+              cwd: "/tmp",
+              modelProvider: "openai",
+              preview: "Recent update",
+              createdAt: 1_700_000_000,
+              updatedAt: Date.parse(recent) / 1000,
+            },
+          ],
+        });
+        const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
+        const imported = yield* importer.adopt({
+          providerInstanceId: instanceId,
+          nativeThreadId: "read-lags",
+          projectId,
+        });
+        const directory = yield* ProviderSessionDirectory;
+        expect(
+          Option.getOrThrow(yield* directory.getBinding(imported.threadId)).runtimePayload,
+        ).toMatchObject({ codexHistoryImport: { lastActivityAt: recent } });
+        expect(harness.requests.filter(({ method }) => method === "thread/read")).toEqual([
+          { method: "thread/read", params: { threadId: "read-lags", includeTurns: false } },
+        ]);
+        expect(
+          harness.requests.find(({ method }) => method === "thread/list")?.params,
+        ).toMatchObject({ cwd: "/tmp" });
+        const absent = makeHarness({ nativeId: "activity-unknown", catalog: [] });
+        const other = yield* makeCodexThreadImport.pipe(Effect.provide(absent.services));
+        const result = yield* other.adopt({
+          providerInstanceId: instanceId,
+          nativeThreadId: "activity-unknown",
+          projectId,
+        });
+        const payload = Option.getOrThrow(
+          yield* directory.getBinding(result.threadId),
+        ).runtimePayload;
+        expect(payload).toMatchObject({
+          codexHistoryImport: { nativeThreadId: "activity-unknown" },
+        });
+        expect(payload).not.toHaveProperty("codexHistoryImport.lastActivityAt");
+      }),
+  );
+
+  it.effect(
+    "hides completed imports before project counts and pagination while retaining upgrade and retry rows",
+    () =>
+      Effect.gen(function* () {
+        const ids = [
+          "done-0",
+          "done-1",
+          "done-2",
+          "legacy",
+          "retry",
+          ...Array.from({ length: 51 }, (_, index) => `new-${index}`),
+        ];
+        const catalog = ids.map((id) => ({
+          id,
+          cwd: "/tmp",
+          modelProvider: "openai",
+          preview: id,
+          createdAt: 1,
+          updatedAt: 2,
+          threadSource: "user",
+        }));
+        const directory = yield* ProviderSessionDirectory;
+        for (const nativeId of ids.slice(0, 5)) {
+          const threadId = ThreadId.make(`bound-${nativeId}`);
+          const boundary = {
+            nativeThreadId: nativeId,
+            providerInstanceId: instanceId,
+            importedAt: "2026-01-01T00:00:00.000Z",
+            homeIdentity: "shared-home",
+            firstItem: null,
+            nextCursor: null,
+          };
+          yield* directory.upsert({
+            threadId,
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: instanceId,
+            status: nativeId === "retry" ? "stopped" : "running",
+            resumeCursor: { threadId: nativeId },
+            runtimePayload: nativeId === "legacy" ? {} : { codexHistoryImport: boundary },
+          });
+        }
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,role,text,is_streaming,created_at,updated_at) VALUES ('import:legacy-preview','bound-legacy','user','preview',0,'2026-01-01','2026-01-01')`;
+        const harness = makeHarness({ catalog });
+        const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
+        const first = yield* importer.list({ providerInstanceId: instanceId, hideImported: true });
+        expect(first.totalCount).toBe(53);
+        expect(first.projects[0]).toMatchObject({ totalCount: 53, importableCount: 53 });
+        expect(first.threads.some((thread) => thread.id.startsWith("done-"))).toBe(false);
+        expect(
+          first.threads.find((thread) => thread.id === "legacy")?.historyUpgradeAvailable,
+        ).toBe(true);
+        expect(first.threads.find((thread) => thread.id === "retry")?.existingThreadId).toBeNull();
+        expect(first.threads).toHaveLength(50);
+        const second = yield* importer.list({
+          providerInstanceId: instanceId,
+          hideImported: true,
+          cursor: first.nextCursor!,
+        });
+        expect(second.threads).toHaveLength(3);
+        expect(second.nextCursor).toBeNull();
+        expect(
+          (yield* importer
+            .list({ providerInstanceId: instanceId, cursor: first.nextCursor! })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        expect((yield* importer.list({ providerInstanceId: instanceId })).totalCount).toBe(56);
+      }),
+  );
+
   it.effect(
     "groups unseen Git worktrees into the main project and preserves their runtime checkout",
     () =>
@@ -476,7 +612,10 @@ it.layer(testLayer)("Codex native imports", (it) => {
         const directory = yield* ProviderSessionDirectory;
         expect(Option.getOrThrow(yield* directory.getBinding(result.threadId))).toMatchObject({
           resumeCursor: { threadId: "native-1" },
-          runtimePayload: { cwd: "/tmp" },
+          runtimePayload: {
+            cwd: "/tmp",
+            codexHistoryImport: { lastActivityAt: "2023-11-14T22:13:21.000Z" },
+          },
           status: "stopped",
         });
         harness.appendLiveItem();
@@ -487,6 +626,9 @@ it.layer(testLayer)("Codex native imports", (it) => {
           status: "running",
           runtimePayload: { cwd: "/tmp", pid: 42 },
         });
+        expect(
+          Option.getOrThrow(yield* directory.getBinding(result.threadId)).runtimePayload,
+        ).toMatchObject({ codexHistoryImport: { lastActivityAt: "2023-11-14T22:13:21.000Z" } });
         const restarted = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
         const page = yield* restarted.history({ threadId: result.threadId });
         expect(page.items).toEqual([historicalItem, olderItem]);
@@ -550,6 +692,7 @@ it.layer(testLayer)("Codex native imports", (it) => {
         expect(harness.requests.map((request) => request.method)).toEqual([
           "thread/read",
           "thread/items/list",
+          "thread/list",
           "thread/unarchive",
         ]);
         expect(harness.commands).toHaveLength(1);

@@ -88,3 +88,38 @@ it.effect("marks a bounded catalog incomplete rather than claiming exact all-pro
     assert.equal(result.threads.length, 100);
   }),
 );
+
+it.effect(
+  "uses list activity instead of metadata-only read timestamps and stops after target discovery",
+  () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; params: unknown }> = [];
+      const native = makeThreadHistory({
+        request: (method, params) =>
+          Effect.sync(() => {
+            calls.push({ method, params });
+            if (method === "thread/read")
+              return { thread: thread("target", { createdAt: 1, updatedAt: 1 }) };
+            return {
+              data: [thread("target", { createdAt: 1, updatedAt: 900 })],
+              nextCursor: "later-unneeded-page",
+            };
+          }),
+      });
+      // Installed Codex 0.153.4 exposes creation time through read(false), while
+      // list retains the actual update time. Never hydrate full turns just for age.
+      assert.equal((yield* native.read("target")).updatedAt, 1);
+      const result = yield* readCodexCatalog(native, false, {
+        cwd: "/repo",
+        targetIds: ["target"],
+      });
+      assert.equal(result.threads[0]?.updatedAt, 900);
+      assert.isFalse(result.complete);
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        ["thread/read", "thread/list"],
+      );
+      assert.deepInclude(calls[0]?.params, { includeTurns: false });
+      assert.deepInclude(calls[1]?.params, { cwd: "/repo", limit: 100 });
+    }),
+);

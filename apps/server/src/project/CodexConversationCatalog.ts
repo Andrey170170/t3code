@@ -81,6 +81,10 @@ export const topLevelCodexThreads = (threads: ReadonlyArray<NativeThread>) => {
 export const readCodexCatalog = Effect.fn("readCodexCatalog")(function* (
   native: ReturnType<typeof makeThreadHistory>,
   archived: boolean,
+  options: {
+    readonly cwd?: string | ReadonlyArray<string>;
+    readonly targetIds?: ReadonlyArray<string>;
+  } = {},
 ) {
   const threads = new Map<string, NativeThread>();
   const seen = new Set<string>();
@@ -91,6 +95,7 @@ export const readCodexCatalog = Effect.fn("readCodexCatalog")(function* (
       modelProviders: [],
       useStateDbOnly: false,
       archived,
+      ...(options.cwd ? { cwd: options.cwd } : {}),
       limit: 100,
       sortDirection: "desc",
       sortKey: "updated_at",
@@ -98,6 +103,8 @@ export const readCodexCatalog = Effect.fn("readCodexCatalog")(function* (
     });
     for (const thread of page.data) threads.set(thread.id, thread);
     if (!page.nextCursor) return { threads: [...threads.values()], complete: true };
+    if (options.targetIds?.every((id) => threads.has(id)))
+      return { threads: [...threads.values()], complete: false };
     if (seen.has(page.nextCursor))
       return yield* new CodexThreadError({
         message: "Codex returned a non-advancing catalog cursor. Refresh and try again.",

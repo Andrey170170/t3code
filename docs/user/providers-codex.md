@@ -20,6 +20,9 @@ importing. The choice applies to removed worktrees in that project; conversation
 whose worktrees still exist keep their original checkout.
 
 Search titles or full messages, and filter by conversation origin or archive state.
+Already imported conversations are hidden by default unless a history upgrade is
+available. Older imports follow your automatic settling setting using their original
+activity time, so look under **Settled** for inactive conversations.
 Importing an archived conversation restores it in Codex. A batch continues if you
 close the picker; reopen it to retry any failures. Meaningful native titles are
 preserved; unnamed conversations receive a title using your configured title model.

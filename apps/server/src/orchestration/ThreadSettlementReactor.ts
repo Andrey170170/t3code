@@ -1,4 +1,4 @@
-import { CommandId } from "@t3tools/contracts";
+import { CommandId, type ThreadId } from "@t3tools/contracts";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -11,6 +11,7 @@ import * as Schedule from "effect/Schedule";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import { makeCodexImportedActivity } from "../project/CodexImportedActivity.ts";
 import * as GitManager from "../git/GitManager.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -41,6 +42,7 @@ export const make = Effect.gen(function* () {
   const pullRequests = yield* PullRequestService.PullRequestService;
   const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
+  const importedActivityLookup = yield* makeCodexImportedActivity;
 
   const sweep = Effect.fn("ThreadSettlementReactor.sweep")(function* (
     mergedPullRequest: PullRequestService.PullRequestMergeEvent | null,
@@ -55,6 +57,7 @@ export const make = Effect.gen(function* () {
     // A merge rechecks all candidates, including branches that discovery has
     // not linked yet. Those lookups can still have cached the PR as open.
     const candidates = snapshot.threads.filter((thread) => isAutoSettlementCandidate(thread, now));
+    let importedActivity = new Map<ThreadId, string>();
 
     // Return the thread when it still needs a pull request decision. A rejected
     // dispatch skips it for this snapshot instead of retrying through a lookup.
@@ -68,6 +71,7 @@ export const make = Effect.gen(function* () {
           now: decisionNow,
           autoSettleAfterDays: settings.sidebarAutoSettleAfterDays,
           autoSettleOnMerge: settings.sidebarAutoSettleOnMerge,
+          importedActivityAt: importedActivity.get(thread.id) ?? null,
         });
         if (settledAt === null) {
           return thread;
@@ -97,12 +101,35 @@ export const make = Effect.gen(function* () {
 
     // Inactivity needs no host state. Finish these decisions before any lookup
     // can fail or wait on the network, including lookups shared by recent threads.
-    const lookupCandidates = (yield* Effect.forEach(
+    const pendingAfterLocal = (yield* Effect.forEach(
       candidates,
       (thread) => settleThread(thread, null),
       {
         concurrency: 8,
       },
+    )).filter((thread) => thread !== null);
+
+    // Native imports have no projected messages. Persisted source activity is
+    // the age anchor; legacy boundaries backfill metadata in bounded batches.
+    // Run this after local inactivity decisions so a slow provider cannot delay them.
+    importedActivity = yield* importedActivityLookup(
+      pendingAfterLocal
+        .filter(
+          (thread) =>
+            thread.latestUserMessageAt === null &&
+            thread.latestTurn === null &&
+            (settings.sidebarAutoSettleAfterDays !== null ||
+              thread.branch !== null ||
+              thread.linkedPullRequest != null ||
+              thread.branchPullRequest != null),
+        )
+        .map((thread) => thread.id),
+    );
+    const lookupCandidates = (yield* Effect.forEach(
+      pendingAfterLocal,
+      (thread) =>
+        importedActivity.has(thread.id) ? settleThread(thread, null) : Effect.succeed(thread),
+      { concurrency: 8 },
     )).filter((thread) => thread !== null);
 
     // Use the same cwd as PR discovery so both paths share GitManager's cache.
@@ -252,6 +279,13 @@ export const make = Effect.gen(function* () {
     const settingsChanges = yield* settingsService.subscribeChanges;
     const mergedPullRequests = yield* pullRequests.subscribeMerges;
     const initialSettings = yield* settingsService.getSettings.pipe(Effect.orDie);
+    yield* forkParked(
+      Stream.runForEach(engine.streamDomainEvents, (event) =>
+        event.type === "thread.created" && event.metadata.historyImport === true
+          ? worker.enqueue(undefined)
+          : Effect.void,
+      ),
+    );
     let lastAfterDays = initialSettings.sidebarAutoSettleAfterDays;
     let lastOnMerge = initialSettings.sidebarAutoSettleOnMerge;
     yield* forkParked(

@@ -57,6 +57,7 @@ const HistoryBoundary = Schema.Struct({
   nativeThreadId: Schema.String,
   providerInstanceId: ProviderInstanceId,
   importedAt: Schema.String,
+  lastActivityAt: Schema.optionalKey(Schema.String),
   homeIdentity: Schema.String,
   replacesLegacyMessages: Schema.optionalKey(Schema.Boolean),
   firstItem: Schema.NullOr(CodexHistoryItem),
@@ -201,6 +202,7 @@ export const makeCodexThreadImport = Effect.gen(function* () {
       input.origin ?? "",
       search,
       input.searchScope ?? "titles",
+      String(input.hideImported ?? false),
     ]);
     const cursor = input.cursor
       ? yield* decodeCatalogCursor(input.cursor).pipe(
@@ -443,6 +445,7 @@ export const makeCodexThreadImport = Effect.gen(function* () {
       })
       .filter(
         (row) =>
+          (!input.hideImported || row.existingThreadId === null || row.historyUpgradeAvailable) &&
           (!input.origin || row.origin === input.origin) &&
           (!search ||
             (searchResult
@@ -595,6 +598,19 @@ export const makeCodexThreadImport = Effect.gen(function* () {
             typeof thread.path === "string"
               ? /(?:^|[\\/])archived_sessions[\\/]/.test(thread.path)
               : (thread.archived ?? input.archived ?? false);
+          // Codex 0.153 read(includeTurns:false) can report createdAt as updatedAt.
+          // Discovery metadata carries the correct activity time without loading history.
+          const activityCatalog = yield* readCodexCatalog(native, archived, {
+            cwd: thread.cwd,
+            targetIds: [thread.id],
+          }).pipe(Effect.orElseSucceed(() => null));
+          const sourceActivity = activityCatalog?.threads.find(
+            (entry) => entry.id === thread.id,
+          )?.updatedAt;
+          const sourceActivityAt =
+            sourceActivity === undefined
+              ? Option.none<DateTime.Utc>()
+              : DateTime.make(sourceActivity * 1000);
           if (archived && !upgrading) yield* native.unarchive(thread.id);
           const importedAt = DateTime.formatIso(yield* DateTime.now);
           const homeIdentity = yield* client.resolveNativeHomeIdentity(input.providerInstanceId);
@@ -605,6 +621,9 @@ export const makeCodexThreadImport = Effect.gen(function* () {
             nativeThreadId: thread.id,
             providerInstanceId: input.providerInstanceId,
             importedAt,
+            ...(Option.isSome(sourceActivityAt)
+              ? { lastActivityAt: DateTime.formatIso(sourceActivityAt.value) }
+              : {}),
             homeIdentity,
             firstItem: first.data[0] ?? null,
             nextCursor: first.nextCursor ?? null,

@@ -74,6 +74,7 @@ interface EnvironmentOption {
 interface ImportFlow {
   readonly activate: () => () => void;
   readonly archived: boolean;
+  readonly hideImported: boolean;
   readonly catalog: CodexThreadsListResult | null;
   readonly catalogRevision: number;
   readonly environmentId: EnvironmentId | null;
@@ -106,6 +107,7 @@ interface ImportFlow {
   ) => Promise<CodexThreadsListResult>;
   readonly refreshCatalog: () => Promise<void>;
   readonly setArchived: (value: boolean) => void;
+  readonly setHideImported: (value: boolean) => void;
   readonly setCheckoutChoice: (projectCwd: string, checkoutCwd: string) => void;
   readonly setEnvironmentId: (value: EnvironmentId) => void;
   readonly setOrigin: (value: OriginFilter) => void;
@@ -142,6 +144,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
   const [searchScope, setSearchScope] = useState<SearchScope>("titles");
   const [origin, setOrigin] = useState<OriginFilter>("all");
   const [archived, setArchived] = useState(false);
+  const [hideImported, setHideImported] = useState(true);
   const [catalog, setCatalog] = useState<CodexThreadsListResult | null>(null);
   const [knownProjects, setKnownProjects] = useState<Map<string, CatalogProject>>(new Map());
   const [checkoutChoices, setCheckoutChoices] = useState<Map<string, string>>(new Map());
@@ -196,6 +199,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     environmentId,
     providerId,
     archived,
+    hideImported,
     origin,
     debouncedSearch,
     searchScope,
@@ -210,6 +214,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
         input: {
           providerInstanceId: providerId,
           archived,
+          hideImported,
           ...(origin === "all" ? {} : { origin }),
           ...(debouncedSearch ? { search: debouncedSearch, searchScope } : {}),
           ...(cwd ? { cwd } : {}),
@@ -240,7 +245,17 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       });
       return result.value;
     },
-    [archived, debouncedSearch, environmentId, filterKey, list, origin, providerId, searchScope],
+    [
+      archived,
+      hideImported,
+      debouncedSearch,
+      environmentId,
+      filterKey,
+      list,
+      origin,
+      providerId,
+      searchScope,
+    ],
   );
 
   const loadCatalog = useCallback(
@@ -542,6 +557,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     () => ({
       activate,
       archived,
+      hideImported,
       catalog,
       catalogRevision,
       checkoutChoices,
@@ -567,6 +583,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       loadProjectPage,
       refreshCatalog: () => loadCatalog(true),
       setArchived,
+      setHideImported,
       setCheckoutChoice: (projectCwd, checkoutCwd) => {
         setCheckoutChoices((current) =>
           new Map(current).set(normalizeProjectPathForComparison(projectCwd), checkoutCwd),
@@ -587,6 +604,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     [
       activate,
       archived,
+      hideImported,
       catalog,
       catalogRevision,
       checkoutChoices,
@@ -821,6 +839,15 @@ function FilterControls() {
           disabled={flow.importing}
           onValueChange={flow.setArchived}
           value={flow.archived}
+        />
+      </View>
+      <View className="min-h-11 flex-row items-center justify-between rounded-xl bg-card px-4">
+        <Text className="text-sm font-t3-medium text-foreground">Hide already imported</Text>
+        <ThemedSwitch
+          accessibilityLabel="Hide already imported"
+          disabled={flow.importing}
+          onValueChange={flow.setHideImported}
+          value={flow.hideImported}
         />
       </View>
     </View>
@@ -1189,7 +1216,11 @@ export function SettingsCodexImportRouteScreen() {
         ) : flow.catalog?.projects.length === 0 ? (
           <EmptyState
             title="No conversations found"
-            detail="No Codex conversations match the current search and filters."
+            detail={
+              flow.hideImported
+                ? "No new conversations or history upgrades match these filters. Turn off Hide already imported to see previous imports."
+                : "No Codex conversations match the current search and filters."
+            }
           />
         ) : flow.catalog ? (
           <SettingsSection title="Projects" card>
@@ -1402,7 +1433,11 @@ export function SettingsCodexImportProjectRouteScreen({
         ) : threads.length === 0 ? (
           <EmptyState
             title="No conversations found"
-            detail="No conversations in this project match the current search and filters."
+            detail={
+              flow.hideImported
+                ? "No new conversations or history upgrades match these filters. Turn off Hide already imported to see previous imports."
+                : "No conversations in this project match the current search and filters."
+            }
           />
         ) : (
           <SettingsSection card>

@@ -67,6 +67,7 @@ import { Kbd } from "./ui/kbd";
 import {
   Menu,
   MenuCheckboxItem,
+  MenuGroup,
   MenuGroupLabel,
   MenuPopup,
   MenuSeparator,
@@ -170,7 +171,7 @@ export function CodexThreadImportDialog({
   const query = useDebouncedValue(search.trim(), 300);
   const [searchScope, setSearchScope] = useState<"titles" | "messages">("titles");
   const [archived, setArchived] = useState(false);
-  const [hideImported, setHideImported] = useState(false);
+  const [hideImported, setHideImported] = useState(true);
   const [origin, setOrigin] = useState<CodexConversationOrigin | undefined>();
   const [data, setData] = useState<CodexThreadsListResult>(EMPTY_RESULT);
   const [loading, setLoading] = useState(false);
@@ -208,16 +209,24 @@ export function CodexThreadImportDialog({
         ? {
             providerInstanceId,
             archived,
+            hideImported,
             searchScope,
             ...(cwd !== null ? { cwd } : {}),
             ...(origin ? { origin } : {}),
             ...(query ? { search: query } : {}),
           }
         : null,
-    [providerInstanceId, archived, searchScope, cwd, origin, query],
+    [providerInstanceId, archived, hideImported, searchScope, cwd, origin, query],
   );
   const queryKey = JSON.stringify(input);
-  const filterKey = JSON.stringify([providerInstanceId, archived, searchScope, origin, query]);
+  const filterKey = JSON.stringify([
+    providerInstanceId,
+    archived,
+    hideImported,
+    searchScope,
+    origin,
+    query,
+  ]);
   const pendingSearch = query !== search.trim();
   const currentProject =
     data.projects.find((project) => project.cwd === cwd) ??
@@ -921,25 +930,27 @@ export function CodexThreadImportDialog({
                         Hide already imported
                       </MenuCheckboxItem>
                       <MenuSeparator />
-                      <MenuGroupLabel>Conversation origin</MenuGroupLabel>
-                      {ORIGINS.map((value) => (
-                        <MenuCheckboxItem
-                          key={value}
-                          checked={origin === value}
-                          onCheckedChange={(checked) => setOrigin(checked ? value : undefined)}
-                        >
-                          <span className="flex items-center gap-2">
-                            <OriginIcon origin={value} />
-                            {value === "human"
-                              ? "Human"
-                              : value === "agent"
-                                ? "Agent"
-                                : value === "mixed"
-                                  ? "Mixed"
-                                  : "Unknown"}
-                          </span>
-                        </MenuCheckboxItem>
-                      ))}
+                      <MenuGroup>
+                        <MenuGroupLabel>Conversation origin</MenuGroupLabel>
+                        {ORIGINS.map((value) => (
+                          <MenuCheckboxItem
+                            key={value}
+                            checked={origin === value}
+                            onCheckedChange={(checked) => setOrigin(checked ? value : undefined)}
+                          >
+                            <span className="flex items-center gap-2">
+                              <OriginIcon origin={value} />
+                              {value === "human"
+                                ? "Human"
+                                : value === "agent"
+                                  ? "Agent"
+                                  : value === "mixed"
+                                    ? "Mixed"
+                                    : "Unknown"}
+                            </span>
+                          </MenuCheckboxItem>
+                        ))}
+                      </MenuGroup>
                     </MenuPopup>
                   </Menu>
                 </div>
@@ -1085,9 +1096,11 @@ export function CodexThreadImportDialog({
                   </EmptyMedia>
                   <EmptyTitle>No conversations found</EmptyTitle>
                   <EmptyDescription>
-                    {search || archived || origin || hideImported
-                      ? "No conversations match these filters. Try another search or clear a filter."
-                      : "There are no saved Codex conversations in this location."}
+                    {hideImported
+                      ? "No new conversations or history upgrades match these filters. Turn off Hide already imported to see previous imports."
+                      : search || archived || origin
+                        ? "No conversations match these filters. Try another search or clear a filter."
+                        : "There are no saved Codex conversations in this location."}
                   </EmptyDescription>
                 </Empty>
               ) : (
