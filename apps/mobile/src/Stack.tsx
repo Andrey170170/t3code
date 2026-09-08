@@ -55,7 +55,11 @@ import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsCl
 import { SettingsAuthRouteScreen } from "./features/settings/SettingsAuthRouteScreen";
 import { SettingsEnvironmentsRouteScreen } from "./features/settings/SettingsEnvironmentsRouteScreen";
 import { SettingsLegalRouteScreen } from "./features/settings/SettingsLegalRouteScreen";
-import { SettingsCodexImportRouteScreen } from "./features/settings/SettingsCodexImportRouteScreen";
+import {
+  SettingsCodexImportProjectRouteScreen,
+  SettingsCodexImportProvider,
+  SettingsCodexImportRouteScreen,
+} from "./features/settings/SettingsCodexImportRouteScreen";
 import { SettingsProjectGroupingRouteScreen } from "./features/settings/SettingsProjectGroupingRouteScreen";
 import { UsageLimitAccountScreen } from "./features/usage/UsageLimitsPooled";
 import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
@@ -139,6 +143,7 @@ const LEGAL_DOCUMENT_HEADER_OPTIONS: AppScreenOptions = {
 
 const SettingsContentStack = createNativeStackNavigator({
   initialRouteName: "Settings",
+  layout: ({ children }) => <SettingsCodexImportProvider>{children}</SettingsCodexImportProvider>,
   screenOptions: {
     ...GLASS_HEADER_OPTIONS,
     // Sheets read better with the iOS-default centered title (no editor style).
@@ -183,7 +188,11 @@ const SettingsContentStack = createNativeStackNavigator({
     SettingsCodexImport: createNativeStackScreen({
       screen: SettingsCodexImportRouteScreen,
       linking: "codex-import",
-      options: { title: "Import Codex Chats" },
+      options: { title: "Import conversations" },
+    }),
+    SettingsCodexImportProject: createNativeStackScreen({
+      screen: SettingsCodexImportProjectRouteScreen,
+      options: { title: "Conversations" },
     }),
     SettingsProjectGrouping: createNativeStackScreen({
       screen: SettingsProjectGroupingRouteScreen,

@@ -926,7 +926,7 @@ function ProjectDetail({
         <SettingsSection title="Project" hideTitle>
           <SettingsRow
             title="Conversations"
-            description="Import recent sessions or select existing Codex conversations."
+            description="Choose existing Codex conversations to import into this project."
             control={
               <CodexThreadImportButton
                 environmentId={selectedCheckout.environmentId}

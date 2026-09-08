@@ -42,6 +42,21 @@ const settings = layerTest({
 const services = Layer.merge(NodeServices.layer, settings);
 
 describe("CodexThreadClient", () => {
+  it.effect("resolves the built-in Codex provider when settings omit providerInstances", () =>
+    Effect.gen(function* () {
+      const client = yield* makeCodexThreadClient;
+      const home = yield* client.resolveNativeHomeIdentity(ProviderInstanceId.make("codex"));
+      expect(home).toBe("codex:home:/tmp/t3-thread-client-legacy-default");
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          NodeServices.layer,
+          layerTest({ providers: { codex: { homePath: "/tmp/t3-thread-client-legacy-default" } } }),
+        ),
+      ),
+    ),
+  );
+
   it.effect("deduplicates shared-home overlays but keeps isolated homes separate", () =>
     Effect.gen(function* () {
       const client = yield* makeCodexThreadClient;

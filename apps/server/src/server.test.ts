@@ -95,6 +95,7 @@ const decodeTransferShellSnapshot = Schema.decodeUnknownEffect(
 );
 const encodeTestJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
+import { TextGeneration } from "./textGeneration/TextGeneration.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as ServerConfig from "./config.ts";
 import { HTTP_ROUTER_CONFIG, makeRoutesLayer } from "./server.ts";
@@ -744,6 +745,9 @@ const buildAppUnderTest = (options?: {
     ).pipe(
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(TextGeneration)({
+            generateThreadTitle: () => Effect.succeed({ title: "Imported conversation" }),
+          }),
           Layer.mock(Keybindings.Keybindings)({
             loadConfigState: Effect.succeed({
               keybindings: [],

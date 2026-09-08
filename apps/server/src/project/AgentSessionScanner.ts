@@ -110,6 +110,26 @@ const CodexTurnMetadata = Schema.Struct({
   turn_id: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
 });
 
+const CodexSubagentSource = Schema.Union([
+  Schema.Literals(["review", "compact", "memory_consolidation"]),
+  Schema.Struct({
+    thread_spawn: Schema.Struct({
+      parent_thread_id: Schema.String,
+      depth: Schema.Number,
+      agent_path: Schema.optional(Schema.Unknown),
+      agent_nickname: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
+      agent_role: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
+    }),
+  }),
+  Schema.Struct({ other: Schema.String }),
+]);
+
+const CodexSessionSource = Schema.Union([
+  Schema.Literals(["cli", "vscode", "exec", "app_server", "unknown"]),
+  Schema.Struct({ custom: Schema.String }),
+  Schema.Struct({ subagent: CodexSubagentSource }),
+]);
+
 const TranscriptRecord = Schema.Struct({
   type: Schema.optional(Schema.String),
   timestamp: Schema.optional(Schema.String),
@@ -129,6 +149,7 @@ const TranscriptRecord = Schema.Struct({
       message: Schema.optional(Schema.String),
       model: Schema.optional(Schema.String),
       cwd: Schema.optional(Schema.String),
+      source: Schema.optional(CodexSessionSource),
       content: Schema.optional(Schema.Array(TranscriptContentBlock)),
       internal_chat_message_metadata_passthrough: Schema.optional(Schema.Unknown),
     }),
@@ -141,6 +162,17 @@ const decodeTranscriptRecord = Schema.decodeUnknownOption(Schema.fromJsonString(
 const decodeTranscriptValue = Schema.decodeUnknownOption(TranscriptRecord);
 const selectTranscriptPath = createTranscriptJsonSelector(TranscriptRecord);
 const decodeCodexTurnMetadata = Schema.decodeUnknownOption(CodexTurnMetadata);
+const decodeCodexSessionMetadata = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      type: Schema.Literal("session_meta"),
+      payload: Schema.Struct({
+        cwd: Schema.optional(Schema.String),
+        source: Schema.optional(CodexSessionSource),
+      }),
+    }),
+  ),
+);
 
 type DecodedTranscriptRecord = typeof TranscriptRecord.Type;
 
@@ -300,6 +332,18 @@ function parseAgentSessionRecords(
   input: AgentSessionTranscriptMetadata,
   records: ReadonlyArray<DecodedTranscriptRecord>,
 ): AgentSessionThread | null {
+  if (
+    input.source === "codex" &&
+    records.some(
+      (record) =>
+        record.type === "session_meta" &&
+        typeof record.payload?.source === "object" &&
+        record.payload.source !== null &&
+        "subagent" in record.payload.source,
+    )
+  ) {
+    return null;
+  }
   const fallbackTimestamp = DateTime.formatIso(DateTime.makeUnsafe(input.lastActiveAtMs));
   // Claude filenames are session IDs. Codex rollout filenames include extra
   // timestamp text, so only transcript metadata can provide a resumable ID.
@@ -563,8 +607,23 @@ function isT3ManagedWorktree(
   );
 }
 
-/** Extract `cwd` from a session-meta record, tolerating the shapes each CLI writes. */
-function extractCwd(line: string): string | null {
+/** Extract `cwd` from a session-meta record, excluding native Codex subagents. */
+function extractCwd(line: string, source: AgentSessionSource): string | null {
+  if (source === "codex") {
+    const metadata = decodeCodexSessionMetadata(line);
+    if (Option.isNone(metadata)) return null;
+    const sessionSource = metadata.value.payload.source;
+    if (
+      typeof sessionSource === "object" &&
+      sessionSource !== null &&
+      "subagent" in sessionSource
+    ) {
+      return null;
+    }
+    const cwd = metadata.value.payload.cwd?.trim();
+    return cwd && cwd.length > 0 ? cwd : null;
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -731,6 +790,7 @@ export const make = Effect.gen(function* () {
   // A large history snapshot can precede session metadata. Read bounded
   // chunks until a complete record names its cwd or the safety budget ends.
   const readCwd = Effect.fn("AgentSessionScanner.readCwd")(function* (
+    source: AgentSessionSource,
     transcript: TranscriptCandidate,
     budget: MetadataReadBudget,
   ) {
@@ -767,7 +827,9 @@ export const make = Effect.gen(function* () {
             };
             const readLastRecord = () => {
               const record = remaining + decoder.decode();
-              return record.length === 0 || !reserveRecord() ? null : extractCwd(record.trim());
+              return record.length === 0 || !reserveRecord()
+                ? null
+                : extractCwd(record.trim(), source);
             };
 
             while (bytesRead < maxBytes) {
@@ -794,7 +856,7 @@ export const make = Effect.gen(function* () {
 
               for (const line of lines) {
                 if (!reserveRecord()) return null;
-                const cwd = extractCwd(line.trim());
+                const cwd = extractCwd(line.trim(), source);
                 if (cwd !== null) return cwd;
               }
             }
@@ -1056,7 +1118,7 @@ export const make = Effect.gen(function* () {
     >();
 
     for (const transcript of transcripts) {
-      const cwd = yield* readCwd(transcript, budget);
+      const cwd = yield* readCwd(source, transcript, budget);
       if (cwd === null) continue;
       const key = `${transcript.providerInstanceId}\0${cwd}`;
       const existing = byOwnerAndCwd.get(key);

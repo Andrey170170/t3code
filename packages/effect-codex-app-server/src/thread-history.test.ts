@@ -350,3 +350,44 @@ it.effect("reports removed legacy anchors and rolled-back items as unavailable",
     }
   }),
 );
+
+it.effect("searches native message content with snippets and opaque pagination", () =>
+  Effect.gen(function* () {
+    const history = makeThreadHistory({
+      request: (method, params) =>
+        Effect.sync(() => {
+          assert.equal(method, "thread/search");
+          assert.deepEqual(params, {
+            searchTerm: "needle",
+            sourceKinds: ["exec"],
+            cursor: "opaque",
+            limit: 100,
+          });
+          return {
+            data: [
+              {
+                thread: {
+                  id: "match",
+                  cwd: "/repo",
+                  modelProvider: "custom",
+                  preview: "unrelated title",
+                  createdAt: 1,
+                  updatedAt: 2,
+                },
+                snippet: "message needle match",
+              },
+            ],
+            nextCursor: "next",
+          };
+        }),
+    });
+    const page = yield* history.search({
+      searchTerm: "needle",
+      sourceKinds: ["exec"],
+      cursor: "opaque",
+      limit: 1000,
+    });
+    assert.equal(page.data[0]?.snippet, "message needle match");
+    assert.equal(page.nextCursor, "next");
+  }),
+);

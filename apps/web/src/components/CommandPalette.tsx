@@ -1,5 +1,8 @@
 "use client";
 
+import { CodexThreadImportDialog } from "./CodexThreadImport";
+import { ImportIcon } from "lucide-react";
+
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   canCreateProjectInEnvironment,
@@ -392,6 +395,16 @@ function overlayModeForCommand(command: string | null): SearchOverlayMode | null
 }
 
 export function CommandPalette({ children }: { children: ReactNode }) {
+  const [importEnvironmentId, setImportEnvironmentId] = useState<EnvironmentId | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const openImport = useCallback(
+    (environmentId: EnvironmentId) => {
+      if (!importBusy) setImportEnvironmentId(environmentId);
+      setImportOpen(true);
+    },
+    [importBusy],
+  );
   const [state, dispatch] = useReducer(reduceCommandPaletteUiState, {
     open: false,
     mode: "command",
@@ -503,6 +516,7 @@ export function CommandPalette({ children }: { children: ReactNode }) {
           {children}
         </div>
         <CommandPaletteDialog
+          openImport={openImport}
           mode={state.mode}
           openIntent={state.openIntent}
           setOpen={setOpen}
@@ -510,11 +524,21 @@ export function CommandPalette({ children }: { children: ReactNode }) {
           clearOpenIntent={clearOpenIntent}
         />
       </CommandDialog>
+      {importEnvironmentId ? (
+        <CodexThreadImportDialog
+          key={importEnvironmentId}
+          environmentId={importEnvironmentId}
+          open={importOpen}
+          onOpenChange={setImportOpen}
+          onImportingChange={setImportBusy}
+        />
+      ) : null}
     </ComposerHandleContext>
   );
 }
 
 function CommandPaletteDialog(props: {
+  readonly openImport: (environmentId: EnvironmentId) => void;
   readonly mode: SearchOverlayMode;
   readonly openIntent: CommandPaletteOpenIntent | null;
   readonly setOpen: (open: boolean) => void;
@@ -550,6 +574,7 @@ function CommandPaletteDialog(props: {
         <ProjectContentSearchDialog onOpenChange={props.setOpen} />
       ) : (
         <OpenCommandPaletteDialog
+          openImport={props.openImport}
           openIntent={props.openIntent}
           setOpen={props.setOpen}
           openOverlayMode={props.openOverlayMode}
@@ -561,6 +586,7 @@ function CommandPaletteDialog(props: {
 }
 
 function OpenCommandPaletteDialog(props: {
+  readonly openImport: (environmentId: EnvironmentId) => void;
   readonly openIntent: CommandPaletteOpenIntent | null;
   readonly setOpen: (open: boolean) => void;
   readonly openOverlayMode: (mode: SearchOverlayMode) => void;
@@ -1675,6 +1701,18 @@ function OpenCommandPaletteDialog(props: {
         themeHalves,
         initialAppearance: resolvedTheme,
       });
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:import-conversations",
+    searchTerms: ["import", "conversations", "codex", "history"],
+    title: "Import conversations…",
+    disabled: primaryEnvironmentId === null,
+    icon: <ImportIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      if (primaryEnvironmentId) props.openImport(primaryEnvironmentId);
     },
   });
 

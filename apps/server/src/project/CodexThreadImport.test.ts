@@ -9,7 +9,7 @@ import {
   type OrchestrationCommand,
   type OrchestrationThreadShell,
 } from "@t3tools/contracts";
-import { makeThreadHistory } from "effect-codex-app-server/thread-history";
+import { makeThreadHistory, type NativeThread } from "effect-codex-app-server/thread-history";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -20,6 +20,7 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.ts";
 import { ProviderSessionDirectoryLive } from "../provider/Layers/ProviderSessionDirectory.ts";
 import { ProviderSessionDirectory } from "../provider/Services/ProviderSessionDirectory.ts";
+import { CodexImportTitle } from "./CodexImportTitle.ts";
 import { CodexThreadClient } from "./CodexThreadClient.ts";
 import { findNativeBinding, makeCodexThreadImport } from "./CodexThreadImport.ts";
 
@@ -46,18 +47,35 @@ const makeHarness = (
     active?: boolean;
     cwd?: string;
     nativeId?: string;
+    nativeName?: string;
     archived?: boolean;
     historyLength?: number;
     existingThread?: OrchestrationThreadShell;
+    catalog?: ReadonlyArray<NativeThread>;
   } = {},
 ) => {
   const commands: Array<OrchestrationCommand> = [];
+  const titleRequests: Array<{
+    threadId: ThreadId;
+    cwd: string;
+    expectedTitle: string;
+    context: string;
+  }> = [];
   const requests: Array<{ method: string; params: unknown }> = [];
   let newItemAppeared = false;
   const native = makeThreadHistory({
     request: (method, params) =>
       Effect.sync(() => {
         requests.push({ method, params });
+        if (method === "thread/list") return { data: options.catalog ?? [], nextCursor: null };
+        if (method === "thread/search")
+          return {
+            data: (options.catalog ?? []).map((thread) => ({
+              thread,
+              snippet: "Found in message",
+            })),
+            nextCursor: null,
+          };
         if (method === "thread/read" || method === "thread/unarchive")
           return {
             thread: {
@@ -68,6 +86,7 @@ const makeHarness = (
               cwd: options.cwd ?? "/tmp",
               modelProvider: "openai",
               preview: "My native thread",
+              ...(options.nativeName !== undefined ? { name: options.nativeName } : {}),
               createdAt: 1_700_000_000,
               updatedAt: 1_700_000_001,
               status: { type: options.active ? "active" : "idle" },
@@ -110,6 +129,12 @@ const makeHarness = (
       }),
   });
   const services = Layer.mergeAll(
+    Layer.mock(CodexImportTitle)({
+      schedule: (input) =>
+        Effect.sync(() => {
+          titleRequests.push(input);
+        }),
+    }),
     Layer.succeed(
       CodexThreadClient,
       CodexThreadClient.of({
@@ -130,6 +155,13 @@ const makeHarness = (
             updatedAt: "2026-01-01T00:00:00.000Z",
           }),
         ),
+      getShellSnapshot: () =>
+        Effect.succeed({
+          projects: [],
+          threads: [],
+          snapshotSequence: 0,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        }),
       getThreadShellById: () => Effect.succeed(Option.fromUndefinedOr(options.existingThread)),
     }),
     Layer.mock(OrchestrationEngineService)({
@@ -143,6 +175,7 @@ const makeHarness = (
   return {
     services,
     commands,
+    titleRequests,
     requests,
     appendLiveItem: () => {
       newItemAppeared = true;
@@ -151,6 +184,157 @@ const makeHarness = (
 };
 
 it.layer(testLayer)("Codex native imports", (it) => {
+  it.effect("requests a title only for fresh imports without a meaningful native title", () =>
+    Effect.gen(function* () {
+      for (const [nativeId, nativeName, expectedCount] of [
+        ["unnamed", undefined, 1],
+        ["named", "Trace attention circuits", 0],
+        ["placeholder", "New thread", 1],
+      ] as const) {
+        const harness = makeHarness({
+          nativeId,
+          ...(nativeName === undefined ? {} : { nativeName }),
+        });
+        const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
+        yield* importer.adopt({
+          providerInstanceId: instanceId,
+          nativeThreadId: nativeId,
+          projectId,
+        });
+        expect(harness.titleRequests).toHaveLength(expectedCount);
+        if (expectedCount)
+          expect(harness.titleRequests[0]).toMatchObject({
+            context: "My native thread",
+            expectedTitle: nativeName ?? "My native thread",
+            cwd: "/tmp",
+          });
+      }
+    }),
+  );
+
+  it.effect("keeps interrupted native adoptions selectable for retry", () =>
+    Effect.gen(function* () {
+      const nativeThread = {
+        id: "interrupted-native",
+        cwd: "/tmp",
+        modelProvider: "openai",
+        preview: "Interrupted",
+        createdAt: 1,
+        updatedAt: 2,
+        threadSource: "user",
+      };
+      const harness = makeHarness({ catalog: [nativeThread], nativeId: nativeThread.id });
+      const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
+      // The harness records thread.create without projecting it, reproducing a
+      // binding that survived interruption before the projection was installed.
+      yield* importer.adopt({
+        providerInstanceId: instanceId,
+        nativeThreadId: nativeThread.id,
+        projectId,
+      });
+      const listed = yield* importer.list({ providerInstanceId: instanceId });
+      expect(listed.threads[0]?.existingThreadId).toBeNull();
+      expect(listed.projects[0]?.importableCount).toBe(1);
+      const retried = yield* importer.adopt({
+        providerInstanceId: instanceId,
+        nativeThreadId: nativeThread.id,
+        projectId,
+      });
+      expect(retried.alreadyImported).toBe(false);
+    }),
+  );
+
+  it.effect(
+    "uses real T3 prompt provenance for agent and mixed origins, excluding import previews",
+    () =>
+      Effect.gen(function* () {
+        const nativeThread = {
+          id: "task-native",
+          cwd: "/tmp",
+          modelProvider: "openai",
+          preview: "Task",
+          createdAt: 1,
+          updatedAt: 2,
+          threadSource: "user",
+        };
+        const harness = makeHarness({ catalog: [nativeThread] });
+        const directory = yield* ProviderSessionDirectory;
+        const taskId = ThreadId.make("task-thread");
+        yield* directory.upsert({
+          threadId: taskId,
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: instanceId,
+          status: "stopped",
+          resumeCursor: { threadId: nativeThread.id },
+          runtimePayload: {},
+        });
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,role,text,is_streaming,created_at,updated_at,agent_origin_json) VALUES ('task-prompt',${taskId},'user','Do task',0,'2026-01-01','2026-01-01','{"threadId":"agent-parent","operationId":"task"}')`;
+        yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,role,text,is_streaming,created_at,updated_at) VALUES ('import:synthetic',${taskId},'user','preview',0,'2025-01-01','2025-01-01')`;
+        const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
+        const agent = yield* importer.list({ providerInstanceId: instanceId });
+        expect(agent.threads[0]?.origin).toBe("agent");
+        expect(agent.projects[0]?.agentCount).toBe(1);
+        yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,role,text,is_streaming,created_at,updated_at) VALUES ('human-followup',${taskId},'user','Please adjust',0,'2026-01-02','2026-01-02')`;
+        const mixed = yield* importer.list({ providerInstanceId: instanceId, origin: "mixed" });
+        expect(mixed.threads[0]?.origin).toBe("mixed");
+        expect(mixed.projects[0]?.mixedCount).toBe(1);
+      }),
+  );
+
+  it.effect(
+    "catalog counts only roots, exposes all providers, and caches metadata across pages",
+    () =>
+      Effect.gen(function* () {
+        const roots = Array.from({ length: 51 }, (_, index) => ({
+          id: `root-${index}`,
+          cwd: "/tmp",
+          modelProvider: "custom",
+          preview: `Root ${index}`,
+          createdAt: 1,
+          updatedAt: 2,
+          threadSource: "user",
+        }));
+        const harness = makeHarness({
+          catalog: [
+            ...roots,
+            { ...roots[0]!, id: "child", threadSource: "subagent", parentThreadId: "root-0" },
+            { ...roots[0]!, id: "guardian", threadSource: "guardian_review" },
+          ],
+        });
+        const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
+        const first = yield* importer.list({ providerInstanceId: instanceId });
+        expect(first.totalCount).toBe(51);
+        expect(first.projects[0]).toMatchObject({ cwd: "/tmp", totalCount: 51, humanCount: 51 });
+        expect(first.threads[0]).toMatchObject({ id: "root-0", childCount: 1, origin: "human" });
+        expect(first.threads).toHaveLength(50);
+        const second = yield* importer.list({
+          providerInstanceId: instanceId,
+          cursor: first.nextCursor!,
+        });
+        expect(second.threads).toHaveLength(1);
+        expect(second.nextCursor).toBeNull();
+        expect(harness.requests.filter(({ method }) => method === "thread/list")).toHaveLength(1);
+        expect(harness.requests.some(({ method }) => method === "thread/read")).toBe(false);
+        const search = yield* importer.list({
+          providerInstanceId: instanceId,
+          search: "message",
+          searchScope: "messages",
+        });
+        expect(search.threads[0]?.matchPreview).toBe("Found in message");
+        expect(search.messageSearchSupported).toBe(true);
+        const wrongFilter = yield* importer
+          .list({ providerInstanceId: instanceId, cursor: first.nextCursor!, origin: "agent" })
+          .pipe(Effect.result);
+        expect(wrongFilter._tag).toBe("Failure");
+        yield* importer.list({ providerInstanceId: instanceId, refresh: true });
+        const stalePage = yield* importer
+          .list({ providerInstanceId: instanceId, cursor: first.nextCursor! })
+          .pipe(Effect.result);
+        expect(stalePage._tag).toBe("Failure");
+      }),
+  );
+
   it.effect(
     "persists native identity and a rich history fence across runtime updates and restart",
     () =>
@@ -302,6 +486,7 @@ it.layer(testLayer)("Codex native imports", (it) => {
           }),
         ).toEqual({ threadId: id, alreadyImported: true });
         expect(harness.commands).toEqual([]);
+        expect(harness.titleRequests).toEqual([]);
         expect(Option.getOrThrow(yield* directory.getBinding(id))).toMatchObject(binding);
         const page = yield* importer.history({ threadId: id });
         expect(page.boundary?.replacesLegacyMessages).toBe(true);

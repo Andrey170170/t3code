@@ -882,6 +882,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         thread.branch !== command.expectedBranch
           ? thread.branch
           : command.branch;
+      const title =
+        command.title !== undefined &&
+        (command.expectedTitle === undefined ||
+          (thread.archivedAt === null &&
+            thread.deletedAt === null &&
+            thread.title === command.expectedTitle))
+          ? command.title
+          : undefined;
       const occurredAt = yield* nowIso;
       return {
         ...(yield* withEventBase({
@@ -893,7 +901,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.meta-updated",
         payload: {
           threadId: command.threadId,
-          ...(command.title !== undefined ? { title: command.title } : {}),
+          ...(title !== undefined ? { title } : {}),
           ...(command.regenerateTitle === true
             ? {
                 regenerateTitle: true as const,
@@ -904,7 +912,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
                 },
               }
             : {}),
-          ...(command.title !== undefined && thread.titleRegeneration != null
+          ...(title !== undefined && thread.titleRegeneration != null
             ? { titleRegeneration: null }
             : {}),
           ...(command.modelSelection !== undefined

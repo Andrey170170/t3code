@@ -6,18 +6,29 @@ export class CodexThreadError extends Schema.TaggedError<CodexThreadError>()("Co
   message: Schema.String,
 }) {}
 
+export const CodexConversationOrigin = Schema.Literals(["human", "agent", "mixed", "unknown"]);
+export type CodexConversationOrigin = typeof CodexConversationOrigin.Type;
+
 export const CodexThreadsListInput = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   projectId: Schema.optional(ProjectId),
   cursor: Schema.optional(TrimmedNonEmptyString),
   search: Schema.optional(Schema.String),
   archived: Schema.optional(Schema.Boolean),
+  cwd: Schema.optional(Schema.String),
+  origin: Schema.optional(CodexConversationOrigin),
+  searchScope: Schema.optional(Schema.Literals(["titles", "messages"])),
+  refresh: Schema.optional(Schema.Boolean),
 });
 export type CodexThreadsListInput = typeof CodexThreadsListInput.Type;
 export const CodexThreadsListResult = Schema.Struct({
   threads: Schema.Array(
     Schema.Struct({
       id: TrimmedNonEmptyString,
+      sourceIdentity: Schema.String,
+      origin: CodexConversationOrigin,
+      childCount: Schema.Finite,
+      matchPreview: Schema.optionalKey(Schema.String),
       title: Schema.String,
       cwd: Schema.String,
       createdAt: IsoDateTime,
@@ -29,6 +40,22 @@ export const CodexThreadsListResult = Schema.Struct({
     }),
   ),
   nextCursor: Schema.NullOr(Schema.String),
+  projects: Schema.Array(
+    Schema.Struct({
+      cwd: Schema.String,
+      title: Schema.String,
+      existingProjectId: Schema.NullOr(ProjectId),
+      totalCount: Schema.Finite,
+      importableCount: Schema.Finite,
+      humanCount: Schema.Finite,
+      agentCount: Schema.Finite,
+      mixedCount: Schema.Finite,
+      unknownCount: Schema.Finite,
+    }),
+  ),
+  totalCount: Schema.Finite,
+  catalogComplete: Schema.Boolean,
+  messageSearchSupported: Schema.NullOr(Schema.Boolean),
 });
 export type CodexThreadsListResult = typeof CodexThreadsListResult.Type;
 export const CodexThreadsImportInput = Schema.Struct({

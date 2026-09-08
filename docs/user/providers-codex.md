@@ -6,26 +6,32 @@ and custom binaries or environment variables.
 
 ## Import existing conversations
 
-Open **Import conversations** in a project's settings or from the sidebar while
-that project is selected. On mobile, use **Settings > Import Codex Chats**. Choose
-the Codex account on the environment that holds the conversations, then browse or
-search and import an individual conversation. Enable archived conversations to
-find older archived work; importing one restores it in Codex.
+Open **Import** beside **All projects**, or **Import conversations** in a project's
+settings to start with that folder. On mobile, use **Settings > Import Codex Chats**.
+Choose the Codex account on the environment that holds the conversations, then
+select whole projects or open a project to choose individual conversations. Imports
+keep their original folders and create missing T3 projects as needed. Subagents
+stay attached to their parent conversation and are not imported as separate chats.
+
+Search titles or full messages, and filter by conversation origin or archive state.
+Importing an archived conversation restores it in Codex. A batch continues if you
+close the picker; reopen it to retry any failures. Meaningful native titles are
+preserved; unnamed conversations receive a title using your configured title model.
 
 Finish work in the original client before importing. Import does not synchronize
-with a conversation still running elsewhere. Keep its original project folder, or
-explicitly choose to continue in the selected project's folder.
+with a conversation still running elsewhere. Its original project folder must
+still exist on the environment.
 
 The conversation keeps its Codex context when you continue it in T3 Code. Open
 **Original Codex history** above the chat to read its earlier messages and tool
 results, and load older pages as needed. Conversations previously imported through
-onboarding can use **Load full history** in the import picker. The original-history
+onboarding can select their **History upgrade** entry in the import picker. The original-history
 panel replaces their short imported text preview while open; new T3 messages stay
 in the chat.
 
 **Import recent conversations** remains available for the previous batch import:
 it selects recent Claude/Codex conversations and retains a limited text preview.
-Use individual Codex import for complete, paginated history.
+Use the Codex import picker for complete, paginated history.
 
 ## Ask Codex to start another chat
 

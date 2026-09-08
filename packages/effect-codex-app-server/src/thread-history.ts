@@ -50,6 +50,10 @@ const cursors = {
   backwardsCursor: Schema.optionalKey(Schema.NullOr(Schema.String)),
 };
 const ThreadPage = Schema.Struct({ data: Schema.Array(NativeThread), ...cursors });
+const SearchPage = Schema.Struct({
+  data: Schema.Array(Schema.Struct({ thread: NativeThread, snippet: Schema.String })),
+  ...cursors,
+});
 const TurnPage = Schema.Struct({ data: Schema.Array(NativeTurn), ...cursors });
 const ItemPage = Schema.Struct({ data: Schema.Array(NativeThreadItemEntry), ...cursors });
 
@@ -66,6 +70,12 @@ export interface ThreadListParams extends PageParams {
   readonly searchTerm?: string;
   readonly sortKey?: "created_at" | "updated_at";
   readonly useStateDbOnly?: boolean;
+}
+export interface ThreadSearchParams extends PageParams {
+  readonly searchTerm: string;
+  readonly archived?: boolean;
+  readonly sourceKinds?: ReadonlyArray<string>;
+  readonly sortKey?: "created_at" | "updated_at";
 }
 export interface ThreadTurnsParams extends PageParams {
   readonly threadId: string;
@@ -277,6 +287,8 @@ export const makeThreadHistory = (raw: ThreadHistoryRawClient) => {
   return {
     list: (params: ThreadListParams = {}) =>
       request("thread/list", { ...params, limit: limit(params.limit) }, ThreadPage),
+    search: (params: ThreadSearchParams) =>
+      request("thread/search", { ...params, limit: limit(params.limit) }, SearchPage),
     read: (threadId: string) =>
       request(
         "thread/read",

@@ -4385,16 +4385,18 @@ export default function Sidebar() {
                 </Tooltip>
               </div>
             </div>
-            {projectGroups.length > 0 ? (
+            {
               <div className="flex items-center gap-1">
-                {importTargetProject ? (
-                  <CodexThreadImportButton
-                    environmentId={importTargetProject.environmentId}
-                    projectId={importTargetProject.id}
-                    workspaceRoot={importTargetProject.workspaceRoot}
-                    label="Import"
-                  />
-                ) : null}
+                <CodexThreadImportButton
+                  environmentId={importTargetProject?.environmentId ?? primaryEnvironmentId}
+                  {...(importTargetProject
+                    ? {
+                        projectId: importTargetProject.id,
+                        workspaceRoot: importTargetProject.workspaceRoot,
+                      }
+                    : {})}
+                  label="Import"
+                />
                 <Combobox
                   items={projectScopeItems}
                   filteredItems={filteredProjectScopeItems}
@@ -4535,7 +4537,7 @@ export default function Sidebar() {
                   <TooltipPopup side="right">New project</TooltipPopup>
                 </Tooltip>
               </div>
-            ) : null}
+            }
           </SidebarGroup>
         }
       >

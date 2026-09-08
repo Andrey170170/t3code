@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/codexImportSelection": {
+      "types": "./src/state/codexImportSelection.ts",
+      "default": "./src/state/codexImportSelection.ts"
+    },
     "./state/codex-threads": {
       "types": "./src/state/codexThreads.ts",
       "default": "./src/state/codexThreads.ts"

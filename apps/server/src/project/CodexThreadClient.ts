@@ -1,4 +1,9 @@
-import { CodexSettings, CodexThreadError, type ProviderInstanceId } from "@t3tools/contracts";
+import {
+  CodexSettings,
+  CodexThreadError,
+  resolveProviderInstanceEnabled,
+  type ProviderInstanceId,
+} from "@t3tools/contracts";
 import { makeThreadHistory } from "effect-codex-app-server/thread-history";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -16,6 +21,7 @@ import {
 import { withCodexAppServerClient } from "../provider/Layers/CodexProvider.ts";
 import { resolveCodexLaunchArgs } from "../provider/Layers/codexLaunchArgs.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
+import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 
 type ThreadHistory = ReturnType<typeof makeThreadHistory>;
@@ -46,7 +52,7 @@ export const makeCodexThreadClient = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const resolve = Effect.fn("CodexThreadClient.resolve")(function* (id: ProviderInstanceId) {
     const settings = yield* settingsService.getSettings;
-    const instance = settings.providerInstances[id];
+    const instance = deriveProviderInstanceConfigMap(settings)[id];
     if (!instance || instance.driver !== "codex") {
       return yield* new CodexThreadError({ message: `Codex provider '${id}' is not configured.` });
     }
@@ -86,7 +92,7 @@ export const makeCodexThreadClient = Effect.gen(function* () {
     Effect.scoped(
       Effect.gen(function* () {
         const { instance, config, environment, layout } = yield* resolve(id);
-        if (instance.enabled === false) {
+        if (!resolveProviderInstanceEnabled(instance)) {
           return yield* new CodexThreadError({ message: `Codex provider '${id}' is disabled.` });
         }
         yield* materializeCodexShadowHome(layout).pipe(

@@ -280,6 +280,118 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect("excludes spawned and guardian Codex subagents", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-subagents-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-subagents-codex-");
+        const workspace = yield* makeTempDir("t3code-subagents-workspace-");
+        const directory = path.join(codexHomePath, "sessions", "2026", "08", "24");
+        const transcript = (id: string, source: unknown, prompt: string) =>
+          [
+            encodeTranscriptRecord({
+              type: "session_meta",
+              payload: { id, cwd: workspace, source },
+            }),
+            encodeTranscriptRecord({
+              type: "event_msg",
+              payload: { type: "user_message", message: prompt },
+            }),
+          ].join("\n");
+
+        yield* writeTranscript({
+          filePath: path.join(directory, "rollout-human.jsonl"),
+          contents: transcript("human-session", "vscode", "Human-started conversation"),
+          mtimeMs: nowMs,
+        });
+        for (let index = 0; index < 15; index++) {
+          yield* writeTranscript({
+            filePath: path.join(directory, `rollout-spawn-${String(index).padStart(2, "0")}.jsonl`),
+            contents: transcript(
+              `spawn-${index}`,
+              {
+                subagent: {
+                  thread_spawn: {
+                    parent_thread_id: "human-session",
+                    depth: index === 0 ? 1 : 2,
+                  },
+                },
+              },
+              `Spawned subagent ${index}`,
+            ),
+            mtimeMs: nowMs - index - 1,
+          });
+          yield* writeTranscript({
+            filePath: path.join(
+              directory,
+              `rollout-guardian-${String(index).padStart(2, "0")}.jsonl`,
+            ),
+            contents: transcript(
+              `guardian-${index}`,
+              { subagent: { other: "guardian" } },
+              `Guardian subagent ${index}`,
+            ),
+            mtimeMs: nowMs - index - 16,
+          });
+        }
+
+        const result = yield* runScan({ claudeHomePath, codexHomePath });
+        expect(result.candidates).toMatchObject([{ path: workspace, threadCount: 1 }]);
+
+        const threads = yield* runRecentThreads({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+        });
+        expect(threads.map((thread) => thread.providerSessionId)).toEqual(["human-session"]);
+      }),
+    );
+
+    it.effect("keeps top-level Codex threads created through app server", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-app-server-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-app-server-codex-");
+        const workspace = yield* makeTempDir("t3code-app-server-workspace-");
+        yield* writeTranscript({
+          filePath: path.join(
+            codexHomePath,
+            "sessions",
+            "2026",
+            "08",
+            "24",
+            "rollout-app-server.jsonl",
+          ),
+          contents: [
+            encodeTranscriptRecord({
+              type: "session_meta",
+              payload: { id: "agent-created-session", cwd: workspace, source: "app_server" },
+            }),
+            encodeTranscriptRecord({
+              type: "event_msg",
+              payload: { type: "user_message", message: "Agent-created conversation" },
+            }),
+          ].join("\n"),
+          mtimeMs: nowMs,
+        });
+
+        const result = yield* runScan({ claudeHomePath, codexHomePath });
+        expect(result.candidates).toMatchObject([{ path: workspace, threadCount: 1 }]);
+        const threads = yield* runRecentThreads({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+        });
+        expect(threads.map((thread) => thread.providerSessionId)).toEqual([
+          "agent-created-session",
+        ]);
+      }),
+    );
+
     it.effect.each(["claudeAgent", "codex"] as const)(
       "does not open a non-file %s transcript",
       (source) =>

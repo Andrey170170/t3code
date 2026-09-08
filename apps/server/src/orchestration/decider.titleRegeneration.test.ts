@@ -69,4 +69,54 @@ it.layer(NodeServices.layer)("title regeneration decider", (it) => {
       }
     }),
   );
+
+  it.effect("does not apply a generated title after a manual rename", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-import-title-complete"),
+          threadId: ThreadId.make("thread-1"),
+          title: "Generated title",
+          expectedTitle: "New thread",
+        },
+        readModel,
+      });
+      const event = Array.isArray(result) ? result[0] : result;
+
+      expect(event.type).toBe("thread.meta-updated");
+      if (event.type === "thread.meta-updated") {
+        expect(event.payload.title).toBeUndefined();
+      }
+    }),
+  );
+
+  it.effect("does not apply a generated title after the thread is archived", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-import-title-after-archive"),
+          threadId: ThreadId.make("thread-1"),
+          title: "Generated title",
+          expectedTitle: "Manual title",
+        },
+        readModel: {
+          ...readModel,
+          threads: [
+            {
+              ...readModel.threads[0]!,
+              archivedAt: "2026-01-02T00:00:00.000Z",
+            },
+          ],
+        },
+      });
+      const event = Array.isArray(result) ? result[0] : result;
+
+      expect(event.type).toBe("thread.meta-updated");
+      if (event.type === "thread.meta-updated") {
+        expect(event.payload.title).toBeUndefined();
+      }
+    }),
+  );
 });
