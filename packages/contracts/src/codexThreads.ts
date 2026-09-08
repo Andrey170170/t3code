@@ -31,6 +31,10 @@ export const CodexThreadsListResult = Schema.Struct({
       matchPreview: Schema.optionalKey(Schema.String),
       title: Schema.String,
       cwd: Schema.String,
+      projectCwd: Schema.optionalKey(Schema.String),
+      worktreePath: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      worktreeBranch: Schema.optionalKey(Schema.NullOr(Schema.String)),
+      worktreeMissing: Schema.optionalKey(Schema.Boolean),
       createdAt: IsoDateTime,
       updatedAt: IsoDateTime,
       archived: Schema.Boolean,
@@ -45,6 +49,15 @@ export const CodexThreadsListResult = Schema.Struct({
       cwd: Schema.String,
       title: Schema.String,
       existingProjectId: Schema.NullOr(ProjectId),
+      checkouts: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({
+            cwd: Schema.String,
+            branch: Schema.NullOr(Schema.String),
+            isMain: Schema.Boolean,
+          }),
+        ),
+      ),
       totalCount: Schema.Finite,
       importableCount: Schema.Finite,
       humanCount: Schema.Finite,

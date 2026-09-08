@@ -4,7 +4,10 @@ import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime"
 import {
   canImportCodexConversation,
   codexImportKey,
+  codexImportProjectCwd,
+  codexImportWorktree,
   codexProjectSelectionState,
+  resolveCodexImportCheckout,
   runCodexImportBatch,
   updateCodexImportSelection,
   type CodexImportCandidate,
@@ -28,6 +31,7 @@ import {
   CircleCheckIcon,
   CircleDashedIcon,
   FolderOpenIcon,
+  GitBranchIcon,
   ImportIcon,
   SearchIcon,
   SlidersHorizontalIcon,
@@ -172,6 +176,7 @@ export function CodexThreadImportDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [selection, setSelection] = useState<Map<string, Selection>>(() => new Map());
+  const [checkoutChoices, setCheckoutChoices] = useState(() => new Map<string, string>());
   const [selectingProject, setSelectingProject] = useState<string | null>(null);
   const [results, setResults] = useState<ImportResult[] | null>(null);
   const [importing, setImporting] = useState(false);
@@ -216,6 +221,7 @@ export function CodexThreadImportDialog({
   const pendingSearch = query !== search.trim();
   const currentProject =
     data.projects.find((project) => project.cwd === cwd) ??
+    (cwd && data.projects.length === 1 ? data.projects[0] : undefined) ??
     (cwd ? catalogProjects.get(cwd) : undefined);
   const projectTitle =
     currentProject?.title ?? cwd?.split(/[\\/]/).findLast(Boolean) ?? "Conversations";
@@ -260,7 +266,7 @@ export function CodexThreadImportDialog({
       setMatchingKeys((previous) => {
         const next = new Map(previous);
         for (const thread of result.threads) {
-          const key = JSON.stringify([filterKey, thread.cwd]);
+          const key = JSON.stringify([filterKey, codexImportProjectCwd(thread)]);
           const keys = new Set(next.get(key));
           keys.add(thread.sourceIdentity);
           next.set(key, keys);
@@ -339,13 +345,13 @@ export function CodexThreadImportDialog({
     // Message matches are authoritative only when returned by this query, including cached pages.
     return (
       matchingKeys
-        .get(JSON.stringify([filterKey, item.thread.cwd]))
+        .get(JSON.stringify([filterKey, codexImportProjectCwd(item.thread)]))
         ?.has(item.thread.sourceIdentity) ?? false
     );
   }
   function projectSelection(project: Project) {
     const count = [...selection.values()].filter(
-      (item) => item.thread.cwd === project.cwd && matchesCurrentFilter(item),
+      (item) => codexImportProjectCwd(item.thread) === project.cwd && matchesCurrentFilter(item),
     ).length;
     return codexProjectSelectionState(count, project.importableCount, data.catalogComplete);
   }
@@ -382,6 +388,11 @@ export function CodexThreadImportDialog({
               ? String(squashAtomCommandFailure(response))
               : "Selection was interrupted.",
           );
+        setCatalogProjects((previous) => {
+          const next = new Map(previous);
+          for (const group of response.value.projects) next.set(group.cwd, group);
+          return next;
+        });
         if (!response.value.catalogComplete)
           throw new Error(
             "This catalog is incomplete. Refresh it or select individual conversations.",
@@ -409,12 +420,46 @@ export function CodexThreadImportDialog({
     }
   }
 
+  function checkoutResolution(thread: CodexImportCandidate) {
+    const projectCwd = codexImportProjectCwd(thread);
+    return resolveCodexImportCheckout(
+      thread,
+      checkoutChoices.get(projectCwd),
+      catalogProjects.get(projectCwd)?.checkouts ?? [],
+    );
+  }
+  const unresolvedCheckoutCount = [...selection.values()].filter(
+    (item) => checkoutResolution(item.thread).kind === "choose-checkout",
+  ).length;
+  const missingProjectCounts = new Map<string, number>();
+  for (const item of selection.values()) {
+    if (!item.thread.worktreeMissing) continue;
+    const projectCwd = codexImportProjectCwd(item.thread);
+    missingProjectCounts.set(projectCwd, (missingProjectCounts.get(projectCwd) ?? 0) + 1);
+  }
+  if (cwd !== null) {
+    for (const thread of visibleThreads) {
+      if (!thread.worktreeMissing || !canImportCodexConversation(thread)) continue;
+      const projectCwd = codexImportProjectCwd(thread);
+      if (!missingProjectCounts.has(projectCwd)) missingProjectCounts.set(projectCwd, 0);
+    }
+  }
+
   async function importSelection(retry?: ImportResult[]) {
     if (importing || selectingProject || (!retry && selection.size === 0)) return;
     const batch =
       retry ??
       [...selection].map(([key, item]): ImportResult => ({ ...item, key, status: "pending" }));
     if (!batch.length) return;
+    const needsCheckout = batch.filter(
+      (item) => checkoutResolution(item.thread).kind === "choose-checkout",
+    ).length;
+    if (needsCheckout > 0) {
+      setError(
+        `${needsCheckout} selected conversations need an existing checkout. Choose one for each project with removed worktrees.`,
+      );
+      return;
+    }
     setImporting(true);
     onImportingChange?.(true);
     setError("");
@@ -429,7 +474,7 @@ export function CodexThreadImportDialog({
     );
     const projectPromises = new Map<string, Promise<ProjectId>>();
     const resolveProject = (item: Selection) => {
-      const path = item.thread.cwd;
+      const path = codexImportProjectCwd(item.thread);
       let promise = projectPromises.get(path);
       if (!promise) {
         promise = (async () => {
@@ -475,6 +520,9 @@ export function CodexThreadImportDialog({
               row.key === item.key ? { ...row, status: "importing" } : row,
             ) ?? null,
         );
+        const checkout = checkoutResolution(item.thread);
+        if (checkout.kind === "choose-checkout")
+          throw new Error("Choose an existing checkout for this removed worktree.");
         const targetProjectId = await resolveProject(item);
         const response = await adopt({
           environmentId,
@@ -483,6 +531,7 @@ export function CodexThreadImportDialog({
             nativeThreadId: item.thread.id,
             archived: item.thread.archived,
             projectId: targetProjectId,
+            ...(checkout.kind === "chosen-checkout" ? { cwdOverride: checkout.cwdOverride } : {}),
           },
         });
         if (response._tag !== "Success")
@@ -656,7 +705,7 @@ export function CodexThreadImportDialog({
                 <ArrowLeftIcon />
               </Button>
             ) : null}
-            {!results && cwd ? projectIcon(cwd, projectTitle) : null}
+            {!results && cwd ? projectIcon(currentProject?.cwd ?? cwd, projectTitle) : null}
             <DialogTitle className="min-w-0 flex-1 truncate text-lg">
               {results
                 ? importing
@@ -672,7 +721,12 @@ export function CodexThreadImportDialog({
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={importing}
+                    disabled={
+                      importing ||
+                      failed.some(
+                        (item) => checkoutResolution(item.thread).kind === "choose-checkout",
+                      )
+                    }
                     onClick={() => void importSelection(failed)}
                   >
                     Retry {failed.length} failed
@@ -687,7 +741,9 @@ export function CodexThreadImportDialog({
             ) : (
               <Button
                 size="sm"
-                disabled={!selection.size || selectingProject !== null}
+                disabled={
+                  !selection.size || selectingProject !== null || unresolvedCheckoutCount > 0
+                }
                 onClick={() => void importSelection()}
               >
                 <ImportIcon />
@@ -726,8 +782,9 @@ export function CodexThreadImportDialog({
                       {item.thread.title || "Untitled conversation"}
                     </p>
                     <p className="truncate font-mono text-[11px] text-muted-foreground">
-                      {item.thread.cwd}
+                      {codexImportProjectCwd(item.thread)}
                     </p>
+                    <WorktreeBadge thread={item.thread} />
                     {item.error ? (
                       <p className="mt-1 text-xs text-destructive">{item.error}</p>
                     ) : null}
@@ -789,6 +846,7 @@ export function CodexThreadImportDialog({
                       if (value) {
                         setSelectedProvider(value as ProviderInstanceId);
                         setSelection(new Map());
+                        setCheckoutChoices(new Map());
                         setCatalogProjects(new Map());
                       }
                     }}
@@ -911,6 +969,83 @@ export function CodexThreadImportDialog({
                   </Button>
                 </div>
               </div>
+              {[...missingProjectCounts].map(([projectCwd, count]) => {
+                const project = catalogProjects.get(projectCwd);
+                const checkouts = project?.checkouts ?? [];
+                const selectedCwd = checkoutChoices.get(projectCwd);
+                const selectedCheckout = checkouts.find((checkout) => checkout.cwd === selectedCwd);
+                const checkoutLabel = (checkout: (typeof checkouts)[number]) =>
+                  `${checkout.isMain ? "Main checkout" : checkout.branch || checkout.cwd.split(/[\\/]/).findLast(Boolean) || checkout.cwd}${checkout.isMain && checkout.branch ? ` · ${checkout.branch}` : ""}`;
+                return (
+                  <Alert key={projectCwd} variant="warning">
+                    <GitBranchIcon />
+                    <AlertTitle>
+                      {project?.title ?? projectCwd.split(/[\\/]/).findLast(Boolean)} · Removed
+                      worktrees
+                    </AlertTitle>
+                    <AlertDescription>
+                      <p>
+                        {count
+                          ? count === 1
+                            ? "1 selected conversation came from a removed worktree. Choose where it should continue."
+                            : `${count} selected conversations came from removed worktrees. Choose where they should continue.`
+                          : "Choose an existing checkout for conversations from removed worktrees."}{" "}
+                        This applies only to removed worktrees in this project.
+                      </p>
+                      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
+                        <span className="shrink-0 text-xs">Continue in</span>
+                        <Select
+                          value={selectedCheckout?.cwd ?? null}
+                          onValueChange={(value) => {
+                            setCheckoutChoices((previous) => {
+                              const next = new Map(previous);
+                              if (value) next.set(projectCwd, value);
+                              else next.delete(projectCwd);
+                              return next;
+                            });
+                          }}
+                        >
+                          <SelectTrigger
+                            className="min-w-0 flex-1"
+                            size="sm"
+                            aria-label={`Checkout for removed worktrees in ${project?.title ?? projectCwd}`}
+                            disabled={checkouts.length === 0}
+                          >
+                            <SelectValue>
+                              {selectedCheckout
+                                ? checkoutLabel(selectedCheckout)
+                                : "Choose checkout…"}
+                            </SelectValue>
+                          </SelectTrigger>
+                          <SelectPopup>
+                            {checkouts.map((checkout) => (
+                              <SelectItem key={checkout.cwd} value={checkout.cwd}>
+                                <span className="min-w-0">
+                                  <span className="block truncate">{checkoutLabel(checkout)}</span>
+                                  <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                                    {checkout.cwd}
+                                  </span>
+                                </span>
+                              </SelectItem>
+                            ))}
+                          </SelectPopup>
+                        </Select>
+                      </div>
+                      {checkouts.length === 0 ? (
+                        <p className="mt-1 text-xs">
+                          No existing checkout is available. Restore a checkout, then refresh.
+                        </p>
+                      ) : null}
+                    </AlertDescription>
+                  </Alert>
+                );
+              })}
+              {unresolvedCheckoutCount > 0 ? (
+                <p role="status" className="text-xs text-warning">
+                  Choose a checkout above for {unresolvedCheckoutCount} selected conversations to
+                  enable Import.
+                </p>
+              ) : null}
               {error ? (
                 <Alert variant="error">
                   <CircleAlertIcon />
@@ -1048,6 +1183,7 @@ export function CodexThreadImportDialog({
                                 {thread.title || "Untitled conversation"}
                               </span>
                             </div>
+                            <WorktreeBadge thread={thread} />
                             {thread.matchPreview ? (
                               <p className="truncate text-xs text-muted-foreground">
                                 {thread.matchPreview}
@@ -1103,7 +1239,7 @@ export function CodexThreadImportDialog({
           <span role="status" className="text-xs text-muted-foreground">
             {results
               ? `${completed} of ${results.length} finished${failed.length ? ` · ${failed.length} failed` : ""}`
-              : `${selection.size} selected across ${new Set([...selection.values()].map((item) => item.thread.cwd)).size} projects`}
+              : `${selection.size} selected across ${new Set([...selection.values()].map((item) => codexImportProjectCwd(item.thread))).size} projects${unresolvedCheckoutCount ? ` · ${unresolvedCheckoutCount} need checkout` : ""}`}
           </span>
           <span className="flex items-center gap-2 text-xs text-muted-foreground max-sm:hidden">
             {results ? null : (
@@ -1120,6 +1256,31 @@ export function CodexThreadImportDialog({
         </DialogFooter>
       </DialogPopup>
     </Dialog>
+  );
+}
+
+function WorktreeBadge({ thread }: { thread: CodexImportCandidate }) {
+  const worktree = codexImportWorktree(thread);
+  if (!worktree && !thread.worktreeMissing) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span className="mt-1 flex min-w-0" />}>
+        <Badge
+          size="sm"
+          variant={thread.worktreeMissing ? "outline" : "secondary"}
+          className="max-w-full gap-1 text-muted-foreground"
+        >
+          <GitBranchIcon className="size-3 shrink-0" />
+          <span className="truncate font-mono">
+            {worktree?.label ?? thread.cwd.split(/[\\/]/).findLast(Boolean)}
+            {thread.worktreeMissing ? " · Removed" : ""}
+          </span>
+        </Badge>
+      </TooltipTrigger>
+      <TooltipPopup className="max-w-96 break-all">
+        {thread.worktreeMissing ? "Removed worktree" : "Worktree"}: {worktree?.path ?? thread.cwd}
+      </TooltipPopup>
+    </Tooltip>
   );
 }
 

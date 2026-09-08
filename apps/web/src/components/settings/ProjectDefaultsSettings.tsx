@@ -23,6 +23,7 @@ import { useEnvironments, usePrimaryEnvironmentId } from "../../state/environmen
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { resolveEnvModeLabel } from "../BranchToolbar.logic";
+import { CodexThreadImportButton } from "../CodexThreadImport";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -164,6 +165,31 @@ export function ProjectDefaultsSettings({
   const setModel = (value: ModelSelection | null) => void save({ defaultModelSelection: value });
   return (
     <SettingsPageContainer>
+      <SettingsSection id={searchableSetting("import-conversations").id} title="Conversations">
+        <SettingsRow
+          title="Import conversations"
+          description="Choose existing Codex conversations from any project on a connected machine."
+          control={
+            <div className="flex flex-wrap gap-2">
+              {scoped.length ? (
+                scoped.map((target) => (
+                  <CodexThreadImportButton
+                    key={target.environmentId}
+                    environmentId={
+                      target.connection.phase === "connected" ? target.environmentId : null
+                    }
+                    label={
+                      scoped.length > 1 ? `Import from ${target.label}` : "Import conversations"
+                    }
+                  />
+                ))
+              ) : (
+                <CodexThreadImportButton environmentId={null} />
+              )}
+            </div>
+          }
+        />
+      </SettingsSection>
       <SettingsSection
         id={searchableSetting("project-defaults").id}
         title="Project defaults"

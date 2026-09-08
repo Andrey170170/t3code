@@ -1,7 +1,10 @@
 import {
   canImportCodexConversation,
   codexImportKey,
+  codexImportProjectCwd,
+  codexImportWorktree,
   codexProjectSelectionState,
+  resolveCodexImportCheckout,
   runCodexImportBatch,
   updateCodexImportSelection,
   type CodexImportCandidate,
@@ -59,6 +62,7 @@ import { useSavedRemoteConnections } from "../../state/use-remote-environment-re
 import { SettingsSection } from "./components/SettingsSection";
 
 type CatalogProject = CodexThreadsListResult["projects"][number];
+type CatalogCheckout = NonNullable<CatalogProject["checkouts"]>[number];
 type OriginFilter = CodexConversationOrigin | "all";
 type SearchScope = "titles" | "messages";
 
@@ -78,6 +82,8 @@ interface ImportFlow {
   readonly failed: ReadonlyMap<string, CodexImportCandidate>;
   readonly filterKey: string;
   readonly importing: boolean;
+  readonly checkoutChoices: ReadonlyMap<string, string>;
+  readonly knownProjects: ReadonlyMap<string, CatalogProject>;
   readonly loadingCatalog: boolean;
   readonly matchingKeys: ReadonlyMap<string, ReadonlySet<string>>;
   readonly origin: OriginFilter;
@@ -91,6 +97,7 @@ interface ImportFlow {
   readonly searchScope: SearchScope;
   readonly selected: ReadonlyMap<string, CodexImportCandidate>;
   readonly status: string | null;
+  readonly unresolvedCheckoutCount: number;
   readonly importSelected: () => Promise<void>;
   readonly loadProjectPage: (
     cwd: string,
@@ -99,6 +106,7 @@ interface ImportFlow {
   ) => Promise<CodexThreadsListResult>;
   readonly refreshCatalog: () => Promise<void>;
   readonly setArchived: (value: boolean) => void;
+  readonly setCheckoutChoice: (projectCwd: string, checkoutCwd: string) => void;
   readonly setEnvironmentId: (value: EnvironmentId) => void;
   readonly setOrigin: (value: OriginFilter) => void;
   readonly setProviderId: (value: ProviderInstanceId) => void;
@@ -135,6 +143,8 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
   const [origin, setOrigin] = useState<OriginFilter>("all");
   const [archived, setArchived] = useState(false);
   const [catalog, setCatalog] = useState<CodexThreadsListResult | null>(null);
+  const [knownProjects, setKnownProjects] = useState<Map<string, CatalogProject>>(new Map());
+  const [checkoutChoices, setCheckoutChoices] = useState<Map<string, string>>(new Map());
   const [catalogRevision, setCatalogRevision] = useState(0);
   const [loadingCatalog, setLoadingCatalog] = useState(false);
   const [selected, setSelected] = useState<Map<string, CodexImportCandidate>>(new Map());
@@ -214,10 +224,17 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       setMatchingKeys((current) => {
         const next = new Map(current);
         for (const candidate of result.value.threads) {
-          const key = JSON.stringify([filterKey, candidate.cwd]);
+          const key = JSON.stringify([filterKey, codexImportProjectCwd(candidate)]);
           const matches = new Set(next.get(key));
           matches.add(candidate.sourceIdentity);
           next.set(key, matches);
+        }
+        return next;
+      });
+      setKnownProjects((current) => {
+        const next = new Map(current);
+        for (const project of result.value.projects) {
+          next.set(normalizeProjectPathForComparison(project.cwd), project);
         }
         return next;
       });
@@ -260,6 +277,8 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     setSelected(new Map());
     setFailed(new Map());
     setMatchingKeys(new Map());
+    setKnownProjects(new Map());
+    setCheckoutChoices(new Map());
     setStatus(null);
     setError(null);
   }, [environmentId, providerId]);
@@ -276,6 +295,8 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       setSelected(new Map());
       setFailed(new Map());
       setMatchingKeys(new Map());
+      setKnownProjects(new Map());
+      setCheckoutChoices(new Map());
       setStatus(null);
       setError(null);
     };
@@ -309,7 +330,8 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       const currentMatches = matchingKeys.get(JSON.stringify([filterKey, project.cwd]));
       const selectedCount = [...selected.values()].filter(
         (candidate) =>
-          sameCwd(candidate.cwd, project.cwd) && currentMatches?.has(candidate.sourceIdentity),
+          sameCwd(codexImportProjectCwd(candidate), project.cwd) &&
+          currentMatches?.has(candidate.sourceIdentity),
       ).length;
       const clear = codexProjectSelectionState(
         selectedCount,
@@ -364,10 +386,42 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     ],
   );
 
+  const importCandidates = failed.size > 0 ? [...failed.values()] : [...selected.values()];
+  const unresolvedCheckoutCount = importCandidates.filter((candidate) => {
+    const projectCwd = codexImportProjectCwd(candidate);
+    const projectKey = normalizeProjectPathForComparison(projectCwd);
+    const project = knownProjects.get(projectKey);
+    return (
+      resolveCodexImportCheckout(
+        candidate,
+        checkoutChoices.get(projectKey),
+        project?.checkouts ?? [],
+      ).kind === "choose-checkout"
+    );
+  }).length;
+
   const importSelected = useCallback(async () => {
     if (!environmentId || !providerId || importing || projectSelectionBusy || selected.size === 0)
       return;
     const candidates = failed.size > 0 ? [...failed.values()] : [...selected.values()];
+    const unresolved = candidates.filter((candidate) => {
+      const projectCwd = codexImportProjectCwd(candidate);
+      const projectKey = normalizeProjectPathForComparison(projectCwd);
+      const project = knownProjects.get(projectKey);
+      return (
+        resolveCodexImportCheckout(
+          candidate,
+          checkoutChoices.get(projectKey),
+          project?.checkouts ?? [],
+        ).kind === "choose-checkout"
+      );
+    });
+    if (unresolved.length > 0) {
+      setError(
+        `Choose an existing checkout for ${unresolved.length} conversation${unresolved.length === 1 ? "" : "s"} from removed worktrees.`,
+      );
+      return;
+    }
     const projectIds = new Map<string, Promise<ProjectIdType>>();
     const failures = new Map<string, CodexImportCandidate>();
     let firstFailureMessage: string | null = null;
@@ -386,7 +440,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
           cwd,
         );
         if (existing) return existing.id;
-        const catalogProject = catalog?.projects.find((project) => sameCwd(project.cwd, cwd));
+        const catalogProject = knownProjects.get(normalizeProjectPathForComparison(cwd));
         if (catalogProject?.existingProjectId) return catalogProject.existingProjectId;
 
         const projectId = ProjectId.make(uuidv4());
@@ -413,7 +467,18 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     await runCodexImportBatch(
       candidates,
       async (candidate) => {
-        const projectId = await resolveProject(candidate.cwd);
+        const projectCwd = codexImportProjectCwd(candidate);
+        const projectKey = normalizeProjectPathForComparison(projectCwd);
+        const projectId = await resolveProject(projectCwd);
+        const project = knownProjects.get(projectKey);
+        const checkout = resolveCodexImportCheckout(
+          candidate,
+          checkoutChoices.get(projectKey),
+          project?.checkouts ?? [],
+        );
+        if (checkout.kind === "choose-checkout") {
+          throw new Error("Choose an existing checkout before importing this conversation.");
+        }
         const result = await adopt({
           environmentId,
           input: {
@@ -421,6 +486,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
             nativeThreadId: candidate.id,
             archived: candidate.archived,
             projectId,
+            ...(checkout.kind === "chosen-checkout" ? { cwdOverride: checkout.cwdOverride } : {}),
           },
         });
         if (result._tag !== "Success") {
@@ -459,12 +525,13 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     }
   }, [
     adopt,
-    catalog?.projects,
+    checkoutChoices,
     createProject,
     environmentId,
     failed,
     importing,
     loadCatalog,
+    knownProjects,
     projects,
     projectSelectionBusy,
     providerId,
@@ -477,12 +544,14 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       archived,
       catalog,
       catalogRevision,
+      checkoutChoices,
       environmentId,
       environmentOptions,
       error,
       failed,
       filterKey,
       importing,
+      knownProjects,
       loadingCatalog,
       matchingKeys,
       origin,
@@ -493,10 +562,17 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       searchScope,
       selected,
       status,
+      unresolvedCheckoutCount,
       importSelected,
       loadProjectPage,
       refreshCatalog: () => loadCatalog(true),
       setArchived,
+      setCheckoutChoice: (projectCwd, checkoutCwd) => {
+        setCheckoutChoices((current) =>
+          new Map(current).set(normalizeProjectPathForComparison(projectCwd), checkoutCwd),
+        );
+        setError(null);
+      },
       setEnvironmentId: (value) => {
         setSelectedEnvironmentId(value);
         setSelectedProviderId(null);
@@ -513,12 +589,14 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       archived,
       catalog,
       catalogRevision,
+      checkoutChoices,
       environmentId,
       environmentOptions,
       error,
       failed,
       filterKey,
       importing,
+      knownProjects,
       loadCatalog,
       loadingCatalog,
       loadProjectPage,
@@ -531,6 +609,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       searchScope,
       selected,
       status,
+      unresolvedCheckoutCount,
       importSelected,
       toggleCandidate,
       toggleProject,
@@ -752,7 +831,11 @@ function HeaderImportAction() {
   const flow = useImportFlow();
   const count = flow.failed.size > 0 ? flow.failed.size : flow.selected.size;
   const label = flow.failed.size > 0 ? `Retry ${count}` : `Import ${count}`;
-  const disabled = count === 0 || flow.importing || flow.projectSelectionBusy !== null;
+  const disabled =
+    count === 0 ||
+    flow.importing ||
+    flow.projectSelectionBusy !== null ||
+    flow.unresolvedCheckoutCount > 0;
   if (Platform.OS === "android") {
     return (
       <Pressable
@@ -800,11 +883,21 @@ function ScreenHeader(props: { readonly title: string }) {
 
 function SelectionStatus() {
   const flow = useImportFlow();
-  if (!flow.status && flow.selected.size === 0) return null;
+  if (!flow.status && flow.selected.size === 0 && flow.unresolvedCheckoutCount === 0) return null;
   return (
-    <Text accessibilityRole="summary" className="px-1 text-sm text-foreground-muted">
-      {flow.status ?? `${flow.selected.size} selected`}
-    </Text>
+    <View className="gap-1 px-1">
+      {flow.unresolvedCheckoutCount > 0 ? (
+        <Text accessibilityRole="alert" className="text-sm text-warning-foreground">
+          {flow.unresolvedCheckoutCount} selected conversation
+          {flow.unresolvedCheckoutCount === 1 ? " needs" : "s need"} an existing checkout.
+        </Text>
+      ) : null}
+      {flow.status || flow.selected.size > 0 ? (
+        <Text accessibilityRole="summary" className="text-sm text-foreground-muted">
+          {flow.status ?? `${flow.selected.size} selected`}
+        </Text>
+      ) : null}
+    </View>
   );
 }
 
@@ -868,13 +961,103 @@ function EnvironmentAndProviderPickers() {
   );
 }
 
+function checkoutTitle(checkout: CatalogCheckout): string {
+  if (checkout.isMain) {
+    return checkout.branch ? `Main checkout · ${checkout.branch}` : "Main checkout";
+  }
+  return (
+    checkout.branch ?? checkout.cwd.split(/[\\/]/).filter(Boolean).at(-1) ?? "Detached checkout"
+  );
+}
+
+function CheckoutChoicePanel(props: {
+  readonly missingCount: number;
+  readonly project: CatalogProject;
+}) {
+  const flow = useImportFlow();
+  const projectKey = normalizeProjectPathForComparison(props.project.cwd);
+  const selectedCwd = flow.checkoutChoices.get(projectKey);
+  const checkouts = props.project.checkouts ?? [];
+  return (
+    <View className="gap-2">
+      <View className="rounded-2xl border border-warning-border bg-warning px-4 py-3">
+        <Text className="text-sm font-t3-bold text-warning-foreground">
+          Removed worktrees: continue in
+        </Text>
+        <Text className="mt-1 text-xs leading-normal text-warning-foreground">
+          Choose where {props.missingCount} conversation
+          {props.missingCount === 1 ? "" : "s"} from {props.project.title} should continue. Other
+          conversations keep their original folders.
+        </Text>
+      </View>
+      {checkouts.length > 0 ? (
+        <SettingsSection card>
+          {checkouts.map((checkout, index) => (
+            <Pressable
+              accessibilityRole="radio"
+              accessibilityState={{ checked: checkout.cwd === selectedCwd }}
+              className={cn(
+                "min-h-14 flex-row items-center gap-3 bg-card px-4 py-3 active:bg-subtle",
+                index < checkouts.length - 1 && "border-b border-border-subtle",
+                flow.importing && "opacity-45",
+              )}
+              disabled={flow.importing}
+              key={checkout.cwd}
+              onPress={() => flow.setCheckoutChoice(props.project.cwd, checkout.cwd)}
+            >
+              <SelectionIndicator checked={checkout.cwd === selectedCwd} />
+              <SymbolView
+                name={checkout.isMain ? "folder" : "arrow.triangle.branch"}
+                size={17}
+                tintColorClassName="accent-icon-muted"
+                type="monochrome"
+              />
+              <View className="min-w-0 flex-1 gap-0.5">
+                <Text className="text-sm font-t3-medium text-foreground" numberOfLines={1}>
+                  {checkoutTitle(checkout)}
+                </Text>
+                <Text
+                  className="text-xs text-foreground-muted"
+                  ellipsizeMode="middle"
+                  numberOfLines={1}
+                >
+                  {checkout.cwd}
+                </Text>
+              </View>
+            </Pressable>
+          ))}
+        </SettingsSection>
+      ) : (
+        <ErrorBanner message="No existing checkout is available for this project. Refresh the catalog after creating or restoring one." />
+      )}
+    </View>
+  );
+}
+
+function SelectedCheckoutPanels() {
+  const flow = useImportFlow();
+  const missingByProject = new Map<string, number>();
+  for (const candidate of flow.selected.values()) {
+    if (!candidate.worktreeMissing) continue;
+    const key = normalizeProjectPathForComparison(codexImportProjectCwd(candidate));
+    missingByProject.set(key, (missingByProject.get(key) ?? 0) + 1);
+  }
+  return [...missingByProject].map(([projectKey, missingCount]) => {
+    const project = flow.knownProjects.get(projectKey);
+    return project ? (
+      <CheckoutChoicePanel key={projectKey} missingCount={missingCount} project={project} />
+    ) : null;
+  });
+}
+
 function ProjectRow(props: { readonly project: CatalogProject; readonly isLast: boolean }) {
   const flow = useImportFlow();
   const navigation = useNavigation();
   const currentMatches = flow.matchingKeys.get(JSON.stringify([flow.filterKey, props.project.cwd]));
   const selectedCount = [...flow.selected.values()].filter(
     (candidate) =>
-      sameCwd(candidate.cwd, props.project.cwd) && currentMatches?.has(candidate.sourceIdentity),
+      sameCwd(codexImportProjectCwd(candidate), props.project.cwd) &&
+      currentMatches?.has(candidate.sourceIdentity),
   ).length;
   const selection = codexProjectSelectionState(
     selectedCount,
@@ -987,6 +1170,7 @@ export function SettingsCodexImportRouteScreen() {
         <EnvironmentAndProviderPickers />
         <FilterControls />
         <SelectionStatus />
+        <SelectedCheckoutPanels />
         {flow.error ? <ErrorBanner message={flow.error} /> : null}
         {flow.environmentOptions.length === 0 ? (
           <EmptyState
@@ -1037,10 +1221,16 @@ function ConversationRow(props: {
   const key = flow.providerId ? codexImportKey(flow.providerId, props.candidate) : "";
   const selected = flow.selected.has(key);
   const importable = canImportCodexConversation(props.candidate);
-  const subtitle = props.candidate.matchPreview ?? props.candidate.cwd;
+  const worktree = codexImportWorktree(props.candidate);
+  const removedWorktree = props.candidate.worktreeMissing === true;
+  const worktreeLabel =
+    worktree?.label ?? props.candidate.worktreeBranch?.trim() ?? "Unknown branch";
+  const worktreePath = worktree?.path ?? props.candidate.cwd;
+  const subtitle = props.candidate.matchPreview;
   return (
     <Pressable
-      accessibilityLabel={`${props.candidate.title || "Untitled conversation"}, ${props.candidate.origin}${props.candidate.childCount > 0 ? `, ${props.candidate.childCount} subagents` : ""}`}
+      accessibilityHint={worktree || removedWorktree ? `Worktree path ${worktreePath}` : undefined}
+      accessibilityLabel={`${props.candidate.title || "Untitled conversation"}, ${props.candidate.origin}${removedWorktree ? `, removed worktree ${worktreeLabel}` : worktree ? `, worktree ${worktreeLabel}` : ""}${props.candidate.childCount > 0 ? `, ${props.candidate.childCount} subagents` : ""}`}
       accessibilityRole="checkbox"
       accessibilityState={{ checked: selected, disabled: !importable || flow.importing }}
       className={cn(
@@ -1061,6 +1251,41 @@ function ConversationRow(props: {
           <Text className="text-xs text-foreground-muted" numberOfLines={2}>
             {subtitle}
           </Text>
+        ) : null}
+        {worktree || removedWorktree ? (
+          <View className="min-w-0 flex-row items-center gap-1.5">
+            <View
+              className={cn(
+                "flex-row items-center gap-1 rounded-full px-2 py-0.5",
+                removedWorktree ? "bg-warning" : "bg-subtle",
+              )}
+            >
+              <SymbolView
+                name={removedWorktree ? "exclamationmark.triangle" : "arrow.triangle.branch"}
+                size={11}
+                tintColorClassName={
+                  removedWorktree ? "accent-warning-foreground" : "accent-icon-muted"
+                }
+                type="monochrome"
+              />
+              <Text
+                className={cn(
+                  "max-w-44 text-[11px] font-t3-medium",
+                  removedWorktree ? "text-warning-foreground" : "text-foreground-muted",
+                )}
+                numberOfLines={1}
+              >
+                {removedWorktree ? `Removed worktree · ${worktreeLabel}` : worktreeLabel}
+              </Text>
+            </View>
+            <Text
+              className="min-w-0 flex-1 text-[11px] text-foreground-muted"
+              ellipsizeMode="middle"
+              numberOfLines={1}
+            >
+              {worktreePath}
+            </Text>
+          </View>
         ) : null}
         <Text className="text-xs text-foreground-muted" numberOfLines={1}>
           {new Date(props.candidate.updatedAt).toLocaleDateString()}
@@ -1091,6 +1316,19 @@ export function SettingsCodexImportProjectRouteScreen({
   const [error, setError] = useState<string | null>(null);
   const generationRef = useRef(0);
   useEffect(() => flow.activate(), [flow.activate]);
+
+  const projectKey = normalizeProjectPathForComparison(route.params.cwd);
+  const project = flow.knownProjects.get(projectKey);
+  const missingCandidates = new Map<string, CodexImportCandidate>();
+  for (const candidate of [...threads, ...flow.selected.values()]) {
+    if (
+      candidate.worktreeMissing &&
+      canImportCodexConversation(candidate) &&
+      sameCwd(codexImportProjectCwd(candidate), route.params.cwd)
+    ) {
+      missingCandidates.set(candidate.sourceIdentity, candidate);
+    }
+  }
 
   const load = useCallback(
     async (cursor?: string, refresh?: boolean) => {
@@ -1152,6 +1390,9 @@ export function SettingsCodexImportProjectRouteScreen({
       >
         <FilterControls />
         <SelectionStatus />
+        {project && missingCandidates.size > 0 ? (
+          <CheckoutChoicePanel missingCount={missingCandidates.size} project={project} />
+        ) : null}
         {flow.error ? <ErrorBanner message={flow.error} /> : null}
         {error ? <ErrorBanner message={error} /> : null}
         {loading && threads.length === 0 ? (

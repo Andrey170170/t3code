@@ -48,6 +48,8 @@ import {
   type CodexOriginEvidence,
 } from "./CodexConversationCatalog.ts";
 import { CodexImportTitle, needsCodexImportTitle } from "./CodexImportTitle.ts";
+import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
+import { makeCodexWorktreeResolver } from "./CodexWorktreeResolver.ts";
 import { CodexThreadClient } from "./CodexThreadClient.ts";
 
 const ResumeCursor = Schema.Struct({ threadId: Schema.String });
@@ -137,6 +139,7 @@ export const makeCodexThreadImport = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const fs = yield* FileSystem.FileSystem;
   const sql = yield* SqlClient.SqlClient;
+  const worktrees = yield* makeCodexWorktreeResolver(yield* GitVcsDriver);
   const hasLegacyMessages = Effect.fn("CodexThreadImport.hasLegacyMessages")(function* (
     threadId: ThreadId,
   ) {
@@ -186,6 +189,7 @@ export const makeCodexThreadImport = Effect.gen(function* () {
   const list = Effect.fn("CodexThreadImport.list")(function* (
     input: CodexThreadsListInput,
   ): Effect.fn.Return<CodexThreadsListResult, unknown> {
+    if (input.refresh && !input.cursor) yield* worktrees.invalidate;
     const selectedProject = input.projectId ? yield* project(input.projectId) : undefined;
     const cwd = input.cwd;
     const home = yield* client.resolveNativeHomeIdentity(input.providerInstanceId);
@@ -350,10 +354,60 @@ export const makeCodexThreadImport = Effect.gen(function* () {
         if (!projectsByCwd.has(pathKey)) projectsByCwd.set(pathKey, owner);
       }
     }
+    const rootThreads = topLevelCodexThreads(catalog.threads);
+    const identities = yield* worktrees.resolveCatalog({
+      threads: rootThreads.map(({ thread }) => thread),
+      codexHome: home.startsWith("codex:home:") ? home.slice("codex:home:".length) : home,
+      projectRoots: [
+        ...snapshot.projects.map((entry) => entry.workspaceRoot),
+        ...(selectedProject ? [selectedProject.workspaceRoot] : []),
+        ...(cwd ? [cwd] : []),
+      ],
+    });
+    const workspaceHints = new Map(
+      yield* Effect.forEach(
+        [...new Set(rootThreads.map(({ thread }) => thread.cwd))],
+        (sourceCwd) =>
+          Effect.gen(function* () {
+            const identity = identities.get(sourceCwd);
+            const known = projectsByCwd.get(normalizeProjectPathForComparison(sourceCwd));
+            const ownerIdentity = known ? identities.get(known.workspaceRoot) : undefined;
+            const projectCwd =
+              identity?.projectCwd ??
+              ownerIdentity?.projectCwd ??
+              known?.workspaceRoot ??
+              sourceCwd;
+            const checkouts =
+              identity?.checkouts ??
+              ownerIdentity?.checkouts ??
+              ((yield* worktrees.existingDirectory(projectCwd))
+                ? [{ cwd: projectCwd, branch: null, isMain: true }]
+                : []);
+            return [
+              sourceCwd,
+              {
+                projectCwd,
+                worktreePath: identity
+                  ? identity.worktreePath
+                  : sourceCwd !== projectCwd
+                    ? sourceCwd
+                    : null,
+                worktreeBranch: identity?.worktreeBranch ?? null,
+                worktreeMissing:
+                  identity?.worktreeMissing ?? (yield* worktrees.missingDirectory(sourceCwd)),
+                checkouts,
+              },
+            ] as const;
+          }),
+        { concurrency: 4 },
+      ),
+    );
+    const canonicalFilter = (value: string) =>
+      identities.get(value)?.projectCwd ?? workspaceHints.get(value)?.projectCwd ?? value;
     const searchResult =
       search && input.searchScope === "messages" ? catalog.searches.get(search) : undefined;
     const lowerSearch = search.toLocaleLowerCase();
-    const rows = topLevelCodexThreads(catalog.threads)
+    const rows = rootThreads
       .map(({ thread, childCount }) => {
         const binding = byNative.get(thread.id);
         const origin = classifyCodexOrigin(
@@ -371,6 +425,10 @@ export const makeCodexThreadImport = Effect.gen(function* () {
           childCount,
           title: thread.name || thread.preview || "Codex conversation",
           cwd: thread.cwd,
+          projectCwd: workspaceHints.get(thread.cwd)!.projectCwd,
+          worktreePath: workspaceHints.get(thread.cwd)!.worktreePath,
+          worktreeBranch: workspaceHints.get(thread.cwd)!.worktreeBranch,
+          worktreeMissing: workspaceHints.get(thread.cwd)!.worktreeMissing,
           createdAt: DateTime.formatIso(DateTime.makeUnsafe(thread.createdAt * 1000)),
           updatedAt: DateTime.formatIso(DateTime.makeUnsafe(thread.updatedAt * 1000)),
           archived: thread.archived ?? input.archived ?? false,
@@ -389,16 +447,21 @@ export const makeCodexThreadImport = Effect.gen(function* () {
           (!search ||
             (searchResult
               ? searchResult.matches.has(row.id)
-              : `${row.title} ${row.cwd}`.toLocaleLowerCase().includes(lowerSearch))),
+              : `${row.title} ${row.cwd} ${row.projectCwd} ${row.worktreeBranch ?? ""}`
+                  .toLocaleLowerCase()
+                  .includes(lowerSearch))),
       );
     const groups = new Map<string, CodexThreadsListResult["projects"][number]>();
     for (const row of rows) {
-      const pathKey = normalizeProjectPathForComparison(row.cwd);
+      const pathKey = normalizeProjectPathForComparison(row.projectCwd);
       const known = projectsByCwd.get(pathKey);
       const group = groups.get(pathKey) ?? {
-        cwd: row.cwd,
+        cwd: row.projectCwd,
+        checkouts: workspaceHints.get(row.cwd)!.checkouts,
         title:
-          known?.title ?? row.cwd.split(/[\\/]/).findLast((part) => part.length > 0) ?? row.cwd,
+          known?.title ??
+          row.projectCwd.split(/[\\/]/).findLast((part) => part.length > 0) ??
+          row.projectCwd,
         existingProjectId: known?.id ?? null,
         totalCount: 0,
         importableCount: 0,
@@ -417,11 +480,13 @@ export const makeCodexThreadImport = Effect.gen(function* () {
       });
     }
     const filtered = rows.filter((row) => {
-      const pathKey = normalizeProjectPathForComparison(row.cwd);
+      const pathKey = normalizeProjectPathForComparison(row.projectCwd);
       return (
-        (cwd === undefined || pathKey === normalizeProjectPathForComparison(cwd)) &&
+        (cwd === undefined ||
+          pathKey === normalizeProjectPathForComparison(canonicalFilter(cwd))) &&
         (!selectedProject ||
-          pathKey === normalizeProjectPathForComparison(selectedProject.workspaceRoot) ||
+          pathKey ===
+            normalizeProjectPathForComparison(canonicalFilter(selectedProject.workspaceRoot)) ||
           projectsByCwd.get(pathKey)?.id === selectedProject.id)
       );
     });
@@ -483,6 +548,7 @@ export const makeCodexThreadImport = Effect.gen(function* () {
             );
           const cwd = input.cwdOverride ?? thread.cwd;
           let worktreePath: string | null = null;
+          let worktreeBranch: string | null = null;
           if (!upgrading) {
             const stat = yield* fs
               .stat(cwd)
@@ -499,18 +565,20 @@ export const makeCodexThreadImport = Effect.gen(function* () {
               normalizeProjectPathForComparison(cwd) !==
               normalizeProjectPathForComparison(selectedProject.workspaceRoot)
             ) {
-              const snapshot = yield* snapshots.getShellSnapshot();
-              const knownWorktree = snapshot.threads.some(
-                (entry) =>
-                  entry.projectId === input.projectId &&
-                  entry.worktreePath !== null &&
-                  normalizeProjectPathForComparison(entry.worktreePath) ===
-                    normalizeProjectPathForComparison(cwd),
-              );
-              if (!knownWorktree)
+              const sourceIdentity = yield* worktrees.resolveFresh(cwd);
+              const targetIdentity = yield* worktrees.resolveFresh(selectedProject.workspaceRoot);
+              const sameDirectory =
+                (yield* fs.realPath(cwd)) === (yield* fs.realPath(selectedProject.workspaceRoot));
+              if (
+                !sameDirectory &&
+                (!sourceIdentity ||
+                  !targetIdentity ||
+                  sourceIdentity.gitCommonDir !== targetIdentity.gitCommonDir)
+              )
                 return yield* fail(
-                  `This conversation belongs to '${cwd}'. Create or select a project rooted at that folder, or explicitly choose a workspace override.`,
+                  `The selected checkout '${cwd}' does not belong to this project's Git repository. Choose an existing checkout of the same repository.`,
                 );
+              worktreeBranch = sourceIdentity?.worktreeBranch ?? null;
               worktreePath = cwd;
             }
           }
@@ -585,7 +653,7 @@ export const makeCodexThreadImport = Effect.gen(function* () {
             },
             runtimeMode: DEFAULT_RUNTIME_MODE,
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            branch: null,
+            branch: worktreeBranch,
             worktreePath,
             createdAt: DateTime.formatIso(DateTime.makeUnsafe(thread.createdAt * 1000)),
             historyImport: true,

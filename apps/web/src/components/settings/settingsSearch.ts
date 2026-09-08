@@ -243,6 +243,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "import-conversations",
+    title: "Import conversations",
+    to: "/settings/projects",
+    searchTerms: ["codex chats history projects worktrees"],
+  },
+  {
     id: "new-threads",
     title: "New threads",
     to: "/settings/projects",

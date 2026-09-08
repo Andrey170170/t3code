@@ -10,6 +10,10 @@ import {
   type OrchestrationThreadShell,
 } from "@t3tools/contracts";
 import { makeThreadHistory, type NativeThread } from "effect-codex-app-server/thread-history";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import { GitVcsDriver, layer as gitLayer } from "../vcs/GitVcsDriver.ts";
+import { ServerConfig } from "../config.ts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -29,6 +33,10 @@ const projectId = ProjectId.make("project");
 const repository = ProviderSessionRuntime.layer.pipe(Layer.provide(SqlitePersistenceMemory));
 const testLayer = Layer.mergeAll(
   NodeServices.layer,
+  gitLayer.pipe(
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "codex-import-git-" })),
+    Layer.provide(NodeServices.layer),
+  ),
   SqlitePersistenceMemory,
   repository,
   ProviderSessionDirectoryLive.pipe(Layer.provide(repository)),
@@ -46,6 +54,7 @@ const makeHarness = (
   options: {
     active?: boolean;
     cwd?: string;
+    projectRoot?: string;
     nativeId?: string;
     nativeName?: string;
     archived?: boolean;
@@ -148,7 +157,7 @@ const makeHarness = (
           Option.some({
             id: projectId,
             title: "Project",
-            workspaceRoot: "/tmp",
+            workspaceRoot: options.projectRoot ?? "/tmp",
             defaultModelSelection: null,
             scripts: [],
             createdAt: "2026-01-01T00:00:00.000Z",
@@ -184,6 +193,122 @@ const makeHarness = (
 };
 
 it.layer(testLayer)("Codex native imports", (it) => {
+  it.effect(
+    "groups unseen Git worktrees into the main project and preserves their runtime checkout",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const git = yield* GitVcsDriver;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "codex-import-worktrees-" });
+        const main = path.join(root, "main");
+        const linked = path.join(root, "linked");
+        const detached = path.join(root, "detached");
+        yield* fs.makeDirectory(main);
+        const run = (args: string[]) =>
+          git.execute({ operation: "CodexThreadImport.test", cwd: main, args });
+        yield* run(["init"]);
+        yield* run([
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=test@example.invalid",
+          "commit",
+          "--allow-empty",
+          "-m",
+          "initial",
+        ]);
+        yield* run(["worktree", "add", "-b", "feature/work", linked]);
+        yield* run(["worktree", "add", "--detach", detached]);
+        const catalog = [main, linked, detached].map((cwd, index) => ({
+          id: `native-worktree-${index}`,
+          cwd,
+          modelProvider: "openai",
+          preview: "Worktree conversation",
+          createdAt: 1,
+          updatedAt: 2,
+          threadSource: "user",
+        }));
+        const harness = makeHarness({
+          catalog,
+          cwd: linked,
+          projectRoot: main,
+          nativeId: "native-worktree-1",
+        });
+        const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
+        const listed = yield* importer.list({ providerInstanceId: instanceId, projectId });
+        expect(listed.totalCount).toBe(3);
+        expect(listed.projects).toHaveLength(1);
+        expect(listed.projects[0]).toMatchObject({ cwd: main, totalCount: 3 });
+        expect(listed.threads.find((thread) => thread.cwd === linked)).toMatchObject({
+          projectCwd: main,
+          worktreePath: linked,
+          worktreeBranch: "feature/work",
+        });
+        expect(listed.projects[0]?.checkouts).toHaveLength(3);
+        const fromLinked = yield* importer.list({ providerInstanceId: instanceId, cwd: linked });
+        expect(fromLinked.threads).toHaveLength(3);
+        yield* importer.adopt({
+          providerInstanceId: instanceId,
+          nativeThreadId: "native-worktree-1",
+          projectId,
+        });
+        expect(harness.commands[0]).toMatchObject({
+          type: "thread.create",
+          projectId,
+          worktreePath: linked,
+          branch: "feature/work",
+        });
+        const directory = yield* ProviderSessionDirectory;
+        expect(
+          Option.getOrThrow(
+            yield* directory.getBinding(ThreadId.make("import:codex:native-worktree-1")),
+          ),
+        ).toMatchObject({ runtimePayload: { cwd: linked } });
+        yield* fs.remove(linked, { recursive: true });
+        const missing = makeHarness({
+          cwd: linked,
+          projectRoot: main,
+          nativeId: "native-missing-worktree",
+        });
+        const missingImporter = yield* makeCodexThreadImport.pipe(Effect.provide(missing.services));
+        expect(
+          (yield* missingImporter
+            .adopt({
+              providerInstanceId: instanceId,
+              nativeThreadId: "native-missing-worktree",
+              projectId,
+            })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        expect(missing.commands).toHaveLength(0);
+        const clone = path.join(root, "clone");
+        yield* run(["clone", main, clone]);
+        expect(
+          (yield* missingImporter
+            .adopt({
+              providerInstanceId: instanceId,
+              nativeThreadId: "native-missing-worktree",
+              projectId,
+              cwdOverride: clone,
+            })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        expect(missing.commands).toHaveLength(0);
+        yield* missingImporter.adopt({
+          providerInstanceId: instanceId,
+          nativeThreadId: "native-missing-worktree",
+          projectId,
+          cwdOverride: detached,
+        });
+        expect(missing.commands[0]).toMatchObject({
+          type: "thread.create",
+          worktreePath: detached,
+          branch: null,
+        });
+      }),
+  );
+
   it.effect("requests a title only for fresh imports without a meaningful native title", () =>
     Effect.gen(function* () {
       for (const [nativeId, nativeName, expectedCount] of [

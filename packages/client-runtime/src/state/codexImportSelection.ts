@@ -2,6 +2,50 @@ import type { CodexThreadsListResult, ProviderInstanceId } from "@t3tools/contra
 
 export type CodexImportCandidate = CodexThreadsListResult["threads"][number];
 
+type CodexImportLocation = {
+  readonly cwd: string;
+  readonly projectCwd?: string | null;
+  readonly worktreePath?: string | null;
+  readonly worktreeBranch?: string | null;
+  readonly worktreeMissing?: boolean;
+};
+
+/** Group linked worktrees by the main checkout without changing their runtime cwd. */
+export function codexImportProjectCwd(candidate: CodexImportLocation): string {
+  return candidate.projectCwd ?? candidate.cwd;
+}
+
+/** Only explicit worktree metadata earns a badge; ordinary project subdirectories do not. */
+export function codexImportWorktree(
+  candidate: CodexImportLocation,
+): { path: string; label: string } | null {
+  const path = candidate.worktreePath;
+  if (!path || path === codexImportProjectCwd(candidate)) return null;
+  return {
+    path,
+    label:
+      candidate.worktreeBranch?.trim() ||
+      path.split(/[\\/]/).filter(Boolean).slice(-2).join("/") ||
+      path,
+  };
+}
+
+/** Removed worktrees require an explicit choice from this project's current, proven checkouts. */
+export function resolveCodexImportCheckout(
+  candidate: CodexImportLocation,
+  selectedCwd: string | undefined,
+  availableCheckouts: ReadonlyArray<{ readonly cwd: string }>,
+):
+  | { kind: "original" }
+  | { kind: "choose-checkout" }
+  | { kind: "chosen-checkout"; cwdOverride: string } {
+  if (!candidate.worktreeMissing) return { kind: "original" };
+  if (selectedCwd && availableCheckouts.some((checkout) => checkout.cwd === selectedCwd)) {
+    return { kind: "chosen-checkout", cwdOverride: selectedCwd };
+  }
+  return { kind: "choose-checkout" };
+}
+
 export function codexImportKey(
   providerId: ProviderInstanceId,
   candidate: CodexImportCandidate,

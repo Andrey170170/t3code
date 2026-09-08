@@ -6,12 +6,18 @@ and custom binaries or environment variables.
 
 ## Import existing conversations
 
-Open **Import** beside **All projects**, or **Import conversations** in a project's
-settings to start with that folder. On mobile, use **Settings > Import Codex Chats**.
+Open **Settings > Projects > Import conversations**, or select a project in
+Settings to start with that project's conversations. On mobile, use **Settings > Import Codex Chats**.
 Choose the Codex account on the environment that holds the conversations, then
 select whole projects or open a project to choose individual conversations. Imports
-keep their original folders and create missing T3 projects as needed. Subagents
+keep their original folders and create missing T3 projects as needed. Git worktrees
+are grouped under their main project, with a worktree label on conversations from
+other checkouts. Subagents
 stay attached to their parent conversation and are not imported as separate chats.
+
+If a worktree was removed, choose an existing checkout for its conversations before
+importing. The choice applies to removed worktrees in that project; conversations
+whose worktrees still exist keep their original checkout.
 
 Search titles or full messages, and filter by conversation origin or archive state.
 Importing an archived conversation restores it in Codex. A batch continues if you
@@ -19,8 +25,8 @@ close the picker; reopen it to retry any failures. Meaningful native titles are
 preserved; unnamed conversations receive a title using your configured title model.
 
 Finish work in the original client before importing. Import does not synchronize
-with a conversation still running elsewhere. Its original project folder must
-still exist on the environment.
+with a conversation still running elsewhere. The checkout you continue in must
+exist on the environment.
 
 The conversation keeps its Codex context when you continue it in T3 Code. Open
 **Original Codex history** above the chat to read its earlier messages and tool

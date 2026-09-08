@@ -1,4 +1,3 @@
-import { CodexThreadImportButton } from "./CodexThreadImport";
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
@@ -2322,9 +2321,6 @@ export default function Sidebar() {
     () => new Map(projectGroups.map((project) => [project.projectKey, project] as const)),
     [projectGroups],
   );
-  const importTargetProject = projectScopeKey
-    ? projectGroupByScopeKey.get(projectScopeKey)
-    : undefined;
   const selectedProjectScopeItem = useMemo(
     () =>
       projectScopeItems.find((item) => item.value === (projectScopeKey ?? "all")) ??
@@ -4387,16 +4383,6 @@ export default function Sidebar() {
             </div>
             {
               <div className="flex items-center gap-1">
-                <CodexThreadImportButton
-                  environmentId={importTargetProject?.environmentId ?? primaryEnvironmentId}
-                  {...(importTargetProject
-                    ? {
-                        projectId: importTargetProject.id,
-                        workspaceRoot: importTargetProject.workspaceRoot,
-                      }
-                    : {})}
-                  label="Import"
-                />
                 <Combobox
                   items={projectScopeItems}
                   filteredItems={filteredProjectScopeItems}
