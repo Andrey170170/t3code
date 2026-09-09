@@ -73,8 +73,18 @@ for await (const line of NodeReadline.createInterface({ input: process.stdin }))
       respond({ config: { developer_instructions: "Existing developer policy." }, origins: {} });
       break;
     case "thread/fork":
+      if (message.params.ephemeral && message.params.excludeTurns !== true) {
+        write({
+          id: message.id,
+          error: {
+            code: -32600,
+            message: "ephemeral paginated thread/fork requires `excludeTurns: true`",
+          },
+        });
+        break;
+      }
       notify("thread/started", { thread: thread("side") });
-      respond(opened("side"));
+      respond({ ...opened("side"), thread: { ...thread("side"), turns: [] } });
       break;
     case "thread/inject_items":
       boundary = true;

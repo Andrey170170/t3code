@@ -44,6 +44,9 @@ import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+const decodeV2ThreadForkResponse = Schema.decodeUnknownEffect(
+  EffectCodexSchema.V2ThreadForkResponse,
+);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -1258,7 +1261,7 @@ export const makeCodexSessionRuntime = (
     const sideChatLock = yield* Semaphore.make(1);
     let sideChat: CodexSideChat | undefined;
     let sideTurnId: string | undefined;
-    let sideInheritedTurnIds = new Set<string>();
+    const sideOwnTurnIds = new Set<string>();
     const completedSideTurns = new Set<string>();
     let parentTurnSettings: Pick<
       CodexSessionRuntimeSendTurnInput,
@@ -1378,6 +1381,7 @@ export const makeCodexSessionRuntime = (
             event.turnId &&
             (event.method === "turn/started" || event.method === "turn/completed")
           ) {
+            sideOwnTurnIds.add(event.turnId);
             const saved = sideTurnTimestamps.get(event.turnId) ?? {};
             sideTurnTimestamps.set(event.turnId, {
               ...saved,
@@ -2527,9 +2531,12 @@ export const makeCodexSessionRuntime = (
           includeLayers: false,
         });
         const existingInstructions = config.config.developer_instructions?.trim();
-        const response = yield* client.request("thread/fork", {
+        // The generated request schema predates excludeTurns and strips it.
+        const raw = yield* client.raw.request("thread/fork", {
           threadId,
           ephemeral: true,
+          // Paginated ephemeral forks inherit context without returning turn history.
+          excludeTurns: true,
           ...(parentSession.model ? { model: parentSession.model } : {}),
           developerInstructions: existingInstructions
             ? `${existingInstructions}\n\n${SIDE_DEVELOPER_INSTRUCTIONS}`
@@ -2539,8 +2546,16 @@ export const makeCodexSessionRuntime = (
             : {}),
           ...(serviceTier ? { serviceTier } : {}),
         });
+        const response = yield* decodeV2ThreadForkResponse(raw).pipe(
+          Effect.mapError((error) =>
+            CodexErrors.CodexAppServerRequestError.invalidPayload(
+              "thread/fork",
+              "decode-payload",
+              error,
+            ),
+          ),
+        );
         const id = response.thread.id;
-        sideInheritedTurnIds = new Set(response.thread.turns.map((turn) => turn.id));
         sideChatIds.add(id);
         yield* client
           .request("thread/inject_items", {
@@ -2593,6 +2608,7 @@ export const makeCodexSessionRuntime = (
               ),
             ),
           );
+          sideOwnTurnIds.add(response.turn.id);
           if (response.turn.status === "inProgress" && !completedSideTurns.has(response.turn.id))
             sideTurnId ??= response.turn.id;
           sideChat = {
@@ -2631,11 +2647,12 @@ export const makeCodexSessionRuntime = (
               }),
             ),
           );
-          // Native subscriptions stop at detach. Reconcile only side turns so a
-          // response completed while disconnected is visible on reconnect.
+          // The fork excludes history, so recognize side turns by their send
+          // receipts/live events instead of relying on inherited turn IDs.
+          // This also recovers responses completed while disconnected.
           sideTurnId = undefined;
           for (const turn of response.thread.turns) {
-            if (sideInheritedTurnIds.has(turn.id)) continue;
+            if (!sideOwnTurnIds.has(turn.id)) continue;
             if (turn.status === "inProgress") sideTurnId = turn.id;
             const savedTimestamps = sideTurnTimestamps.get(turn.id);
             const startedAt =

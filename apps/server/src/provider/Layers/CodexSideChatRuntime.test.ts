@@ -136,6 +136,7 @@ it.layer(NodeServices.layer)("native Codex side conversations", (it) => {
         assert.equal(requests.filter((request) => request.method === "thread/fork").length, 1);
         const fork = requests.find((request) => request.method === "thread/fork")!;
         assert.equal(fork.params.ephemeral, true);
+        assert.equal(fork.params.excludeTurns, true);
         assert.match(String(fork.params.developerInstructions), /Existing developer policy/);
         assert.match(
           String(fork.params.developerInstructions),
