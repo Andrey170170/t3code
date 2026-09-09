@@ -41,6 +41,18 @@ to replace the short text preview with complete, paginated history.
 it selects recent Claude/Codex conversations and retains a limited text preview.
 Use the Codex import picker for complete, paginated history.
 
+## Ask a side question
+
+In a started Codex chat, open the right panel and choose **Side chat**. It inherits
+the conversation up to that point, so you can ask a related question while the main
+chat continues. Side-chat messages do not become part of the main conversation.
+
+You can change its model, reasoning effort, speed, permissions, and Build/Plan mode.
+It shares the main chat's workspace; the branch indicator does not switch branches.
+Side chats are temporary and do not appear in the thread list. Closing the tab ends
+the conversation, and Codex can expire it while it is inactive and hidden. Start a
+new side chat to take a fresh copy of the main conversation's context.
+
 ## Ask Codex to start another chat
 
 Ask explicitly, for example: “Start a separate chat to review the parser, and keep

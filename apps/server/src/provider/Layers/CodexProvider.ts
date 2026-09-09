@@ -662,29 +662,32 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
             checkedAt,
           });
 
-  return buildServerProvider({
-    presentation: CODEX_PRESENTATION,
-    enabled: codexSettings.enabled,
-    checkedAt,
-    models: snapshot.models,
-    skills: snapshot.skills,
-    slashCommands: [
-      COMPACT_SLASH_COMMAND,
-      {
-        name: "feedback",
-        description: "Send this thread and Codex logs to OpenAI",
-        input: { hint: "Describe the issue (optional)" },
+  return {
+    ...buildServerProvider({
+      presentation: CODEX_PRESENTATION,
+      enabled: codexSettings.enabled,
+      checkedAt,
+      models: snapshot.models,
+      skills: snapshot.skills,
+      slashCommands: [
+        COMPACT_SLASH_COMMAND,
+        {
+          name: "feedback",
+          description: "Send this thread and Codex logs to OpenAI",
+          input: { hint: "Describe the issue (optional)" },
+        },
+      ],
+      probe: {
+        installed: true,
+        version: snapshot.version ?? null,
+        status: accountStatus.status,
+        auth: accountStatus.auth,
+        ...(accountStatus.message ? { message: accountStatus.message } : {}),
+        usageLimits,
       },
-    ],
-    probe: {
-      installed: true,
-      version: snapshot.version ?? null,
-      status: accountStatus.status,
-      auth: accountStatus.auth,
-      ...(accountStatus.message ? { message: accountStatus.message } : {}),
-      usageLimits,
-    },
-  });
+    }),
+    supportsSideChat: true,
+  };
 });
 
 // NOTE: the singleton `CodexProviderLive` Layer has been removed as part of

@@ -1,3 +1,4 @@
+import type { ProviderSideChats } from "./ProviderSideChats.ts";
 /**
  * ProviderAdapter - Provider-specific runtime adapter contract.
  *
@@ -65,6 +66,7 @@ export interface ProviderThreadSnapshot {
 }
 
 export interface ProviderAdapterShape<TError> {
+  readonly sideChats?: ProviderSideChats<TError>;
   /**
    * Provider kind implemented by this adapter.
    */

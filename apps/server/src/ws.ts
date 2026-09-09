@@ -1,3 +1,4 @@
+import { SideChatError } from "@t3tools/contracts";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -524,6 +525,13 @@ const makeWsRpcLayer = (
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const providerService = yield* ProviderService.ProviderService;
+      const sideChats = Effect.fromNullishOr(providerService.sideChats).pipe(
+        Effect.mapError(
+          () => new SideChatError({ message: "This server does not support side chats." }),
+        ),
+      );
+      const sideChatError = (cause: { readonly message: string }) =>
+        new SideChatError({ message: cause.message });
       const providerSessionDirectory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const providerAuth = yield* ProviderAuthService;
@@ -2365,6 +2373,40 @@ const makeWsRpcLayer = (
             WS_METHODS.attachmentsDelete,
             deletePendingAttachment(input.attachmentId),
             { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.sideChatOpen]: (input) =>
+          sideChats.pipe(
+            Effect.flatMap((side) => side.open(input)),
+            Effect.mapError(sideChatError),
+          ),
+        [WS_METHODS.sideChatSend]: (input) =>
+          sideChats.pipe(
+            Effect.flatMap((side) => side.send(input)),
+            Effect.mapError(sideChatError),
+          ),
+        [WS_METHODS.sideChatInterrupt]: (input) =>
+          sideChats.pipe(
+            Effect.flatMap((side) => side.interrupt(input)),
+            Effect.mapError(sideChatError),
+          ),
+        [WS_METHODS.sideChatClose]: (input) =>
+          sideChats.pipe(
+            Effect.flatMap((side) => side.close(input)),
+            Effect.mapError(sideChatError),
+          ),
+        [WS_METHODS.sideChatRespondApproval]: (input) =>
+          sideChats.pipe(
+            Effect.flatMap((side) => side.respondApproval(input)),
+            Effect.mapError(sideChatError),
+          ),
+        [WS_METHODS.sideChatRespondUserInput]: (input) =>
+          sideChats.pipe(
+            Effect.flatMap((side) => side.respondUserInput(input)),
+            Effect.mapError(sideChatError),
+          ),
+        [WS_METHODS.sideChatSubscribe]: (input) =>
+          Stream.unwrap(sideChats.pipe(Effect.map((side) => side.subscribe(input)))).pipe(
+            Stream.mapError(sideChatError),
           ),
         [WS_METHODS.codexThreadsList]: (input) => codexThreadImport.list(input),
         [WS_METHODS.codexThreadsImport]: (input) => codexThreadImport.adopt(input),

@@ -1,3 +1,4 @@
+import { useSideChatPortalProps } from "./sideChatFocus";
 import {
   type ProviderDriverKind,
   type ProviderInstanceId,
@@ -557,6 +558,7 @@ export const TraitsPicker = memo(function TraitsPicker({
     size?: ComposerControlSize;
     hidden?: boolean;
   }) {
+  const sideChatPortalProps = useSideChatPortalProps();
   const [isMenuOpen, setIsMenuOpen] = useComposerMenuState(hidden);
   const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled } =
     getTraitsSectionVisibility({
@@ -647,7 +649,11 @@ export const TraitsPicker = memo(function TraitsPicker({
           </>
         )}
       </MenuTrigger>
-      <MenuPopup align="start" {...(isComposerOwned ? composerFloatingLayerProps : {})}>
+      <MenuPopup
+        {...sideChatPortalProps}
+        align="start"
+        {...(isComposerOwned ? composerFloatingLayerProps : {})}
+      >
         <TraitsMenuContent
           provider={provider}
           {...(instanceId ? { instanceId } : {})}

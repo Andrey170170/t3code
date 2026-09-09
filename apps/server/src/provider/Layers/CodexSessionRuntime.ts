@@ -30,6 +30,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
@@ -38,6 +39,7 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
+import { SIDE_BOUNDARY_PROMPT, SIDE_DEVELOPER_INSTRUCTIONS } from "./codexSideChat.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
@@ -177,6 +179,7 @@ export interface CodexSessionRuntimeOptions {
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
+  readonly runtimeMode?: RuntimeMode;
   readonly agentOrigin?: AgentOrigin;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
@@ -199,7 +202,33 @@ export interface CodexThreadSnapshot {
   readonly turns: ReadonlyArray<CodexThreadTurnSnapshot>;
 }
 
+export interface CodexSideChat {
+  readonly id: string;
+  readonly model: string;
+  readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
+  readonly serviceTier?: string;
+  readonly cwd: string;
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+}
+
+export interface CodexSideChatEvent {
+  readonly sideChatId: string;
+  readonly event: ProviderEvent;
+}
+
 export interface CodexSessionRuntimeShape {
+  readonly openSideChat: Effect.Effect<CodexSideChat, CodexSessionRuntimeError>;
+  readonly sendSideChat: (
+    id: string,
+    input: CodexSessionRuntimeSendTurnInput,
+  ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
+  readonly interruptSideChat: (id: string) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly detachSideChat: (id: string) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly attachSideChat: (id: string) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly closeSideChat: (id: string) => Effect.Effect<void, CodexSessionRuntimeError>;
+  readonly sideChatEvents: Stream.Stream<CodexSideChatEvent>;
+
   readonly start: () => Effect.Effect<ProviderSession, CodexSessionRuntimeError>;
   readonly getSession: Effect.Effect<ProviderSession>;
   readonly sendTurn: (
@@ -231,7 +260,17 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
-  | CodexSessionRuntimeThreadIdMissingError;
+  | CodexSessionRuntimeThreadIdMissingError
+  | CodexSessionRuntimeSideChatNotFoundError;
+
+export class CodexSessionRuntimeSideChatNotFoundError extends Schema.TaggedError<CodexSessionRuntimeSideChatNotFoundError>()(
+  "CodexSessionRuntimeSideChatNotFoundError",
+  { sideChatId: Schema.String },
+) {
+  override get message() {
+    return "This side chat has ended. Start a new side chat to continue.";
+  }
+}
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedError<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -1215,6 +1254,21 @@ export const makeCodexSessionRuntime = (
     const runtimeScope = yield* Scope.Scope;
     const crypto = yield* Crypto.Crypto;
     const events = yield* Queue.unbounded<ProviderEvent>();
+    const sideChatEvents = yield* Queue.unbounded<CodexSideChatEvent>();
+    const sideChatLock = yield* Semaphore.make(1);
+    let sideChat: CodexSideChat | undefined;
+    let sideTurnId: string | undefined;
+    let sideInheritedTurnIds = new Set<string>();
+    const completedSideTurns = new Set<string>();
+    let parentTurnSettings: Pick<
+      CodexSessionRuntimeSendTurnInput,
+      "effort" | "serviceTier" | "interactionMode"
+    > = {};
+    const sideTurnTimestamps = new Map<string, { startedAt?: string; completedAt?: string }>();
+
+    // Retain closed IDs to suppress late notifications after unsubscribe.
+    const sideChatIds = new Set<string>();
+    const sideRequestOwners = new Map<ApprovalRequestId, string>();
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
@@ -1297,16 +1351,46 @@ export const makeCodexSessionRuntime = (
     const sessionRef = yield* Ref.make<ProviderSession>(initialSession);
     const offerEvent = (event: ProviderEvent) => Queue.offer(events, event).pipe(Effect.asVoid);
 
-    const emitEvent = (event: Omit<ProviderEvent, "id" | "provider" | "createdAt">) =>
+    const emitEvent = (
+      event: Omit<ProviderEvent, "id" | "provider" | "createdAt"> & { readonly createdAt?: string },
+    ) =>
       Effect.gen(function* () {
         const id = yield* randomUUIDv4("provider-event");
-        return yield* offerEvent({
+        const payload = event.payload as
+          | { threadId?: unknown; thread?: { id?: unknown } }
+          | undefined;
+        const nativeId = payload?.threadId ?? payload?.thread?.id;
+        const owner =
+          typeof nativeId === "string" && sideChatIds.has(nativeId)
+            ? nativeId
+            : event.requestId
+              ? sideRequestOwners.get(event.requestId)
+              : undefined;
+        const fullEvent: ProviderEvent = {
           id: EventId.make(id),
           provider: PROVIDER,
           ...(options.providerInstanceId ? { providerInstanceId: options.providerInstanceId } : {}),
           createdAt: yield* nowIso,
           ...event,
-        });
+        };
+        if (owner) {
+          if (
+            event.turnId &&
+            (event.method === "turn/started" || event.method === "turn/completed")
+          ) {
+            const saved = sideTurnTimestamps.get(event.turnId) ?? {};
+            sideTurnTimestamps.set(event.turnId, {
+              ...saved,
+              ...(event.method === "turn/started"
+                ? { startedAt: saved.startedAt ?? fullEvent.createdAt }
+                : { completedAt: saved.completedAt ?? fullEvent.createdAt }),
+            });
+          }
+          if (event.requestId) sideRequestOwners.set(event.requestId, owner);
+          yield* Queue.offer(sideChatEvents, { sideChatId: owner, event: fullEvent });
+          return;
+        }
+        return yield* offerEvent(fullEvent);
       });
     const emitSessionEvent = (method: string, message: string) =>
       emitEvent({
@@ -1778,6 +1862,57 @@ export const makeCodexSessionRuntime = (
 
     const handleRawNotification = (notification: CodexServerNotification) =>
       Effect.gen(function* () {
+        const paramsThreadId = (notification.params as { threadId?: unknown }).threadId;
+        const sideId =
+          readNotificationThreadId(notification) ??
+          (typeof paramsThreadId === "string" ? paramsThreadId : undefined);
+        // Fork announces the ephemeral thread before its RPC response arrives.
+        if (notification.method === "thread/started" && notification.params.thread.ephemeral) {
+          sideChatIds.add(notification.params.thread.id);
+        }
+        if (sideId && sideChatIds.has(sideId)) {
+          if (sideChat?.id === sideId && notification.method === "turn/started")
+            sideTurnId = notification.params.turn.id;
+          if (notification.method === "turn/completed") {
+            completedSideTurns.add(notification.params.turn.id);
+            if (sideChat?.id === sideId && sideTurnId === notification.params.turn.id)
+              sideTurnId = undefined;
+          }
+          if (notification.method === "thread/closed" && sideChat?.id === sideId) {
+            sideTurnId = undefined;
+            sideChat = undefined;
+          }
+          const route = readRouteFields(notification);
+          const rawRequestId =
+            notification.method === "serverRequest/resolved"
+              ? String(notification.params.requestId)
+              : undefined;
+          const correlation = rawRequestId
+            ? (yield* Ref.get(approvalCorrelationsRef)).get(rawRequestId)
+            : undefined;
+          if (rawRequestId && correlation) {
+            yield* Ref.update(approvalCorrelationsRef, (current) => {
+              const next = new Map(current);
+              next.delete(rawRequestId);
+              return next;
+            });
+          }
+          yield* emitEvent({
+            kind: "notification",
+            threadId: options.threadId,
+            method: notification.method,
+            payload: notification.params,
+            ...(correlation
+              ? { requestId: correlation.requestId, requestKind: correlation.requestKind }
+              : {}),
+            ...(route.turnId ? { turnId: route.turnId } : {}),
+            ...(route.itemId ? { itemId: route.itemId } : {}),
+            ...(notification.method === "item/agentMessage/delta"
+              ? { textDelta: notification.params.delta }
+              : {}),
+          });
+          return;
+        }
         const isMemoryConsolidationNotification =
           suppressMemoryConsolidationNotification(notification);
 
@@ -2323,11 +2458,46 @@ export const makeCodexSessionRuntime = (
       return providerThreadId;
     });
 
+    const requireSideChat = (id: string) =>
+      sideChat?.id === id
+        ? Effect.succeed(sideChat)
+        : Effect.fail(new CodexSessionRuntimeSideChatNotFoundError({ sideChatId: id }));
+    const interruptSideChat = (id: string) =>
+      Effect.gen(function* () {
+        yield* requireSideChat(id);
+        if (sideTurnId)
+          yield* client.request("turn/interrupt", { threadId: id, turnId: sideTurnId });
+      });
+    const closeSideChat = (id: string) =>
+      Effect.gen(function* () {
+        if (sideChat?.id !== id) return;
+        yield* interruptSideChat(id);
+        // Resolve only the side conversation's pending requests before detaching it.
+        for (const [requestId, owner] of sideRequestOwners) {
+          if (owner !== id) continue;
+          const approval = (yield* Ref.get(pendingApprovalsRef)).get(requestId);
+          if (approval) yield* Deferred.succeed(approval.decision, "cancel");
+          const userInput = (yield* Ref.get(pendingUserInputsRef)).get(requestId);
+          if (userInput) yield* Deferred.succeed(userInput.answers, {});
+        }
+        yield* client.request("thread/unsubscribe", { threadId: id });
+        sideChat = undefined;
+        sideTurnId = undefined;
+        yield* emitEvent({
+          kind: "notification",
+          threadId: options.threadId,
+          method: "thread/closed",
+          payload: { threadId: id },
+        });
+      }).pipe(sideChatLock.withPermits(1));
+
     const close = Effect.gen(function* () {
       const alreadyClosed = yield* Ref.getAndSet(closedRef, true);
       if (alreadyClosed) {
         return;
       }
+      if (sideChat)
+        yield* closeSideChat(sideChat.id).pipe(Effect.timeoutOption("5 seconds"), Effect.ignore);
       yield* settlePendingApprovals("cancel");
       yield* settlePendingUserInputs({});
       yield* updateSession(sessionRef, {
@@ -2342,10 +2512,173 @@ export const makeCodexSessionRuntime = (
       yield* Scope.close(runtimeScope, Exit.void);
       yield* Queue.shutdown(serverNotifications);
       yield* Queue.shutdown(events);
+      yield* Queue.shutdown(sideChatEvents);
     });
 
     return {
       start,
+      openSideChat: Effect.gen(function* () {
+        if (sideChat) return sideChat;
+        const threadId = yield* readProviderThreadId;
+        const parentSession = yield* Ref.get(sessionRef);
+        const serviceTier = parentTurnSettings.serviceTier ?? options.serviceTier;
+        const config = yield* client.request("config/read", {
+          cwd: options.cwd,
+          includeLayers: false,
+        });
+        const existingInstructions = config.config.developer_instructions?.trim();
+        const response = yield* client.request("thread/fork", {
+          threadId,
+          ephemeral: true,
+          ...(parentSession.model ? { model: parentSession.model } : {}),
+          developerInstructions: existingInstructions
+            ? `${existingInstructions}\n\n${SIDE_DEVELOPER_INSTRUCTIONS}`
+            : SIDE_DEVELOPER_INSTRUCTIONS,
+          ...(parentTurnSettings.effort
+            ? { config: { model_reasoning_effort: parentTurnSettings.effort } }
+            : {}),
+          ...(serviceTier ? { serviceTier } : {}),
+        });
+        const id = response.thread.id;
+        sideInheritedTurnIds = new Set(response.thread.turns.map((turn) => turn.id));
+        sideChatIds.add(id);
+        yield* client
+          .request("thread/inject_items", {
+            threadId: id,
+            items: [
+              {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: SIDE_BOUNDARY_PROMPT }],
+              },
+            ],
+          })
+          .pipe(
+            Effect.onError(() =>
+              client.request("thread/unsubscribe", { threadId: id }).pipe(Effect.ignore),
+            ),
+          );
+        sideChat = {
+          id,
+          model: response.model,
+          cwd: response.cwd,
+          runtimeMode: options.runtimeMode,
+          interactionMode: parentTurnSettings.interactionMode ?? "default",
+          ...(response.reasoningEffort ? { effort: response.reasoningEffort } : {}),
+          ...(response.serviceTier ? { serviceTier: response.serviceTier } : {}),
+        };
+        return sideChat;
+      }).pipe(sideChatLock.withPermits(1)),
+      sendSideChat: (id, input) =>
+        Effect.gen(function* () {
+          const current = yield* requireSideChat(id);
+          const params = yield* buildTurnStartParams({
+            threadId: id,
+            runtimeMode: input.runtimeMode ?? current.runtimeMode,
+            ...(input.input ? { prompt: input.input } : {}),
+            ...(input.attachments ? { attachments: input.attachments } : {}),
+            model: input.model ?? current.model,
+            ...((input.effort ?? current.effort) ? { effort: input.effort ?? current.effort } : {}),
+            ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+            interactionMode: input.interactionMode ?? current.interactionMode,
+            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+          });
+          const raw = yield* client.raw.request("turn/start", params);
+          const response = yield* decodeV2TurnStartResponse(raw).pipe(
+            Effect.mapError((error) =>
+              CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+                "decode-response-payload",
+                error,
+                { method: "turn/start" },
+              ),
+            ),
+          );
+          if (response.turn.status === "inProgress" && !completedSideTurns.has(response.turn.id))
+            sideTurnId ??= response.turn.id;
+          sideChat = {
+            ...current,
+            runtimeMode: input.runtimeMode ?? current.runtimeMode,
+            model: input.model ?? current.model,
+            interactionMode: input.interactionMode ?? current.interactionMode,
+            ...(input.effort ? { effort: input.effort } : {}),
+            ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+          };
+          return { threadId: options.threadId, turnId: TurnId.make(response.turn.id) };
+        }).pipe(sideChatLock.withPermits(1)),
+      interruptSideChat,
+      detachSideChat: (id) =>
+        Effect.gen(function* () {
+          yield* requireSideChat(id);
+          yield* client.request("thread/unsubscribe", { threadId: id });
+        }).pipe(sideChatLock.withPermits(1)),
+      attachSideChat: (id) =>
+        Effect.gen(function* () {
+          yield* requireSideChat(id);
+          const response = yield* client.request("thread/resume", { threadId: id }).pipe(
+            Effect.catch((error) =>
+              Effect.gen(function* () {
+                if (isRecoverableThreadResumeError(error)) {
+                  sideChat = undefined;
+                  sideTurnId = undefined;
+                  yield* emitEvent({
+                    kind: "notification",
+                    threadId: options.threadId,
+                    method: "thread/closed",
+                    payload: { threadId: id },
+                  });
+                }
+                return yield* Effect.fail(error);
+              }),
+            ),
+          );
+          // Native subscriptions stop at detach. Reconcile only side turns so a
+          // response completed while disconnected is visible on reconnect.
+          sideTurnId = undefined;
+          for (const turn of response.thread.turns) {
+            if (sideInheritedTurnIds.has(turn.id)) continue;
+            if (turn.status === "inProgress") sideTurnId = turn.id;
+            const savedTimestamps = sideTurnTimestamps.get(turn.id);
+            const startedAt =
+              turn.startedAt != null
+                ? new Date(turn.startedAt * 1000).toISOString()
+                : savedTimestamps?.startedAt;
+            const completedAt =
+              turn.completedAt != null
+                ? new Date(turn.completedAt * 1000).toISOString()
+                : savedTimestamps?.completedAt;
+            yield* emitEvent({
+              kind: "notification",
+              threadId: options.threadId,
+              method: "turn/started",
+              turnId: TurnId.make(turn.id),
+              ...(startedAt ? { createdAt: startedAt } : {}),
+              payload: { threadId: id, turn },
+            });
+            const itemCreatedAt = completedAt ?? startedAt;
+            for (const item of turn.items) {
+              yield* emitEvent({
+                kind: "notification",
+                threadId: options.threadId,
+                method: "item/completed",
+                turnId: TurnId.make(turn.id),
+                itemId: ProviderItemId.make(item.id),
+                ...(itemCreatedAt ? { createdAt: itemCreatedAt } : {}),
+                payload: { threadId: id, turnId: turn.id, item },
+              });
+            }
+            if (turn.status !== "inProgress")
+              yield* emitEvent({
+                kind: "notification",
+                threadId: options.threadId,
+                method: "turn/completed",
+                turnId: TurnId.make(turn.id),
+                ...(completedAt ? { createdAt: completedAt } : {}),
+                payload: { threadId: id, turn },
+              });
+          }
+        }).pipe(sideChatLock.withPermits(1)),
+      closeSideChat,
+      sideChatEvents: Stream.fromQueue(sideChatEvents),
       getSession: Ref.get(sessionRef),
       compactThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
@@ -2391,6 +2724,14 @@ export const makeCodexSessionRuntime = (
               ),
             ),
           );
+          parentTurnSettings = {
+            ...parentTurnSettings,
+            ...(input.effort !== undefined ? { effort: input.effort } : {}),
+            ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}),
+            ...(input.interactionMode !== undefined
+              ? { interactionMode: input.interactionMode }
+              : {}),
+          };
           const turnId = TurnId.make(response.turn.id);
           yield* updateSession(sessionRef, (session) => ({
             status: "running",

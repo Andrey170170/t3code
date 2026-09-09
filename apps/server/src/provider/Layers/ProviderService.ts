@@ -2277,7 +2277,47 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
+  const resolveSideChats = Effect.fn("ProviderService.resolveSideChats")(function* (
+    parentThreadId: ThreadId,
+    allowRecovery = false,
+  ) {
+    const routed = yield* resolveRoutableSession({
+      threadId: parentThreadId,
+      operation: "ProviderService.sideChat",
+      allowRecovery,
+    });
+    if (!routed.adapter.sideChats)
+      return yield* toValidationError(
+        "ProviderService.sideChat",
+        "This provider does not support native side chats.",
+      );
+    return routed.adapter.sideChats;
+  });
+  const sideChats: NonNullable<ProviderService.ProviderServiceShape["sideChats"]> = {
+    open: (input) =>
+      resolveSideChats(input.parentThreadId, true).pipe(Effect.flatMap((side) => side.open(input))),
+    send: (input) =>
+      resolveSideChats(input.parentThreadId).pipe(Effect.flatMap((side) => side.send(input))),
+    interrupt: (input) =>
+      resolveSideChats(input.parentThreadId).pipe(Effect.flatMap((side) => side.interrupt(input))),
+    close: (input) =>
+      resolveSideChats(input.parentThreadId).pipe(Effect.flatMap((side) => side.close(input))),
+    respondApproval: (input) =>
+      resolveSideChats(input.parentThreadId).pipe(
+        Effect.flatMap((side) => side.respondApproval(input)),
+      ),
+    respondUserInput: (input) =>
+      resolveSideChats(input.parentThreadId).pipe(
+        Effect.flatMap((side) => side.respondUserInput(input)),
+      ),
+    subscribe: (input) =>
+      Stream.unwrap(
+        resolveSideChats(input.parentThreadId).pipe(Effect.map((side) => side.subscribe(input))),
+      ),
+  };
+
   return {
+    sideChats,
     startSession,
     sendTurn,
     compactThread,

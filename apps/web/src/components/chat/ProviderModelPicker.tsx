@@ -1,3 +1,4 @@
+import { useSideChatPortalProps } from "./sideChatFocus";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   type ProviderInstanceId,
@@ -55,6 +56,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   getModelDisabledReason?: (instanceId: ProviderInstanceId, model: string) => string | null;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
+  const sideChatPortalProps = useSideChatPortalProps();
   const [uncontrolledIsMenuOpen, setUncontrolledIsMenuOpen] = useState(false);
   const isMenuOpen = props.open ?? uncontrolledIsMenuOpen;
   const size = props.size ?? "sm";
@@ -221,6 +223,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         </span>
       </PopoverTrigger>
       <PopoverPopup
+        {...sideChatPortalProps}
         {...(props.isComposerOwned ? composerFloatingLayerProps : {})}
         align="start"
         className="before:hidden [--viewport-inline-padding:0]"

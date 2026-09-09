@@ -191,6 +191,10 @@
       "types": "./src/state/session.ts",
       "default": "./src/state/session.ts"
     },
+    "./state/side-chat": {
+      "types": "./src/state/sideChat.ts",
+      "default": "./src/state/sideChat.ts"
+    },
     "./state/shared-settings": {
       "types": "./src/state/sharedSettings.ts",
       "default": "./src/state/sharedSettings.ts"

@@ -15,6 +15,7 @@ import {
   Files,
   GitPullRequest,
   Globe2,
+  MessagesSquare,
   Plus,
   TerminalSquare,
   Volume2,
@@ -105,15 +106,20 @@ interface RightPanelTabsProps {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddAgents: () => void;
+  onAddSideChat?: (() => void) | undefined;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
   pullRequestAvailable: boolean;
   agentsAvailable: boolean;
+  sideChatAvailable?: boolean | undefined;
+  sideChatDisabledReason?: string | undefined;
   pullRequestStatusSeeds?: Readonly<Record<string, PullRequestTabStatusSeed>>;
   /** Running + waiting subagents; badges the Agents card in the empty state. */
   liveAgentCount: number;
+  /** A conversation can retain its draft while the selected surface changes. */
+  persistentContent?: ReactNode;
   children: ReactNode;
 }
 
@@ -140,6 +146,7 @@ const SURFACE_DISABLED_REASONS = {
   diff: "Diff is only available for server threads in Git repositories.",
   pullRequest: "This thread's branch has no pull request yet.",
   agents: "Agents are only available from a thread.",
+  sideChat: "Side chats are available in started Codex threads on supported servers.",
 } as const;
 
 /** Overlays that must win over the launcher's letter shortcuts. */
@@ -162,6 +169,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
   diff: "Available for Git repositories.",
   pullRequest: "No pull request on this branch yet.",
   agents: "Available from a thread.",
+  sideChat: "Available in started Codex threads.",
 } as const;
 
 type TabContextMenuAction =
@@ -299,12 +307,15 @@ function RightPanelEmptyState(props: {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddAgents: () => void;
+  onAddSideChat?: (() => void) | undefined;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
   pullRequestAvailable: boolean;
   agentsAvailable: boolean;
+  sideChatAvailable?: boolean | undefined;
+  sideChatDisabledReason?: string | undefined;
   liveAgentCount: number;
 }) {
   // -1 means no highlight: it only appears on hover or arrow use.
@@ -370,6 +381,16 @@ function RightPanelEmptyState(props: {
       disabledReason: SURFACE_UNAVAILABLE_HINTS.agents,
       onClick: props.onAddAgents,
       badgeCount: props.liveAgentCount,
+    },
+    {
+      label: "Side chat",
+      description: "Ask a question with this chat’s context.",
+      icon: MessagesSquare,
+      shortcut: "S",
+      available: props.sideChatAvailable === true,
+      disabledReason: props.sideChatDisabledReason ?? SURFACE_UNAVAILABLE_HINTS.sideChat,
+      onClick: () => props.onAddSideChat?.(),
+      badgeCount: 0,
     },
   ] as const;
 
@@ -604,6 +625,8 @@ function surfaceTitle(
       return `#${surface.number}`;
     case "agents":
       return "Agents";
+    case "side-chat":
+      return "Side chat";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
@@ -685,6 +708,8 @@ function SurfaceIcon({
       );
     case "agents":
       return <Bot className="size-3 shrink-0" />;
+    case "side-chat":
+      return <MessagesSquare className="size-3 shrink-0" />;
   }
 }
 
@@ -813,6 +838,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       available: props.agentsAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.agents,
       onClick: props.onAddAgents,
+    },
+    {
+      label: "Side chat",
+      icon: MessagesSquare,
+      shortcut: "S",
+      available: props.sideChatAvailable === true,
+      disabledReason: props.sideChatDisabledReason ?? SURFACE_DISABLED_REASONS.sideChat,
+      onClick: () => props.onAddSideChat?.(),
     },
   ] as const;
 
@@ -1241,7 +1274,8 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
         ) : null}
       </div>
       <div className="flex min-h-0 flex-1 flex-col" data-right-panel-surface-content>
-        {props.activeSurfaceId === null ? (
+        {props.persistentContent}
+        {props.activeSurfaceId === null && props.open !== false ? (
           <RightPanelEmptyState
             onAddBrowser={props.onAddBrowser}
             onAddBrowserInProfile={props.onAddBrowserInProfile}
@@ -1251,12 +1285,15 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddFiles={props.onAddFiles}
             onAddPullRequest={props.onAddPullRequest}
             onAddAgents={props.onAddAgents}
+            onAddSideChat={props.onAddSideChat}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}
             filesAvailable={props.filesAvailable}
             pullRequestAvailable={props.pullRequestAvailable}
             agentsAvailable={props.agentsAvailable}
+            sideChatAvailable={props.sideChatAvailable}
+            sideChatDisabledReason={props.sideChatDisabledReason}
             liveAgentCount={props.liveAgentCount}
           />
         ) : (

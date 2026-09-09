@@ -307,6 +307,9 @@ import {
 } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
+import { sideChatEnvironment } from "../state/sideChat";
+import { onOpenSideChat } from "../sideChatBus";
+import { isSideChatTarget } from "./chat/sideChatFocus";
 import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
@@ -556,6 +559,9 @@ const PreviewPanel = lazy(() =>
   import("./preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
 );
 const DiffPanel = lazy(() => import("./DiffPanel"));
+const SideChatPanel = lazy(() =>
+  import("./chat/SideChatPanel").then((module) => ({ default: module.SideChatPanel })),
+);
 const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
@@ -1420,6 +1426,11 @@ export default function ChatView(props: ChatViewProps) {
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const createThread = useAtomCommand(threadEnvironment.create, { reportFailure: false });
+  const openSideChat = useAtomCommand(sideChatEnvironment.open, { reportFailure: false });
+  const closeSideChat = useAtomCommand(sideChatEnvironment.close, { reportFailure: false });
+  const sideChatIdsRef = useRef(new Map<string, string>());
+  const sideChatOpenRequestsRef = useRef(new Set<string>());
+  const [openingSideChatKey, setOpeningSideChatKey] = useState<string | null>(null);
   const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -1943,11 +1954,17 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadKey,
     panelAnimationDurationMs,
   );
-  const rightPanelPresent = rightPanelPresence.present;
+  // Keep the side composer's local draft while the panel is hidden. Its subscription
+  // follows visibility, so Codex still owns the idle lifetime of the native fork.
+  const hasSideChatSurface = rightPanelState.surfaces.some(
+    (surface) => surface.kind === "side-chat",
+  );
+  const rightPanelPresent = rightPanelPresence.present || hasSideChatSurface;
   const rightPanelControlsInPanel = shouldUseRightPanelSheet && rightPanelPresent && rightPanelOpen;
   const rightPanelControlsAtRoot = rightPanelPresent && !shouldUseRightPanelSheet;
   const renderedRightPanelSurface = rightPanelPresence.value?.activeSurface ?? null;
-  const renderedRightPanelSurfaces = rightPanelPresence.value?.surfaces ?? [];
+  const renderedRightPanelSurfaces =
+    rightPanelPresence.value?.surfaces ?? (hasSideChatSurface ? rightPanelState.surfaces : []);
   const previewMiniPlayerVisible = shouldRenderPreviewMiniPlayer(
     activePreviewMiniPlayer?.tabId ?? null,
     renderedRightPanelSurface,
@@ -2616,6 +2633,21 @@ export default function ChatView(props: ChatViewProps) {
     providerStatuses.find(
       (status) => status.instanceId === activeThread?.session?.providerInstanceId,
     ) ?? activeProviderStatus;
+  const sideChatAvailable =
+    isServerThread &&
+    conversationProviderStatus?.driver === "codex" &&
+    conversationProviderStatus.supportsSideChat === true &&
+    activeThread?.session !== null &&
+    activeThread?.session !== undefined &&
+    !activeEnvironmentUnavailable;
+  const sideChatDisabledReason =
+    conversationProviderStatus?.driver !== "codex"
+      ? "Side chats are available with Codex."
+      : conversationProviderStatus.supportsSideChat !== true
+        ? "Update this environment’s server to use side chats."
+        : activeEnvironmentUnavailable
+          ? "Reconnect to this environment to start a side chat."
+          : "Send a message in the main chat first.";
   const supportsConversationRollback =
     conversationProviderStatus !== null &&
     conversationProviderStatus.supportsConversationRollback !== false;
@@ -4173,6 +4205,63 @@ export default function ChatView(props: ChatViewProps) {
     if (!activeThreadRef) return;
     useRightPanelStore.getState().open(activeThreadRef, "agents");
   }, [activeThreadRef]);
+  const rememberSideChatId = useCallback(
+    (sideChatId: string) => {
+      if (activeThreadKey) sideChatIdsRef.current.set(activeThreadKey, sideChatId);
+    },
+    [activeThreadKey],
+  );
+  const addSideChatSurface = useCallback(() => {
+    if (!activeThreadRef || !sideChatAvailable) return;
+    const ref = activeThreadRef;
+    const key = scopedThreadKey(ref);
+    useRightPanelStore.getState().open(ref, "side-chat");
+    if (sideChatOpenRequestsRef.current.has(key)) return;
+    sideChatOpenRequestsRef.current.add(key);
+    setOpeningSideChatKey(key);
+    void openSideChat({
+      environmentId: ref.environmentId,
+      input: { parentThreadId: ref.threadId },
+    }).then(async (result) => {
+      sideChatOpenRequestsRef.current.delete(key);
+      setOpeningSideChatKey((current) => (current === key ? null : current));
+      if (result._tag === "Failure") {
+        if (isAtomCommandInterrupted(result)) return;
+        const error = squashAtomCommandFailure(result);
+        toastManager.add({
+          type: "error",
+          title: "Unable to start side chat",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        });
+        return;
+      }
+      sideChatIdsRef.current.set(key, result.value.sideChatId);
+      // Closing the tab while the fork is starting must not leave an invisible conversation.
+      if (
+        !selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, ref).surfaces.some(
+          (surface) => surface.kind === "side-chat",
+        )
+      ) {
+        await closeSideChat({
+          environmentId: ref.environmentId,
+          input: { parentThreadId: ref.threadId, sideChatId: result.value.sideChatId },
+        });
+        sideChatIdsRef.current.delete(key);
+      }
+    });
+  }, [activeThreadRef, sideChatAvailable, openSideChat, closeSideChat]);
+  useEffect(
+    () =>
+      onOpenSideChat((detail) => {
+        if (
+          detail.environmentId === activeThreadRef?.environmentId &&
+          detail.threadId === activeThreadRef.threadId
+        ) {
+          addSideChatSurface();
+        }
+      }),
+    [activeThreadRef, addSideChatSurface],
+  );
   const openFileSurface = useCallback(
     (relativePath: string) => {
       if (!activeThreadRef || !activeProject) return;
@@ -4560,14 +4649,47 @@ export default function ChatView(props: ChatViewProps) {
   const finishRightPanelSurfaceClose = useCallback(
     (surfaces: readonly RightPanelSurface[]) => {
       if (!activeThreadRef) return;
-      cleanupRightPanelSurfaces(surfaces);
-      const store = useRightPanelStore.getState();
-      for (const surface of surfaces) {
-        store.closeSurface(activeThreadRef, surface.id);
+      const ref = activeThreadRef;
+      const key = scopedThreadKey(ref);
+      const finish = () => {
+        cleanupRightPanelSurfaces(surfaces);
+        const store = useRightPanelStore.getState();
+        for (const surface of surfaces) store.closeSurface(ref, surface.id);
+        syncActivePreviewSurface();
+      };
+      const sideChatId = surfaces.some((surface) => surface.kind === "side-chat")
+        ? sideChatIdsRef.current.get(key)
+        : undefined;
+      if (!sideChatId || activeEnvironmentUnavailable) {
+        if (sideChatId) sideChatIdsRef.current.delete(key);
+        finish();
+        return;
       }
-      syncActivePreviewSurface();
+      void closeSideChat({
+        environmentId: ref.environmentId,
+        input: { parentThreadId: ref.threadId, sideChatId },
+      }).then((result) => {
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add({
+            type: "warning",
+            title: "Side chat closed locally",
+            description:
+              error instanceof Error ? error.message : "Could not confirm remote cleanup.",
+          });
+        }
+        if (sideChatIdsRef.current.get(key) !== sideChatId) return;
+        sideChatIdsRef.current.delete(key);
+        finish();
+      });
     },
-    [activeThreadRef, cleanupRightPanelSurfaces, syncActivePreviewSurface],
+    [
+      activeThreadRef,
+      activeEnvironmentUnavailable,
+      cleanupRightPanelSurfaces,
+      syncActivePreviewSurface,
+      closeSideChat,
+    ],
   );
   const closeRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
@@ -6121,6 +6243,7 @@ export default function ChatView(props: ChatViewProps) {
       };
 
       if (
+        !isSideChatTarget(event.target) &&
         !shortcutContext.terminalFocus &&
         !shortcutContext.modelPickerOpen &&
         shouldTypeToFocusComposer(event)
@@ -6136,11 +6259,27 @@ export default function ChatView(props: ChatViewProps) {
         context: shortcutContext,
       });
       if (!command) return;
+      if (
+        isSideChatTarget(event.target) &&
+        command !== "rightPanel.toggle" &&
+        command !== "rightPanel.toggleMaximized" &&
+        command !== "rightPanel.close" &&
+        command !== "sideChat.open"
+      )
+        return;
 
       if (command === "thread.copyReference") {
         event.preventDefault();
         event.stopPropagation();
         if (!event.repeat) copyActiveThreadReference();
+        return;
+      }
+
+      if (command === "sideChat.open") {
+        if (!sideChatAvailable) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) addSideChatSurface();
         return;
       }
 
@@ -6338,6 +6477,8 @@ export default function ChatView(props: ChatViewProps) {
     supportsSettlement,
     confirmAndUnpinThread,
     copyActiveThreadReference,
+    sideChatAvailable,
+    addSideChatSurface,
     previewPanelOpen,
     toggleRightPanel,
     toggleRightPanelMaximized,
@@ -6350,6 +6491,7 @@ export default function ChatView(props: ChatViewProps) {
   // Route it to the composer like a typed key, which also expands it.
   useEffect(() => {
     const handler = (event: ClipboardEvent) => {
+      if (isSideChatTarget(event.target)) return;
       if (!activeThreadId || isCommandPaletteOpen()) return;
       if (getTerminalFocusOwner() !== null) return;
       if (composerRef.current?.isModelPickerOpen()) return;
@@ -8026,7 +8168,7 @@ export default function ChatView(props: ChatViewProps) {
       <div className="pointer-events-auto flex h-full items-center">{panelToggleControls}</div>
     </div>
   );
-  const rightPanelContent = activeThreadRef ? (
+  const activeRightPanelContent = activeThreadRef ? (
     renderedRightPanelSurface?.kind === "preview" ? (
       <Suspense fallback={null}>
         <PreviewPanel
@@ -8162,6 +8304,39 @@ export default function ChatView(props: ChatViewProps) {
       </Suspense>
     ) : null
   ) : null;
+
+  const sideChatPanelContent = (
+    <>
+      {hasSideChatSurface && activeThreadRef ? (
+        <div
+          className={cn(
+            "min-h-0 flex-1 flex-col",
+            renderedRightPanelSurface?.kind === "side-chat" && rightPanelOpen ? "flex" : "hidden",
+          )}
+          inert={renderedRightPanelSurface?.kind !== "side-chat" || !rightPanelOpen}
+        >
+          <Suspense fallback={null}>
+            <SideChatPanel
+              key={activeThreadKey}
+              threadRef={activeThreadRef}
+              parentTitle={activeThread.title}
+              branch={activeThread.branch}
+              providerStatuses={providerStatuses}
+              settings={settings}
+              keybindings={keybindings}
+              resolvedTheme={resolvedTheme}
+              visible={rightPanelOpen && renderedRightPanelSurface?.kind === "side-chat"}
+              opening={openingSideChatKey === activeThreadKey}
+              onStart={addSideChatSurface}
+              onSideChatId={rememberSideChatId}
+              onImageExpand={onExpandTimelineImage}
+              onFileOpen={openFileAttachment}
+            />
+          </Suspense>
+        </div>
+      ) : null}
+    </>
+  );
 
   const workspaceFileDropHandlers = makeWorkspaceFileDropHandlers({
     setDragActive: setIsWorkspaceFileDragActive,
@@ -8675,15 +8850,19 @@ export default function ChatView(props: ChatViewProps) {
           onAddFiles={addFilesSurface}
           onAddPullRequest={addPullRequestSurface}
           onAddAgents={addAgentsSurface}
+          onAddSideChat={addSideChatSurface}
           browserAvailable={isPreviewSupportedInRuntime()}
           terminalAvailable={activeProject !== null}
           diffAvailable={isServerThread && isGitRepo}
           filesAvailable={activeProject !== null}
           pullRequestAvailable={pullRequestSurfaceAvailable}
           agentsAvailable
+          sideChatAvailable={sideChatAvailable}
+          sideChatDisabledReason={sideChatDisabledReason}
           liveAgentCount={agentPanelModel.liveCount}
+          persistentContent={sideChatPanelContent}
         >
-          {rightPanelContent}
+          {activeRightPanelContent}
         </RightPanelTabs>
       ) : null}
       {rightPanelPresent && shouldUseRightPanelSheet && activeThreadRef ? (
@@ -8695,6 +8874,7 @@ export default function ChatView(props: ChatViewProps) {
         >
           <RightPanelTabs
             mode="sheet"
+            open={rightPanelOpen}
             // Same effective inset as the closed-state titlebar controls
             // (pr-3 in the tab bar plus this pixel equals the absolute
             // right inset plus mr-px), so the cluster does not creep when
@@ -8725,15 +8905,19 @@ export default function ChatView(props: ChatViewProps) {
             onAddFiles={addFilesSurface}
             onAddPullRequest={addPullRequestSurface}
             onAddAgents={addAgentsSurface}
+            onAddSideChat={addSideChatSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             terminalAvailable={activeProject !== null}
             diffAvailable={isServerThread && isGitRepo}
             filesAvailable={activeProject !== null}
             pullRequestAvailable={pullRequestSurfaceAvailable}
             agentsAvailable
+            sideChatAvailable={sideChatAvailable}
+            sideChatDisabledReason={sideChatDisabledReason}
             liveAgentCount={agentPanelModel.liveCount}
+            persistentContent={sideChatPanelContent}
           >
-            {rightPanelContent}
+            {activeRightPanelContent}
           </RightPanelTabs>
         </RightPanelSheet>
       ) : null}

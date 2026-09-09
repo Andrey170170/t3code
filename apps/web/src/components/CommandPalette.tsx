@@ -98,6 +98,7 @@ import {
   resolveProjectPathForDispatch,
 } from "../lib/projectPaths";
 import { onOpenCommandPalette } from "../commandPaletteBus";
+import { openSideChat } from "../sideChatBus";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import {
@@ -1614,6 +1615,47 @@ function OpenCommandPaletteDialog(props: {
       icon: <LinkIcon className={ITEM_ICON_CLASS} />,
       shortcutCommand: "thread.copyReference",
       run: copyActiveThreadReference,
+    });
+  }
+
+  if (activeThread) {
+    const providerInstanceId =
+      activeThread.session?.providerInstanceId ?? activeThread.modelSelection.instanceId;
+    const providerEntry = providerEntryByEnvironmentAndInstanceId.get(
+      `${activeThread.environmentId}:${providerInstanceId}`,
+    );
+    const connected = environments.some(
+      (environment) =>
+        environment.environmentId === activeThread.environmentId &&
+        environment.connection.phase === "connected",
+    );
+    const available =
+      providerEntry?.driverKind === "codex" &&
+      providerEntry.snapshot.supportsSideChat === true &&
+      activeThread.session != null &&
+      connected;
+    actionItems.push({
+      kind: "action",
+      value: "action:open-side-chat",
+      searchTerms: ["side chat", "side conversation", "codex", "branch", "temporary"],
+      title: "Open side chat",
+      description: available
+        ? "Ask a side question using this chat’s context."
+        : providerEntry?.driverKind !== "codex"
+          ? "Side chats are available with Codex."
+          : providerEntry.snapshot.supportsSideChat !== true
+            ? "Update this environment’s server to use side chats."
+            : !connected
+              ? "Reconnect to this environment to start a side chat."
+              : "Send a message in the main chat first.",
+      icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
+      shortcutCommand: "sideChat.open",
+      disabled: !available,
+      run: async () => {
+        if (available) {
+          openSideChat({ environmentId: activeThread.environmentId, threadId: activeThread.id });
+        }
+      },
     });
   }
 

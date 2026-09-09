@@ -4993,3 +4993,60 @@ describe("agent browser access", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
+
+const sideRoutingAdapter = makeFakeCodexAdapter(CODEX_DRIVER);
+const nativeSideOpen = vi.fn(() =>
+  Effect.fail(
+    new ProviderAdapterRequestError({
+      provider: CODEX_DRIVER,
+      method: "thread/fork",
+      detail: "native-open-reached",
+    }),
+  ),
+);
+const sideRoutingFixture = makeProviderServiceLayer({
+  registry: makeStaticInstanceRegistry([
+    [
+      ProviderInstanceId.make("codex"),
+      {
+        ...sideRoutingAdapter.adapter,
+        sideChats: {
+          open: nativeSideOpen,
+          send: () => Effect.void,
+          interrupt: () => Effect.void,
+          close: () => Effect.void,
+          respondApproval: () => Effect.void,
+          respondUserInput: () => Effect.void,
+          subscribe: () => Stream.succeed({ type: "snapshot" as const, snapshot: null }),
+        },
+      },
+    ],
+  ]),
+});
+sideRoutingFixture.layer("ProviderService native side chat routing", (it) => {
+  it.effect(
+    "subscribes without starting a provider and resumes the parent only on explicit open",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* ProviderService.ProviderService;
+        const parentThreadId = asThreadId("side-parent-recovery");
+        yield* service.startSession(parentThreadId, {
+          threadId: parentThreadId,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "full-access",
+        });
+        yield* sideRoutingAdapter.stopSession(parentThreadId);
+        const started = sideRoutingAdapter.startSession.mock.calls.length;
+        const initial = yield* service
+          .sideChats!.subscribe({ parentThreadId })
+          .pipe(Stream.take(1), Stream.runCollect);
+        assert.deepStrictEqual(initial, [{ type: "snapshot", snapshot: null }]);
+        assert.equal(sideRoutingAdapter.startSession.mock.calls.length, started);
+        const result = yield* service.sideChats!.open({ parentThreadId }).pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        assert.equal(nativeSideOpen.mock.calls.length, 1);
+        assert.equal(sideRoutingAdapter.startSession.mock.calls.length, started + 1);
+        assert.equal(sideRoutingAdapter.sendTurn.mock.calls.length, 0);
+      }),
+  );
+});

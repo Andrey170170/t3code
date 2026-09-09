@@ -1,4 +1,14 @@
 import {
+  SideChatError,
+  SideChatParentInput,
+  SideChatTargetInput,
+  SideChatSendInput,
+  SideChatApprovalInput,
+  SideChatUserInput,
+  SideChatSnapshot,
+  SideChatStreamEvent,
+} from "./sideChat.ts";
+import {
   CodexThreadError,
   CodexThreadsListInput,
   CodexThreadsListResult,
@@ -262,6 +272,13 @@ export const WS_METHODS = {
   filesystemBrowse: "filesystem.browse",
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
+  sideChatOpen: "sideChat.open",
+  sideChatSend: "sideChat.send",
+  sideChatInterrupt: "sideChat.interrupt",
+  sideChatClose: "sideChat.close",
+  sideChatRespondApproval: "sideChat.respondApproval",
+  sideChatRespondUserInput: "sideChat.respondUserInput",
+  sideChatSubscribe: "sideChat.subscribe",
   codexThreadsList: "codexThreads.list",
   codexThreadsImport: "codexThreads.import",
   codexThreadsHistory: "codexThreads.history",
@@ -834,6 +851,44 @@ const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
   error: Schema.Union([FilesystemBrowseError, EnvironmentAuthorizationError]),
 });
 
+const sideChatRpcError = Schema.Union([SideChatError, EnvironmentAuthorizationError]);
+const WsSideChatOpenRpc = Rpc.make(WS_METHODS.sideChatOpen, {
+  payload: SideChatParentInput,
+  success: SideChatSnapshot,
+  error: sideChatRpcError,
+});
+const WsSideChatSendRpc = Rpc.make(WS_METHODS.sideChatSend, {
+  payload: SideChatSendInput,
+  success: Schema.Void,
+  error: sideChatRpcError,
+});
+const WsSideChatInterruptRpc = Rpc.make(WS_METHODS.sideChatInterrupt, {
+  payload: SideChatTargetInput,
+  success: Schema.Void,
+  error: sideChatRpcError,
+});
+const WsSideChatCloseRpc = Rpc.make(WS_METHODS.sideChatClose, {
+  payload: SideChatTargetInput,
+  success: Schema.Void,
+  error: sideChatRpcError,
+});
+const WsSideChatRespondApprovalRpc = Rpc.make(WS_METHODS.sideChatRespondApproval, {
+  payload: SideChatApprovalInput,
+  success: Schema.Void,
+  error: sideChatRpcError,
+});
+const WsSideChatRespondUserInputRpc = Rpc.make(WS_METHODS.sideChatRespondUserInput, {
+  payload: SideChatUserInput,
+  success: Schema.Void,
+  error: sideChatRpcError,
+});
+const WsSideChatSubscribeRpc = Rpc.make(WS_METHODS.sideChatSubscribe, {
+  payload: SideChatParentInput,
+  success: SideChatStreamEvent,
+  error: sideChatRpcError,
+  stream: true,
+});
+
 const WsCodexThreadsListRpc = Rpc.make(WS_METHODS.codexThreadsList, {
   payload: CodexThreadsListInput,
   success: CodexThreadsListResult,
@@ -1277,6 +1332,13 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsWriteFileRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
+  WsSideChatOpenRpc,
+  WsSideChatSendRpc,
+  WsSideChatInterruptRpc,
+  WsSideChatCloseRpc,
+  WsSideChatRespondApprovalRpc,
+  WsSideChatRespondUserInputRpc,
+  WsSideChatSubscribeRpc,
   WsCodexThreadsListRpc,
   WsCodexThreadsImportRpc,
   WsCodexThreadsHistoryRpc,

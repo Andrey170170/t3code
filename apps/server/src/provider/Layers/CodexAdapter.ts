@@ -9,6 +9,8 @@
  */
 import {
   EventId,
+  MessageId,
+  type SideChatSnapshot,
   type CanonicalItemType,
   type CanonicalRequestType,
   type CodexSettings,
@@ -37,8 +39,15 @@ import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as PubSub from "effect/PubSub";
+import {
+  applySideChatEvent,
+  closeSideChatSnapshot,
+  sideChatStreamEvent,
+} from "../sideChatState.ts";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -65,6 +74,7 @@ import {
   CodexSessionRuntimeThreadIdMissingError,
   describeMcpElicitation,
   makeCodexSessionRuntime,
+  isRecoverableThreadResumeError,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
@@ -2234,6 +2244,328 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
 
+  const sideSnapshots = new Map<ThreadId, SideChatSnapshot>();
+  const sideSubscribers = new Map<ThreadId, number>();
+  const sideOperationLocks = new Map<ThreadId, Semaphore.Semaphore>();
+  const sideOperationLock = (parentThreadId: ThreadId) =>
+    Effect.sync(() => {
+      const existing = sideOperationLocks.get(parentThreadId);
+      if (existing) return existing;
+      const lock = Semaphore.makeUnsafe(1);
+      sideOperationLocks.set(parentThreadId, lock);
+      return lock;
+    });
+  const sideUpdates = new Map<ThreadId, PubSub.PubSub<SideChatSnapshot>>();
+  const getSideUpdates = Effect.fn("getSideUpdates")(function* (parentThreadId: ThreadId) {
+    const existing = sideUpdates.get(parentThreadId);
+    if (existing) return existing;
+    const updates = yield* PubSub.sliding<SideChatSnapshot>(1);
+    sideUpdates.set(parentThreadId, updates);
+    return updates;
+  });
+  const publishSide = (snapshot: SideChatSnapshot) =>
+    Effect.sync(() => sideSnapshots.set(snapshot.parentThreadId, snapshot)).pipe(
+      Effect.andThen(
+        getSideUpdates(snapshot.parentThreadId).pipe(
+          Effect.flatMap((updates) => PubSub.publish(updates, snapshot)),
+        ),
+      ),
+      Effect.asVoid,
+    );
+  const requireSide = Effect.fn("requireSide")(function* (input: {
+    parentThreadId: ThreadId;
+    sideChatId: string;
+  }) {
+    const snapshot = sideSnapshots.get(input.parentThreadId);
+    if (!snapshot || snapshot.sideChatId !== input.sideChatId || snapshot.status === "closed") {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "sideChat",
+        detail: "This side chat has expired or was closed. Open a new side chat to continue.",
+      });
+    }
+    const session = yield* requireSession(input.parentThreadId);
+    return { snapshot, session };
+  });
+  const sideChats: NonNullable<CodexAdapterShape["sideChats"]> = {
+    open: Effect.fn("sideChat.open")(function* ({ parentThreadId }) {
+      const lock = yield* sideOperationLock(parentThreadId);
+      return yield* lock.withPermits(1)(
+        Effect.gen(function* () {
+          const session = yield* requireSession(parentThreadId);
+          const native = yield* session.runtime.openSideChat.pipe(
+            Effect.mapError((cause) => mapCodexRuntimeError(parentThreadId, "thread/fork", cause)),
+          );
+          const existing = sideSnapshots.get(parentThreadId);
+          if (existing?.sideChatId === native.id && existing.status !== "closed") return existing;
+          const snapshot: SideChatSnapshot = {
+            parentThreadId,
+            sideChatId: native.id,
+            modelSelection: {
+              instanceId: boundInstanceId,
+              model: native.model,
+              options: [
+                ...(native.effort ? [{ id: "reasoningEffort", value: native.effort }] : []),
+                ...(native.serviceTier ? [{ id: "serviceTier", value: native.serviceTier }] : []),
+              ],
+            },
+            interactionMode: native.interactionMode,
+            runtimeMode: native.runtimeMode,
+            cwd: native.cwd,
+            status: "ready",
+            messages: [],
+            activities: [],
+            proposedPlans: [],
+            pendingRequests: [],
+            latestTurn: null,
+          };
+          yield* publishSide(snapshot);
+          if (!sideSubscribers.get(parentThreadId))
+            yield* session.runtime.detachSideChat(native.id).pipe(Effect.ignore);
+          return snapshot;
+        }),
+      );
+    }),
+    send: Effect.fn("sideChat.send")(function* (input) {
+      const lock = yield* sideOperationLock(input.parentThreadId);
+      return yield* lock.withPermits(1)(
+        Effect.gen(function* () {
+          const { snapshot, session } = yield* requireSide(input);
+          if (snapshot.status === "running")
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "sideChat.send",
+              detail:
+                "Wait for the side chat's current response or stop it before sending another message.",
+            });
+          if (input.modelSelection && input.modelSelection.instanceId !== boundInstanceId)
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "sideChat.send",
+              detail: "A side chat must use its parent's Codex provider instance.",
+            });
+          const selection = input.modelSelection ?? snapshot.modelSelection;
+          const effort = getModelSelectionStringOptionValue(selection, "reasoningEffort");
+          const serviceTier = getCodexServiceTierOptionValue(selection);
+          const now = new Date().toISOString();
+          const messageId = MessageId.make(NodeCrypto.randomUUID());
+          yield* publishSide({
+            ...snapshot,
+            status: "running",
+            error: undefined,
+            messages: [
+              ...snapshot.messages,
+              {
+                id: messageId,
+                role: "user",
+                text: input.input,
+                turnId: null,
+                streaming: false,
+                createdAt: now,
+                updatedAt: now,
+              },
+            ],
+          });
+          yield* session.runtime
+            .sendSideChat(input.sideChatId, {
+              input: input.input,
+              model: selection.model,
+              ...(effort
+                ? { effort: effort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort }
+                : {}),
+              ...(serviceTier ? { serviceTier } : {}),
+              interactionMode: input.interactionMode ?? snapshot.interactionMode,
+              runtimeMode: input.runtimeMode ?? snapshot.runtimeMode,
+            })
+            .pipe(
+              Effect.mapError((cause) =>
+                mapCodexRuntimeError(input.parentThreadId, "turn/start", cause),
+              ),
+              Effect.tap((result) => {
+                const current = sideSnapshots.get(input.parentThreadId);
+                if (!current || current.sideChatId !== input.sideChatId) return Effect.void;
+                return publishSide({
+                  ...current,
+                  modelSelection: selection,
+                  runtimeMode: input.runtimeMode ?? current.runtimeMode,
+                  interactionMode: input.interactionMode ?? current.interactionMode,
+                  messages: current.messages.map((message) =>
+                    message.id === messageId ? { ...message, turnId: result.turnId } : message,
+                  ),
+                });
+              }),
+              Effect.tapError((error) => {
+                const current = sideSnapshots.get(input.parentThreadId);
+                return current?.sideChatId === input.sideChatId
+                  ? publishSide({
+                      ...current,
+                      status: "error",
+                      error: error.message,
+                      messages: current.messages.filter((message) => message.id !== messageId),
+                    })
+                  : Effect.void;
+              }),
+            );
+        }),
+      );
+    }),
+    interrupt: Effect.fn("sideChat.interrupt")(function* (input) {
+      const { session } = yield* requireSide(input);
+      yield* session.runtime
+        .interruptSideChat(input.sideChatId)
+        .pipe(
+          Effect.mapError((cause) =>
+            mapCodexRuntimeError(input.parentThreadId, "turn/interrupt", cause),
+          ),
+        );
+    }),
+    close: Effect.fn("sideChat.close")(function* (input) {
+      const snapshot = sideSnapshots.get(input.parentThreadId);
+      if (!snapshot || snapshot.sideChatId !== input.sideChatId || snapshot.status === "closed")
+        return;
+      if (!sessions.has(input.parentThreadId)) {
+        yield* publishSide(closeSideChatSnapshot(snapshot));
+        return;
+      }
+      const { session } = yield* requireSide(input);
+      yield* session.runtime
+        .closeSideChat(input.sideChatId)
+        .pipe(
+          Effect.mapError((cause) =>
+            mapCodexRuntimeError(input.parentThreadId, "thread/unsubscribe", cause),
+          ),
+        );
+      const current = sideSnapshots.get(input.parentThreadId);
+      if (current?.sideChatId === input.sideChatId)
+        yield* publishSide(closeSideChatSnapshot(current));
+    }),
+    respondApproval: Effect.fn("sideChat.respondApproval")(function* (input) {
+      const { snapshot, session } = yield* requireSide(input);
+      if (
+        !snapshot.pendingRequests.some(
+          (event) => event.type === "request.opened" && String(event.requestId) === input.requestId,
+        )
+      )
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "sideChat.respondApproval",
+          detail: "This approval does not belong to the active side chat.",
+        });
+      yield* session.runtime
+        .respondToRequest(input.requestId, input.decision)
+        .pipe(
+          Effect.mapError((cause) =>
+            mapCodexRuntimeError(input.parentThreadId, "approval/respond", cause),
+          ),
+        );
+    }),
+    respondUserInput: Effect.fn("sideChat.respondUserInput")(function* (input) {
+      const { snapshot, session } = yield* requireSide(input);
+      const request = snapshot.pendingRequests.find(
+        (event) =>
+          event.type === "user-input.requested" && String(event.requestId) === input.requestId,
+      );
+      if (!request || request.type !== "user-input.requested")
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "sideChat.respondUserInput",
+          detail: "This input request does not belong to the active side chat.",
+        });
+      if (request.payload.responseMode === "message") {
+        const answerText = request.payload.questions
+          .map(
+            (question) =>
+              `${question.question}\n${JSON.stringify(input.answers[question.id] ?? "")}`,
+          )
+          .join("\n\n");
+        if (Object.keys(input.answers).length > 0)
+          yield* sideChats.send({
+            parentThreadId: input.parentThreadId,
+            sideChatId: input.sideChatId,
+            input: answerText,
+          });
+        const current = sideSnapshots.get(input.parentThreadId);
+        if (current?.sideChatId === input.sideChatId)
+          yield* publishSide(
+            applySideChatEvent(current, {
+              ...request,
+              type: "user-input.resolved",
+              eventId: EventId.make(NodeCrypto.randomUUID()),
+              createdAt: new Date().toISOString(),
+              payload: { answers: input.answers },
+            }),
+          );
+        return;
+      }
+      yield* session.runtime
+        .respondToUserInput(input.requestId, input.answers)
+        .pipe(
+          Effect.mapError((cause) =>
+            mapCodexRuntimeError(input.parentThreadId, "user-input/respond", cause),
+          ),
+        );
+    }),
+    subscribe: ({ parentThreadId }) =>
+      Stream.unwrap(
+        Effect.gen(function* () {
+          // Register before reading the snapshot so reconnect cannot miss an update.
+          const updates = yield* getSideUpdates(parentThreadId);
+          const subscription = yield* PubSub.subscribe(updates);
+          const lock = yield* sideOperationLock(parentThreadId);
+          // Count changes and the corresponding native lease operation are one
+          // transaction, including open's initial detach when no client is present.
+          yield* Effect.acquireRelease(
+            lock.withPermits(1)(
+              Effect.gen(function* () {
+                const count = sideSubscribers.get(parentThreadId) ?? 0;
+                sideSubscribers.set(parentThreadId, count + 1);
+                const current = sideSnapshots.get(parentThreadId);
+                const session = sessions.get(parentThreadId);
+                if (count === 0 && current && current.status !== "closed" && session)
+                  yield* session.runtime
+                    .attachSideChat(current.sideChatId)
+                    .pipe(
+                      Effect.catch((error) =>
+                        publishSide(
+                          isRecoverableThreadResumeError(error)
+                            ? closeSideChatSnapshot(current)
+                            : { ...current, status: "error", error: error.message },
+                        ),
+                      ),
+                    );
+              }),
+            ),
+            () =>
+              lock.withPermits(1)(
+                Effect.gen(function* () {
+                  const count = (sideSubscribers.get(parentThreadId) ?? 1) - 1;
+                  if (count > 0) {
+                    sideSubscribers.set(parentThreadId, count);
+                    return;
+                  }
+                  sideSubscribers.delete(parentThreadId);
+                  const current = sideSnapshots.get(parentThreadId);
+                  const session = sessions.get(parentThreadId);
+                  if (current && current.status !== "closed" && session)
+                    yield* session.runtime.detachSideChat(current.sideChatId).pipe(Effect.ignore);
+                }),
+              ),
+          );
+          let previous: SideChatSnapshot | null | undefined;
+          return Stream.concat(
+            Stream.succeed(sideSnapshots.get(parentThreadId) ?? null),
+            Stream.fromSubscription(subscription),
+          ).pipe(
+            Stream.map((snapshot) => {
+              const event = sideChatStreamEvent(previous, snapshot);
+              previous = snapshot;
+              return event;
+            }),
+          );
+        }),
+      ),
+  };
+
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -2324,6 +2656,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         // runtime event the session emitted afterwards was dropped.
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
+            if (event.method === "session/exited" || event.method === "session/closed") {
+              const side = sideSnapshots.get(input.threadId);
+              if (side && side.status !== "closed") yield* publishSide(closeSideChatSnapshot(side));
+            }
             yield* writeNativeEvent(event);
             if (event.method === "turn/started" && event.turnId) {
               if (turnTokenUsage.activeTurnId !== event.turnId) {
@@ -2440,6 +2776,18 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               return;
             }
             yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+          }),
+        ).pipe(Effect.forkIn(sessionScope));
+
+        yield* Stream.runForEach(runtime.sideChatEvents, ({ sideChatId, event }) =>
+          Effect.gen(function* () {
+            const current = sideSnapshots.get(input.threadId);
+            if (!current || current.sideChatId !== sideChatId || current.status === "closed")
+              return;
+            let next = current;
+            for (const mapped of mapToRuntimeEvents(event, input.threadId))
+              next = applySideChatEvent(next, mapped);
+            if (next !== current) yield* publishSide(next);
           }),
         ).pipe(Effect.forkIn(sessionScope));
 
@@ -2673,6 +3021,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     }
     session.stopped = true;
     sessions.delete(session.threadId);
+    const sideSnapshot = sideSnapshots.get(session.threadId);
+    if (sideSnapshot) yield* publishSide(closeSideChatSnapshot(sideSnapshot));
     yield* session.runtime.close.pipe(Effect.ignore);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
@@ -2706,6 +3056,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   yield* Effect.acquireRelease(Effect.void, () =>
     stopAll().pipe(
       Effect.andThen(Queue.shutdown(runtimeEventQueue)),
+      Effect.andThen(Effect.forEach(sideUpdates.values(), PubSub.shutdown, { discard: true })),
       Effect.andThen(managedNativeEventLogger?.close() ?? Effect.void),
       Effect.ignore,
     ),
@@ -2713,6 +3064,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
   return {
     provider: PROVIDER,
+    sideChats,
     capabilities: {
       sessionModelSwitch: "in-session",
       promptlessTurnContinuation: true,

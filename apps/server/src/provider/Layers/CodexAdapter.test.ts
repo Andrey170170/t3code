@@ -23,6 +23,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -41,6 +42,8 @@ import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
+  CodexSessionRuntimeSideChatNotFoundError,
+  type CodexSideChatEvent,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
@@ -61,6 +64,7 @@ const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
 
 class FakeCodexRuntime implements CodexSessionRuntimeShape {
   private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());
+  private readonly sideEventQueue: Queue.Queue<CodexSideChatEvent>;
   private readonly now = "2026-01-01T00:00:00.000Z";
 
   public readonly startImpl = vi.fn(() =>
@@ -84,6 +88,31 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       }),
   );
 
+  public readonly openSideChat: CodexSessionRuntimeShape["openSideChat"] = Effect.sync(() => ({
+    id: "side-native-1",
+    model: "gpt-5.4",
+    cwd: this.options.cwd ?? "/tmp",
+    runtimeMode: this.options.runtimeMode,
+    interactionMode: "default" as const,
+  }));
+  public readonly sendSideChat = vi.fn<CodexSessionRuntimeShape["sendSideChat"]>((_id, input) =>
+    this.sendTurn(input),
+  );
+  public readonly interruptSideChat: CodexSessionRuntimeShape["interruptSideChat"] = () =>
+    Effect.void;
+  public readonly closeSideChat: CodexSessionRuntimeShape["closeSideChat"] = () => Effect.void;
+  public readonly attachSideChat = vi.fn<CodexSessionRuntimeShape["attachSideChat"]>(
+    () => Effect.void,
+  );
+  public readonly detachSideChat = vi.fn<CodexSessionRuntimeShape["detachSideChat"]>(
+    () => Effect.void,
+  );
+  get sideChatEvents() {
+    return Stream.fromQueue(this.sideEventQueue);
+  }
+  emitSide(event: ProviderEvent) {
+    return Queue.offer(this.sideEventQueue, { sideChatId: "side-native-1", event });
+  }
   public readonly compactThread = Effect.void;
 
   public readonly interruptTurnImpl = vi.fn((_turnId?: TurnId): Promise<void> =>
@@ -122,7 +151,11 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   readonly options: CodexSessionRuntimeOptions;
 
-  constructor(options: CodexSessionRuntimeOptions) {
+  constructor(
+    options: CodexSessionRuntimeOptions,
+    sideEventQueue: Queue.Queue<CodexSideChatEvent>,
+  ) {
+    this.sideEventQueue = sideEventQueue;
     this.options = options;
   }
 
@@ -171,11 +204,13 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
 function makeRuntimeFactory() {
   const runtimes: Array<FakeCodexRuntime> = [];
-  const factory = vi.fn((options: CodexSessionRuntimeOptions) => {
-    const runtime = new FakeCodexRuntime(options);
-    runtimes.push(runtime);
-    return Effect.succeed(runtime);
-  });
+  const factory = vi.fn((options: CodexSessionRuntimeOptions) =>
+    Effect.gen(function* () {
+      const runtime = new FakeCodexRuntime(options, yield* Queue.unbounded<CodexSideChatEvent>());
+      runtimes.push(runtime);
+      return runtime;
+    }),
+  );
 
   return {
     factory,
@@ -205,7 +240,10 @@ function makeScopedRuntimeFactory(options?: { readonly failConstruction?: boolea
         });
       }
 
-      const runtime = new FakeCodexRuntime(runtimeOptions);
+      const runtime = new FakeCodexRuntime(
+        runtimeOptions,
+        yield* Queue.unbounded<CodexSideChatEvent>(),
+      );
       runtimes.push(runtime);
       return runtime;
     }),
@@ -2990,6 +3028,321 @@ usageLimitLayer("CodexAdapterLive usage limits", (it) => {
       if (first._tag !== "Some" || first.value.type !== "runtime.error") return;
       NodeAssert.equal(first.value.payload.message, "Codex is temporarily unavailable.");
       NodeAssert.equal(first.value.payload.class, "provider_error");
+    }),
+  );
+});
+
+validationLayer("Codex native side chat transport", (it) => {
+  it.effect("replays transient state, isolates side events, and fences stale mutations", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const side = adapter.sideChats!;
+      const parentThreadId = asThreadId("side-parent-transport");
+      yield* adapter.startSession({ threadId: parentThreadId, runtimeMode: "full-access" });
+      const runtime = validationRuntimeFactory.lastRuntime!;
+      const snapshots = yield* Queue.unbounded<import("@t3tools/contracts").SideChatStreamEvent>();
+      const watcher = yield* Stream.runForEach(side.subscribe({ parentThreadId }), (snapshot) =>
+        Queue.offer(snapshots, snapshot),
+      ).pipe(Effect.forkScoped);
+      NodeAssert.deepStrictEqual(yield* Queue.take(snapshots), {
+        type: "snapshot",
+        snapshot: null,
+      });
+      const opened = yield* side.open({ parentThreadId });
+      const openedEvent = yield* Queue.take(snapshots);
+      NodeAssert.equal(
+        openedEvent.type === "snapshot" ? openedEvent.snapshot?.sideChatId : undefined,
+        opened.sideChatId,
+      );
+      NodeAssert.deepStrictEqual(yield* side.open({ parentThreadId }), opened);
+      yield* runtime.emitSide({
+        id: asEventId("side-answer-delta"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: parentThreadId,
+        method: "item/agentMessage/delta",
+        itemId: asItemId("side-answer"),
+        turnId: asTurnId("side-turn"),
+        textDelta: "Side answer",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      const updated = yield* Queue.take(snapshots);
+      NodeAssert.equal(
+        updated.type === "update" ? updated.changes.messages?.[0]?.text : undefined,
+        "Side answer",
+      );
+      const replayed = yield* side
+        .subscribe({ parentThreadId })
+        .pipe(Stream.take(1), Stream.runCollect);
+      NodeAssert.equal(
+        replayed[0]?.type === "snapshot" ? replayed[0].snapshot?.messages[0]?.text : undefined,
+        "Side answer",
+      );
+      const rejected = yield* side
+        .send({ parentThreadId, sideChatId: "expired-side", input: "wrong target" })
+        .pipe(Effect.result);
+      NodeAssert.equal(rejected._tag, "Failure");
+      const approval = yield* side
+        .respondApproval({
+          parentThreadId,
+          sideChatId: opened.sideChatId,
+          requestId: ApprovalRequestId.make("main-approval"),
+          decision: "accept",
+        })
+        .pipe(Effect.result);
+      NodeAssert.equal(approval._tag, "Failure");
+      NodeAssert.equal(runtime.respondToRequestImpl.mock.calls.length, 0);
+      yield* side.close({ parentThreadId, sideChatId: opened.sideChatId });
+      const closedEvent = yield* Queue.take(snapshots);
+      NodeAssert.equal(
+        closedEvent.type === "update" ? closedEvent.changes.status : undefined,
+        "closed",
+      );
+      yield* side.close({ parentThreadId, sideChatId: opened.sideChatId });
+      NodeAssert.equal(
+        (yield* adapter.listSessions()).find((session) => session.threadId === parentThreadId)
+          ?.status,
+        "ready",
+      );
+      yield* Fiber.interrupt(watcher);
+    }),
+  );
+
+  it.effect("detaches only the last client and closes the pane when its provider exits", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const side = adapter.sideChats!;
+      const parentThreadId = asThreadId("side-parent-subscribers");
+      yield* adapter.startSession({ threadId: parentThreadId, runtimeMode: "full-access" });
+      const runtime = validationRuntimeFactory.lastRuntime!;
+      yield* side.open({ parentThreadId });
+      NodeAssert.equal(runtime.detachSideChat.mock.calls.length, 1);
+      const firstUpdates =
+        yield* Queue.unbounded<import("@t3tools/contracts").SideChatStreamEvent>();
+      const secondUpdates =
+        yield* Queue.unbounded<import("@t3tools/contracts").SideChatStreamEvent>();
+      const first = yield* Stream.runForEach(side.subscribe({ parentThreadId }), (event) =>
+        Queue.offer(firstUpdates, event),
+      ).pipe(Effect.forkScoped);
+      yield* Queue.take(firstUpdates);
+      const second = yield* Stream.runForEach(side.subscribe({ parentThreadId }), (event) =>
+        Queue.offer(secondUpdates, event),
+      ).pipe(Effect.forkScoped);
+      yield* Queue.take(secondUpdates);
+      NodeAssert.equal(runtime.attachSideChat.mock.calls.length, 1);
+      yield* Fiber.interrupt(first);
+      NodeAssert.equal(runtime.detachSideChat.mock.calls.length, 1);
+      yield* Fiber.interrupt(second);
+      NodeAssert.equal(runtime.detachSideChat.mock.calls.length, 2);
+      const third = yield* Stream.runForEach(side.subscribe({ parentThreadId }), (event) =>
+        Queue.offer(firstUpdates, event),
+      ).pipe(Effect.forkScoped);
+      yield* Queue.take(firstUpdates);
+      yield* runtime.emit({
+        id: asEventId("side-provider-exit"),
+        kind: "session",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: parentThreadId,
+        method: "session/exited",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      const exited = yield* Queue.take(firstUpdates);
+      NodeAssert.equal(exited.type === "update" ? exited.changes.status : undefined, "closed");
+      yield* Fiber.interrupt(third);
+    }),
+  );
+
+  it.effect("rolls back failed sends and admits only one concurrent side turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const side = adapter.sideChats!;
+      const parentThreadId = asThreadId("side-parent-send-failures");
+      yield* adapter.startSession({ threadId: parentThreadId, runtimeMode: "full-access" });
+      const runtime = validationRuntimeFactory.lastRuntime!;
+      const opened = yield* side.open({ parentThreadId });
+      const target = { parentThreadId, sideChatId: opened.sideChatId };
+      runtime.sendSideChat.mockImplementationOnce(() =>
+        Effect.fail(
+          new CodexSessionRuntimeSideChatNotFoundError({ sideChatId: opened.sideChatId }),
+        ),
+      );
+      const failed = yield* side.send({ ...target, input: "Retry me" }).pipe(Effect.result);
+      NodeAssert.equal(failed._tag, "Failure");
+      const replay = yield* side
+        .subscribe({ parentThreadId })
+        .pipe(Stream.take(1), Stream.runCollect);
+      NodeAssert.equal(
+        replay[0]?.type === "snapshot" ? replay[0].snapshot?.messages.length : undefined,
+        0,
+      );
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      runtime.sendSideChat.mockImplementationOnce(() =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(started, undefined);
+          yield* Deferred.await(release);
+          return { threadId: parentThreadId, turnId: asTurnId("retry-turn") };
+        }),
+      );
+      const first = yield* side.send({ ...target, input: "Retry me" }).pipe(Effect.forkScoped);
+      yield* Deferred.await(started);
+      const second = yield* side
+        .send({ ...target, input: "Concurrent turn" })
+        .pipe(Effect.result, Effect.forkScoped);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(first);
+      NodeAssert.equal((yield* Fiber.join(second))._tag, "Failure");
+      NodeAssert.equal(runtime.sendSideChat.mock.calls.length, 2);
+      const final = yield* side
+        .subscribe({ parentThreadId })
+        .pipe(Stream.take(1), Stream.runCollect);
+      NodeAssert.equal(
+        final[0]?.type === "snapshot" ? final[0].snapshot?.messages.length : undefined,
+        1,
+      );
+      NodeAssert.equal(
+        final[0]?.type === "snapshot" ? final[0].snapshot?.error : "missing",
+        undefined,
+      );
+    }),
+  );
+
+  it.effect("dismisses an asynchronous side question without starting another turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const side = adapter.sideChats!;
+      const parentThreadId = asThreadId("side-parent-dismiss");
+      yield* adapter.startSession({ threadId: parentThreadId, runtimeMode: "full-access" });
+      const runtime = validationRuntimeFactory.lastRuntime!;
+      const opened = yield* side.open({ parentThreadId });
+      const updates = yield* Queue.unbounded<import("@t3tools/contracts").SideChatStreamEvent>();
+      const watcher = yield* Stream.runForEach(side.subscribe({ parentThreadId }), (event) =>
+        Queue.offer(updates, event),
+      ).pipe(Effect.forkScoped);
+      yield* Queue.take(updates);
+      yield* runtime.emitSide({
+        id: asEventId("side-async-question"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: parentThreadId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "item/completed",
+        payload: {
+          completedAtMs: 0,
+          threadId: opened.sideChatId,
+          turnId: "side-turn",
+          item: {
+            type: "agentMessage",
+            id: "question",
+            text: "Which option?",
+            phase: "final_answer",
+            delivery: "async",
+            questions: [{ title: "Which option?", options: ["A", "B"] }],
+          },
+        },
+      });
+      const requested = yield* Queue.take(updates);
+      const requestId =
+        requested.type === "update" ? requested.changes.pendingRequests?.[0]?.requestId : undefined;
+      NodeAssert.ok(requestId);
+      yield* side.respondUserInput({
+        parentThreadId,
+        sideChatId: opened.sideChatId,
+        requestId: ApprovalRequestId.make(requestId),
+        answers: {},
+      });
+      const resolved = yield* Queue.take(updates);
+      NodeAssert.deepStrictEqual(
+        resolved.type === "update" ? resolved.changes.pendingRequests : undefined,
+        [],
+      );
+      NodeAssert.equal(runtime.sendSideChat.mock.calls.length, 0);
+      yield* Fiber.interrupt(watcher);
+    }),
+  );
+
+  it.effect("serializes an opening detach with the first subscriber's attach", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const side = adapter.sideChats!;
+      const parentThreadId = asThreadId("side-parent-opening-race");
+      yield* adapter.startSession({ threadId: parentThreadId, runtimeMode: "full-access" });
+      const runtime = validationRuntimeFactory.lastRuntime!;
+      const detachStarted = yield* Deferred.make<void>();
+      const releaseDetach = yield* Deferred.make<void>();
+      const nativeOperations: string[] = [];
+      runtime.detachSideChat.mockImplementationOnce(() =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(detachStarted, undefined);
+          yield* Deferred.await(releaseDetach);
+          nativeOperations.push("detach");
+        }),
+      );
+      runtime.attachSideChat.mockImplementation(() =>
+        Effect.sync(() => {
+          nativeOperations.push("attach");
+        }),
+      );
+      const opening = yield* side.open({ parentThreadId }).pipe(Effect.forkScoped);
+      yield* Deferred.await(detachStarted);
+      const snapshots = yield* Queue.unbounded<import("@t3tools/contracts").SideChatStreamEvent>();
+      const subscribing = yield* Stream.runForEach(side.subscribe({ parentThreadId }), (event) =>
+        Queue.offer(snapshots, event),
+      ).pipe(Effect.forkScoped);
+      // Let the subscriber attempt acquisition while the native detach is blocked.
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(releaseDetach, undefined);
+      yield* Fiber.join(opening);
+      yield* Queue.take(snapshots);
+      NodeAssert.deepStrictEqual(nativeOperations, ["detach", "attach"]);
+      yield* Fiber.interrupt(subscribing);
+    }),
+  );
+
+  it.effect("preserves mutable Codex turn controls without changing the parent", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const side = adapter.sideChats!;
+      const parentThreadId = asThreadId("side-parent-controls");
+      yield* adapter.startSession({ threadId: parentThreadId, runtimeMode: "full-access" });
+      const runtime = validationRuntimeFactory.lastRuntime!;
+      const opened = yield* side.open({ parentThreadId });
+      const modelSelection = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.4", [
+        { id: "reasoningEffort", value: "high" },
+        { id: "serviceTier", value: "priority" },
+      ]);
+      yield* side.send({
+        parentThreadId,
+        sideChatId: opened.sideChatId,
+        input: "Explain this",
+        modelSelection,
+        interactionMode: "plan",
+        runtimeMode: "approval-required",
+      });
+      NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls.at(-1)?.[0], {
+        input: "Explain this",
+        model: "gpt-5.4",
+        effort: "high",
+        serviceTier: "priority",
+        interactionMode: "plan",
+        runtimeMode: "approval-required",
+      });
+      const snapshots = yield* side
+        .subscribe({ parentThreadId })
+        .pipe(Stream.take(1), Stream.runCollect);
+      NodeAssert.equal(
+        snapshots[0]?.type === "snapshot" ? snapshots[0].snapshot?.runtimeMode : undefined,
+        "approval-required",
+      );
+      NodeAssert.equal(
+        snapshots[0]?.type === "snapshot" ? snapshots[0].snapshot?.messages[0]?.role : undefined,
+        "user",
+      );
+      NodeAssert.equal(
+        (yield* adapter.listSessions()).find((session) => session.threadId === parentThreadId)
+          ?.runtimeMode,
+        "full-access",
+      );
     }),
   );
 });

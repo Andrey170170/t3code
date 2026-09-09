@@ -1,3 +1,4 @@
+import type { ProviderSideChats } from "./ProviderSideChats.ts";
 /**
  * ProviderService - Service interface for provider sessions, turns, and checkpoints.
  *
@@ -39,6 +40,7 @@ import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
  * ProviderServiceShape - Service API for provider session and turn orchestration.
  */
 export interface ProviderServiceShape {
+  readonly sideChats?: ProviderSideChats<ProviderServiceError>;
   /**
    * Start a provider session.
    */
