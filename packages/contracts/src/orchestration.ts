@@ -1288,6 +1288,12 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/**
+ * Materializes history from a provider session as ordinary thread messages and
+ * activities. Messages carrying a `turnId` reproduce complete native turns and
+ * may be appended to a thread that already has history; turnless messages in
+ * the reserved `import:` namespace are text previews for an empty thread.
+ */
 const ThreadHistoryImportCommand = Schema.Struct({
   type: Schema.Literal("thread.history.import"),
   commandId: CommandId,
@@ -1297,9 +1303,11 @@ const ThreadHistoryImportCommand = Schema.Struct({
       messageId: MessageId,
       role: Schema.Literals(["user", "assistant"]),
       text: Schema.String,
+      turnId: Schema.optional(TurnId),
       createdAt: IsoDateTime,
     }),
   ).check(Schema.isNonEmpty()),
+  activities: Schema.optional(Schema.Array(OrchestrationThreadActivity)),
 });
 
 const ThreadProposedPlanUpsertCommand = Schema.Struct({

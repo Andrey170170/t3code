@@ -1452,7 +1452,37 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.message-sent": {
-          if (event.payload.turnId === null || event.payload.role !== "assistant") {
+          if (event.payload.turnId === null) {
+            return;
+          }
+          if (event.payload.role === "user") {
+            // Live prompts reach a turn through thread.turn-start-requested and
+            // carry no turn id. A user message that already names its turn is
+            // imported history: record the turn so it pages like a live one.
+            const existingTurn = yield* projectionTurnRepository.getByTurnId({
+              threadId: event.payload.threadId,
+              turnId: event.payload.turnId,
+            });
+            if (Option.isSome(existingTurn)) return;
+            yield* projectionTurnRepository.upsertByTurnId({
+              turnId: event.payload.turnId,
+              threadId: event.payload.threadId,
+              pendingMessageId: event.payload.messageId,
+              sourceProposedPlanThreadId: null,
+              sourceProposedPlanId: null,
+              assistantMessageId: null,
+              state: "completed",
+              requestedAt: event.payload.createdAt,
+              startedAt: event.payload.createdAt,
+              completedAt: null,
+              checkpointTurnCount: null,
+              checkpointRef: null,
+              checkpointStatus: null,
+              checkpointFiles: [],
+            });
+            return;
+          }
+          if (event.payload.role !== "assistant") {
             return;
           }
           // A completed assistant message only settles the turn once the

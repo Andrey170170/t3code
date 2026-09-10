@@ -41,14 +41,41 @@ const testLayer = Layer.mergeAll(
   repository,
   ProviderSessionDirectoryLive.pipe(Layer.provide(repository)),
 );
-const historicalItem = {
-  turnId: "turn-old",
-  item: { id: "item-fence", type: "agentMessage", text: "old answer", phase: "final_answer" },
+// One completed native turn: prompt, a shell command, and the final answer.
+const oldTurn = {
+  id: "turn-old",
+  status: "completed",
+  startedAt: 1_700_000_000,
+  completedAt: 1_700_000_060,
+  items: [
+    { id: "item-user", type: "userMessage", content: [{ type: "text", text: "old question" }] },
+    {
+      id: "item-command",
+      type: "commandExecution",
+      command: "ls",
+      commandActions: [],
+      cwd: "/tmp",
+      status: "completed",
+      exitCode: 0,
+    },
+    { id: "item-answer", type: "agentMessage", text: "old answer", phase: "final_answer" },
+  ],
 };
-const olderItem = {
-  turnId: "turn-old",
-  item: { id: "item-user", type: "userMessage", content: [{ type: "text", text: "old question" }] },
+const newTurn = {
+  id: "turn-new",
+  status: "completed",
+  startedAt: 1_700_000_100,
+  completedAt: 1_700_000_160,
+  items: [
+    { id: "new-user", type: "userMessage", content: [{ type: "text", text: "follow-up" }] },
+    { id: "new-answer", type: "agentMessage", text: "live" },
+  ],
 };
+const historyImports = (commands: ReadonlyArray<OrchestrationCommand>) =>
+  commands.filter(
+    (command): command is Extract<OrchestrationCommand, { type: "thread.history.import" }> =>
+      command.type === "thread.history.import",
+  );
 
 const makeHarness = (
   options: {
@@ -59,7 +86,8 @@ const makeHarness = (
     nativeName?: string;
     readUpdatedAt?: number;
     archived?: boolean;
-    historyLength?: number;
+    /** Generate this many single-message turns, served in native pages of 100. */
+    turnCount?: number;
     existingThread?: OrchestrationThreadShell;
     catalog?: ReadonlyArray<NativeThread>;
   } = {},
@@ -72,7 +100,7 @@ const makeHarness = (
     context: string;
   }> = [];
   const requests: Array<{ method: string; params: unknown }> = [];
-  let newItemAppeared = false;
+  let newTurnAppeared = false;
   const native = makeThreadHistory({
     request: (method, params) =>
       Effect.sync(() => {
@@ -115,38 +143,27 @@ const makeHarness = (
               status: { type: options.active ? "active" : "idle" },
             },
           };
-        if (method === "thread/items/list") {
-          const cursor = (params as { cursor?: string }).cursor;
-          if (options.historyLength !== undefined) {
+        if (method === "thread/turns/list") {
+          if (options.turnCount !== undefined) {
+            const { cursor, limit } = params as { cursor?: string; limit: number };
             const offset = Number(cursor ?? 0);
-            const end = Math.min(
-              offset + (params as { limit: number }).limit,
-              options.historyLength,
-            );
+            const end = Math.min(offset + limit, options.turnCount);
             return {
               data: Array.from({ length: end - offset }, (_, index) => ({
-                turnId: `turn-${index + offset}`,
-                item: {
-                  id: `item-${index + offset}`,
-                  type: "agentMessage",
-                  text: `answer ${index + offset}`,
-                },
+                id: `turn-${index + offset}`,
+                status: "completed",
+                items: [
+                  {
+                    id: `item-${index + offset}`,
+                    type: "agentMessage",
+                    text: `answer ${index + offset}`,
+                  },
+                ],
               })),
-              nextCursor: end < options.historyLength ? String(end) : null,
+              nextCursor: end < options.turnCount ? String(end) : null,
             };
           }
-          if (cursor === "before-fence") return { data: [olderItem], nextCursor: null };
-          return {
-            data: [
-              newItemAppeared
-                ? {
-                    turnId: "new-turn",
-                    item: { id: "new-item", type: "agentMessage", text: "live" },
-                  }
-                : historicalItem,
-            ],
-            nextCursor: "before-fence",
-          };
+          return { data: newTurnAppeared ? [oldTurn, newTurn] : [oldTurn], nextCursor: null };
         }
         return { data: [], nextCursor: null };
       }),
@@ -200,13 +217,182 @@ const makeHarness = (
     commands,
     titleRequests,
     requests,
-    appendLiveItem: () => {
-      newItemAppeared = true;
+    appendLiveTurn: () => {
+      newTurnAppeared = true;
     },
   };
 };
 
+const makeExistingThread = (id: ThreadId, archivedAt: string | null = null) =>
+  ({
+    id,
+    projectId,
+    title: "Old import",
+    modelSelection: { instanceId, model: "default" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    latestTurn: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    archivedAt,
+    settledOverride: null,
+    settledAt: null,
+    session: null,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+  }) satisfies OrchestrationThreadShell;
+
 it.layer(testLayer)("Codex native imports", (it) => {
+  it.effect("imports complete native turns as messages and activities", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness();
+      const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
+      const result = yield* importer.adopt({
+        projectId,
+        providerInstanceId: instanceId,
+        nativeThreadId: "native-1",
+      });
+      expect(result).toEqual({
+        threadId: ThreadId.make("import:codex:native-1"),
+        importedTurnCount: 1,
+      });
+      expect(harness.commands.map((command) => command.type)).toEqual([
+        "thread.create",
+        "thread.history.import",
+      ]);
+      const history = historyImports(harness.commands)[0]!;
+      // Items spread across the turn's native duration in their original order.
+      expect(history.messages).toEqual([
+        {
+          messageId: "history:item-user",
+          role: "user",
+          text: "old question",
+          turnId: "turn-old",
+          createdAt: "2023-11-14T22:13:20.000Z",
+        },
+        {
+          messageId: "history:item-answer",
+          role: "assistant",
+          text: "old answer",
+          turnId: "turn-old",
+          createdAt: "2023-11-14T22:14:20.000Z",
+        },
+      ]);
+      expect(history.activities).toHaveLength(1);
+      expect(history.activities?.[0]).toMatchObject({
+        turnId: "turn-old",
+        createdAt: "2023-11-14T22:13:50.000Z",
+      });
+      expect(harness.requests.filter(({ method }) => method === "thread/turns/list")).toEqual([
+        {
+          method: "thread/turns/list",
+          params: { threadId: "native-1", itemsView: "full", sortDirection: "asc", limit: 100 },
+        },
+      ]);
+      const directory = yield* ProviderSessionDirectory;
+      expect(Option.getOrThrow(yield* directory.getBinding(result.threadId))).toMatchObject({
+        resumeCursor: { threadId: "native-1" },
+        runtimePayload: {
+          cwd: "/tmp",
+          codexHistoryImport: { lastActivityAt: "2023-11-14T22:14:20.000Z" },
+        },
+        status: "stopped",
+      });
+      // Runtime writes with stale payloads keep the import marker.
+      yield* directory.upsert({
+        threadId: result.threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        status: "running",
+        runtimePayload: { cwd: "/tmp", pid: 42 },
+      });
+      expect(
+        Option.getOrThrow(yield* directory.getBinding(result.threadId)).runtimePayload,
+      ).toMatchObject({
+        pid: 42,
+        codexHistoryImport: { lastActivityAt: "2023-11-14T22:14:20.000Z" },
+      });
+    }),
+  );
+
+  it.effect("appends only turns that are not yet projected when importing again", () =>
+    Effect.gen(function* () {
+      const id = ThreadId.make("import:codex:native-update");
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO projection_turns (thread_id,turn_id,state,requested_at,checkpoint_files_json) VALUES (${id},'turn-old','completed','2026-01-02','[]')`;
+      const directory = yield* ProviderSessionDirectory;
+      const binding = {
+        threadId: id,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        status: "stopped" as const,
+        runtimeMode: "full-access" as const,
+        resumeCursor: { threadId: "native-update" },
+        runtimePayload: {
+          cwd: "/tmp",
+          codexHistoryImport: {
+            nativeThreadId: "native-update",
+            homeIdentity: "shared-home",
+            importedAt: "2026-01-01T00:00:00.000Z",
+            lastActivityAt: "2023-11-14T22:14:20.000Z",
+          },
+        },
+      };
+      yield* directory.upsert(binding);
+      const harness = makeHarness({
+        nativeId: "native-update",
+        existingThread: makeExistingThread(id),
+      });
+      harness.appendLiveTurn();
+      const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
+      expect(
+        yield* importer.adopt({
+          projectId,
+          providerInstanceId: ProviderInstanceId.make("codex-alias"),
+          nativeThreadId: "native-update",
+        }),
+      ).toEqual({ threadId: id, importedTurnCount: 1 });
+      expect(harness.commands.map((command) => command.type)).toEqual(["thread.history.import"]);
+      expect(historyImports(harness.commands)[0]?.messages.map((m) => m.messageId)).toEqual([
+        "history:new-user",
+        "history:new-answer",
+      ]);
+      expect(harness.titleRequests).toEqual([]);
+      expect(Option.getOrThrow(yield* directory.getBinding(id))).toMatchObject({
+        ...binding,
+        runtimePayload: {
+          cwd: "/tmp",
+          codexHistoryImport: { lastActivityAt: "2023-11-14T22:16:00.000Z" },
+        },
+      });
+    }),
+  );
+
+  it.effect("reads every turn through bounded native pages", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({ nativeId: "native-long", turnCount: 250 });
+      const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
+      const adopted = yield* importer.adopt({
+        projectId,
+        providerInstanceId: instanceId,
+        nativeThreadId: "native-long",
+      });
+      expect(adopted.importedTurnCount).toBe(250);
+      expect(
+        harness.requests
+          .filter(({ method }) => method === "thread/turns/list")
+          .map(({ params }) => (params as { cursor?: string }).cursor),
+      ).toEqual([undefined, "100", "200"]);
+      expect(historyImports(harness.commands)[0]?.messages.map((m) => m.text)).toEqual(
+        Array.from({ length: 250 }, (_, index) => `answer ${index}`),
+      );
+    }),
+  );
+
   it.effect(
     "uses fresh list activity when native read(false) incorrectly returns creation time",
     () =>
@@ -242,6 +428,7 @@ it.layer(testLayer)("Codex native imports", (it) => {
         expect(
           harness.requests.find(({ method }) => method === "thread/list")?.params,
         ).toMatchObject({ cwd: "/tmp" });
+        // Without catalog metadata the imported turns still date the conversation.
         const absent = makeHarness({ nativeId: "activity-unknown", catalog: [] });
         const other = yield* makeCodexThreadImport.pipe(Effect.provide(absent.services));
         const result = yield* other.adopt({
@@ -249,25 +436,26 @@ it.layer(testLayer)("Codex native imports", (it) => {
           nativeThreadId: "activity-unknown",
           projectId,
         });
-        const payload = Option.getOrThrow(
-          yield* directory.getBinding(result.threadId),
-        ).runtimePayload;
-        expect(payload).toMatchObject({
-          codexHistoryImport: { nativeThreadId: "activity-unknown" },
+        expect(
+          Option.getOrThrow(yield* directory.getBinding(result.threadId)).runtimePayload,
+        ).toMatchObject({
+          codexHistoryImport: {
+            nativeThreadId: "activity-unknown",
+            lastActivityAt: "2023-11-14T22:14:20.000Z",
+          },
         });
-        expect(payload).not.toHaveProperty("codexHistoryImport.lastActivityAt");
       }),
   );
 
   it.effect(
-    "hides completed imports before project counts and pagination while retaining upgrade and retry rows",
+    "hides completed imports before project counts and pagination while retaining update and retry rows",
     () =>
       Effect.gen(function* () {
         const ids = [
           "done-0",
           "done-1",
           "done-2",
-          "legacy",
+          "updated",
           "retry",
           ...Array.from({ length: 51 }, (_, index) => `new-${index}`),
         ];
@@ -276,41 +464,39 @@ it.layer(testLayer)("Codex native imports", (it) => {
           cwd: "/tmp",
           modelProvider: "openai",
           preview: id,
-          createdAt: 1,
-          updatedAt: 2,
+          createdAt: 1_700_000_000,
+          updatedAt: 1_700_000_100,
           threadSource: "user",
         }));
         const directory = yield* ProviderSessionDirectory;
         for (const nativeId of ids.slice(0, 5)) {
-          const threadId = ThreadId.make(`bound-${nativeId}`);
-          const boundary = {
-            nativeThreadId: nativeId,
-            providerInstanceId: instanceId,
-            importedAt: "2026-01-01T00:00:00.000Z",
-            homeIdentity: "shared-home",
-            firstItem: null,
-            nextCursor: null,
-          };
           yield* directory.upsert({
-            threadId,
+            threadId: ThreadId.make(`bound-${nativeId}`),
             provider: ProviderDriverKind.make("codex"),
             providerInstanceId: instanceId,
             status: nativeId === "retry" ? "stopped" : "running",
             resumeCursor: { threadId: nativeId },
-            runtimePayload: nativeId === "legacy" ? {} : { codexHistoryImport: boundary },
+            runtimePayload: {
+              codexHistoryImport: {
+                nativeThreadId: nativeId,
+                importedAt: "2026-01-01T00:00:00.000Z",
+                homeIdentity: "shared-home",
+                lastActivityAt:
+                  nativeId === "updated" ? "2023-11-14T22:13:20.000Z" : "2023-11-14T22:15:00.000Z",
+              },
+            },
           });
         }
-        const sql = yield* SqlClient.SqlClient;
-        yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,role,text,is_streaming,created_at,updated_at) VALUES ('import:legacy-preview','bound-legacy','user','preview',0,'2026-01-01','2026-01-01')`;
         const harness = makeHarness({ catalog });
         const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
         const first = yield* importer.list({ providerInstanceId: instanceId, hideImported: true });
         expect(first.totalCount).toBe(53);
         expect(first.projects[0]).toMatchObject({ totalCount: 53, importableCount: 53 });
         expect(first.threads.some((thread) => thread.id.startsWith("done-"))).toBe(false);
-        expect(
-          first.threads.find((thread) => thread.id === "legacy")?.historyUpgradeAvailable,
-        ).toBe(true);
+        expect(first.threads.find((thread) => thread.id === "updated")).toMatchObject({
+          existingThreadId: "bound-updated",
+          updateAvailable: true,
+        });
         expect(first.threads.find((thread) => thread.id === "retry")?.existingThreadId).toBeNull();
         expect(first.threads).toHaveLength(50);
         const second = yield* importer.list({
@@ -325,7 +511,12 @@ it.layer(testLayer)("Codex native imports", (it) => {
             .list({ providerInstanceId: instanceId, cursor: first.nextCursor! })
             .pipe(Effect.result))._tag,
         ).toBe("Failure");
-        expect((yield* importer.list({ providerInstanceId: instanceId })).totalCount).toBe(56);
+        const all = yield* importer.list({ providerInstanceId: instanceId });
+        expect(all.totalCount).toBe(56);
+        expect(all.threads.find((thread) => thread.id === "done-0")).toMatchObject({
+          existingThreadId: "bound-done-0",
+          updateAvailable: false,
+        });
       }),
   );
 
@@ -488,7 +679,7 @@ it.layer(testLayer)("Codex native imports", (it) => {
       const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
       // The harness records thread.create without projecting it, reproducing a
       // binding that survived interruption before the projection was installed.
-      yield* importer.adopt({
+      const first = yield* importer.adopt({
         providerInstanceId: instanceId,
         nativeThreadId: nativeThread.id,
         projectId,
@@ -501,7 +692,13 @@ it.layer(testLayer)("Codex native imports", (it) => {
         nativeThreadId: nativeThread.id,
         projectId,
       });
-      expect(retried.alreadyImported).toBe(false);
+      expect(retried).toEqual({ threadId: first.threadId, importedTurnCount: 1 });
+      expect(harness.commands.map((command) => command.type)).toEqual([
+        "thread.create",
+        "thread.history.import",
+        "thread.create",
+        "thread.history.import",
+      ]);
     }),
   );
 
@@ -596,176 +793,27 @@ it.layer(testLayer)("Codex native imports", (it) => {
       }),
   );
 
-  it.effect(
-    "persists native identity and a rich history fence across runtime updates and restart",
-    () =>
-      Effect.gen(function* () {
-        const harness = makeHarness();
-        const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
-        const result = yield* importer.adopt({
-          projectId,
-          providerInstanceId: instanceId,
-          nativeThreadId: "native-1",
-        });
-        expect(result.alreadyImported).toBe(false);
-        expect(harness.commands.map((command) => command.type)).toEqual(["thread.create"]);
-        const directory = yield* ProviderSessionDirectory;
-        expect(Option.getOrThrow(yield* directory.getBinding(result.threadId))).toMatchObject({
-          resumeCursor: { threadId: "native-1" },
-          runtimePayload: {
-            cwd: "/tmp",
-            codexHistoryImport: { lastActivityAt: "2023-11-14T22:13:21.000Z" },
-          },
-          status: "stopped",
-        });
-        harness.appendLiveItem();
-        yield* directory.upsert({
-          threadId: result.threadId,
-          provider: ProviderDriverKind.make("codex"),
-          providerInstanceId: instanceId,
-          status: "running",
-          runtimePayload: { cwd: "/tmp", pid: 42 },
-        });
-        expect(
-          Option.getOrThrow(yield* directory.getBinding(result.threadId)).runtimePayload,
-        ).toMatchObject({ codexHistoryImport: { lastActivityAt: "2023-11-14T22:13:21.000Z" } });
-        const restarted = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
-        const page = yield* restarted.history({ threadId: result.threadId });
-        expect(page.items).toEqual([historicalItem, olderItem]);
-        expect(page.nextCursor).toBeNull();
-        expect(
-          harness.requests.filter((request) => request.method === "thread/items/list"),
-        ).toEqual([
-          {
-            method: "thread/items/list",
-            params: { threadId: "native-1", limit: 1, sortDirection: "desc" },
-          },
-          {
-            method: "thread/items/list",
-            params: {
-              threadId: "native-1",
-              cursor: "before-fence",
-              limit: 49,
-              sortDirection: "desc",
-            },
-          },
-        ]);
-      }),
-  );
-
-  it.effect("reads every item through bounded native pages without a total-history cap", () =>
+  it.effect("restores an archived native thread only after reading its history", () =>
     Effect.gen(function* () {
-      const harness = makeHarness({ nativeId: "native-long", historyLength: 1205 });
+      const harness = makeHarness({ nativeId: "native-archived", archived: true });
       const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
-      const adopted = yield* importer.adopt({
+      yield* importer.adopt({
         projectId,
         providerInstanceId: instanceId,
-        nativeThreadId: "native-long",
+        nativeThreadId: "native-archived",
+        archived: true,
       });
-      const ids: Array<unknown> = [];
-      let cursor: string | undefined;
-      do {
-        const page = yield* importer.history({
-          threadId: adopted.threadId,
-          ...(cursor ? { cursor } : {}),
-        });
-        expect(page.items.length).toBeLessThanOrEqual(50);
-        ids.push(...page.items.map((entry) => entry.item.id));
-        cursor = page.nextCursor ?? undefined;
-      } while (cursor);
-      expect(ids).toEqual(Array.from({ length: 1205 }, (_, index) => `item-${index}`));
+      expect(harness.requests.map((request) => request.method)).toEqual([
+        "thread/read",
+        "thread/list",
+        "thread/turns/list",
+        "thread/unarchive",
+      ]);
+      expect(harness.commands.map((command) => command.type)).toEqual([
+        "thread.create",
+        "thread.history.import",
+      ]);
     }),
-  );
-
-  it.effect(
-    "restores an archived native thread only after validating and fencing its history",
-    () =>
-      Effect.gen(function* () {
-        const harness = makeHarness({ nativeId: "native-archived", archived: true });
-        const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
-        yield* importer.adopt({
-          projectId,
-          providerInstanceId: instanceId,
-          nativeThreadId: "native-archived",
-          archived: true,
-        });
-        expect(harness.requests.map((request) => request.method)).toEqual([
-          "thread/read",
-          "thread/items/list",
-          "thread/list",
-          "thread/unarchive",
-        ]);
-        expect(harness.commands).toHaveLength(1);
-      }),
-  );
-
-  it.effect(
-    "upgrades a legacy import without altering its running binding or repeating managed turns",
-    () =>
-      Effect.gen(function* () {
-        const id = ThreadId.make("import:codex:native-upgrade");
-        const existingThread: OrchestrationThreadShell = {
-          id,
-          projectId,
-          title: "Old import",
-          modelSelection: { instanceId, model: "default" },
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: null,
-          worktreePath: null,
-          latestTurn: null,
-          createdAt: "2026-01-01T00:00:00.000Z",
-          updatedAt: "2026-01-01T00:00:00.000Z",
-          archivedAt: null,
-          settledOverride: null,
-          settledAt: null,
-          session: null,
-          latestUserMessageAt: null,
-          hasPendingApprovals: false,
-          hasPendingUserInput: false,
-          hasActionableProposedPlan: false,
-        };
-        const sql = yield* SqlClient.SqlClient;
-        yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,role,text,is_streaming,created_at,updated_at) VALUES (${`${id}:000000`},${id},'user','legacy preview',0,'2026-01-01','2026-01-01')`;
-        yield* sql`INSERT INTO projection_turns (thread_id,turn_id,state,requested_at,checkpoint_files_json) VALUES (${id},'new-turn','running','2026-01-02','[]')`;
-        const directory = yield* ProviderSessionDirectory;
-        const binding = {
-          threadId: id,
-          provider: ProviderDriverKind.make("codex"),
-          providerInstanceId: instanceId,
-          status: "running" as const,
-          runtimeMode: "full-access" as const,
-          resumeCursor: { threadId: "native-upgrade" },
-          runtimePayload: { cwd: "/tmp", pid: 77 },
-        };
-        yield* directory.upsert(binding);
-        const runtimeRepository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
-        const staleRuntime = Option.getOrThrow(
-          yield* runtimeRepository.getByThreadId({ threadId: id }),
-        );
-        const harness = makeHarness({ nativeId: "native-upgrade", existingThread });
-        harness.appendLiveItem();
-        const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
-        expect(
-          yield* importer.adopt({
-            projectId,
-            providerInstanceId: ProviderInstanceId.make("codex-alias"),
-            nativeThreadId: "native-upgrade",
-          }),
-        ).toEqual({ threadId: id, alreadyImported: true });
-        expect(harness.commands).toEqual([]);
-        expect(harness.titleRequests).toEqual([]);
-        expect(Option.getOrThrow(yield* directory.getBinding(id))).toMatchObject(binding);
-        const page = yield* importer.history({ threadId: id });
-        expect(page.boundary?.replacesLegacyMessages).toBe(true);
-        expect(page.items).toEqual([olderItem]);
-        expect(
-          yield* sql`SELECT text FROM projection_thread_messages WHERE thread_id = ${id}`,
-        ).toEqual([{ text: "legacy preview" }]);
-        // A runtime upsert may have read its payload before the metadata install.
-        yield* runtimeRepository.upsert(staleRuntime);
-        expect((yield* importer.history({ threadId: id })).items).toEqual([olderItem]);
-      }),
   );
 
   it.effect("matches arbitrary T3 ids across instances sharing the native home", () =>
@@ -791,22 +839,38 @@ it.layer(testLayer)("Codex native imports", (it) => {
     }),
   );
 
-  it.effect("rejects active threads and mismatched workspaces before recording a binding", () =>
+  it.effect("rejects active, mismatched, and archived targets before reading history", () =>
     Effect.gen(function* () {
-      for (const options of [{ active: true }, { cwd: "/" }]) {
+      const archivedId = ThreadId.make("import:codex:reject-archived");
+      const directory = yield* ProviderSessionDirectory;
+      yield* directory.upsert({
+        threadId: archivedId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        status: "stopped",
+        resumeCursor: { threadId: "reject-archived" },
+        runtimePayload: {},
+      });
+      for (const [nativeThreadId, options] of [
+        ["reject-active", { active: true }],
+        ["reject-cwd", { cwd: "/" }],
+        [
+          "reject-archived",
+          {
+            nativeId: "reject-archived",
+            existingThread: makeExistingThread(archivedId, "2026-02-01T00:00:00.000Z"),
+          },
+        ],
+      ] as const) {
         const harness = makeHarness(options);
         const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
         const result = yield* importer
-          .adopt({
-            projectId,
-            providerInstanceId: instanceId,
-            nativeThreadId: `reject-${options.active ? "active" : "cwd"}`,
-          })
+          .adopt({ projectId, providerInstanceId: instanceId, nativeThreadId })
           .pipe(Effect.result);
         expect(result._tag).toBe("Failure");
         if (result._tag === "Failure") expect(result.failure).toBeInstanceOf(CodexThreadError);
         expect(harness.commands).toEqual([]);
-        expect(harness.requests.some((request) => request.method === "thread/items/list")).toBe(
+        expect(harness.requests.some((request) => request.method === "thread/turns/list")).toBe(
           false,
         );
       }

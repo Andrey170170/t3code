@@ -170,8 +170,9 @@ function toPersistenceSqlOrDecodeError(
 export const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
-  // Runtime writes can carry stale payloads. Only recordImportedTranscript may
-  // change source records, so restore that field from the row being updated.
+  // Runtime writes can carry stale payloads. Import records (`importedTranscripts`
+  // from onboarding, `codexHistoryImport` from the Codex picker) are owned by their
+  // writers, so the stored values win over whatever the runtime write carries.
   const upsertRuntimeRow = SqlSchema.void({
     Request: ProviderSessionRuntimeDbRowSchema,
     execute: (runtime) =>
@@ -212,50 +213,23 @@ export const make = Effect.gen(function* () {
           last_seen_at = excluded.last_seen_at,
           resume_cursor_json = excluded.resume_cursor_json,
           runtime_payload_json = CASE
-            WHEN json_type(CASE WHEN json_valid(provider_session_runtime.runtime_payload_json) THEN provider_session_runtime.runtime_payload_json ELSE '{}' END, '$.codexHistoryImport') IS NOT NULL
-            THEN json_set(
-CASE
-            WHEN json_type(
-              CASE
-                WHEN json_valid(provider_session_runtime.runtime_payload_json)
-                THEN provider_session_runtime.runtime_payload_json
-                ELSE '{}'
-              END,
-              '$.importedTranscripts'
-            ) IS NOT NULL
-            THEN json_set(
+            WHEN json_valid(provider_session_runtime.runtime_payload_json)
+              AND (
+                json_type(provider_session_runtime.runtime_payload_json, '$.importedTranscripts') IS NOT NULL
+                OR json_type(provider_session_runtime.runtime_payload_json, '$.codexHistoryImport') IS NOT NULL
+              )
+            THEN json_patch(
               CASE
                 WHEN json_type(excluded.runtime_payload_json) = 'object'
                 THEN excluded.runtime_payload_json
                 ELSE '{}'
               END,
-              '$.importedTranscripts',
-              json_extract(provider_session_runtime.runtime_payload_json, '$.importedTranscripts')
+              json_object(
+                'importedTranscripts', provider_session_runtime.runtime_payload_json -> '$.importedTranscripts',
+                'codexHistoryImport', provider_session_runtime.runtime_payload_json -> '$.codexHistoryImport'
+              )
             )
             ELSE excluded.runtime_payload_json
-          END,
-              '$.codexHistoryImport', json_extract(provider_session_runtime.runtime_payload_json, '$.codexHistoryImport')
-            )
-            ELSE CASE
-            WHEN json_type(
-              CASE
-                WHEN json_valid(provider_session_runtime.runtime_payload_json)
-                THEN provider_session_runtime.runtime_payload_json
-                ELSE '{}'
-              END,
-              '$.importedTranscripts'
-            ) IS NOT NULL
-            THEN json_set(
-              CASE
-                WHEN json_type(excluded.runtime_payload_json) = 'object'
-                THEN excluded.runtime_payload_json
-                ELSE '{}'
-              END,
-              '$.importedTranscripts',
-              json_extract(provider_session_runtime.runtime_payload_json, '$.importedTranscripts')
-            )
-            ELSE excluded.runtime_payload_json
-          END
           END
       `,
   });

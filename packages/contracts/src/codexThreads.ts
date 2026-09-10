@@ -40,8 +40,8 @@ export const CodexThreadsListResult = Schema.Struct({
       updatedAt: IsoDateTime,
       archived: Schema.Boolean,
       existingThreadId: Schema.NullOr(ThreadId),
-      historyAvailable: Schema.optionalKey(Schema.Boolean),
-      historyUpgradeAvailable: Schema.optionalKey(Schema.Boolean),
+      /** The native conversation moved on since T3 last imported it. */
+      updateAvailable: Schema.optionalKey(Schema.Boolean),
     }),
   ),
   nextCursor: Schema.NullOr(Schema.String),
@@ -80,34 +80,9 @@ export const CodexThreadsImportInput = Schema.Struct({
   cwdOverride: Schema.optional(TrimmedNonEmptyString),
 });
 export type CodexThreadsImportInput = typeof CodexThreadsImportInput.Type;
+/** Importing an already imported conversation appends only its new turns. */
 export const CodexThreadsImportResult = Schema.Struct({
   threadId: ThreadId,
-  alreadyImported: Schema.Boolean,
+  importedTurnCount: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
 });
 export type CodexThreadsImportResult = typeof CodexThreadsImportResult.Type;
-export const CodexThreadsHistoryInput = Schema.Struct({
-  threadId: ThreadId,
-  limit: Schema.optional(
-    Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 50 })),
-  ),
-  cursor: Schema.optional(TrimmedNonEmptyString),
-});
-export type CodexThreadsHistoryInput = typeof CodexThreadsHistoryInput.Type;
-export const CodexHistoryItem = Schema.Struct({
-  turnId: Schema.String,
-  item: Schema.Record(Schema.String, Schema.Unknown),
-});
-export const CodexThreadsHistoryResult = Schema.Struct({
-  imported: Schema.Boolean,
-  boundary: Schema.NullOr(
-    Schema.Struct({
-      nativeThreadId: Schema.String,
-      importedAt: IsoDateTime,
-      replacesLegacyMessages: Schema.optionalKey(Schema.Boolean),
-    }),
-  ),
-  /** Native items in newest-first order. Further pages continue toward older history. */
-  items: Schema.Array(CodexHistoryItem),
-  nextCursor: Schema.NullOr(Schema.String),
-});
-export type CodexThreadsHistoryResult = typeof CodexThreadsHistoryResult.Type;

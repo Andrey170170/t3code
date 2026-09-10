@@ -1641,17 +1641,40 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      // Preview imports carry reserved `import:` ids and only fit an empty thread.
+      // Turn imports append complete native turns, so they only need the thread
+      // to be idle: no live turn, no running session, no open request.
+      const preview = command.messages.every((message) =>
+        isImportedAgentSessionMessageId(message.messageId),
+      );
+      const idle =
+        thread.latestTurn?.state !== "running" &&
+        thread.session?.status !== "starting" &&
+        thread.session?.status !== "running" &&
+        openRequests(thread).size === 0;
       if (
         thread.deletedAt !== null ||
         thread.archivedAt !== null ||
-        thread.messages.length > 0 ||
-        thread.latestTurn !== null ||
-        thread.session !== null ||
-        openRequests(thread).size > 0
+        !idle ||
+        (preview && (thread.messages.length > 0 || thread.session !== null))
       ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `Thread '${command.threadId}' must be active and empty before history can be imported.`,
+          detail: preview
+            ? `Thread '${command.threadId}' must be active and empty before history can be imported.`
+            : `Thread '${command.threadId}' must be idle before history turns can be imported.`,
+        });
+      }
+      const knownMessageIds = new Set(thread.messages.map((message) => message.id));
+      const knownActivityIds = new Set(thread.activities.map((activity) => activity.id));
+      const activities = command.activities ?? [];
+      const duplicate =
+        command.messages.find((message) => knownMessageIds.has(message.messageId))?.messageId ??
+        activities.find((activity) => knownActivityIds.has(activity.id))?.id;
+      if (duplicate !== undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' already contains imported history '${duplicate}'.`,
         });
       }
       const firstMessage = command.messages[0];
@@ -1678,13 +1701,30 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             messageId: message.messageId,
             role: message.role,
             text: message.text,
-            turnId: null,
+            turnId: message.turnId ?? null,
             streaming: false,
             createdAt: message.createdAt,
             updatedAt: message.createdAt,
           },
         });
       }
+      for (const activity of activities) {
+        events.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: activity.createdAt,
+            commandId: command.commandId,
+            metadata: { historyImport: true },
+          })),
+          type: "thread.activity-appended",
+          payload: { threadId: command.threadId, activity },
+        });
+      }
+      events.sort((left, right) => compareDateTimeStrings(left.occurredAt, right.occurredAt));
+      if (!preview) return events;
+      // Preview messages never count as activity, so the thread settles at once
+      // instead of waiting for an automatic settlement that could never trigger.
       const settledAt = command.messages.reduce(
         (latest, message) =>
           compareDateTimeStrings(message.createdAt, latest) > 0 ? message.createdAt : latest,

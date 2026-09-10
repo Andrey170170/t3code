@@ -47,7 +47,6 @@ function pullRequestSettles(
   thread: Pick<OrchestrationThreadShell, "createdAt" | "latestUserMessageAt" | "latestTurn">,
   pullRequest: SettlementPullRequest,
   autoSettleOnMerge: boolean,
-  importedActivityAt?: string | null,
 ): boolean {
   if (pullRequest.state !== "closed" && (pullRequest.state !== "merged" || !autoSettleOnMerge)) {
     return false;
@@ -58,7 +57,6 @@ function pullRequestSettles(
     thread.createdAt,
     thread.latestUserMessageAt,
     thread.latestTurn?.requestedAt,
-    importedActivityAt,
   ]);
   if (userAnchor === null) return false;
   const pullRequestAt = Date.parse(terminalAt);
@@ -73,20 +71,17 @@ export function resolveAutoSettlementAt(input: {
   readonly now: string;
   readonly autoSettleAfterDays: number | null;
   readonly autoSettleOnMerge: boolean;
-  readonly importedActivityAt?: string | null;
 }): string | null {
   const { thread, pullRequest } = input;
   if (!isAutoSettlementCandidate(thread, input.now)) return null;
-  const localActivityAt = latestTimestamp([
+  const activityAt = latestTimestamp([
     thread.latestUserMessageAt,
     thread.latestTurn?.requestedAt,
     thread.latestTurn?.startedAt,
     thread.latestTurn?.completedAt,
   ]);
-  const importedActivityAt = localActivityAt === null ? input.importedActivityAt : null;
-  const activityAt = latestTimestamp([localActivityAt, importedActivityAt]);
   if (pullRequest !== null) {
-    if (pullRequestSettles(thread, pullRequest, input.autoSettleOnMerge, importedActivityAt)) {
+    if (pullRequestSettles(thread, pullRequest, input.autoSettleOnMerge)) {
       return activityAt ?? thread.createdAt;
     }
   }

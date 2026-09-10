@@ -29,7 +29,6 @@ import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolv
 import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
 import { makeTaskOperationStore, TaskOperationStore } from "./TaskOperationStore.ts";
-import { CodexThreadImport } from "../project/CodexThreadImport.ts";
 import { makeTaskService } from "./TaskService.ts";
 
 const at = "2026-09-08T12:00:00.000Z";
@@ -106,15 +105,10 @@ const setup = Effect.gen(function* () {
       createdAt: at,
     });
   }
-  let history: CodexThreadImport["Service"]["history"] = () =>
-    Effect.succeed({ imported: false, boundary: null, items: [], nextCursor: null });
-  const nativeLayer = Layer.mock(CodexThreadImport)({
-    history: (input) => Effect.suspend(() => history(input)),
-  });
   const operations = yield* makeTaskOperationStore;
   const build = makeTaskService.pipe(
     Effect.provideService(TaskOperationStore, operations),
-    Effect.provide(Layer.mergeAll(providerLayer, startupLayer, nativeLayer)),
+    Effect.provide(Layer.mergeAll(providerLayer, startupLayer)),
   );
   const service = yield* build;
   return {
@@ -123,9 +117,6 @@ const setup = Effect.gen(function* () {
     sql,
     service,
     build,
-    setHistory: (handler: CodexThreadImport["Service"]["history"]) => {
-      history = handler;
-    },
   };
 });
 
@@ -304,41 +295,9 @@ it.effect("deduplicates follow-ups and exposes their agent source when reading",
   }).pipe(Effect.provide(baseLayer)),
 );
 
-it.effect("reads native imported history instead of reporting an empty conversation", () =>
+it.effect("rejects read pages larger than the limit", () =>
   Effect.gen(function* () {
-    const { service, setHistory } = yield* setup;
-    const calls: Array<{ cursor?: string | undefined; limit?: number | undefined }> = [];
-    setHistory((input) => {
-      calls.push(input);
-      return Effect.succeed({
-        imported: true,
-        boundary: { nativeThreadId: "native-import", importedAt: at },
-        items: [
-          {
-            turnId: "native-turn",
-            item: {
-              id: input.cursor ? "older" : "newest",
-              type: "agentMessage",
-              text: input.cursor ? "Earlier answer" : "Original answer",
-            },
-          },
-        ],
-        nextCursor: input.cursor ? null : "opaque-native-cursor",
-      });
-    });
-    const newest = yield* service.read(caller, { threadId: sibling, limit: 5 });
-    assert.equal(newest.messages[0]?.text, "Original answer");
-    assert.equal(newest.messages[0]?.createdAt, null);
-    assert.isNotNull(newest.nextCursor);
-    const older = yield* service.read(caller, {
-      threadId: sibling,
-      cursor: newest.nextCursor!,
-      limit: 5,
-    });
-    assert.equal(older.messages[0]?.text, "Earlier answer");
-    assert.isNull(older.nextCursor);
-    assert.equal(calls.at(-1)?.cursor, "opaque-native-cursor");
-    assert.equal(calls.at(-1)?.limit, 5);
+    const { service } = yield* setup;
     const invalid = yield* service
       .read(caller, { threadId: sibling, limit: 51 })
       .pipe(Effect.result);

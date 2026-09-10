@@ -1,24 +1,31 @@
 import {
   CodexThreadError,
-  CodexHistoryItem,
   CommandId,
   DEFAULT_MODEL,
+  EventId,
+  MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderItemId,
   DEFAULT_MODEL_BY_PROVIDER,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   ThreadId,
+  TurnId,
   type CodexThreadsListInput,
   type CodexThreadsListResult,
   type CodexThreadsImportInput,
-  type CodexThreadsHistoryInput,
-  type CodexThreadsHistoryResult,
+  type CodexThreadsImportResult,
+  type OrchestrationThreadActivity,
+  type ProviderEvent,
 } from "@t3tools/contracts";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import {
   isUnsupportedHistoryMethod,
   type NativeThread,
+  type NativeThreadItem,
+  type NativeTurn,
+  type makeThreadHistory,
 } from "effect-codex-app-server/thread-history";
 import { CodexAppServerRequestError } from "effect-codex-app-server/errors";
 import * as Clock from "effect/Clock";
@@ -33,8 +40,11 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { agentSessionImportLock } from "./AgentSessionImportLock.ts";
+import { projectActivityPayload } from "../orchestration/ActivityPayloadProjection.ts";
+import { runtimeEventToActivities } from "../orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { mapCodexHistoryItem } from "../provider/Layers/CodexAdapter.ts";
 import {
   ProviderSessionDirectory,
   type ProviderRuntimeBinding,
@@ -53,25 +63,26 @@ import { makeCodexWorktreeResolver } from "./CodexWorktreeResolver.ts";
 import { CodexThreadClient } from "./CodexThreadClient.ts";
 
 const ResumeCursor = Schema.Struct({ threadId: Schema.String });
-const HistoryBoundary = Schema.Struct({
+/**
+ * Stored beside the provider binding so later imports can recognize the native
+ * conversation across Codex homes and tell whether it has moved on since.
+ */
+const HistoryImportMarker = Schema.Struct({
   nativeThreadId: Schema.String,
-  providerInstanceId: ProviderInstanceId,
-  importedAt: Schema.String,
-  lastActivityAt: Schema.optionalKey(Schema.String),
   homeIdentity: Schema.String,
-  replacesLegacyMessages: Schema.optionalKey(Schema.Boolean),
-  firstItem: Schema.NullOr(CodexHistoryItem),
-  nextCursor: Schema.NullOr(Schema.String),
+  importedAt: Schema.String,
+  lastActivityAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
-const ImportPayload = Schema.Struct({ codexHistoryImport: HistoryBoundary });
-const encodeBoundary = Schema.encodeSync(Schema.fromJsonString(HistoryBoundary));
-const TurnRow = Schema.Struct({ turnId: Schema.String });
-const decodeTurns = Schema.decodeUnknownEffect(Schema.Array(TurnRow));
-const decodeLegacyExists = Schema.decodeUnknownEffect(
-  Schema.Array(Schema.Struct({ present: Schema.Finite })),
-);
+const ImportPayload = Schema.Struct({ codexHistoryImport: HistoryImportMarker });
+const encodeMarker = Schema.encodeSync(Schema.fromJsonString(HistoryImportMarker));
 const decodeCursor = Schema.decodeUnknownOption(ResumeCursor);
 const decodeImport = Schema.decodeUnknownOption(ImportPayload);
+const decodeThreadRows = Schema.decodeUnknownEffect(
+  Schema.Array(Schema.Struct({ threadId: ThreadId })),
+);
+const decodeTurnRows = Schema.decodeUnknownEffect(
+  Schema.Array(Schema.Struct({ turnId: Schema.String })),
+);
 const fail = (message: string) => new CodexThreadError({ message });
 const isCodexThreadError = Schema.is(CodexThreadError);
 const decodeStatus = Schema.decodeUnknownOption(Schema.Struct({ type: Schema.String }));
@@ -94,10 +105,12 @@ const OriginRow = Schema.Struct({
   firstAgent: Schema.Finite,
   humanCount: Schema.Finite,
 });
-const LegacyRow = Schema.Struct({ threadId: ThreadId });
 const decodeOrigins = Schema.decodeUnknownEffect(Schema.Array(OriginRow));
-const decodeLegacyRows = Schema.decodeUnknownEffect(Schema.Array(LegacyRow));
 const isRequestError = Schema.is(CodexAppServerRequestError);
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const nonEmptyString = (value: unknown) =>
+  typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 
 /** Match native identity independently of the T3 thread's arbitrary local id. */
 export const findNativeBinding = Effect.fn("findNativeBinding")(function* (
@@ -131,6 +144,117 @@ export const findNativeBinding = Effect.fn("findNativeBinding")(function* (
   return Option.none<ProviderRuntimeBinding>();
 });
 
+/** Flatten a native user message into prompt text; non-text parts become short placeholders. */
+function userMessageText(item: NativeThreadItem): string {
+  if (!Array.isArray(item.content)) return nonEmptyString(item.text) ?? "";
+  const parts: Array<string> = [];
+  for (const part of item.content) {
+    if (typeof part === "string") {
+      parts.push(part);
+      continue;
+    }
+    if (!isRecord(part)) continue;
+    const text = nonEmptyString(part.text);
+    if (part.type === "text" && text !== null) {
+      parts.push(text);
+      continue;
+    }
+    const location = nonEmptyString(part.path) ?? nonEmptyString(part.url);
+    const name = nonEmptyString(part.name);
+    if (part.type === "image" || part.type === "localImage")
+      parts.push(location && !location.startsWith("data:") ? `Image: ${location}` : "[Image]");
+    else if (part.type === "skill" || part.type === "mention")
+      parts.push(`${part.type === "skill" ? "Skill" : "Mention"}: ${name ?? location ?? "?"}`);
+    else if (text !== null) parts.push(text);
+  }
+  return parts.join("\n\n");
+}
+
+export interface CodexHistoryMaterialization {
+  readonly messages: Array<{
+    readonly messageId: MessageId;
+    readonly role: "user" | "assistant";
+    readonly text: string;
+    readonly turnId: TurnId;
+    readonly createdAt: string;
+  }>;
+  readonly activities: Array<OrchestrationThreadActivity>;
+  readonly turnCount: number;
+  /** Time of the last materialized item, or null when no turn was materialized. */
+  readonly lastActivityAt: string | null;
+}
+
+/**
+ * Turns native turns into the messages and activities T3 stores for live
+ * turns. Codex records time per turn, not per item, so items are spread across
+ * the turn's duration in native order; timestamps stay strictly increasing so
+ * the timeline orders them exactly as Codex did.
+ */
+export function materializeCodexTurns(input: {
+  readonly threadId: ThreadId;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly nativeThreadId: string;
+  readonly turns: ReadonlyArray<NativeTurn>;
+  /** Fallback clock for turns without native timestamps, in epoch milliseconds. */
+  readonly startMs: number;
+}): CodexHistoryMaterialization {
+  const messages: CodexHistoryMaterialization["messages"] = [];
+  const activities: Array<OrchestrationThreadActivity> = [];
+  // Last emitted time; the first item may land exactly on the thread's start.
+  let clock = input.startMs - 1;
+  for (const turn of input.turns) {
+    const startedMs = typeof turn.startedAt === "number" ? turn.startedAt * 1000 : null;
+    const completedMs = typeof turn.completedAt === "number" ? turn.completedAt * 1000 : null;
+    const start = Math.max(startedMs ?? 0, clock + 1);
+    const span = completedMs !== null && completedMs > start ? completedMs - start : 0;
+    const count = turn.items.length;
+    turn.items.forEach((item, index) => {
+      const spread = span > 0 ? Math.round((span * index) / Math.max(count - 1, 1)) : index;
+      clock = Math.max(start + spread, clock + 1);
+      const createdAt = DateTime.formatIso(DateTime.makeUnsafe(clock));
+      const turnId = TurnId.make(turn.id);
+      if (item.type === "userMessage" || item.type === "agentMessage") {
+        const text =
+          item.type === "userMessage" ? userMessageText(item) : nonEmptyString(item.text);
+        if (!text) return;
+        messages.push({
+          messageId: MessageId.make(`history:${item.id}`),
+          role: item.type === "userMessage" ? "user" : "assistant",
+          text,
+          turnId,
+          createdAt,
+        });
+        return;
+      }
+      const event: ProviderEvent = {
+        id: EventId.make(`history:${item.id}`),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: input.providerInstanceId,
+        threadId: input.threadId,
+        createdAt,
+        method: "item/completed",
+        turnId,
+        itemId: ProviderItemId.make(item.id),
+        payload: { threadId: input.nativeThreadId, turnId: turn.id, item, completedAtMs: clock },
+      };
+      const runtimeEvent = mapCodexHistoryItem(event, input.threadId);
+      if (!runtimeEvent) return;
+      for (const activity of runtimeEventToActivities(runtimeEvent)) {
+        activities.push(projectActivityPayload(activity));
+      }
+    });
+    if (count === 0) clock = start;
+  }
+  return {
+    messages,
+    activities,
+    turnCount: input.turns.length,
+    lastActivityAt:
+      input.turns.length === 0 ? null : DateTime.formatIso(DateTime.makeUnsafe(clock)),
+  };
+}
+
 export const makeCodexThreadImport = Effect.gen(function* () {
   const client = yield* CodexThreadClient;
   const titles = yield* CodexImportTitle;
@@ -141,25 +265,6 @@ export const makeCodexThreadImport = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const sql = yield* SqlClient.SqlClient;
   const worktrees = yield* makeCodexWorktreeResolver(yield* GitVcsDriver);
-  const hasLegacyMessages = Effect.fn("CodexThreadImport.hasLegacyMessages")(function* (
-    threadId: ThreadId,
-  ) {
-    const rows = yield* decodeLegacyExists(
-      yield* sql`SELECT EXISTS(SELECT 1 FROM projection_thread_messages WHERE thread_id = ${threadId} AND message_id LIKE 'import:%') AS present`,
-    );
-    return rows[0]?.present === 1;
-  });
-  const omitProjectedTurns = Effect.fn("CodexThreadImport.omitProjectedTurns")(function* (
-    threadId: ThreadId,
-    items: ReadonlyArray<typeof CodexHistoryItem.Type>,
-  ) {
-    if (items.length === 0) return items;
-    const rows = yield* decodeTurns(
-      yield* sql`SELECT turn_id AS "turnId" FROM projection_turns WHERE thread_id = ${threadId} AND ${sql.in("turn_id", [...new Set(items.map((entry) => entry.turnId))])}`,
-    );
-    const projected = new Set(rows.map((row) => row.turnId));
-    return items.filter((entry) => !projected.has(entry.turnId));
-  });
   const lock = agentSessionImportLock;
   const find = (
     bindings: ReadonlyArray<ProviderRuntimeBinding>,
@@ -173,6 +278,42 @@ export const makeCodexThreadImport = Effect.gen(function* () {
     if (Option.isNone(result))
       return yield* fail("Project no longer exists. Select a project and try again.");
     return result.value;
+  });
+  const projectedTurnIds = Effect.fn("CodexThreadImport.projectedTurnIds")(function* (
+    threadId: ThreadId,
+  ) {
+    const rows = yield* decodeTurnRows(
+      yield* sql`SELECT turn_id AS "turnId" FROM projection_turns WHERE thread_id = ${threadId} AND turn_id IS NOT NULL`,
+    );
+    return new Set(rows.map((row) => row.turnId));
+  });
+  const writeMarker = (threadId: ThreadId, marker: typeof HistoryImportMarker.Type) =>
+    sql`UPDATE provider_session_runtime
+      SET runtime_payload_json = json_set(CASE WHEN json_valid(runtime_payload_json) AND json_type(runtime_payload_json) = 'object' THEN runtime_payload_json ELSE '{}' END, '$.codexHistoryImport', json(${encodeMarker(marker)}))
+      WHERE thread_id = ${threadId}`;
+  const readAllTurns = Effect.fn("CodexThreadImport.readAllTurns")(function* (
+    native: ReturnType<typeof makeThreadHistory>,
+    threadId: string,
+  ) {
+    const turns: Array<NativeTurn> = [];
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    for (let pageNumber = 0; pageNumber < 1_000; pageNumber++) {
+      const page = yield* native.turns({
+        threadId,
+        itemsView: "full",
+        sortDirection: "asc",
+        limit: 100,
+        ...(cursor ? { cursor } : {}),
+      });
+      turns.push(...page.data);
+      if (!page.nextCursor) return turns;
+      if (seen.has(page.nextCursor))
+        return yield* fail("Codex returned a non-advancing history cursor. Try again.");
+      seen.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
+    return yield* fail("This conversation is too long to import.");
   });
 
   type Catalog = {
@@ -327,17 +468,10 @@ export const makeCodexThreadImport = Effect.gen(function* () {
         { kind: row.firstAgent ? "agent" : "human", hasHumanParticipation: row.humanCount > 0 },
       ]),
     );
-    const legacyRows =
-      boundThreadIds.length === 0
-        ? []
-        : yield* decodeLegacyRows(
-            yield* sql`SELECT DISTINCT thread_id AS "threadId" FROM projection_thread_messages WHERE message_id LIKE 'import:%' AND ${sql.in("thread_id", boundThreadIds)}`,
-          );
-    const legacy = new Set(legacyRows.map((row) => row.threadId));
     const projectedRows =
       boundThreadIds.length === 0
         ? []
-        : yield* decodeLegacyRows(
+        : yield* decodeThreadRows(
             yield* sql`SELECT thread_id AS "threadId" FROM projection_threads WHERE deleted_at IS NULL AND ${sql.in("thread_id", boundThreadIds)}`,
           );
     const projected = new Set(projectedRows.map((row) => row.threadId));
@@ -416,10 +550,15 @@ export const makeCodexThreadImport = Effect.gen(function* () {
           thread,
           binding ? origins.get(binding.threadId) : undefined,
         );
-        const historyAvailable =
-          binding !== undefined && Option.isSome(decodeImport(binding.runtimePayload));
+        const marker = binding
+          ? Option.getOrUndefined(decodeImport(binding.runtimePayload))?.codexHistoryImport
+          : undefined;
+        // A stopped import binding without a projected thread is an interrupted
+        // adoption: offer it again instead of pointing at a missing thread.
         const retryableImport =
-          historyAvailable && binding?.status === "stopped" && !projected.has(binding.threadId);
+          marker !== undefined && binding?.status === "stopped" && !projected.has(binding.threadId);
+        const existingThreadId = retryableImport ? null : (binding?.threadId ?? null);
+        const lastActivityAt = marker?.lastActivityAt ? Date.parse(marker.lastActivityAt) : NaN;
         return {
           id: thread.id,
           sourceIdentity: encodeIdentity([home, thread.id]),
@@ -434,10 +573,11 @@ export const makeCodexThreadImport = Effect.gen(function* () {
           createdAt: DateTime.formatIso(DateTime.makeUnsafe(thread.createdAt * 1000)),
           updatedAt: DateTime.formatIso(DateTime.makeUnsafe(thread.updatedAt * 1000)),
           archived: thread.archived ?? input.archived ?? false,
-          existingThreadId: retryableImport ? null : (binding?.threadId ?? null),
-          historyAvailable: historyAvailable && !retryableImport,
-          historyUpgradeAvailable:
-            binding !== undefined && !historyAvailable && legacy.has(binding.threadId),
+          existingThreadId,
+          updateAvailable:
+            existingThreadId !== null &&
+            Number.isFinite(lastActivityAt) &&
+            thread.updatedAt * 1000 > lastActivityAt,
           ...(searchResult?.matches.has(thread.id)
             ? { matchPreview: searchResult.matches.get(thread.id)! }
             : {}),
@@ -445,7 +585,7 @@ export const makeCodexThreadImport = Effect.gen(function* () {
       })
       .filter(
         (row) =>
-          (!input.hideImported || row.existingThreadId === null || row.historyUpgradeAvailable) &&
+          (!input.hideImported || row.existingThreadId === null || row.updateAvailable) &&
           (!input.origin || row.origin === input.origin) &&
           (!search ||
             (searchResult
@@ -477,8 +617,7 @@ export const makeCodexThreadImport = Effect.gen(function* () {
         ...group,
         totalCount: group.totalCount + 1,
         importableCount:
-          group.importableCount +
-          (row.existingThreadId === null || row.historyUpgradeAvailable ? 1 : 0),
+          group.importableCount + (row.existingThreadId === null || row.updateAvailable ? 1 : 0),
         [`${row.origin}Count`]: group[`${row.origin}Count`] + 1,
       });
     }
@@ -513,30 +652,37 @@ export const makeCodexThreadImport = Effect.gen(function* () {
     };
   }, Effect.mapError(toError));
 
+  /**
+   * Import a native conversation as a T3 thread with its complete history, or
+   * append the turns Codex recorded since a previous import of the same
+   * conversation. Turns already projected (imported earlier or run through T3)
+   * are skipped, so repeating an import is safe.
+   */
   const adopt = Effect.fn("CodexThreadImport.adopt")(
-    function* (input: CodexThreadsImportInput) {
+    function* (
+      input: CodexThreadsImportInput,
+    ): Effect.fn.Return<CodexThreadsImportResult, unknown> {
       const selectedProject = yield* project(input.projectId);
       const bindings = yield* directory.listBindings();
       const existing = yield* find(bindings, input.providerInstanceId, input.nativeThreadId);
-      let upgrading = false;
-      if (Option.isSome(existing)) {
-        const thread = yield* snapshots.getThreadShellById(existing.value.threadId);
-        if (Option.isSome(thread)) {
-          upgrading =
-            Option.isNone(decodeImport(existing.value.runtimePayload)) &&
-            (yield* hasLegacyMessages(existing.value.threadId));
-          if (!upgrading) return { threadId: existing.value.threadId, alreadyImported: true };
-        }
+      const existingThread = Option.isSome(existing)
+        ? yield* snapshots.getThreadShellById(existing.value.threadId)
+        : Option.none<never>();
+      if (Option.isSome(existing) && Option.isNone(existingThread)) {
+        // A stopped imported binding with no projection is a retry after interruption.
         if (
-          Option.isNone(thread) &&
-          (Option.isNone(decodeImport(existing.value.runtimePayload)) ||
-            existing.value.status !== "stopped")
+          Option.isNone(decodeImport(existing.value.runtimePayload)) ||
+          existing.value.status !== "stopped"
         )
           return yield* fail(
             "This Codex conversation already has a T3 binding but its thread is unavailable. Restore that thread before importing again.",
           );
-        // A stopped imported binding with no projection is a retry after interruption.
       }
+      if (Option.isSome(existingThread) && existingThread.value.archivedAt !== null)
+        return yield* fail(
+          "This conversation is archived in T3 Code. Unarchive it before importing new turns.",
+        );
+      const updating = Option.isSome(existingThread);
       return yield* client.withClient(input.providerInstanceId, (native) =>
         Effect.gen(function* () {
           const thread = yield* native.read(input.nativeThreadId);
@@ -545,14 +691,14 @@ export const makeCodexThreadImport = Effect.gen(function* () {
               "Subagent and review conversations belong to their parent and cannot be imported independently.",
             );
           const status = decodeStatus(thread.status);
-          if (!upgrading && Option.isSome(status) && status.value.type === "active")
+          if (Option.isSome(status) && status.value.type === "active")
             return yield* fail(
               "This Codex conversation is active. Stop it in its original client before importing. T3 cannot take over an externally running conversation.",
             );
           const cwd = input.cwdOverride ?? thread.cwd;
           let worktreePath: string | null = null;
           let worktreeBranch: string | null = null;
-          if (!upgrading) {
+          if (!updating) {
             const stat = yield* fs
               .stat(cwd)
               .pipe(
@@ -585,13 +731,6 @@ export const makeCodexThreadImport = Effect.gen(function* () {
               worktreePath = cwd;
             }
           }
-          // Capture one immutable starting point. Following its native cursor only reads
-          // older items, so later T3 turns never leak into the imported history panel.
-          const first = yield* native.items({
-            threadId: thread.id,
-            limit: 1,
-            sortDirection: "desc",
-          });
           // Codex rejects resuming archived sessions. The rollout path lets a
           // retry see that a previous interrupted adoption already restored it.
           const archived =
@@ -607,77 +746,87 @@ export const makeCodexThreadImport = Effect.gen(function* () {
           const sourceActivity = activityCatalog?.threads.find(
             (entry) => entry.id === thread.id,
           )?.updatedAt;
-          const sourceActivityAt =
-            sourceActivity === undefined
-              ? Option.none<DateTime.Utc>()
-              : DateTime.make(sourceActivity * 1000);
-          if (archived && !upgrading) yield* native.unarchive(thread.id);
-          const importedAt = DateTime.formatIso(yield* DateTime.now);
-          const homeIdentity = yield* client.resolveNativeHomeIdentity(input.providerInstanceId);
           const threadId =
             Option.getOrUndefined(existing)?.threadId ??
             ThreadId.make(`import:${input.providerInstanceId}:${thread.id}`);
-          const boundary = {
-            nativeThreadId: thread.id,
-            providerInstanceId: input.providerInstanceId,
-            importedAt,
-            ...(Option.isSome(sourceActivityAt)
-              ? { lastActivityAt: DateTime.formatIso(sourceActivityAt.value) }
-              : {}),
-            homeIdentity,
-            firstItem: first.data[0] ?? null,
-            nextCursor: first.nextCursor ?? null,
-            replacesLegacyMessages: upgrading,
-          };
-          if (upgrading) {
-            // Only attach immutable history metadata. Runtime state may have
-            // changed while the native page was being read; never replay a stale binding.
-            const rows = yield* sql`UPDATE provider_session_runtime
-              SET runtime_payload_json = json_set(CASE WHEN json_valid(runtime_payload_json) AND json_type(runtime_payload_json) = 'object' THEN runtime_payload_json ELSE '{}' END, '$.codexHistoryImport', json(${encodeBoundary(boundary)}))
-              WHERE thread_id = ${threadId} AND json_extract(runtime_payload_json, '$.codexHistoryImport') IS NULL
-              RETURNING thread_id`;
-            if (rows.length === 0 && Option.isNone(yield* directory.getBinding(threadId)))
-              return yield* fail(
-                "The T3 conversation binding disappeared during history import. Retry after restoring it.",
-              );
-            return { threadId, alreadyImported: true };
-          }
-          yield* directory.upsert(
-            {
-              threadId,
-              provider: ProviderDriverKind.make("codex"),
-              providerInstanceId: input.providerInstanceId,
-              status: "stopped",
-              runtimeMode: DEFAULT_RUNTIME_MODE,
-              resumeCursor: { threadId: thread.id },
-              runtimePayload: {
-                cwd,
-                codexHistoryImport: boundary,
-              },
-            },
-            { onConflict: "ignore" },
+          const projectedTurns = updating ? yield* projectedTurnIds(threadId) : new Set<string>();
+          const turns = (yield* readAllTurns(native, thread.id)).filter(
+            (turn) => !projectedTurns.has(turn.id),
           );
-          yield* engine.dispatch({
-            type: "thread.create",
-            commandId: CommandId.make(yield* crypto.randomUUIDv4),
+          const history = materializeCodexTurns({
             threadId,
-            projectId: input.projectId,
-            title: thread.name || thread.preview || "Imported Codex conversation",
-            modelSelection: {
-              instanceId: input.providerInstanceId,
-              model:
-                thread.model ||
-                DEFAULT_MODEL_BY_PROVIDER[ProviderDriverKind.make("codex")] ||
-                DEFAULT_MODEL,
-            },
-            runtimeMode: DEFAULT_RUNTIME_MODE,
-            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-            branch: worktreeBranch,
-            worktreePath,
-            createdAt: DateTime.formatIso(DateTime.makeUnsafe(thread.createdAt * 1000)),
-            historyImport: true,
+            providerInstanceId: input.providerInstanceId,
+            nativeThreadId: thread.id,
+            turns,
+            startMs: thread.createdAt * 1000,
           });
-          if (needsCodexImportTitle(thread.name)) {
+          if (archived && !updating) yield* native.unarchive(thread.id);
+          const importedAt = DateTime.formatIso(yield* DateTime.now);
+          const homeIdentity = yield* client.resolveNativeHomeIdentity(input.providerInstanceId);
+          const lastActivityAt = [
+            sourceActivity === undefined ? null : sourceActivity * 1000,
+            history.lastActivityAt === null ? null : Date.parse(history.lastActivityAt),
+          ].reduce<number | null>(
+            (latest, value) =>
+              value !== null && (latest === null || value > latest) ? value : latest,
+            null,
+          );
+          const marker = {
+            nativeThreadId: thread.id,
+            homeIdentity,
+            importedAt,
+            lastActivityAt:
+              lastActivityAt === null
+                ? null
+                : DateTime.formatIso(DateTime.makeUnsafe(lastActivityAt)),
+          };
+          if (!updating) {
+            // Install the cursor before the thread becomes visible; insert-ignore
+            // keeps a concurrent live session's newer binding.
+            yield* directory.upsert(
+              {
+                threadId,
+                provider: ProviderDriverKind.make("codex"),
+                providerInstanceId: input.providerInstanceId,
+                status: "stopped",
+                runtimeMode: DEFAULT_RUNTIME_MODE,
+                resumeCursor: { threadId: thread.id },
+                runtimePayload: { cwd, codexHistoryImport: marker },
+              },
+              { onConflict: "ignore" },
+            );
+            yield* engine.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make(yield* crypto.randomUUIDv4),
+              threadId,
+              projectId: input.projectId,
+              title: thread.name || thread.preview || "Imported Codex conversation",
+              modelSelection: {
+                instanceId: input.providerInstanceId,
+                model:
+                  thread.model ||
+                  DEFAULT_MODEL_BY_PROVIDER[ProviderDriverKind.make("codex")] ||
+                  DEFAULT_MODEL,
+              },
+              runtimeMode: DEFAULT_RUNTIME_MODE,
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              branch: worktreeBranch,
+              worktreePath,
+              createdAt: DateTime.formatIso(DateTime.makeUnsafe(thread.createdAt * 1000)),
+              historyImport: true,
+            });
+          }
+          if (history.messages.length > 0) {
+            yield* engine.dispatch({
+              type: "thread.history.import",
+              commandId: CommandId.make(yield* crypto.randomUUIDv4),
+              threadId,
+              messages: history.messages,
+              activities: history.activities,
+            });
+          }
+          yield* writeMarker(threadId, marker);
+          if (!updating && needsCodexImportTitle(thread.name)) {
             yield* titles.schedule({
               threadId,
               cwd,
@@ -685,7 +834,7 @@ export const makeCodexThreadImport = Effect.gen(function* () {
               context: thread.preview.slice(0, 4000),
             });
           }
-          return { threadId, alreadyImported: false };
+          return { threadId, importedTurnCount: history.turnCount };
         }),
       );
     },
@@ -693,47 +842,7 @@ export const makeCodexThreadImport = Effect.gen(function* () {
     Effect.mapError(toError),
   );
 
-  const history = Effect.fn("CodexThreadImport.history")(function* (
-    input: CodexThreadsHistoryInput,
-  ): Effect.fn.Return<CodexThreadsHistoryResult, unknown> {
-    const binding = yield* directory.getBinding(input.threadId);
-    const imported = Option.isSome(binding)
-      ? decodeImport(binding.value.runtimePayload)
-      : Option.none();
-    if (Option.isNone(imported) || Option.isNone(binding))
-      return { imported: false, boundary: null, items: [], nextCursor: null };
-    const boundary = imported.value.codexHistoryImport;
-    const publicBoundary = {
-      nativeThreadId: boundary.nativeThreadId,
-      importedAt: boundary.importedAt,
-      replacesLegacyMessages: boundary.replacesLegacyMessages ?? false,
-    };
-    const limit = input.limit ?? 50;
-    const cursor = input.cursor ?? boundary.nextCursor;
-    const firstItems = input.cursor ? [] : boundary.firstItem ? [boundary.firstItem] : [];
-    if (!cursor || (firstItems.length === 1 && limit === 1))
-      return {
-        imported: true,
-        boundary: publicBoundary,
-        items: yield* omitProjectedTurns(input.threadId, firstItems),
-        nextCursor: cursor,
-      };
-    const page = yield* client.withClient(boundary.providerInstanceId, (native) =>
-      native.items({
-        threadId: boundary.nativeThreadId,
-        cursor,
-        limit: limit - firstItems.length,
-        sortDirection: "desc",
-      }),
-    );
-    return {
-      imported: true,
-      boundary: publicBoundary,
-      items: yield* omitProjectedTurns(input.threadId, [...firstItems, ...page.data]),
-      nextCursor: page.nextCursor ?? null,
-    };
-  }, Effect.mapError(toError));
-  return { list, adopt, history };
+  return { list, adopt };
 });
 
 export class CodexThreadImport extends Context.Service<

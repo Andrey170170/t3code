@@ -1,4 +1,3 @@
-import { mergeCodexHistoryFeed } from "./codex-history-feed";
 import * as Haptics from "expo-haptics";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-native";
@@ -19,7 +18,6 @@ import {
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { projectCodexHistory } from "@t3tools/client-runtime/state/codex-history-projection";
 import {
   classifyMarkdownImageSource,
   markdownImageSourceFragment,
@@ -141,7 +139,6 @@ import {
 } from "@t3tools/mobile-markdown-text/links";
 import {
   deriveThreadFeedPresentation,
-  buildCodexHistoryFeed,
   isContextCompactionActivityGroup,
   type ThreadFeedEntry,
   type ThreadFeedLatestTurn,
@@ -172,8 +169,6 @@ import {
   useRefreshAssetUrl,
 } from "../../state/assets";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
-import { useAtomCommand } from "../../state/use-atom-command";
-import { codexThreads } from "../../state/codex-threads";
 import { usePreparedConnection } from "../../state/session";
 import * as Option from "effect/Option";
 import {
@@ -190,7 +185,6 @@ import {
   ThreadMarkdownImageUnavailable,
   ThreadMarkdownImageView,
 } from "./ThreadMarkdownImage";
-import { useNativeCodexHistory } from "./use-native-codex-history";
 
 const WIDE_MARKDOWN_BLOCK_OPTIONS = {
   // Native iOS blockquotes and adjacent selectable text are separate layout
@@ -261,7 +255,6 @@ export interface ThreadFeedProps {
   readonly onEndFollowEnabledChange?: (enabled: boolean) => void;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
   readonly onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
-  readonly nativeCodexHistoryEnabled: boolean;
   /** Non-null when older turns exist beyond the loaded window. */
   readonly loadEarlier?: {
     readonly loading: boolean;
@@ -274,25 +267,20 @@ function MessageAttachmentImage(props: {
   readonly attachmentId: string;
   readonly name: string;
   readonly mimeType: string;
-  readonly previewUrl?: string;
   readonly className: string;
   readonly onPressPreview: (source: FilePreviewSource) => void;
 }) {
   const sourceIdentifier = useId();
   const resource = useMemo(
-    () =>
-      props.previewUrl
-        ? null
-        : {
-            _tag: "attachment" as const,
-            attachmentId: props.attachmentId,
-            fileName: props.name,
-            mimeType: props.mimeType,
-          },
-    [props.attachmentId, props.name, props.mimeType, props.previewUrl],
+    () => ({
+      _tag: "attachment" as const,
+      attachmentId: props.attachmentId,
+      fileName: props.name,
+      mimeType: props.mimeType,
+    }),
+    [props.attachmentId, props.name, props.mimeType],
   );
-  const assetUrl = useAssetUrl(resource ? props.environmentId : null, resource);
-  const uri = props.previewUrl ?? assetUrl;
+  const uri = useAssetUrl(props.environmentId, resource);
 
   if (uri === null) {
     return (
@@ -308,23 +296,20 @@ function MessageAttachmentImage(props: {
         accessibilityRole="imagebutton"
         accessibilityLabel={`Open ${props.name}`}
         onPress={() =>
-          props.onPressPreview(
-            resource
-              ? {
-                  kind: "image",
-                  environmentId: props.environmentId,
-                  resource,
-                  name: props.name,
-                  sourceIdentifier,
-                  actionsSource: {
-                    name: props.name,
-                    mimeType: props.mimeType,
-                    environmentId: props.environmentId,
-                    resource,
-                  },
-                }
-              : { kind: "image", uri, name: props.name, sourceIdentifier },
-          )
+          // The viewer mints its own URL from the resource so the image survives a refresh.
+          props.onPressPreview({
+            kind: "image",
+            environmentId: props.environmentId,
+            resource,
+            name: props.name,
+            sourceIdentifier,
+            actionsSource: {
+              name: props.name,
+              mimeType: props.mimeType,
+              environmentId: props.environmentId,
+              resource,
+            },
+          })
         }
       >
         <Image source={{ uri }} className={props.className} resizeMode="cover" />
@@ -338,12 +323,6 @@ function MessageAttachmentImage(props: {
 // with guards and render unknown types as inert rows, never crash.
 function isImageAttachment(attachment: ChatAttachment): attachment is ChatImageAttachment {
   return attachment.type === "image";
-}
-
-function attachmentPreviewUrl(attachment: ChatImageAttachment): string | undefined {
-  return "previewUrl" in attachment && typeof attachment.previewUrl === "string"
-    ? attachment.previewUrl
-    : undefined;
 }
 
 function isFileAttachment(attachment: ChatAttachment): attachment is ChatFileAttachment {
@@ -1558,7 +1537,6 @@ function renderFeedEntry(
                   attachmentId={attachment.id}
                   name={attachment.name}
                   mimeType={attachment.mimeType}
-                  previewUrl={attachmentPreviewUrl(attachment)}
                   className="aspect-[1.3] w-full rounded-[14px] bg-white/15"
                   onPressPreview={props.onPressPreview}
                 />
@@ -1646,7 +1624,6 @@ function renderFeedEntry(
               attachmentId={attachment.id}
               name={attachment.name}
               mimeType={attachment.mimeType}
-              previewUrl={attachmentPreviewUrl(attachment)}
               className="mt-1.5 aspect-[1.3] w-full rounded-[18px] bg-adaptive-neutral-200-800"
               onPressPreview={props.onPressPreview}
             />
@@ -2425,45 +2402,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   // ThreadId, and keying resets (or the list mount) on the bare id would
   // carry stale scroll/follow state across an environment switch.
   const feedThreadKey = scopedThreadKey(props.environmentId, props.threadId);
-  const readCodexHistory = useAtomCommand(codexThreads.history, { reportFailure: false });
-  const loadNativeHistoryPage = useCallback(
-    async (cursor?: string) => {
-      const response = await readCodexHistory({
-        environmentId: props.environmentId,
-        input: { threadId: props.threadId, ...(cursor ? { cursor } : {}) },
-      });
-      if (response._tag === "Failure") throw squashAtomCommandFailure(response);
-      return response.value;
-    },
-    [props.environmentId, props.threadId, readCodexHistory],
-  );
-  const nativeHistory = useNativeCodexHistory({
-    threadKey: feedThreadKey,
-    enabled: props.nativeCodexHistoryEnabled && props.loadEarlier === null,
-    loadPage: loadNativeHistoryPage,
-  });
-  const nativeProjection = useMemo(
-    () => (nativeHistory.result ? projectCodexHistory(nativeHistory.result) : null),
-    [nativeHistory.result],
-  );
-  const nativeHistoryFeed = useMemo(
-    () =>
-      nativeProjection
-        ? buildCodexHistoryFeed(nativeProjection.messages, nativeProjection.workEntries)
-        : [],
-    [nativeProjection],
-  );
-  const timelineLoadEarlier =
-    props.loadEarlier ??
-    (props.nativeCodexHistoryEnabled &&
-    (nativeHistory.loading || nativeHistory.error !== null || nativeHistory.result?.nextCursor)
-      ? {
-          loading: nativeHistory.loading,
-          retry: nativeHistory.error !== null,
-          onLoadEarlier:
-            nativeHistory.error !== null ? nativeHistory.retry : nativeHistory.loadEarlier,
-        }
-      : null);
   // Virtualized groups can unmount without losing the reader's place. This cache
   // belongs to this thread view only and never causes per-scroll React updates.
   const workGroupScrollPositions = useMemo(
@@ -2500,26 +2438,17 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     }
     return ids;
   }, [expandedWorkGroups]);
-  const visibleFeed = useMemo(
-    () =>
-      mergeCodexHistoryFeed(
-        props.feed,
-        nativeHistoryFeed,
-        nativeHistory.result?.boundary?.replacesLegacyMessages === true,
-      ),
-    [nativeHistory.result, nativeHistoryFeed, props.feed],
-  );
   const presentedFeed = useMemo(
     () =>
       appendPendingThreadMessages(
         deriveThreadFeedPresentation(
-          visibleFeed,
+          props.feed,
           props.latestTurn,
           expandedTurnIds,
           expandedWorkGroupIds,
           props.activeWorkStartedAt,
         ),
-        visibleFeed,
+        props.feed,
         props.queuedMessages,
       ),
     [
@@ -2527,7 +2456,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       expandedTurnIds,
       expandedWorkGroupIds,
       props.activeWorkStartedAt,
-      visibleFeed,
+      props.feed,
       props.latestTurn,
     ],
   );
@@ -2555,13 +2484,13 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   );
   const terminalAssistantMessageIds = useMemo(() => {
     const terminalIdsByTurn = new Map<TurnId, string>();
-    for (const entry of visibleFeed) {
+    for (const entry of props.feed) {
       if (entry.type === "message" && entry.message.role === "assistant" && entry.message.turnId) {
         terminalIdsByTurn.set(entry.message.turnId, entry.message.id);
       }
     }
     return new Set(terminalIdsByTurn.values());
-  }, [visibleFeed]);
+  }, [props.feed]);
   useEffect(() => {
     const previous = previousLatestTurnRef.current;
     previousLatestTurnRef.current = props.latestTurn;
@@ -2993,19 +2922,14 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             ListHeaderComponent={
               <>
                 {usesNativeAutomaticInsets ? null : <View style={{ height: topContentInset }} />}
-                {timelineLoadEarlier !== null ? (
+                {props.loadEarlier != null ? (
                   <Pressable
-                    accessibilityRole="button"
-                    onPress={timelineLoadEarlier.onLoadEarlier}
-                    disabled={timelineLoadEarlier.loading}
+                    onPress={props.loadEarlier.onLoadEarlier}
+                    disabled={props.loadEarlier.loading}
                     className="items-center py-2"
                   >
                     <Text className="text-xs text-foreground-secondary">
-                      {timelineLoadEarlier.loading
-                        ? "Loading earlier messages…"
-                        : "retry" in timelineLoadEarlier && timelineLoadEarlier.retry
-                          ? "Retry loading earlier messages"
-                          : "Load earlier messages"}
+                      {props.loadEarlier.loading ? "Loading earlier turns…" : "Load earlier turns"}
                     </Text>
                   </Pressable>
                 ) : null}

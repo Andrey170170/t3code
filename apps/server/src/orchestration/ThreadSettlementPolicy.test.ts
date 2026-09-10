@@ -48,41 +48,19 @@ const decide = (
   }) !== null;
 
 describe("resolveAutoSettlementAt", () => {
-  it("ages native imports from source activity and preserves recent updates and pinned/manual states", () => {
+  it("never settles pinned threads", () => {
     const thread = makeThread({
-      latestUserMessageAt: null,
+      latestUserMessageAt: "2026-08-20T00:00:00.000Z",
       latestTurn: null,
-      createdAt: "2020-01-01T00:00:00.000Z",
-      updatedAt: NOW,
+      pinnedAt: NOW,
     });
-    const decideImport = (
-      importedActivityAt: string | null,
-      overrides: Partial<OrchestrationThreadShell> = {},
-    ) =>
+    expect(
       resolveAutoSettlementAt({
-        thread: { ...thread, ...overrides },
+        thread,
         pullRequest: null,
         now: NOW,
         autoSettleAfterDays: 3,
         autoSettleOnMerge: true,
-        importedActivityAt,
-      });
-    expect(decideImport("2026-08-20T00:00:00.000Z")).toBe("2026-08-20T00:00:00.000Z");
-    expect(decideImport("2026-08-28T00:00:00.000Z")).toBeNull();
-    expect(decideImport(null)).toBeNull();
-    expect(decideImport("2026-08-20T00:00:00.000Z", { pinnedAt: NOW })).toBeNull();
-    expect(decideImport("2026-08-20T00:00:00.000Z", { settledOverride: "active" })).toBeNull();
-    expect(
-      decideImport("2026-08-20T00:00:00.000Z", { latestUserMessageAt: "2026-08-28T00:00:00.000Z" }),
-    ).toBeNull();
-    expect(
-      resolveAutoSettlementAt({
-        thread,
-        pullRequest: { state: "merged", mergedAt: "2026-08-26T00:00:00.000Z" },
-        now: NOW,
-        autoSettleAfterDays: 3,
-        autoSettleOnMerge: true,
-        importedActivityAt: "2026-08-28T00:00:00.000Z",
       }),
     ).toBeNull();
   });

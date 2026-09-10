@@ -20,9 +20,10 @@ importing. The choice applies to removed worktrees in that project; conversation
 whose worktrees still exist keep their original checkout.
 
 Search titles or full messages, and filter by conversation origin or archive state.
-Already imported conversations are hidden by default unless a history upgrade is
-available. Older imports follow your automatic settling setting using their original
-activity time, so look under **Settled** for inactive conversations.
+Already imported conversations are hidden by default unless Codex has recorded new
+turns since the import; those show **Update available** and can be selected again
+to append the new turns. Imports follow your automatic settling setting using their
+original activity time, so look under **Settled** for inactive conversations.
 Importing an archived conversation restores it in Codex. A batch continues if you
 close the picker; reopen it to retry any failures. Meaningful native titles are
 preserved; unnamed conversations receive a title using your configured title model.
@@ -31,15 +32,14 @@ Finish work in the original client before importing. Import does not synchronize
 with a conversation still running elsewhere. The checkout you continue in must
 exist on the environment.
 
-The conversation keeps its Codex context when you continue it in T3 Code. Earlier
-messages and tool results appear in the conversation alongside new messages. Use
-**Load earlier turns** to read older pages. Conversations previously imported
-through onboarding can select their **History upgrade** entry in the import picker
-to replace the short text preview with complete, paginated history.
+An imported conversation contains the complete history: every user message, reply,
+and tool result becomes a normal message in the thread, and the conversation keeps
+its Codex context when you continue it in T3 Code. Turns run in T3 Code and turns
+imported earlier are never duplicated.
 
 **Import recent conversations** remains available for the previous batch import:
 it selects recent Claude/Codex conversations and retains a limited text preview.
-Use the Codex import picker for complete, paginated history.
+Use the Codex import picker for complete history.
 
 ## Ask a side question
 

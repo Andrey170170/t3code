@@ -93,7 +93,9 @@ type ImportResult = Selection & {
   threadId?: ThreadId;
   error?: string | undefined;
 };
+type Checkout = NonNullable<Project["checkouts"]>[number];
 const ORIGINS = ["human", "agent", "mixed", "unknown"] as const;
+const ORIGIN_NAMES = { human: "Human", agent: "Agent", mixed: "Mixed", unknown: "Unknown" };
 const ORIGIN_LABELS = {
   human: "Started by you",
   agent: "Started by an agent",
@@ -108,6 +110,36 @@ const EMPTY_RESULT: CodexThreadsListResult = {
   catalogComplete: false,
   messageSearchSupported: null,
 };
+
+function folderName(path: string) {
+  return path.split(/[\\/]/).findLast(Boolean);
+}
+function threadTitle(thread: CodexImportCandidate) {
+  return thread.title || "Untitled conversation";
+}
+function checkoutLabel(checkout: Checkout) {
+  const name = checkout.isMain
+    ? "Main checkout"
+    : checkout.branch || folderName(checkout.cwd) || checkout.cwd;
+  return checkout.isMain && checkout.branch ? `${name} · ${checkout.branch}` : name;
+}
+function commandFailureMessage(result: Parameters<typeof squashAtomCommandFailure>[0]) {
+  return String(squashAtomCommandFailure(result));
+}
+function mergeProjects(previous: Map<string, Project>, projects: readonly Project[]) {
+  const next = new Map(previous);
+  for (const project of projects) next.set(project.cwd, project);
+  return next;
+}
+function findKnownProject(
+  projects: ReturnType<typeof useProjects>,
+  environmentId: EnvironmentId,
+  workspaceRoot: string,
+) {
+  return projects.find(
+    (project) => project.environmentId === environmentId && project.workspaceRoot === workspaceRoot,
+  );
+}
 
 /** The owner stays mounted when the popup closes so a batch can finish and report its result. */
 export function CodexThreadImportButton(
@@ -189,13 +221,10 @@ export function CodexThreadImportDialog({
   const openRef = useRef(open);
   useEffect(() => {
     openRef.current = open;
-  }, [open]);
-  useEffect(
-    () => () => {
+    return () => {
       openRef.current = false;
-    },
-    [],
-  );
+    };
+  }, [open]);
   const searchRef = useRef<HTMLInputElement>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -232,8 +261,7 @@ export function CodexThreadImportDialog({
     data.projects.find((project) => project.cwd === cwd) ??
     (cwd && data.projects.length === 1 ? data.projects[0] : undefined) ??
     (cwd ? catalogProjects.get(cwd) : undefined);
-  const projectTitle =
-    currentProject?.title ?? cwd?.split(/[\\/]/).findLast(Boolean) ?? "Conversations";
+  const projectTitle = currentProject?.title ?? (cwd ? folderName(cwd) : null) ?? "Conversations";
 
   const load = useCallback(
     async (cursor?: string, refresh = false) => {
@@ -248,11 +276,7 @@ export function CodexThreadImportDialog({
       if (request !== generation.current) return;
       setLoading(false);
       if (response._tag !== "Success") {
-        setError(
-          response._tag === "Failure"
-            ? String(squashAtomCommandFailure(response))
-            : "The request was interrupted. Try again.",
-        );
+        setError(commandFailureMessage(response));
         return;
       }
       const result = response.value;
@@ -267,11 +291,7 @@ export function CodexThreadImportDialog({
         }
         return next;
       });
-      setCatalogProjects((previous) => {
-        const next = new Map(previous);
-        for (const project of result.projects) next.set(project.cwd, project);
-        return next;
-      });
+      setCatalogProjects((previous) => mergeProjects(previous, result.projects));
       setMatchingKeys((previous) => {
         const next = new Map(previous);
         for (const thread of result.threads) {
@@ -342,7 +362,6 @@ export function CodexThreadImportDialog({
   const visibleProjects = hideImported
     ? data.projects.filter((project) => project.importableCount > 0)
     : data.projects;
-  const selectedKeys = new Set(selection.keys());
   function matchesCurrentFilter(item: Selection) {
     if (
       item.providerInstanceId !== providerInstanceId ||
@@ -391,17 +410,8 @@ export function CodexThreadImportDialog({
           input: { ...input, cwd: project.cwd, ...(cursor ? { cursor } : {}) },
         });
         if (request !== generation.current) return;
-        if (response._tag !== "Success")
-          throw new Error(
-            response._tag === "Failure"
-              ? String(squashAtomCommandFailure(response))
-              : "Selection was interrupted.",
-          );
-        setCatalogProjects((previous) => {
-          const next = new Map(previous);
-          for (const group of response.value.projects) next.set(group.cwd, group);
-          return next;
-        });
+        if (response._tag !== "Success") throw new Error(commandFailureMessage(response));
+        setCatalogProjects((previous) => mergeProjects(previous, response.value.projects));
         if (!response.value.catalogComplete)
           throw new Error(
             "This catalog is incomplete. Refresh it or select individual conversations.",
@@ -472,6 +482,11 @@ export function CodexThreadImportDialog({
     setImporting(true);
     onImportingChange?.(true);
     setError("");
+    const patchResult = (key: string, patch: Partial<ImportResult>) =>
+      setResults(
+        (previous) =>
+          previous?.map((row) => (row.key === key ? { ...row, ...patch } : row)) ?? null,
+      );
     setResults((previous) =>
       retry && previous
         ? previous.map((item) =>
@@ -487,9 +502,7 @@ export function CodexThreadImportDialog({
       let promise = projectPromises.get(path);
       if (!promise) {
         promise = (async () => {
-          const existing = latestProjects.current.find(
-            (project) => project.environmentId === environmentId && project.workspaceRoot === path,
-          );
+          const existing = findKnownProject(latestProjects.current, environmentId, path);
           if (existing) return existing.id;
           const catalogId = catalogProjects.get(path)?.existingProjectId;
           if (catalogId) return catalogId;
@@ -500,18 +513,13 @@ export function CodexThreadImportDialog({
             environmentId,
             input: {
               projectId: id,
-              title: path.split(/[\\/]/).findLast(Boolean) ?? path,
+              title: folderName(path) ?? path,
               workspaceRoot: path,
               createWorkspaceRootIfMissing: false,
               defaultModelSelection: null,
             },
           });
-          if (created._tag !== "Success")
-            throw new Error(
-              created._tag === "Failure"
-                ? String(squashAtomCommandFailure(created))
-                : "Project creation was interrupted.",
-            );
+          if (created._tag !== "Success") throw new Error(commandFailureMessage(created));
           return id;
         })();
         projectPromises.set(path, promise);
@@ -523,12 +531,7 @@ export function CodexThreadImportDialog({
     await runCodexImportBatch(
       batch,
       async (item) => {
-        setResults(
-          (previous) =>
-            previous?.map((row) =>
-              row.key === item.key ? { ...row, status: "importing" } : row,
-            ) ?? null,
-        );
+        patchResult(item.key, { status: "importing" });
         const checkout = checkoutResolution(item.thread);
         if (checkout.kind === "choose-checkout")
           throw new Error("Choose an existing checkout for this removed worktree.");
@@ -543,12 +546,7 @@ export function CodexThreadImportDialog({
             ...(checkout.kind === "chosen-checkout" ? { cwdOverride: checkout.cwdOverride } : {}),
           },
         });
-        if (response._tag !== "Success")
-          throw new Error(
-            response._tag === "Failure"
-              ? String(squashAtomCommandFailure(response))
-              : "Import was interrupted. Retry this conversation.",
-          );
+        if (response._tag !== "Success") throw new Error(commandFailureMessage(response));
         return response.value;
       },
       (item, settled) => {
@@ -559,36 +557,17 @@ export function CodexThreadImportDialog({
             next.delete(item.key);
             return next;
           });
-          setResults(
-            (previous) =>
-              previous?.map((row) =>
-                row.key === item.key
-                  ? {
-                      ...row,
-                      status: "success",
-                      threadId: settled.value.threadId,
-                      error: undefined,
-                    }
-                  : row,
-              ) ?? null,
-          );
+          patchResult(item.key, {
+            status: "success",
+            threadId: settled.value.threadId,
+            error: undefined,
+          });
         } else {
           failures++;
-          setResults(
-            (previous) =>
-              previous?.map((row) =>
-                row.key === item.key
-                  ? {
-                      ...row,
-                      status: "failed",
-                      error:
-                        settled.error instanceof Error
-                          ? settled.error.message
-                          : String(settled.error),
-                    }
-                  : row,
-              ) ?? null,
-          );
+          patchResult(item.key, {
+            status: "failed",
+            error: settled.error instanceof Error ? settled.error.message : String(settled.error),
+          });
         }
       },
     );
@@ -605,9 +584,7 @@ export function CodexThreadImportDialog({
 
   const failed = results?.filter((result) => result.status === "failed") ?? [];
   const succeeded = results?.filter((result) => result.status === "success").length ?? 0;
-  const completed = (results ?? []).filter(
-    (result) => result.status === "success" || result.status === "failed",
-  ).length;
+  const completed = succeeded + failed.length;
   const rowCount = cwd === null ? visibleProjects.length : visibleThreads.length;
   const locked = loading || pendingSearch || selectingProject !== null;
   function openProject(path: string) {
@@ -620,13 +597,10 @@ export function CodexThreadImportDialog({
     else if (!results) setCwd(null);
   }
   function projectIcon(path: string, title: string) {
-    const existing = knownProjects.find(
-      (project) => project.environmentId === environmentId && project.workspaceRoot === path,
-    );
     return (
       <ProjectFavicon
         project={
-          existing ?? {
+          findKnownProject(knownProjects, environmentId, path) ?? {
             environmentId,
             workspaceRoot: path,
             title,
@@ -721,13 +695,7 @@ export function CodexThreadImportDialog({
                   >
                     <span className="flex items-center gap-2">
                       <OriginIcon origin={value} />
-                      {value === "human"
-                        ? "Human"
-                        : value === "agent"
-                          ? "Agent"
-                          : value === "mixed"
-                            ? "Mixed"
-                            : "Unknown"}
+                      {ORIGIN_NAMES[value]}
                     </span>
                   </MenuCheckboxItem>
                 ))}
@@ -912,9 +880,7 @@ export function CodexThreadImportDialog({
                     <CircleDashedIcon className="size-4 text-muted-foreground" />
                   )}
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm">
-                      {item.thread.title || "Untitled conversation"}
-                    </p>
+                    <p className="truncate text-sm">{threadTitle(item.thread)}</p>
                     <p className="truncate font-mono text-[11px] text-muted-foreground">
                       {codexImportProjectCwd(item.thread)}
                     </p>
@@ -972,77 +938,23 @@ export function CodexThreadImportDialog({
             </Empty>
           ) : (
             <>
-              {[...missingProjectCounts].map(([projectCwd, count]) => {
-                const project = catalogProjects.get(projectCwd);
-                const checkouts = project?.checkouts ?? [];
-                const selectedCwd = checkoutChoices.get(projectCwd);
-                const selectedCheckout = checkouts.find((checkout) => checkout.cwd === selectedCwd);
-                const checkoutLabel = (checkout: (typeof checkouts)[number]) =>
-                  `${checkout.isMain ? "Main checkout" : checkout.branch || checkout.cwd.split(/[\\/]/).findLast(Boolean) || checkout.cwd}${checkout.isMain && checkout.branch ? ` · ${checkout.branch}` : ""}`;
-                return (
-                  <Alert key={projectCwd} variant="warning">
-                    <GitBranchIcon />
-                    <AlertTitle>
-                      {project?.title ?? projectCwd.split(/[\\/]/).findLast(Boolean)} · Removed
-                      worktrees
-                    </AlertTitle>
-                    <AlertDescription>
-                      <p>
-                        {count
-                          ? count === 1
-                            ? "1 selected conversation came from a removed worktree. Choose where it should continue."
-                            : `${count} selected conversations came from removed worktrees. Choose where they should continue.`
-                          : "Choose an existing checkout for conversations from removed worktrees."}{" "}
-                        This applies only to removed worktrees in this project.
-                      </p>
-                      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
-                        <span className="shrink-0 text-xs">Continue in</span>
-                        <Select
-                          value={selectedCheckout?.cwd ?? null}
-                          onValueChange={(value) => {
-                            setCheckoutChoices((previous) => {
-                              const next = new Map(previous);
-                              if (value) next.set(projectCwd, value);
-                              else next.delete(projectCwd);
-                              return next;
-                            });
-                          }}
-                        >
-                          <SelectTrigger
-                            className="min-w-0 flex-1"
-                            size="sm"
-                            aria-label={`Checkout for removed worktrees in ${project?.title ?? projectCwd}`}
-                            disabled={checkouts.length === 0}
-                          >
-                            <SelectValue>
-                              {selectedCheckout
-                                ? checkoutLabel(selectedCheckout)
-                                : "Choose checkout…"}
-                            </SelectValue>
-                          </SelectTrigger>
-                          <SelectPopup>
-                            {checkouts.map((checkout) => (
-                              <SelectItem key={checkout.cwd} value={checkout.cwd}>
-                                <span className="min-w-0">
-                                  <span className="block truncate">{checkoutLabel(checkout)}</span>
-                                  <span className="block truncate font-mono text-[11px] text-muted-foreground">
-                                    {checkout.cwd}
-                                  </span>
-                                </span>
-                              </SelectItem>
-                            ))}
-                          </SelectPopup>
-                        </Select>
-                      </div>
-                      {checkouts.length === 0 ? (
-                        <p className="mt-1 text-xs">
-                          No existing checkout is available. Restore a checkout, then refresh.
-                        </p>
-                      ) : null}
-                    </AlertDescription>
-                  </Alert>
-                );
-              })}
+              {[...missingProjectCounts].map(([projectCwd, count]) => (
+                <RemovedWorktreeAlert
+                  key={projectCwd}
+                  projectCwd={projectCwd}
+                  project={catalogProjects.get(projectCwd)}
+                  selectedCount={count}
+                  selectedCwd={checkoutChoices.get(projectCwd)}
+                  onSelect={(value) =>
+                    setCheckoutChoices((previous) => {
+                      const next = new Map(previous);
+                      if (value) next.set(projectCwd, value);
+                      else next.delete(projectCwd);
+                      return next;
+                    })
+                  }
+                />
+              ))}
               {unresolvedCheckoutCount > 0 ? (
                 <p role="status" className="text-xs text-warning">
                   Choose a checkout above for {unresolvedCheckoutCount} selected conversations to
@@ -1089,7 +1001,7 @@ export function CodexThreadImportDialog({
                   <EmptyTitle>No conversations found</EmptyTitle>
                   <EmptyDescription>
                     {hideImported
-                      ? "No new conversations or history upgrades match these filters. Turn off Hide already imported to see previous imports."
+                      ? "No new conversations or updates match these filters. Turn off Hide already imported to see previous imports."
                       : search || archived || origin
                         ? "No conversations match these filters. Try another search or clear a filter."
                         : "There are no saved Codex conversations in this location."}
@@ -1165,10 +1077,10 @@ export function CodexThreadImportDialog({
                           onFocus={() => setHighlight(index)}
                         >
                           <Checkbox
-                            aria-label={`Select ${thread.title || "Untitled conversation"}`}
+                            aria-label={`Select ${threadTitle(thread)}`}
                             checked={
                               providerInstanceId
-                                ? selectedKeys.has(codexImportKey(providerInstanceId, thread))
+                                ? selection.has(codexImportKey(providerInstanceId, thread))
                                 : false
                             }
                             disabled={
@@ -1184,9 +1096,7 @@ export function CodexThreadImportDialog({
                               {thread.archived ? (
                                 <ArchiveIcon className="size-3 shrink-0 text-muted-foreground" />
                               ) : null}
-                              <span className="truncate text-sm">
-                                {thread.title || "Untitled conversation"}
-                              </span>
+                              <span className="truncate text-sm">{threadTitle(thread)}</span>
                             </div>
                             <WorktreeBadge thread={thread} />
                             {thread.matchPreview ? (
@@ -1196,9 +1106,9 @@ export function CodexThreadImportDialog({
                             ) : null}
                           </div>
                           <span className="flex shrink-0 items-center gap-1.5">
-                            {thread.historyUpgradeAvailable ? (
+                            {thread.updateAvailable ? (
                               <Badge size="sm" variant="info">
-                                History upgrade
+                                Update available
                               </Badge>
                             ) : thread.existingThreadId ? (
                               <Badge size="sm" variant="outline">
@@ -1264,6 +1174,72 @@ export function CodexThreadImportDialog({
   );
 }
 
+/** Lets the user pick which existing checkout conversations from removed worktrees continue in. */
+function RemovedWorktreeAlert({
+  projectCwd,
+  project,
+  selectedCount,
+  selectedCwd,
+  onSelect,
+}: {
+  projectCwd: string;
+  project: Project | undefined;
+  selectedCount: number;
+  selectedCwd: string | undefined;
+  onSelect: (cwd: string | null) => void;
+}) {
+  const checkouts = project?.checkouts ?? [];
+  const selectedCheckout = checkouts.find((checkout) => checkout.cwd === selectedCwd);
+  return (
+    <Alert variant="warning">
+      <GitBranchIcon />
+      <AlertTitle>{project?.title ?? folderName(projectCwd)} · Removed worktrees</AlertTitle>
+      <AlertDescription>
+        <p>
+          {selectedCount
+            ? selectedCount === 1
+              ? "1 selected conversation came from a removed worktree. Choose where it should continue."
+              : `${selectedCount} selected conversations came from removed worktrees. Choose where they should continue.`
+            : "Choose an existing checkout for conversations from removed worktrees."}{" "}
+          This applies only to removed worktrees in this project.
+        </p>
+        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
+          <span className="shrink-0 text-xs">Continue in</span>
+          <Select value={selectedCheckout?.cwd ?? null} onValueChange={onSelect}>
+            <SelectTrigger
+              className="min-w-0 flex-1"
+              size="sm"
+              aria-label={`Checkout for removed worktrees in ${project?.title ?? projectCwd}`}
+              disabled={checkouts.length === 0}
+            >
+              <SelectValue>
+                {selectedCheckout ? checkoutLabel(selectedCheckout) : "Choose checkout…"}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup>
+              {checkouts.map((checkout) => (
+                <SelectItem key={checkout.cwd} value={checkout.cwd}>
+                  <span className="min-w-0">
+                    <span className="block truncate">{checkoutLabel(checkout)}</span>
+                    <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                      {checkout.cwd}
+                    </span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        </div>
+        {checkouts.length === 0 ? (
+          <p className="mt-1 text-xs">
+            No existing checkout is available. Restore a checkout, then refresh.
+          </p>
+        ) : null}
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 function WorktreeBadge({ thread }: { thread: CodexImportCandidate }) {
   const worktree = codexImportWorktree(thread);
   if (!worktree && !thread.worktreeMissing) return null;
@@ -1277,7 +1253,7 @@ function WorktreeBadge({ thread }: { thread: CodexImportCandidate }) {
         >
           <GitBranchIcon className="size-3 shrink-0" />
           <span className="truncate font-mono">
-            {worktree?.label ?? thread.cwd.split(/[\\/]/).findLast(Boolean)}
+            {worktree?.label ?? folderName(thread.cwd)}
             {thread.worktreeMissing ? " · Removed" : ""}
           </span>
         </Badge>

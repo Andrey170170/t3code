@@ -71,10 +71,24 @@ interface EnvironmentOption {
   readonly label: string;
 }
 
-interface ImportFlow {
-  readonly activate: () => () => void;
+interface ImportFilters {
   readonly archived: boolean;
   readonly hideImported: boolean;
+  readonly origin: OriginFilter;
+  readonly search: string;
+  readonly searchScope: SearchScope;
+}
+
+const INITIAL_FILTERS: ImportFilters = {
+  archived: false,
+  hideImported: true,
+  origin: "all",
+  search: "",
+  searchScope: "titles",
+};
+
+interface ImportFlow {
+  readonly activate: () => () => void;
   readonly catalog: CodexThreadsListResult | null;
   readonly catalogRevision: number;
   readonly environmentId: EnvironmentId | null;
@@ -82,20 +96,18 @@ interface ImportFlow {
   readonly error: string | null;
   readonly failed: ReadonlyMap<string, CodexImportCandidate>;
   readonly filterKey: string;
+  readonly filters: ImportFilters;
   readonly importing: boolean;
   readonly checkoutChoices: ReadonlyMap<string, string>;
   readonly knownProjects: ReadonlyMap<string, CatalogProject>;
   readonly loadingCatalog: boolean;
   readonly matchingKeys: ReadonlyMap<string, ReadonlySet<string>>;
-  readonly origin: OriginFilter;
   readonly projectSelectionBusy: string | null;
   readonly providerId: ProviderInstanceId | null;
   readonly providers: ReadonlyArray<{
     readonly displayName?: string;
     readonly instanceId: ProviderInstanceId;
   }>;
-  readonly search: string;
-  readonly searchScope: SearchScope;
   readonly selected: ReadonlyMap<string, CodexImportCandidate>;
   readonly status: string | null;
   readonly unresolvedCheckoutCount: number;
@@ -106,14 +118,10 @@ interface ImportFlow {
     refresh?: boolean,
   ) => Promise<CodexThreadsListResult>;
   readonly refreshCatalog: () => Promise<void>;
-  readonly setArchived: (value: boolean) => void;
-  readonly setHideImported: (value: boolean) => void;
   readonly setCheckoutChoice: (projectCwd: string, checkoutCwd: string) => void;
   readonly setEnvironmentId: (value: EnvironmentId) => void;
-  readonly setOrigin: (value: OriginFilter) => void;
+  readonly setFilters: (patch: Partial<ImportFilters>) => void;
   readonly setProviderId: (value: ProviderInstanceId) => void;
-  readonly setSearch: (value: string) => void;
-  readonly setSearchScope: (value: SearchScope) => void;
   readonly toggleCandidate: (candidate: CodexImportCandidate) => void;
   readonly toggleProject: (project: CatalogProject) => Promise<void>;
 }
@@ -128,6 +136,49 @@ function sameCwd(left: string, right: string): boolean {
   return normalizeProjectPathForComparison(left) === normalizeProjectPathForComparison(right);
 }
 
+/** Key under which a candidate's project is tracked in knownProjects and checkoutChoices. */
+function candidateProjectKey(candidate: CodexImportCandidate): string {
+  return normalizeProjectPathForComparison(codexImportProjectCwd(candidate));
+}
+
+/** Matching keys are scoped per filter set so pages from an older filter never count toward selection. */
+function matchKey(filterKey: string, projectCwd: string): string {
+  return JSON.stringify([filterKey, projectCwd]);
+}
+
+function countSelectedInProject(
+  selected: ReadonlyMap<string, CodexImportCandidate>,
+  matches: ReadonlySet<string> | undefined,
+  projectCwd: string,
+): number {
+  let count = 0;
+  for (const candidate of selected.values()) {
+    if (
+      sameCwd(codexImportProjectCwd(candidate), projectCwd) &&
+      matches?.has(candidate.sourceIdentity)
+    ) {
+      count++;
+    }
+  }
+  return count;
+}
+
+function resolveCandidateCheckout(
+  candidate: CodexImportCandidate,
+  knownProjects: ReadonlyMap<string, CatalogProject>,
+  checkoutChoices: ReadonlyMap<string, string>,
+) {
+  const projectKey = candidateProjectKey(candidate);
+  return resolveCodexImportCheckout(
+    candidate,
+    checkoutChoices.get(projectKey),
+    knownProjects.get(projectKey)?.checkouts ?? [],
+  );
+}
+
+const HIDDEN_IMPORTS_EMPTY_DETAIL =
+  "No new conversations or updates match these filters. Turn off Hide already imported to see previous imports.";
+
 export function SettingsCodexImportProvider(props: { readonly children: ReactNode }) {
   const projects = useProjects();
   const serverConfigs = useServerConfigs();
@@ -139,12 +190,9 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
   const activeScreenCountRef = useRef(0);
   const [selectedEnvironmentId, setSelectedEnvironmentId] = useState<EnvironmentId | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState<ProviderInstanceId | null>(null);
-  const [search, setSearch] = useState("");
+  const [filters, setFiltersState] = useState<ImportFilters>(INITIAL_FILTERS);
+  const { archived, hideImported, origin, search, searchScope } = filters;
   const debouncedSearch = useDebouncedValue(search, 300).trim();
-  const [searchScope, setSearchScope] = useState<SearchScope>("titles");
-  const [origin, setOrigin] = useState<OriginFilter>("all");
-  const [archived, setArchived] = useState(false);
-  const [hideImported, setHideImported] = useState(true);
   const [catalog, setCatalog] = useState<CodexThreadsListResult | null>(null);
   const [knownProjects, setKnownProjects] = useState<Map<string, CatalogProject>>(new Map());
   const [checkoutChoices, setCheckoutChoices] = useState<Map<string, string>>(new Map());
@@ -229,7 +277,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       setMatchingKeys((current) => {
         const next = new Map(current);
         for (const candidate of result.value.threads) {
-          const key = JSON.stringify([filterKey, codexImportProjectCwd(candidate)]);
+          const key = matchKey(filterKey, codexImportProjectCwd(candidate));
           const matches = new Set(next.get(key));
           matches.add(candidate.sourceIdentity);
           next.set(key, matches);
@@ -287,7 +335,8 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     void loadCatalog();
   }, [filterKey, loadCatalog]);
 
-  useEffect(() => {
+  // Drops selection and cached project pages; any in-flight catalog request is ignored.
+  const resetSelection = useCallback(() => {
     catalogGenerationRef.current++;
     setSelected(new Map());
     setFailed(new Map());
@@ -296,7 +345,11 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     setCheckoutChoices(new Map());
     setStatus(null);
     setError(null);
-  }, [environmentId, providerId]);
+  }, []);
+
+  useEffect(() => {
+    resetSelection();
+  }, [environmentId, providerId, resetSelection]);
 
   const activate = useCallback(() => {
     activeScreenCountRef.current++;
@@ -304,23 +357,11 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     return () => {
       activeScreenCountRef.current--;
       if (activeScreenCountRef.current > 0) return;
-      catalogGenerationRef.current++;
       setActive(false);
       setCatalog(null);
-      setSelected(new Map());
-      setFailed(new Map());
-      setMatchingKeys(new Map());
-      setKnownProjects(new Map());
-      setCheckoutChoices(new Map());
-      setStatus(null);
-      setError(null);
+      resetSelection();
     };
-  }, []);
-
-  const loadProjectPage = useCallback(
-    (cwd: string, cursor?: string, refresh?: boolean) => requestPage(cwd, cursor, refresh),
-    [requestPage],
-  );
+  }, [resetSelection]);
 
   const toggleCandidate = useCallback(
     (candidate: CodexImportCandidate) => {
@@ -342,14 +383,12 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
   const toggleProject = useCallback(
     async (project: CatalogProject) => {
       if (!providerId || importing || projectSelectionBusy || project.importableCount === 0) return;
-      const currentMatches = matchingKeys.get(JSON.stringify([filterKey, project.cwd]));
-      const selectedCount = [...selected.values()].filter(
-        (candidate) =>
-          sameCwd(codexImportProjectCwd(candidate), project.cwd) &&
-          currentMatches?.has(candidate.sourceIdentity),
-      ).length;
       const clear = codexProjectSelectionState(
-        selectedCount,
+        countSelectedInProject(
+          selected,
+          matchingKeys.get(matchKey(filterKey, project.cwd)),
+          project.cwd,
+        ),
         project.importableCount,
         catalog?.catalogComplete ?? false,
       ).checked;
@@ -378,7 +417,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
         if (requestedScope !== scopeRef.current) return;
         setMatchingKeys((current) =>
           new Map(current).set(
-            JSON.stringify([filterKey, project.cwd]),
+            matchKey(filterKey, project.cwd),
             new Set(candidates.map(([, candidate]) => candidate.sourceIdentity)),
           ),
         );
@@ -401,39 +440,28 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     ],
   );
 
-  const importCandidates = failed.size > 0 ? [...failed.values()] : [...selected.values()];
-  const unresolvedCheckoutCount = importCandidates.filter((candidate) => {
-    const projectCwd = codexImportProjectCwd(candidate);
-    const projectKey = normalizeProjectPathForComparison(projectCwd);
-    const project = knownProjects.get(projectKey);
-    return (
-      resolveCodexImportCheckout(
-        candidate,
-        checkoutChoices.get(projectKey),
-        project?.checkouts ?? [],
-      ).kind === "choose-checkout"
-    );
-  }).length;
+  // A failed batch is retried on its own before any new selection is imported.
+  const importCandidates = useMemo(
+    () => (failed.size > 0 ? [...failed.values()] : [...selected.values()]),
+    [failed, selected],
+  );
+  const unresolvedCheckoutCount = useMemo(
+    () =>
+      importCandidates.filter(
+        (candidate) =>
+          resolveCandidateCheckout(candidate, knownProjects, checkoutChoices).kind ===
+          "choose-checkout",
+      ).length,
+    [checkoutChoices, importCandidates, knownProjects],
+  );
 
   const importSelected = useCallback(async () => {
     if (!environmentId || !providerId || importing || projectSelectionBusy || selected.size === 0)
       return;
-    const candidates = failed.size > 0 ? [...failed.values()] : [...selected.values()];
-    const unresolved = candidates.filter((candidate) => {
-      const projectCwd = codexImportProjectCwd(candidate);
-      const projectKey = normalizeProjectPathForComparison(projectCwd);
-      const project = knownProjects.get(projectKey);
-      return (
-        resolveCodexImportCheckout(
-          candidate,
-          checkoutChoices.get(projectKey),
-          project?.checkouts ?? [],
-        ).kind === "choose-checkout"
-      );
-    });
-    if (unresolved.length > 0) {
+    const candidates = importCandidates;
+    if (unresolvedCheckoutCount > 0) {
       setError(
-        `Choose an existing checkout for ${unresolved.length} conversation${unresolved.length === 1 ? "" : "s"} from removed worktrees.`,
+        `Choose an existing checkout for ${unresolvedCheckoutCount} conversation${unresolvedCheckoutCount === 1 ? "" : "s"} from removed worktrees.`,
       );
       return;
     }
@@ -455,7 +483,7 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
           cwd,
         );
         if (existing) return existing.id;
-        const catalogProject = knownProjects.get(normalizeProjectPathForComparison(cwd));
+        const catalogProject = knownProjects.get(cwdKey);
         if (catalogProject?.existingProjectId) return catalogProject.existingProjectId;
 
         const projectId = ProjectId.make(uuidv4());
@@ -482,15 +510,8 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     await runCodexImportBatch(
       candidates,
       async (candidate) => {
-        const projectCwd = codexImportProjectCwd(candidate);
-        const projectKey = normalizeProjectPathForComparison(projectCwd);
-        const projectId = await resolveProject(projectCwd);
-        const project = knownProjects.get(projectKey);
-        const checkout = resolveCodexImportCheckout(
-          candidate,
-          checkoutChoices.get(projectKey),
-          project?.checkouts ?? [],
-        );
+        const projectId = await resolveProject(codexImportProjectCwd(candidate));
+        const checkout = resolveCandidateCheckout(candidate, knownProjects, checkoutChoices);
         if (checkout.kind === "choose-checkout") {
           throw new Error("Choose an existing checkout before importing this conversation.");
         }
@@ -543,21 +564,35 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
     checkoutChoices,
     createProject,
     environmentId,
-    failed,
+    importCandidates,
     importing,
     loadCatalog,
     knownProjects,
     projects,
     projectSelectionBusy,
     providerId,
-    selected,
+    selected.size,
+    unresolvedCheckoutCount,
   ]);
+
+  const setFilters = useCallback((patch: Partial<ImportFilters>) => {
+    setFiltersState((current) => ({ ...current, ...patch }));
+  }, []);
+  const setEnvironmentId = useCallback((value: EnvironmentId) => {
+    setSelectedEnvironmentId(value);
+    setSelectedProviderId(null);
+  }, []);
+  const setCheckoutChoice = useCallback((projectCwd: string, checkoutCwd: string) => {
+    setCheckoutChoices((current) =>
+      new Map(current).set(normalizeProjectPathForComparison(projectCwd), checkoutCwd),
+    );
+    setError(null);
+  }, []);
+  const refreshCatalog = useCallback(() => loadCatalog(true), [loadCatalog]);
 
   const value = useMemo<ImportFlow>(
     () => ({
       activate,
-      archived,
-      hideImported,
       catalog,
       catalogRevision,
       checkoutChoices,
@@ -566,45 +601,29 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       error,
       failed,
       filterKey,
+      filters,
       importing,
       knownProjects,
       loadingCatalog,
       matchingKeys,
-      origin,
       projectSelectionBusy,
       providerId,
       providers,
-      search,
-      searchScope,
       selected,
       status,
       unresolvedCheckoutCount,
       importSelected,
-      loadProjectPage,
-      refreshCatalog: () => loadCatalog(true),
-      setArchived,
-      setHideImported,
-      setCheckoutChoice: (projectCwd, checkoutCwd) => {
-        setCheckoutChoices((current) =>
-          new Map(current).set(normalizeProjectPathForComparison(projectCwd), checkoutCwd),
-        );
-        setError(null);
-      },
-      setEnvironmentId: (value) => {
-        setSelectedEnvironmentId(value);
-        setSelectedProviderId(null);
-      },
-      setOrigin,
+      loadProjectPage: requestPage,
+      refreshCatalog,
+      setCheckoutChoice,
+      setEnvironmentId,
+      setFilters,
       setProviderId: setSelectedProviderId,
-      setSearch,
-      setSearchScope,
       toggleCandidate,
       toggleProject,
     }),
     [
       activate,
-      archived,
-      hideImported,
       catalog,
       catalogRevision,
       checkoutChoices,
@@ -613,19 +632,20 @@ export function SettingsCodexImportProvider(props: { readonly children: ReactNod
       error,
       failed,
       filterKey,
+      filters,
       importing,
       knownProjects,
-      loadCatalog,
       loadingCatalog,
-      loadProjectPage,
       matchingKeys,
-      origin,
       projectSelectionBusy,
       providerId,
       providers,
-      search,
-      searchScope,
+      refreshCatalog,
+      requestPage,
       selected,
+      setCheckoutChoice,
+      setEnvironmentId,
+      setFilters,
       status,
       unresolvedCheckoutCount,
       importSelected,
@@ -790,11 +810,11 @@ function FilterControls() {
         autoCapitalize="none"
         autoCorrect={false}
         className="h-11 rounded-xl bg-card px-4 font-sans text-base text-foreground"
-        onChangeText={flow.setSearch}
+        onChangeText={(search) => flow.setFilters({ search })}
         editable={!flow.importing}
         placeholder="Search conversations"
         placeholderTextColorClassName="accent-placeholder"
-        value={flow.search}
+        value={flow.filters.search}
       />
       <ScrollView
         horizontal
@@ -805,14 +825,14 @@ function FilterControls() {
         <ChoiceChip
           label="Titles"
           disabled={flow.importing}
-          onPress={() => flow.setSearchScope("titles")}
-          selected={flow.searchScope === "titles"}
+          onPress={() => flow.setFilters({ searchScope: "titles" })}
+          selected={flow.filters.searchScope === "titles"}
         />
         <ChoiceChip
           label="Messages"
           disabled={flow.importing}
-          onPress={() => flow.setSearchScope("messages")}
-          selected={flow.searchScope === "messages"}
+          onPress={() => flow.setFilters({ searchScope: "messages" })}
+          selected={flow.filters.searchScope === "messages"}
         />
         {(
           [
@@ -827,8 +847,8 @@ function FilterControls() {
             key={value}
             label={label}
             disabled={flow.importing}
-            onPress={() => flow.setOrigin(value)}
-            selected={flow.origin === value}
+            onPress={() => flow.setFilters({ origin: value })}
+            selected={flow.filters.origin === value}
           />
         ))}
       </ScrollView>
@@ -837,8 +857,8 @@ function FilterControls() {
         <ThemedSwitch
           accessibilityLabel="Archived conversations"
           disabled={flow.importing}
-          onValueChange={flow.setArchived}
-          value={flow.archived}
+          onValueChange={(archived) => flow.setFilters({ archived })}
+          value={flow.filters.archived}
         />
       </View>
       <View className="min-h-11 flex-row items-center justify-between rounded-xl bg-card px-4">
@@ -846,8 +866,8 @@ function FilterControls() {
         <ThemedSwitch
           accessibilityLabel="Hide already imported"
           disabled={flow.importing}
-          onValueChange={flow.setHideImported}
-          value={flow.hideImported}
+          onValueChange={(hideImported) => flow.setFilters({ hideImported })}
+          value={flow.filters.hideImported}
         />
       </View>
     </View>
@@ -905,6 +925,41 @@ function ScreenHeader(props: { readonly title: string }) {
       <NativeStackScreenOptions options={{ title: props.title }} />
       <HeaderImportAction />
     </>
+  );
+}
+
+/** Header plus pull-to-refresh scroll body shared by the catalog and project screens. */
+function ImportScreenScaffold(props: {
+  readonly title: string;
+  readonly refreshing: boolean;
+  readonly children: ReactNode;
+}) {
+  const flow = useImportFlow();
+  const insets = useSafeAreaInsets();
+  useEffect(() => flow.activate(), [flow.activate]);
+  return (
+    <View className="flex-1 bg-sheet" collapsable={false}>
+      <ScreenHeader title={props.title} />
+      <ScrollView
+        contentInsetAdjustmentBehavior="automatic"
+        contentContainerStyle={{
+          gap: 16,
+          paddingBottom: Math.max(insets.bottom, 18) + 18,
+          paddingHorizontal: 16,
+          paddingTop: 12,
+        }}
+        keyboardShouldPersistTaps="handled"
+        refreshControl={
+          <RefreshControl
+            onRefresh={() => void flow.refreshCatalog()}
+            refreshing={props.refreshing}
+          />
+        }
+        showsVerticalScrollIndicator={false}
+      >
+        {props.children}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -1066,7 +1121,7 @@ function SelectedCheckoutPanels() {
   const missingByProject = new Map<string, number>();
   for (const candidate of flow.selected.values()) {
     if (!candidate.worktreeMissing) continue;
-    const key = normalizeProjectPathForComparison(codexImportProjectCwd(candidate));
+    const key = candidateProjectKey(candidate);
     missingByProject.set(key, (missingByProject.get(key) ?? 0) + 1);
   }
   return [...missingByProject].map(([projectKey, missingCount]) => {
@@ -1080,14 +1135,12 @@ function SelectedCheckoutPanels() {
 function ProjectRow(props: { readonly project: CatalogProject; readonly isLast: boolean }) {
   const flow = useImportFlow();
   const navigation = useNavigation();
-  const currentMatches = flow.matchingKeys.get(JSON.stringify([flow.filterKey, props.project.cwd]));
-  const selectedCount = [...flow.selected.values()].filter(
-    (candidate) =>
-      sameCwd(codexImportProjectCwd(candidate), props.project.cwd) &&
-      currentMatches?.has(candidate.sourceIdentity),
-  ).length;
   const selection = codexProjectSelectionState(
-    selectedCount,
+    countSelectedInProject(
+      flow.selected,
+      flow.matchingKeys.get(matchKey(flow.filterKey, props.project.cwd)),
+      props.project.cwd,
+    ),
     props.project.importableCount,
     flow.catalog?.catalogComplete ?? false,
   );
@@ -1171,76 +1224,54 @@ function ProjectRow(props: { readonly project: CatalogProject; readonly isLast: 
 
 export function SettingsCodexImportRouteScreen() {
   const flow = useImportFlow();
-  const insets = useSafeAreaInsets();
-  useEffect(() => flow.activate(), [flow.activate]);
-
   return (
-    <View className="flex-1 bg-sheet" collapsable={false}>
-      <ScreenHeader title="Import conversations" />
-      <ScrollView
-        contentInsetAdjustmentBehavior="automatic"
-        contentContainerStyle={{
-          gap: 16,
-          paddingBottom: Math.max(insets.bottom, 18) + 18,
-          paddingHorizontal: 16,
-          paddingTop: 12,
-        }}
-        keyboardShouldPersistTaps="handled"
-        refreshControl={
-          <RefreshControl
-            onRefresh={() => void flow.refreshCatalog()}
-            refreshing={flow.loadingCatalog}
-          />
-        }
-        showsVerticalScrollIndicator={false}
-      >
-        <EnvironmentAndProviderPickers />
-        <FilterControls />
-        <SelectionStatus />
-        <SelectedCheckoutPanels />
-        {flow.error ? <ErrorBanner message={flow.error} /> : null}
-        {flow.environmentOptions.length === 0 ? (
-          <EmptyState
-            title="No environment available"
-            detail="Connect an environment before importing Codex conversations."
-          />
-        ) : flow.providers.length === 0 ? (
-          <EmptyState
-            title="Enable a Codex account"
-            detail="This environment has no enabled Codex account. Enable one in Settings, then return here."
-          />
-        ) : flow.loadingCatalog && !flow.catalog ? (
-          <View className="items-center py-10">
-            <ActivityIndicator colorClassName="accent-icon-muted" />
-          </View>
-        ) : flow.catalog?.projects.length === 0 ? (
-          <EmptyState
-            title="No conversations found"
-            detail={
-              flow.hideImported
-                ? "No new conversations or history upgrades match these filters. Turn off Hide already imported to see previous imports."
-                : "No Codex conversations match the current search and filters."
-            }
-          />
-        ) : flow.catalog ? (
-          <SettingsSection title="Projects" card>
-            {flow.catalog.projects.map((project, index) => (
-              <ProjectRow
-                key={normalizeProjectPathForComparison(project.cwd)}
-                isLast={index === flow.catalog!.projects.length - 1}
-                project={project}
-              />
-            ))}
-          </SettingsSection>
-        ) : null}
-        {flow.catalog && !flow.catalog.catalogComplete ? (
-          <Text className="px-1 text-xs text-foreground-muted">
-            Codex returned a bounded catalog. Counts and selection cover every conversation in that
-            catalog.
-          </Text>
-        ) : null}
-      </ScrollView>
-    </View>
+    <ImportScreenScaffold title="Import conversations" refreshing={flow.loadingCatalog}>
+      <EnvironmentAndProviderPickers />
+      <FilterControls />
+      <SelectionStatus />
+      <SelectedCheckoutPanels />
+      {flow.error ? <ErrorBanner message={flow.error} /> : null}
+      {flow.environmentOptions.length === 0 ? (
+        <EmptyState
+          title="No environment available"
+          detail="Connect an environment before importing Codex conversations."
+        />
+      ) : flow.providers.length === 0 ? (
+        <EmptyState
+          title="Enable a Codex account"
+          detail="This environment has no enabled Codex account. Enable one in Settings, then return here."
+        />
+      ) : flow.loadingCatalog && !flow.catalog ? (
+        <View className="items-center py-10">
+          <ActivityIndicator colorClassName="accent-icon-muted" />
+        </View>
+      ) : flow.catalog?.projects.length === 0 ? (
+        <EmptyState
+          title="No conversations found"
+          detail={
+            flow.filters.hideImported
+              ? HIDDEN_IMPORTS_EMPTY_DETAIL
+              : "No Codex conversations match the current search and filters."
+          }
+        />
+      ) : flow.catalog ? (
+        <SettingsSection title="Projects" card>
+          {flow.catalog.projects.map((project, index) => (
+            <ProjectRow
+              key={normalizeProjectPathForComparison(project.cwd)}
+              isLast={index === flow.catalog!.projects.length - 1}
+              project={project}
+            />
+          ))}
+        </SettingsSection>
+      ) : null}
+      {flow.catalog && !flow.catalog.catalogComplete ? (
+        <Text className="px-1 text-xs text-foreground-muted">
+          Codex returned a bounded catalog. Counts and selection cover every conversation in that
+          catalog.
+        </Text>
+      ) : null}
+    </ImportScreenScaffold>
   );
 }
 
@@ -1325,8 +1356,8 @@ function ConversationRow(props: {
             : ""}
           {!importable
             ? " · Already imported"
-            : props.candidate.historyUpgradeAvailable
-              ? " · History upgrade"
+            : props.candidate.updateAvailable
+              ? " · Update available"
               : ""}
         </Text>
       </View>
@@ -1340,16 +1371,13 @@ export function SettingsCodexImportProjectRouteScreen({
   route,
 }: StaticScreenProps<ProjectRouteParams>) {
   const flow = useImportFlow();
-  const insets = useSafeAreaInsets();
   const [threads, setThreads] = useState<ReadonlyArray<CodexImportCandidate>>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const generationRef = useRef(0);
-  useEffect(() => flow.activate(), [flow.activate]);
 
-  const projectKey = normalizeProjectPathForComparison(route.params.cwd);
-  const project = flow.knownProjects.get(projectKey);
+  const project = flow.knownProjects.get(normalizeProjectPathForComparison(route.params.cwd));
   const missingCandidates = new Map<string, CodexImportCandidate>();
   for (const candidate of [...threads, ...flow.selected.values()]) {
     if (
@@ -1400,69 +1428,50 @@ export function SettingsCodexImportProjectRouteScreen({
   );
 
   return (
-    <View className="flex-1 bg-sheet" collapsable={false}>
-      <ScreenHeader title={route.params.title} />
-      <ScrollView
-        contentInsetAdjustmentBehavior="automatic"
-        contentContainerStyle={{
-          gap: 16,
-          paddingBottom: Math.max(insets.bottom, 18) + 18,
-          paddingHorizontal: 16,
-          paddingTop: 12,
-        }}
-        keyboardShouldPersistTaps="handled"
-        refreshControl={
-          <RefreshControl
-            onRefresh={() => void flow.refreshCatalog()}
-            refreshing={loading || flow.loadingCatalog}
-          />
-        }
-        showsVerticalScrollIndicator={false}
-      >
-        <FilterControls />
-        <SelectionStatus />
-        {project && missingCandidates.size > 0 ? (
-          <CheckoutChoicePanel missingCount={missingCandidates.size} project={project} />
-        ) : null}
-        {flow.error ? <ErrorBanner message={flow.error} /> : null}
-        {error ? <ErrorBanner message={error} /> : null}
-        {loading && threads.length === 0 ? (
-          <View className="items-center py-10">
-            <ActivityIndicator colorClassName="accent-icon-muted" />
-          </View>
-        ) : threads.length === 0 ? (
-          <EmptyState
-            title="No conversations found"
-            detail={
-              flow.hideImported
-                ? "No new conversations or history upgrades match these filters. Turn off Hide already imported to see previous imports."
-                : "No conversations in this project match the current search and filters."
-            }
-          />
-        ) : (
-          <SettingsSection card>
-            {threads.map((candidate, index) => (
-              <ConversationRow
-                candidate={candidate}
-                isLast={index === threads.length - 1}
-                key={candidate.sourceIdentity}
-              />
-            ))}
-          </SettingsSection>
-        )}
-        {nextCursor ? (
-          <Pressable
-            accessibilityRole="button"
-            className="self-center rounded-full bg-card px-5 py-3 active:opacity-70"
-            disabled={loading}
-            onPress={() => void load(nextCursor)}
-          >
-            <Text className="text-sm font-t3-bold text-accent">
-              {loading ? "Loading…" : "Load older conversations"}
-            </Text>
-          </Pressable>
-        ) : null}
-      </ScrollView>
-    </View>
+    <ImportScreenScaffold title={route.params.title} refreshing={loading || flow.loadingCatalog}>
+      <FilterControls />
+      <SelectionStatus />
+      {project && missingCandidates.size > 0 ? (
+        <CheckoutChoicePanel missingCount={missingCandidates.size} project={project} />
+      ) : null}
+      {flow.error ? <ErrorBanner message={flow.error} /> : null}
+      {error ? <ErrorBanner message={error} /> : null}
+      {loading && threads.length === 0 ? (
+        <View className="items-center py-10">
+          <ActivityIndicator colorClassName="accent-icon-muted" />
+        </View>
+      ) : threads.length === 0 ? (
+        <EmptyState
+          title="No conversations found"
+          detail={
+            flow.filters.hideImported
+              ? HIDDEN_IMPORTS_EMPTY_DETAIL
+              : "No conversations in this project match the current search and filters."
+          }
+        />
+      ) : (
+        <SettingsSection card>
+          {threads.map((candidate, index) => (
+            <ConversationRow
+              candidate={candidate}
+              isLast={index === threads.length - 1}
+              key={candidate.sourceIdentity}
+            />
+          ))}
+        </SettingsSection>
+      )}
+      {nextCursor ? (
+        <Pressable
+          accessibilityRole="button"
+          className="self-center rounded-full bg-card px-5 py-3 active:opacity-70"
+          disabled={loading}
+          onPress={() => void load(nextCursor)}
+        >
+          <Text className="text-sm font-t3-bold text-accent">
+            {loading ? "Loading…" : "Load older conversations"}
+          </Text>
+        </Pressable>
+      ) : null}
+    </ImportScreenScaffold>
   );
 }

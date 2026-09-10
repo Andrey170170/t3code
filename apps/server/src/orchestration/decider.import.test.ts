@@ -7,6 +7,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
@@ -394,6 +395,123 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
       }),
     );
   }
+
+  it.effect("imports native turns as ordinary messages and activities without settling", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-08-24T10:00:00.000Z";
+      const threadId = ThreadId.make("import:codex:turns");
+      const readModel = yield* projectEvent(createEmptyReadModel(createdAt), {
+        sequence: 1,
+        eventId: EventId.make("event-turns-thread-created"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.created",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-turns-thread-created"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-turns-thread-created"),
+        metadata: { historyImport: true },
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-1"),
+          title: "Imported thread",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      const turnId = TurnId.make("turn-1");
+      const command = {
+        type: "thread.history.import" as const,
+        commandId: CommandId.make("command-import-turns"),
+        threadId,
+        messages: [
+          {
+            messageId: MessageId.make("history:user-1"),
+            role: "user" as const,
+            text: "Fix the bug",
+            turnId,
+            createdAt: "2026-08-24T10:01:00.000Z",
+          },
+          {
+            messageId: MessageId.make("history:assistant-1"),
+            role: "assistant" as const,
+            text: "Fixed",
+            turnId,
+            createdAt: "2026-08-24T10:03:00.000Z",
+          },
+        ],
+        activities: [
+          {
+            id: EventId.make("history:command-1"),
+            tone: "tool" as const,
+            kind: "tool.completed",
+            summary: "ls",
+            payload: {},
+            turnId,
+            createdAt: "2026-08-24T10:02:00.000Z",
+          },
+        ],
+      };
+      const events = yield* decideOrchestrationCommand({ command, readModel });
+      expect(events).toMatchObject([
+        {
+          type: "thread.message-sent",
+          metadata: { historyImport: true },
+          payload: { messageId: "history:user-1", role: "user", turnId, streaming: false },
+        },
+        {
+          type: "thread.activity-appended",
+          metadata: { historyImport: true },
+          payload: { activity: { id: "history:command-1" } },
+        },
+        {
+          type: "thread.message-sent",
+          metadata: { historyImport: true },
+          payload: { messageId: "history:assistant-1", role: "assistant", turnId },
+        },
+      ]);
+
+      let projected = readModel;
+      for (const [index, event] of (Array.isArray(events) ? events : [events]).entries()) {
+        projected = yield* projectEvent(projected, { ...event, sequence: index + 2 });
+      }
+      expect(projected.threads[0]?.settledAt).toBeNull();
+
+      // Repeating an import must not duplicate turns the thread already holds.
+      const duplicate = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: { ...command, commandId: CommandId.make("command-import-turns-again") },
+          readModel: projected,
+        }),
+      );
+      expect(duplicate.message).toContain("already contains imported history");
+
+      // New turns append to a thread that already has history, unlike previews.
+      const appended = yield* decideOrchestrationCommand({
+        command: {
+          ...command,
+          commandId: CommandId.make("command-import-turns-more"),
+          messages: [
+            {
+              messageId: MessageId.make("history:user-2"),
+              role: "user" as const,
+              text: "Now add tests",
+              turnId: TurnId.make("turn-2"),
+              createdAt: "2026-08-24T11:00:00.000Z",
+            },
+          ],
+          activities: [],
+        },
+        readModel: projected,
+      });
+      expect(appended).toMatchObject([{ payload: { messageId: "history:user-2" } }]);
+    }),
+  );
 
   it.effect("rejects a live user message in the imported-session namespace", () =>
     Effect.gen(function* () {

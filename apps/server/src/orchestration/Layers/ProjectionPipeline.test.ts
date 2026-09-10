@@ -206,6 +206,90 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-import-shell-")
         assert.deepEqual(yield* readLatestUserMessageAt, [{ latestUserMessageAt: null }]);
       }),
     );
+
+    it.effect("records a completed turn for imported user messages that name their turn", () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const sql = yield* SqlClient.SqlClient;
+        const createdAt = "2026-08-24T10:00:00.000Z";
+        const threadId = ThreadId.make("import:codex:turn-session");
+        const turnId = TurnId.make("native-turn");
+        const base = {
+          aggregateKind: "thread" as const,
+          aggregateId: threadId,
+          causationEventId: null,
+          correlationId: CommandId.make("cmd-import-turn"),
+          metadata: { historyImport: true },
+        };
+        yield* eventStore.append({
+          ...base,
+          type: "thread.created",
+          eventId: EventId.make("evt-import-turn-thread"),
+          occurredAt: createdAt,
+          commandId: CommandId.make("cmd-import-turn-thread"),
+          payload: {
+            threadId,
+            projectId: ProjectId.make("project-import-turn"),
+            title: "Imported thread",
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        });
+        for (const [role, messageId, at] of [
+          ["user", "history:user-item", "2026-08-24T10:01:00.000Z"],
+          ["assistant", "history:assistant-item", "2026-08-24T10:02:00.000Z"],
+        ] as const) {
+          yield* eventStore.append({
+            ...base,
+            type: "thread.message-sent",
+            eventId: EventId.make(`evt-${messageId}`),
+            occurredAt: at,
+            commandId: CommandId.make(`cmd-${messageId}`),
+            payload: {
+              threadId,
+              messageId: MessageId.make(messageId),
+              role,
+              text: role,
+              turnId,
+              streaming: false,
+              createdAt: at,
+              updatedAt: at,
+            },
+          });
+        }
+
+        yield* projectionPipeline.bootstrap;
+
+        assert.deepEqual(
+          yield* sql`
+            SELECT state, pending_message_id AS "pendingMessageId",
+              assistant_message_id AS "assistantMessageId", requested_at AS "requestedAt"
+            FROM projection_turns WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+          `,
+          [
+            {
+              state: "completed",
+              pendingMessageId: "history:user-item",
+              assistantMessageId: "history:assistant-item",
+              requestedAt: "2026-08-24T10:01:00.000Z",
+            },
+          ],
+        );
+        assert.deepEqual(
+          yield* sql`
+            SELECT latest_user_message_at AS "latestUserMessageAt", latest_turn_id AS "latestTurnId"
+            FROM projection_threads WHERE thread_id = ${threadId}
+          `,
+          [{ latestUserMessageAt: "2026-08-24T10:01:00.000Z", latestTurnId: null }],
+        );
+      }),
+    );
   },
 );
 

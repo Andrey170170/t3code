@@ -18,8 +18,6 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { CodexThreadImport } from "../project/CodexThreadImport.ts";
-import { summarizeNativeTaskItem } from "./TaskNativeHistory.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
 import { TaskOperationStore, TaskOperationStoreLive } from "./TaskOperationStore.ts";
@@ -61,12 +59,6 @@ export class TaskService extends Context.Service<TaskService, TaskServiceShape>(
 const PageCursor = Schema.fromJsonString(
   Schema.Struct({ createdAt: Schema.String, id: Schema.String }),
 );
-const ReadCursor = Schema.fromJsonString(
-  Schema.Union([
-    Schema.Struct({ createdAt: Schema.String, id: Schema.String }),
-    Schema.Struct({ native: Schema.NullOr(Schema.String) }),
-  ]),
-);
 const TaskRow = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
@@ -98,7 +90,6 @@ export const makeTaskService = Effect.gen(function* () {
   const startup = yield* ServerRuntimeStartup;
   const operations = yield* TaskOperationStore;
   const sql = yield* SqlClient.SqlClient;
-  const nativeHistory = yield* CodexThreadImport;
 
   const requireThread = Effect.fn("TaskService.requireThread")(function* (threadId: ThreadId) {
     const thread = yield* snapshots.getThreadShellById(threadId);
@@ -263,41 +254,13 @@ export const makeTaskService = Effect.gen(function* () {
     yield* Schema.decodeUnknownEffect(TaskReadInput)(input);
     yield* requireTarget(caller, input.threadId);
     const cursor = input.cursor
-      ? yield* Schema.decodeUnknownEffect(ReadCursor)(input.cursor)
+      ? yield* Schema.decodeUnknownEffect(PageCursor)(input.cursor)
       : null;
     const limit = input.limit ?? 25;
-    const readNative = Effect.fn("TaskService.readNative")(function* (nativeCursor: string | null) {
-      const page = yield* nativeHistory.history({
-        threadId: input.threadId,
-        ...(nativeCursor ? { cursor: nativeCursor } : {}),
-        limit,
-      });
-      const messages: Array<(typeof TaskReadResult.Type)["messages"][number]> = [];
-      let remaining = 32_000;
-      let truncated = false;
-      for (const item of page.items) {
-        const message = summarizeNativeTaskItem(item);
-        const text = message.text.slice(0, remaining);
-        truncated ||= message.truncated || text.length < message.text.length;
-        remaining -= text.length;
-        messages.push({ id: message.id, role: message.role, text, createdAt: null });
-      }
-      return {
-        threadId: input.threadId,
-        messages: messages.reverse(),
-        nextCursor: page.nextCursor
-          ? yield* Schema.encodeEffect(ReadCursor)({ native: page.nextCursor })
-          : null,
-        truncated,
-      };
-    });
-    if (cursor && "native" in cursor) return yield* readNative(cursor.native);
-    const imported = yield* nativeHistory.history({ threadId: input.threadId, limit: 1 });
     const rows = yield* sql`
       SELECT message_id AS id, role, substr(text, 1, 4096) AS text, length(text) AS "textLength",
         created_at AS "createdAt", agent_origin_json AS "agentOrigin"
       FROM projection_thread_messages WHERE thread_id = ${input.threadId}
-        ${imported.boundary?.replacesLegacyMessages ? sql`AND message_id NOT LIKE 'import:%'` : sql``}
         ${cursor ? sql`AND (created_at, message_id) < (${cursor.createdAt}, ${cursor.id})` : sql``}
       ORDER BY created_at DESC, message_id DESC LIMIT ${limit + 1}
     `;
@@ -319,14 +282,8 @@ export const makeTaskService = Effect.gen(function* () {
       });
     }
     const last = messages.at(-1);
-    let nextCursor =
+    const nextCursor =
       decoded.length > messages.length && last ? pageCursor(last.createdAt ?? "", last.id) : null;
-    if (nextCursor === null) {
-      if (imported.imported) {
-        if (messages.length === 0) return yield* readNative(null);
-        nextCursor = yield* Schema.encodeEffect(ReadCursor)({ native: null });
-      }
-    }
     return { threadId: input.threadId, messages: messages.reverse(), nextCursor, truncated };
   }, Effect.mapError(taskFailure));
 

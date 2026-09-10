@@ -53,8 +53,9 @@ export function codexImportKey(
   return JSON.stringify([providerId, candidate.sourceIdentity]);
 }
 
+/** New conversations import; imported ones are selectable again once the source has new turns. */
 export function canImportCodexConversation(candidate: CodexImportCandidate): boolean {
-  return candidate.existingThreadId === null || candidate.historyUpgradeAvailable === true;
+  return candidate.existingThreadId === null || candidate.updateAvailable === true;
 }
 
 /** A loaded page is never proof that a whole project is selected. */

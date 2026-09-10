@@ -2410,7 +2410,6 @@ const makeWsRpcLayer = (
           ),
         [WS_METHODS.codexThreadsList]: (input) => codexThreadImport.list(input),
         [WS_METHODS.codexThreadsImport]: (input) => codexThreadImport.adopt(input),
-        [WS_METHODS.codexThreadsHistory]: (input) => codexThreadImport.history(input),
         [WS_METHODS.agentSessionsScan]: () =>
           observeRpcEffect(WS_METHODS.agentSessionsScan, agentSessionScanner.scan, {
             "rpc.aggregate": "workspace",

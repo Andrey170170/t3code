@@ -655,9 +655,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       ? resolveProviderSkillsForCwd(provider, props.threadCwd ?? props.projectWorkspaceRoot)
       : [];
   }, [props.projectWorkspaceRoot, props.serverConfig, props.threadCwd, selectedInstanceId]);
-  const nativeCodexHistoryEnabled =
-    props.selectedThread.session !== null &&
-    (props.threadSyncStatus === undefined || props.threadSyncStatus === "live");
 
   useLayoutEffect(() => {
     selectedThreadKeyRef.current = selectedThreadKey;
@@ -882,7 +879,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             onEndFollowEnabledChange={setEndFollowEnabled}
             skills={selectedProviderSkills}
             onUseArtifactTemplate={handleUseArtifactTemplate}
-            nativeCodexHistoryEnabled={nativeCodexHistoryEnabled}
             loadEarlier={props.loadEarlier ?? null}
           />
         </View>

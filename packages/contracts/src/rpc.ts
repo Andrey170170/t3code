@@ -14,8 +14,6 @@ import {
   CodexThreadsListResult,
   CodexThreadsImportInput,
   CodexThreadsImportResult,
-  CodexThreadsHistoryInput,
-  CodexThreadsHistoryResult,
 } from "./codexThreads.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
@@ -281,7 +279,6 @@ export const WS_METHODS = {
   sideChatSubscribe: "sideChat.subscribe",
   codexThreadsList: "codexThreads.list",
   codexThreadsImport: "codexThreads.import",
-  codexThreadsHistory: "codexThreads.history",
   assetsCreateUrl: "assets.createUrl",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -899,11 +896,6 @@ const WsCodexThreadsImportRpc = Rpc.make(WS_METHODS.codexThreadsImport, {
   success: CodexThreadsImportResult,
   error: Schema.Union([CodexThreadError, EnvironmentAuthorizationError]),
 });
-const WsCodexThreadsHistoryRpc = Rpc.make(WS_METHODS.codexThreadsHistory, {
-  payload: CodexThreadsHistoryInput,
-  success: CodexThreadsHistoryResult,
-  error: Schema.Union([CodexThreadError, EnvironmentAuthorizationError]),
-});
 
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
@@ -1341,7 +1333,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsSideChatSubscribeRpc,
   WsCodexThreadsListRpc,
   WsCodexThreadsImportRpc,
-  WsCodexThreadsHistoryRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,

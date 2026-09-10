@@ -39,12 +39,6 @@ export const NativeThread = Schema.StructWithRest(
 );
 export type NativeThread = typeof NativeThread.Type;
 
-export const NativeThreadItemEntry = Schema.Struct({
-  turnId: Schema.String,
-  item: NativeThreadItem,
-});
-export type NativeThreadItemEntry = typeof NativeThreadItemEntry.Type;
-
 const cursors = {
   nextCursor: Schema.optionalKey(Schema.NullOr(Schema.String)),
   backwardsCursor: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -55,7 +49,6 @@ const SearchPage = Schema.Struct({
   ...cursors,
 });
 const TurnPage = Schema.Struct({ data: Schema.Array(NativeTurn), ...cursors });
-const ItemPage = Schema.Struct({ data: Schema.Array(NativeThreadItemEntry), ...cursors });
 
 export interface PageParams {
   readonly cursor?: string | null;
@@ -81,10 +74,6 @@ export interface ThreadTurnsParams extends PageParams {
   readonly threadId: string;
   readonly itemsView?: "notLoaded" | "summary" | "full";
 }
-export interface ThreadItemsParams extends PageParams {
-  readonly threadId: string;
-  readonly turnId?: string;
-}
 export interface ThreadHistoryRawClient {
   readonly request: (
     method: string,
@@ -95,22 +84,6 @@ export interface ThreadHistoryRawClient {
 /** Detect protocol-level unsupported methods, never invalid cursors or transport failures. */
 export const isUnsupportedHistoryMethod = (error: CodexAppServerError): boolean =>
   error._tag === "CodexAppServerRequestError" && error.code === -32601;
-
-const legacyCursorPrefix = "t3-codex-legacy-items:v1:";
-const LegacyCursor = Schema.fromJsonString(
-  Schema.Struct({
-    threadId: Schema.String,
-    turnId: Schema.NullOr(Schema.String),
-    direction: Schema.Literals(["asc", "desc"]),
-    turnCursor: Schema.NullOr(Schema.String),
-    offset: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-    expectedTurnId: Schema.NullOr(Schema.String),
-    previousItemId: Schema.optionalKey(Schema.String),
-  }),
-);
-type LegacyCursor = typeof LegacyCursor.Type;
-const decodeLegacyCursor = Schema.decodeEffect(LegacyCursor);
-const encodeLegacyCursor = Schema.encodeEffect(LegacyCursor);
 
 /** One bounded native page per call. Cursors belong to Codex and must remain opaque. */
 export const makeThreadHistory = (raw: ThreadHistoryRawClient) => {
@@ -143,147 +116,6 @@ export const makeThreadHistory = (raw: ThreadHistoryRawClient) => {
       ? Math.max(1, Math.min(100, Math.floor(value)))
       : 50;
 
-  const legacyItems = Effect.fn("CodexThreadHistory.legacyItems")(function* (
-    params: ThreadItemsParams,
-  ) {
-    const direction = params.sortDirection ?? "asc";
-    const cursor: LegacyCursor = params.cursor
-      ? yield* decodeLegacyCursor(params.cursor.slice(legacyCursorPrefix.length)).pipe(
-          Effect.mapError((error) =>
-            CodexAppServerRequestError.invalidPayload("thread/items/list", "decode-payload", error),
-          ),
-        )
-      : {
-          threadId: params.threadId,
-          turnId: params.turnId ?? null,
-          direction,
-          turnCursor: null,
-          offset: 0,
-          expectedTurnId: null,
-        };
-    if (
-      cursor.threadId !== params.threadId ||
-      cursor.turnId !== (params.turnId ?? null) ||
-      cursor.direction !== direction
-    ) {
-      return yield* CodexAppServerRequestError.invalidParams(
-        "Legacy item cursor does not match this thread, turn, or direction.",
-      );
-    }
-    // Legacy Codex supports paging turns, but cannot page items within a turn.
-    // Read at most one full native turn per call; never hydrate thread/read.
-    const page = yield* request(
-      "thread/turns/list",
-      {
-        threadId: params.threadId,
-        cursor: cursor.turnCursor,
-        limit: 1,
-        sortDirection: direction,
-        itemsView: "full",
-      },
-      TurnPage,
-    );
-    const turn = page.data[0];
-    if (page.nextCursor != null && page.nextCursor === cursor.turnCursor) {
-      return yield* CodexAppServerRequestError.invalidParams(
-        "Codex returned a non-advancing legacy history cursor.",
-      );
-    }
-    if (cursor.expectedTurnId !== null && turn?.id !== cursor.expectedTurnId) {
-      // Older saved cursors may precede their turn instead of anchoring it.
-      // Skip one newly appended turn per request without exposing its items.
-      if (page.nextCursor == null) {
-        return yield* CodexAppServerRequestError.invalidParams(
-          "Legacy history anchor is no longer available; the source may have been compacted or rolled back.",
-        );
-      }
-      const continuation = yield* encodeLegacyCursor({
-        ...cursor,
-        turnCursor: page.nextCursor,
-      }).pipe(
-        Effect.mapError((error) =>
-          CodexAppServerRequestError.invalidPayload("thread/items/list", "encode-payload", error),
-        ),
-      );
-      return { data: [], nextCursor: legacyCursorPrefix + continuation, backwardsCursor: null };
-    }
-    const matching =
-      turn !== undefined && (params.turnId === undefined || turn.id === params.turnId);
-    const items = matching ? (direction === "desc" ? turn.items.toReversed() : turn.items) : [];
-    if (
-      cursor.offset > items.length ||
-      (cursor.previousItemId !== undefined &&
-        items[cursor.offset - 1]?.id !== cursor.previousItemId)
-    ) {
-      return yield* CodexAppServerRequestError.invalidParams(
-        "Legacy thread items changed while paging; restart history loading.",
-      );
-    }
-    const selected = items.slice(cursor.offset, cursor.offset + limit(params.limit));
-    const offset = cursor.offset + selected.length;
-    const lastSelected = selected.at(-1);
-    const next: LegacyCursor | null =
-      offset < items.length && turn
-        ? {
-            ...cursor,
-            offset,
-            expectedTurnId: turn.id,
-            // Native backwardsCursor includes this turn as its anchor. Keep it
-            // opaque; re-reading the newest page would shift after continuation.
-            turnCursor: page.backwardsCursor ?? cursor.turnCursor,
-            ...(lastSelected ? { previousItemId: lastSelected.id } : {}),
-          }
-        : page.nextCursor != null && !(matching && params.turnId !== undefined)
-          ? {
-              threadId: cursor.threadId,
-              turnId: cursor.turnId,
-              direction: cursor.direction,
-              turnCursor: page.nextCursor,
-              offset: 0,
-              expectedTurnId: null,
-            }
-          : null;
-    const nextCursor =
-      next === null
-        ? null
-        : legacyCursorPrefix +
-          (yield* encodeLegacyCursor(next).pipe(
-            Effect.mapError((error) =>
-              CodexAppServerRequestError.invalidPayload(
-                "thread/items/list",
-                "encode-payload",
-                error,
-              ),
-            ),
-          ));
-    return {
-      data: turn ? selected.map((item) => ({ turnId: turn.id, item })) : [],
-      nextCursor,
-      backwardsCursor: null,
-    };
-  });
-
-  const items = Effect.fn("CodexThreadHistory.items")(function* (params: ThreadItemsParams) {
-    if (params.cursor?.startsWith(legacyCursorPrefix)) return yield* legacyItems(params);
-    return yield* request(
-      "thread/items/list",
-      { ...params, limit: limit(params.limit) },
-      ItemPage,
-    ).pipe(
-      Effect.catch((error) => {
-        if (!isUnsupportedHistoryMethod(error)) return Effect.fail(error);
-        // A native item cursor cannot be reinterpreted as a native turn cursor.
-        if (params.cursor)
-          return Effect.fail(
-            CodexAppServerRequestError.invalidParams(
-              "Codex item paging is no longer available; restart history loading.",
-            ),
-          );
-        return legacyItems(params);
-      }),
-    );
-  });
-
   return {
     list: (params: ThreadListParams = {}) =>
       request("thread/list", { ...params, limit: limit(params.limit) }, ThreadPage),
@@ -305,6 +137,5 @@ export const makeThreadHistory = (raw: ThreadHistoryRawClient) => {
         { itemsView: "notLoaded", ...params, limit: limit(params.limit) },
         TurnPage,
       ),
-    items,
   };
 };

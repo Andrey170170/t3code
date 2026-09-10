@@ -24,10 +24,6 @@ import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
-import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
-import { CodexThreadClient } from "../project/CodexThreadClient.ts";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 
@@ -243,10 +239,6 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
   });
 
   const dependencies = Layer.mergeAll(
-    Layer.mock(CodexThreadClient)({
-      resolveNativeHomeIdentity: () => Effect.succeed("shared-home"),
-      withClient: () => Effect.die(new Error("Unexpected native metadata lookup")),
-    }),
     Layer.mock(ProjectionSnapshotQuery)({
       getShellSnapshot: () =>
         Ref.updateAndGet(snapshotReadCount, (count) => count + 1).pipe(
@@ -297,39 +289,9 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
       number: 42,
       mergedAt: NOW,
     }),
-    layer: ThreadSettlementReactor.layer.pipe(
-      Layer.provide(dependencies),
-      Layer.provideMerge(SqlitePersistenceMemory),
-    ),
+    layer: ThreadSettlementReactor.layer.pipe(Layer.provide(dependencies)),
   };
 });
-
-const encodeImportedActivity = Schema.encodeSync(
-  Schema.fromJsonString(
-    Schema.Struct({
-      codexHistoryImport: Schema.Struct({
-        nativeThreadId: Schema.String,
-        providerInstanceId: Schema.String,
-        homeIdentity: Schema.String,
-        lastActivityAt: Schema.String,
-      }),
-    }),
-  ),
-);
-const seedImportedActivity = (threadId: ThreadId, lastActivityAt: string) =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    const payload = encodeImportedActivity({
-      codexHistoryImport: {
-        nativeThreadId: threadId,
-        providerInstanceId: "codex",
-        homeIdentity: "shared-home",
-        lastActivityAt,
-      },
-    });
-    yield* sql`INSERT INTO provider_session_runtime (thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode, status, last_seen_at, runtime_payload_json)
-    VALUES (${threadId}, 'codex', 'codex', 'codex', 'full-access', 'stopped', ${NOW}, ${payload})`;
-  });
 
 const startHarness = Effect.fn("startThreadSettlementHarness")(function* (
   reactor: ThreadSettlementReactor.ThreadSettlementReactor["Service"],
@@ -343,87 +305,66 @@ const startHarness = Effect.fn("startThreadSettlementHarness")(function* (
 });
 
 describe("ThreadSettlementReactor", () => {
-  it.effect(
-    "settles old native imports on creation and ages recent source activity on later sweeps",
-    () =>
-      Effect.scoped(
-        Effect.gen(function* () {
-          yield* TestClock.setTime(Date.parse(NOW));
-          const fixture = yield* makeHarness({ snapshot: makeSnapshot([]) });
-          yield* Effect.gen(function* () {
-            const reactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
-            yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
-            const old = makeThread("old-native-import", {
-              latestUserMessageAt: null,
-              latestTurn: null,
+  it.effect("sweeps immediately when an import creates a thread", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const fixture = yield* makeHarness({ snapshot: makeSnapshot([]) });
+        yield* Effect.gen(function* () {
+          const reactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
+          yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
+          const old = makeThread("old-import", {
+            latestUserMessageAt: "2026-08-20T00:00:00.000Z",
+            latestTurn: null,
+            updatedAt: NOW,
+          });
+          const recent = makeThread("recent-import", {
+            latestUserMessageAt: NOW,
+            latestTurn: null,
+            updatedAt: NOW,
+          });
+          const pinned = makeThread("pinned-import", {
+            latestUserMessageAt: "2026-08-20T00:00:00.000Z",
+            latestTurn: null,
+            pinnedAt: NOW,
+          });
+          yield* Ref.set(fixture.snapshots, makeSnapshot([old, recent, pinned]));
+          yield* fixture.publishEvent({
+            type: "thread.created",
+            sequence: 2,
+            eventId: EventId.make("import-created"),
+            aggregateKind: "thread",
+            aggregateId: old.id,
+            occurredAt: NOW,
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: { historyImport: true },
+            payload: {
+              threadId: old.id,
+              projectId: old.projectId,
+              title: old.title,
+              modelSelection: old.modelSelection,
+              runtimeMode: old.runtimeMode,
+              interactionMode: old.interactionMode,
+              branch: null,
+              worktreePath: null,
+              createdAt: old.createdAt,
               updatedAt: NOW,
-            });
-            const recent = makeThread("recent-native-import", {
-              latestUserMessageAt: null,
-              latestTurn: null,
-              createdAt: "2020-01-01T00:00:00.000Z",
-              updatedAt: NOW,
-            });
-            const pinned = makeThread("pinned-native-import", {
-              latestUserMessageAt: null,
-              pinnedAt: NOW,
-            });
-            const manual = makeThread("manual-native-import", {
-              latestUserMessageAt: null,
-              settledOverride: "active",
-            });
-            yield* seedImportedActivity(old.id, "2026-08-20T00:00:00.000Z");
-            yield* seedImportedActivity(recent.id, NOW);
-            yield* seedImportedActivity(pinned.id, "2026-08-20T00:00:00.000Z");
-            yield* seedImportedActivity(manual.id, "2026-08-20T00:00:00.000Z");
-            yield* Ref.set(fixture.snapshots, makeSnapshot([old, recent, pinned, manual]));
-            yield* fixture.publishEvent({
-              type: "thread.created",
-              sequence: 2,
-              eventId: EventId.make("native-import-created"),
-              aggregateKind: "thread",
-              aggregateId: old.id,
-              occurredAt: NOW,
-              commandId: null,
-              causationEventId: null,
-              correlationId: null,
-              metadata: { historyImport: true },
-              payload: {
-                threadId: old.id,
-                projectId: old.projectId,
-                title: old.title,
-                modelSelection: old.modelSelection,
-                runtimeMode: old.runtimeMode,
-                interactionMode: old.interactionMode,
-                branch: null,
-                worktreePath: null,
-                createdAt: old.createdAt,
-                updatedAt: NOW,
-              },
-            });
-            yield* Queue.take(fixture.snapshotReads);
-            yield* reactor.drain;
-            assert.deepEqual(
-              (yield* Ref.get(fixture.commands)).map((command) => [
-                command.threadId,
-                command.settledAt,
-              ]),
-              [[old.id, "2026-08-20T00:00:00.000Z"]],
-            );
-            yield* Ref.set(fixture.snapshots, makeSnapshot([recent, pinned, manual]));
-            yield* TestClock.adjust("4 days");
-            yield* Queue.take(fixture.snapshotReads);
-            yield* reactor.drain;
-            yield* TestClock.adjust("1 minute");
-            yield* Queue.take(fixture.snapshotReads);
-            yield* reactor.drain;
-            assert.deepEqual(
-              (yield* Ref.get(fixture.commands)).map((command) => command.threadId),
-              [old.id, recent.id],
-            );
-          }).pipe(Effect.provide(fixture.layer));
-        }),
-      ),
+            },
+          });
+          yield* Queue.take(fixture.snapshotReads);
+          yield* reactor.drain;
+          assert.deepEqual(
+            (yield* Ref.get(fixture.commands)).map((command) => [
+              command.threadId,
+              command.settledAt,
+            ]),
+            [[old.id, "2026-08-20T00:00:00.000Z"]],
+          );
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
   );
 
   it.effect("uses saved PRs without settling resumed threads or branches with newer PRs", () =>

@@ -110,7 +110,6 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.sideChatRespondUserInput]: AuthOrchestrationOperateScope,
   [WS_METHODS.sideChatSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.codexThreadsList]: AuthOrchestrationReadScope,
-  [WS_METHODS.codexThreadsHistory]: AuthOrchestrationReadScope,
   [WS_METHODS.codexThreadsImport]: AuthOrchestrationOperateScope,
   [WS_METHODS.assetsCreateUrl]: AuthOrchestrationReadScope,
   [WS_METHODS.attachmentsCreateUploadUrl]: AuthOrchestrationOperateScope,

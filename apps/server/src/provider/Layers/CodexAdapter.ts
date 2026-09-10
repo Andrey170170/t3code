@@ -1000,6 +1000,14 @@ function runtimeEventBase(
   };
 }
 
+/** Translates a completed native history item exactly like a live `item/completed` notification. */
+export function mapCodexHistoryItem(
+  event: ProviderEvent,
+  threadId: ThreadId,
+): ProviderRuntimeEvent | undefined {
+  return mapItemLifecycle(event, threadId, "item.completed");
+}
+
 function mapItemLifecycle(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
