@@ -475,6 +475,15 @@ export const makeCodexThreadImport = Effect.gen(function* () {
             yield* sql`SELECT thread_id AS "threadId" FROM projection_threads WHERE deleted_at IS NULL AND ${sql.in("thread_id", boundThreadIds)}`,
           );
     const projected = new Set(projectedRows.map((row) => row.threadId));
+    // Imports made before turns were materialized are empty shells; offer them
+    // for an update so their history can be backfilled.
+    const withTurnsRows =
+      boundThreadIds.length === 0
+        ? []
+        : yield* decodeThreadRows(
+            yield* sql`SELECT DISTINCT thread_id AS "threadId" FROM projection_turns WHERE ${sql.in("thread_id", boundThreadIds)}`,
+          );
+    const withTurns = new Set(withTurnsRows.map((row) => row.threadId));
     const snapshot = yield* snapshots.getShellSnapshot();
     const projectsByCwd = new Map(
       snapshot.projects.map((entry) => [
@@ -576,8 +585,8 @@ export const makeCodexThreadImport = Effect.gen(function* () {
           existingThreadId,
           updateAvailable:
             existingThreadId !== null &&
-            Number.isFinite(lastActivityAt) &&
-            thread.updatedAt * 1000 > lastActivityAt,
+            (!withTurns.has(existingThreadId) ||
+              (Number.isFinite(lastActivityAt) && thread.updatedAt * 1000 > lastActivityAt)),
           ...(searchResult?.matches.has(thread.id)
             ? { matchPreview: searchResult.matches.get(thread.id)! }
             : {}),

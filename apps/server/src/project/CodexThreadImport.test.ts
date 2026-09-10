@@ -456,6 +456,7 @@ it.layer(testLayer)("Codex native imports", (it) => {
           "done-1",
           "done-2",
           "updated",
+          "empty",
           "retry",
           ...Array.from({ length: 51 }, (_, index) => `new-${index}`),
         ];
@@ -469,7 +470,11 @@ it.layer(testLayer)("Codex native imports", (it) => {
           threadSource: "user",
         }));
         const directory = yield* ProviderSessionDirectory;
-        for (const nativeId of ids.slice(0, 5)) {
+        const sql = yield* SqlClient.SqlClient;
+        for (const nativeId of ids.slice(0, 6)) {
+          // Shells imported before turns were materialized have no turn rows.
+          if (nativeId !== "empty")
+            yield* sql`INSERT INTO projection_turns (thread_id,turn_id,state,requested_at,checkpoint_files_json) VALUES (${`bound-${nativeId}`},${`turn-${nativeId}`},'completed','2026-01-02','[]')`;
           yield* directory.upsert({
             threadId: ThreadId.make(`bound-${nativeId}`),
             provider: ProviderDriverKind.make("codex"),
@@ -490,13 +495,14 @@ it.layer(testLayer)("Codex native imports", (it) => {
         const harness = makeHarness({ catalog });
         const importer = yield* makeCodexThreadImport.pipe(Effect.provide(harness.services));
         const first = yield* importer.list({ providerInstanceId: instanceId, hideImported: true });
-        expect(first.totalCount).toBe(53);
-        expect(first.projects[0]).toMatchObject({ totalCount: 53, importableCount: 53 });
+        expect(first.totalCount).toBe(54);
+        expect(first.projects[0]).toMatchObject({ totalCount: 54, importableCount: 54 });
         expect(first.threads.some((thread) => thread.id.startsWith("done-"))).toBe(false);
-        expect(first.threads.find((thread) => thread.id === "updated")).toMatchObject({
-          existingThreadId: "bound-updated",
-          updateAvailable: true,
-        });
+        for (const id of ["updated", "empty"])
+          expect(first.threads.find((thread) => thread.id === id)).toMatchObject({
+            existingThreadId: `bound-${id}`,
+            updateAvailable: true,
+          });
         expect(first.threads.find((thread) => thread.id === "retry")?.existingThreadId).toBeNull();
         expect(first.threads).toHaveLength(50);
         const second = yield* importer.list({
@@ -504,7 +510,7 @@ it.layer(testLayer)("Codex native imports", (it) => {
           hideImported: true,
           cursor: first.nextCursor!,
         });
-        expect(second.threads).toHaveLength(3);
+        expect(second.threads).toHaveLength(4);
         expect(second.nextCursor).toBeNull();
         expect(
           (yield* importer
@@ -512,7 +518,7 @@ it.layer(testLayer)("Codex native imports", (it) => {
             .pipe(Effect.result))._tag,
         ).toBe("Failure");
         const all = yield* importer.list({ providerInstanceId: instanceId });
-        expect(all.totalCount).toBe(56);
+        expect(all.totalCount).toBe(57);
         expect(all.threads.find((thread) => thread.id === "done-0")).toMatchObject({
           existingThreadId: "bound-done-0",
           updateAvailable: false,
