@@ -52,13 +52,15 @@ import json, os, pathlib, shutil, sys
 args = sys.argv[1:]
 if os.environ.get('MOCK_EXPECT_TOKEN'):
     config = pathlib.Path(os.environ['NPM_CONFIG_USERCONFIG'])
+    assert os.environ['npm_config_userconfig'] == str(config)
     assert config.stat().st_mode & 0o777 == 0o600
     assert os.environ['MOCK_EXPECT_TOKEN'] in config.read_text()
     pathlib.Path(os.environ['MOCK_CONFIG_PATH']).write_text(str(config))
 with open(os.environ['MOCK_NPM_LOG'], 'a') as log:
     log.write(json.dumps(args) + '\\n')
 if args[0] == 'view':
-    if args[1] == 't3':
+    if args[2] == 'versions':
+        assert args[1] == 't3@custom', 'Version lookup must not depend on a latest tag'
         print(os.environ.get('MOCK_VERSIONS', '[]'))
         sys.exit(int(os.environ.get('MOCK_VIEW_STATUS', '0')))
     print(json.dumps(os.environ['MOCK_VERSION']))
@@ -117,7 +119,7 @@ else:
         result = self.run_cli("publish", "--artifact", str(self.artifact), "--registry", REGISTRY, "--dry-run")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls(), [
-            ["view", "t3", "versions", "--registry", REGISTRY, "--json"], [
+            ["view", "t3@custom", "versions", "--registry", REGISTRY, "--json"], [
             "publish", str(self.artifact / "package.tgz"), "--registry", REGISTRY,
             "--tag", "custom", "--ignore-scripts", "--dry-run",
         ]])
@@ -238,6 +240,7 @@ with tarfile.open(tarball, 'w:gz') as archive:
             "PACKAGE_FOGEJO_TOKEN_FILE": str(token_file),
             "MOCK_EXPECT_TOKEN": "fake-test-token",
             "MOCK_CONFIG_PATH": str(config_path),
+            "npm_config_userconfig": str(self.root / "inherited-npmrc"),
         })
         result = self.run_cli("check", "--registry", REGISTRY)
         self.assertEqual(result.returncode, 0, result.stderr)

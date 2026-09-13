@@ -86,6 +86,8 @@ try {
     NodeFS.writeFileSync(npmrc, `//${registry.host}${registry.pathname}:_authToken=${token}\n`, {
       mode: 0o600,
     });
+    // npm run supplies a lowercase value, which otherwise overrides this file.
+    env.npm_config_userconfig = npmrc;
     env.NPM_CONFIG_USERCONFIG = npmrc;
   }
   const npm = (args, capture = false) =>
@@ -94,11 +96,12 @@ try {
       env,
       ...(capture ? { stdio: ["ignore", "pipe", "inherit"] } : {}),
     });
+  // Query through custom: npm otherwise selects latest, which custom-only registries lack.
   // Only a package-not-found response can start a new release sequence.
   function publishedVersions() {
     const result = NodeChildProcess.spawnSync(
       "npm",
-      ["view", "t3", "versions", "--registry", registry.href, "--json"],
+      ["view", "t3@custom", "versions", "--registry", registry.href, "--json"],
       { cwd: temporary, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
     if (result.error) throw result.error;
@@ -106,7 +109,9 @@ try {
     try {
       response = JSON.parse(result.stdout);
     } catch {
-      fail("Could not read Forgejo package versions; refusing to allocate a release.");
+      fail(
+        `Could not read Forgejo package versions; refusing to allocate a release. ${result.stderr.trim()}`,
+      );
     }
     if (result.status !== 0) {
       if (response?.error?.code === "E404") return [];
