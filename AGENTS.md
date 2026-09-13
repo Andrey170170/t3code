@@ -110,6 +110,12 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 - The server is event-sourced and its async flows emit typed receipts. Wait on receipts and worker drains, never on sleeps or polling. A test that needs a timeout to pass is wrong.
 - Upon request, user-visible frontend changes should get one integrated pass in a real client: `test-t3-app` for web, `test-t3-mobile` for mobile. The primary agent does this once after integrating. Subagents do not launch their own dev servers. Ask permission before doing computer use or spinning up browsers.
 
+## Custom fork releases
+
+Forgejo is this fork's distribution channel. After completing a significant change to the shipped server or web client (features, behavior fixes, or runtime dependency changes), include package publication in the completion flow unless the user explicitly defers it. This is standing authorization to publish; a separate confirmation is unnecessary. Documentation, tests, and tooling changes alone need a release only when they change the shipped package. Desktop-only changes require the desktop release flow instead.
+
+After focused validation passes, commit the completed changes and follow [Forgejo package operations](docs/operations/forgejo-packages.md) to run `npm run publish:forgejo` from the clean release checkout. Verify the published exact version by downloading it from Forgejo and comparing its hash with the built artifact. Report the version and source commit in the final response. If credentials, connectivity, or validation block publication, report the release as pending. Publication does not authorize installing the update or restarting a running service.
+
 ## Pull requests
 
 - Never make a PR unless the developer explicitly asks you to do so.
