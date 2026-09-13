@@ -1,15 +1,8 @@
 import { useSideChatPortalProps } from "./sideChatFocus";
 import type { ProviderInteractionMode, RuntimeMode } from "@t3tools/contracts";
 import { memo } from "react";
-import {
-  BotIcon,
-  PencilRulerIcon,
-  LockIcon,
-  LockOpenIcon,
-  PenLineIcon,
-  SparklesIcon,
-  type LucideIcon,
-} from "lucide-react";
+import { BotIcon, PencilRulerIcon } from "lucide-react";
+import { runtimeModeConfig, runtimeModeOptions } from "./runtimeModeConfig";
 import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
@@ -22,33 +15,6 @@ import {
 import { composerFloatingLayerProps } from "./composerEventScope";
 import { useComposerMenuState } from "./useComposerMenuState";
 
-const runtimeModeConfig: Record<
-  RuntimeMode,
-  { label: string; description: string; icon: LucideIcon }
-> = {
-  "approval-required": {
-    label: "Supervised",
-    description: "Ask before commands and file changes.",
-    icon: LockIcon,
-  },
-  "auto-accept-edits": {
-    label: "Auto-accept edits",
-    description: "Auto-approve edits, ask before other actions.",
-    icon: PenLineIcon,
-  },
-  auto: {
-    label: "Auto",
-    description: "Supported providers approve routine actions; others still ask.",
-    icon: SparklesIcon,
-  },
-  "full-access": {
-    label: "Full access",
-    description: "Allow commands and edits without prompts.",
-    icon: LockOpenIcon,
-  },
-};
-
-const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
 export const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
   showInteractionModeToggle: boolean;
   interactionMode: ProviderInteractionMode;

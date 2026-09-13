@@ -34,6 +34,7 @@ import {
   ProviderSendTurnInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as NodeCrypto from "node:crypto";
 import * as Crypto from "effect/Crypto";
 import * as Exit from "effect/Exit";
@@ -74,7 +75,6 @@ import {
   CodexSessionRuntimeThreadIdMissingError,
   describeMcpElicitation,
   makeCodexSessionRuntime,
-  isRecoverableThreadResumeError,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
@@ -2253,7 +2253,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
 
   const sideSnapshots = new Map<ThreadId, SideChatSnapshot>();
-  const sideSubscribers = new Map<ThreadId, number>();
   const sideOperationLocks = new Map<ThreadId, Semaphore.Semaphore>();
   const sideOperationLock = (parentThreadId: ThreadId) =>
     Effect.sync(() => {
@@ -2328,8 +2327,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             latestTurn: null,
           };
           yield* publishSide(snapshot);
-          if (!sideSubscribers.get(parentThreadId))
-            yield* session.runtime.detachSideChat(native.id).pipe(Effect.ignore);
           return snapshot;
         }),
       );
@@ -2355,7 +2352,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           const selection = input.modelSelection ?? snapshot.modelSelection;
           const effort = getModelSelectionStringOptionValue(selection, "reasoningEffort");
           const serviceTier = getCodexServiceTierOptionValue(selection);
-          const now = new Date().toISOString();
+          const now = DateTime.formatIso(yield* DateTime.now);
           const messageId = MessageId.make(NodeCrypto.randomUUID());
           yield* publishSide({
             ...snapshot,
@@ -2499,7 +2496,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               ...request,
               type: "user-input.resolved",
               eventId: EventId.make(NodeCrypto.randomUUID()),
-              createdAt: new Date().toISOString(),
+              createdAt: DateTime.formatIso(yield* DateTime.now),
               payload: { answers: input.answers },
             }),
           );
@@ -2519,46 +2516,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           // Register before reading the snapshot so reconnect cannot miss an update.
           const updates = yield* getSideUpdates(parentThreadId);
           const subscription = yield* PubSub.subscribe(updates);
-          const lock = yield* sideOperationLock(parentThreadId);
-          // Count changes and the corresponding native lease operation are one
-          // transaction, including open's initial detach when no client is present.
-          yield* Effect.acquireRelease(
-            lock.withPermits(1)(
-              Effect.gen(function* () {
-                const count = sideSubscribers.get(parentThreadId) ?? 0;
-                sideSubscribers.set(parentThreadId, count + 1);
-                const current = sideSnapshots.get(parentThreadId);
-                const session = sessions.get(parentThreadId);
-                if (count === 0 && current && current.status !== "closed" && session)
-                  yield* session.runtime
-                    .attachSideChat(current.sideChatId)
-                    .pipe(
-                      Effect.catch((error) =>
-                        publishSide(
-                          isRecoverableThreadResumeError(error)
-                            ? closeSideChatSnapshot(current)
-                            : { ...current, status: "error", error: error.message },
-                        ),
-                      ),
-                    );
-              }),
-            ),
-            () =>
-              lock.withPermits(1)(
-                Effect.gen(function* () {
-                  const count = (sideSubscribers.get(parentThreadId) ?? 1) - 1;
-                  if (count > 0) {
-                    sideSubscribers.set(parentThreadId, count);
-                    return;
-                  }
-                  sideSubscribers.delete(parentThreadId);
-                  const current = sideSnapshots.get(parentThreadId);
-                  const session = sessions.get(parentThreadId);
-                  if (current && current.status !== "closed" && session)
-                    yield* session.runtime.detachSideChat(current.sideChatId).pipe(Effect.ignore);
-                }),
-              ),
-          );
+          // Ephemeral forks have no resumable rollout. Keep their native event
+          // subscription until explicit close; UI disconnects only drop this stream.
           let previous: SideChatSnapshot | null | undefined;
           return Stream.concat(
             Stream.succeed(sideSnapshots.get(parentThreadId) ?? null),
@@ -2614,7 +2573,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(mcpSession
             ? {
                 environment: {
-                  ...(options?.environment ?? process.env),
+                  ...McpProviderSession.withAgentDeviceEnvironment(
+                    options?.environment ?? process.env,
+                    mcpSession,
+                  ),
                   T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
                 },
                 appServerArgs: [
@@ -2627,6 +2589,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   "-c",
                   'mcp_servers.t3-code.tools.task_send_message.approval_mode="prompt"',
                 ],
+                mcpCapabilities: mcpSession.capabilities,
               }
             : {}),
         };

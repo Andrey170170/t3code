@@ -12,7 +12,7 @@ const layer = it.layer(
 );
 
 layer("ProjectionThreadMessageRepository", (it) => {
-  it.effect("retains agent origin when a message is updated and read again", () =>
+  it.effect("retains agent origin and structured context when a message is updated", () =>
     Effect.gen(function* () {
       const repository = yield* ProjectionThreadMessageRepository;
       const threadId = ThreadId.make("target");
@@ -27,10 +27,12 @@ layer("ProjectionThreadMessageRepository", (it) => {
         updatedAt: "2026-09-08T00:00:00.000Z",
       };
       const agentOrigin = { threadId: ThreadId.make("source"), operationId: "operation-1" };
-      yield* repository.upsert({ ...message, agentOrigin });
+      const context = { version: 1 as const, records: [] };
+      yield* repository.upsert({ ...message, agentOrigin, context });
       yield* repository.upsert({ ...message, turnId: TurnId.make("assigned-turn") });
       const messages = yield* repository.listByThreadId({ threadId });
       assert.deepStrictEqual(messages[0]?.agentOrigin, agentOrigin);
+      assert.deepStrictEqual(messages[0]?.context, context);
       assert.strictEqual(messages[0]?.turnId, "assigned-turn");
       yield* repository.upsert({ ...message, messageId: MessageId.make("human") });
       const human = yield* repository.getByMessageId({ messageId: MessageId.make("human") });
@@ -89,6 +91,54 @@ layer("ProjectionThreadMessageRepository", (it) => {
       );
       yield* repository.deleteByThreadId({ threadId });
       assert.isNull(yield* repository.getLatestUserMessageAt({ threadId }));
+    }),
+  );
+
+  it.effect("persists structured context and keeps it across updates without context", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectionThreadMessageRepository;
+      const threadId = ThreadId.make("thread-context");
+      const messageId = MessageId.make("message-context");
+      const createdAt = "2026-02-28T19:05:00.000Z";
+      const context = {
+        version: 1 as const,
+        records: [
+          {
+            version: 1 as const,
+            contextId: "ctx_1" as never,
+            kind: "terminal" as const,
+            label: "Terminal 1 line 4",
+            terminalId: "default",
+            terminalLabel: "Terminal 1",
+            lineStart: 4,
+            lineEnd: 4,
+            text: "boom",
+          },
+        ],
+      };
+      yield* repository.upsert({
+        messageId,
+        threadId,
+        turnId: null,
+        role: "user",
+        text: "see [Terminal 1 line 4](t3-context://v1/terminal/ctx_1)",
+        context,
+        isStreaming: false,
+        createdAt,
+        updatedAt: createdAt,
+      });
+      yield* repository.upsert({
+        messageId,
+        threadId,
+        turnId: null,
+        role: "user",
+        text: "see [Terminal 1 line 4](t3-context://v1/terminal/ctx_1)",
+        isStreaming: false,
+        createdAt,
+        updatedAt: "2026-02-28T19:05:01.000Z",
+      });
+      const rows = yield* repository.listByThreadId({ threadId });
+      assert.deepStrictEqual(rows[0]?.context, context);
     }),
   );
 

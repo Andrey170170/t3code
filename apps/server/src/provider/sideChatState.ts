@@ -6,6 +6,8 @@ import {
   type OrchestrationThreadActivity,
 } from "@t3tools/contracts";
 
+import * as DateTime from "effect/DateTime";
+
 /** Project only the ephemeral fork's events; never feed them to durable orchestration. */
 export function applySideChatEvent(
   snapshot: SideChatSnapshot,
@@ -168,7 +170,7 @@ export function closeSideChatSnapshot(snapshot: SideChatSnapshot): SideChatSnaps
         ? { ...snapshot.latestTurn, state: "interrupted" }
         : snapshot.latestTurn,
   };
-  return settleRequests(snapshot, closed, new Date().toISOString());
+  return settleRequests(snapshot, closed, DateTime.formatIso(DateTime.nowUnsafe()));
 }
 
 function settleRequests(

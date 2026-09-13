@@ -22,8 +22,8 @@ worktree**, each background submission creates its own worktree.
 
 ## Import conversations
 
-Use **Import conversations** from project settings or the sidebar when a project
-is selected. On mobile, use the import action in Settings. See
+Use **Import conversations** from **Settings > General** or the command palette.
+On mobile, use the import action in Settings. See
 [Codex conversations](./providers-codex.md#import-existing-conversations) for
 individual imports, complete history, and conversations started by another agent.
 
@@ -35,6 +35,9 @@ On web and desktop, you can also drag files from your computer onto any thread r
 the thread opens and the files are attached in its composer, ready for
 your next message. The same per-message file limits apply as when attaching
 files directly; see [Attach files](./composer.md#attach-files).
+
+On web and desktop, pinning or unpinning a thread keeps the sidebar at your current
+scroll position instead of following the thread to its new place in the list.
 
 Pinning does not prevent automatic settlement. Settling a thread removes its pin.
 
@@ -56,7 +59,11 @@ identify empty sections and a collapsed settled shelf.
 
 Drag within the pinned or active section to change its order. Other rows slide aside to show the
 spot where the thread will land. Drops into either section keep the position you choose. On
-mobile, open a pinned or active thread's menu and choose **Move up** or **Move down**. The server
+mobile, open a thread's menu and choose **Arrange threads**. Drag a handle within or between
+**Pinned** and **Active** to reorder, pin, or unpin. Drop onto the **Settled** divider to
+settle a thread. The dragged card shows the action before you release it. Expand **Snoozed**
+or **Settled** to drag a parked thread back into either live section. Each drop saves; **Done** returns to the thread list.
+**Move up** and **Move down** are also available in the thread menu. The server
 saves the order, so it survives a refresh and appears on your other connected devices.
 
 On web and desktop, the list also animates section changes made with thread actions such as
@@ -89,10 +96,12 @@ settlement, but an old closed or merged pull request does not settle work you
 resumed after it closed.
 
 Change these rules in **Settings → General**. They continue to run when your apps
-are closed. Changes apply to connected environments that support shared settings;
-offline environments and older servers keep their previous values. If connected
-environments disagree, **Apply to all** copies your current settings to those named
-in the warning. Changing a rule does not reopen already settled threads.
+are closed. On web and desktop, choose an environment at the top to change only
+its rules, or **All environments** to update connected environments together.
+Mixed values show where the selected environments disagree. Mobile applies these
+rules to connected environments that support shared settings. Offline environments
+and older servers keep their previous values. Changing a rule does not reopen
+already settled threads.
 
 ## Link a pull request
 

@@ -100,11 +100,7 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   );
   public readonly interruptSideChat: CodexSessionRuntimeShape["interruptSideChat"] = () =>
     Effect.void;
-  public readonly closeSideChat: CodexSessionRuntimeShape["closeSideChat"] = () => Effect.void;
-  public readonly attachSideChat = vi.fn<CodexSessionRuntimeShape["attachSideChat"]>(
-    () => Effect.void,
-  );
-  public readonly detachSideChat = vi.fn<CodexSessionRuntimeShape["detachSideChat"]>(
+  public readonly closeSideChat = vi.fn<CodexSessionRuntimeShape["closeSideChat"]>(
     () => Effect.void,
   );
   get sideChatEvents() {
@@ -3108,7 +3104,7 @@ validationLayer("Codex native side chat transport", (it) => {
     }),
   );
 
-  it.effect("detaches only the last client and closes the pane when its provider exits", () =>
+  it.effect("keeps multiple clients independent and closes the pane when its provider exits", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
       const side = adapter.sideChats!;
@@ -3116,7 +3112,6 @@ validationLayer("Codex native side chat transport", (it) => {
       yield* adapter.startSession({ threadId: parentThreadId, runtimeMode: "full-access" });
       const runtime = validationRuntimeFactory.lastRuntime!;
       yield* side.open({ parentThreadId });
-      NodeAssert.equal(runtime.detachSideChat.mock.calls.length, 1);
       const firstUpdates =
         yield* Queue.unbounded<import("@t3tools/contracts").SideChatStreamEvent>();
       const secondUpdates =
@@ -3129,11 +3124,8 @@ validationLayer("Codex native side chat transport", (it) => {
         Queue.offer(secondUpdates, event),
       ).pipe(Effect.forkScoped);
       yield* Queue.take(secondUpdates);
-      NodeAssert.equal(runtime.attachSideChat.mock.calls.length, 1);
       yield* Fiber.interrupt(first);
-      NodeAssert.equal(runtime.detachSideChat.mock.calls.length, 1);
       yield* Fiber.interrupt(second);
-      NodeAssert.equal(runtime.detachSideChat.mock.calls.length, 2);
       const third = yield* Stream.runForEach(side.subscribe({ parentThreadId }), (event) =>
         Queue.offer(firstUpdates, event),
       ).pipe(Effect.forkScoped);
@@ -3261,41 +3253,27 @@ validationLayer("Codex native side chat transport", (it) => {
     }),
   );
 
-  it.effect("serializes an opening detach with the first subscriber's attach", () =>
+  it.effect("keeps an ephemeral side chat ready across UI disconnects", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
       const side = adapter.sideChats!;
       const parentThreadId = asThreadId("side-parent-opening-race");
       yield* adapter.startSession({ threadId: parentThreadId, runtimeMode: "full-access" });
       const runtime = validationRuntimeFactory.lastRuntime!;
-      const detachStarted = yield* Deferred.make<void>();
-      const releaseDetach = yield* Deferred.make<void>();
-      const nativeOperations: string[] = [];
-      runtime.detachSideChat.mockImplementationOnce(() =>
-        Effect.gen(function* () {
-          yield* Deferred.succeed(detachStarted, undefined);
-          yield* Deferred.await(releaseDetach);
-          nativeOperations.push("detach");
-        }),
-      );
-      runtime.attachSideChat.mockImplementation(() =>
-        Effect.sync(() => {
-          nativeOperations.push("attach");
-        }),
-      );
-      const opening = yield* side.open({ parentThreadId }).pipe(Effect.forkScoped);
-      yield* Deferred.await(detachStarted);
-      const snapshots = yield* Queue.unbounded<import("@t3tools/contracts").SideChatStreamEvent>();
-      const subscribing = yield* Stream.runForEach(side.subscribe({ parentThreadId }), (event) =>
-        Queue.offer(snapshots, event),
-      ).pipe(Effect.forkScoped);
-      // Let the subscriber attempt acquisition while the native detach is blocked.
-      yield* Effect.yieldNow;
-      yield* Deferred.succeed(releaseDetach, undefined);
-      yield* Fiber.join(opening);
-      yield* Queue.take(snapshots);
-      NodeAssert.deepStrictEqual(nativeOperations, ["detach", "attach"]);
-      yield* Fiber.interrupt(subscribing);
+      const opened = yield* side.open({ parentThreadId });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const event = yield* Stream.runHead(side.subscribe({ parentThreadId }));
+        NodeAssert.equal(event._tag, "Some");
+        if (event._tag === "Some" && event.value.type === "snapshot") {
+          NodeAssert.equal(event.value.snapshot?.sideChatId, opened.sideChatId);
+          NodeAssert.equal(event.value.snapshot?.status, "ready");
+        }
+      }
+      NodeAssert.equal(runtime.closeSideChat.mock.calls.length, 0);
+      yield* side.send({ parentThreadId, sideChatId: opened.sideChatId, input: "Still here" });
+      NodeAssert.equal(runtime.sendSideChat.mock.calls.length, 1);
+      yield* side.close({ parentThreadId, sideChatId: opened.sideChatId });
+      NodeAssert.equal(runtime.closeSideChat.mock.calls.length, 1);
     }),
   );
 

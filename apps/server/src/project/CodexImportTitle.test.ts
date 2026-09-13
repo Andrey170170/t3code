@@ -51,6 +51,7 @@ function threadShell(threadId: ThreadId, title: string): OrchestrationThreadShel
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    pullRequests: [],
   };
 }
 

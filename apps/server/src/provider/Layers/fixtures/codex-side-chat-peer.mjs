@@ -115,17 +115,16 @@ for await (const line of NodeReadline.createInterface({ input: process.stdin }))
       break;
     }
     case "thread/resume":
-      {
-        const result = opened(message.params.threadId);
-        result.thread.turns.push({
-          id: "side-turn",
-          status: "completed",
-          startedAt: 1740000000,
-          completedAt: 1740000010,
-          items: [{ type: "agentMessage", id: "replay-answer", text: "Completed while detached" }],
-        });
-        respond(result);
-      }
+      write({
+        id: message.id,
+        error: { code: -32600, message: "no rollout found for thread id side" },
+      });
+      break;
+    case "thread/turns/list":
+      write({
+        id: message.id,
+        error: { code: -32600, message: "ephemeral threads do not support thread/turns/list" },
+      });
       break;
     case "turn/interrupt":
       respond({});

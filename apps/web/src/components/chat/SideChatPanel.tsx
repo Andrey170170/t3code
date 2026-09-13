@@ -89,6 +89,8 @@ function SideChatSubscription({
   return null;
 }
 
+const EMPTY_CONTEXT_RECORDS = new Map<string, never>();
+
 export function SideChatPanel(props: SideChatPanelProps) {
   const [snapshot, setSnapshot] = useState<SideChatSnapshot | null>(null);
   const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
@@ -460,7 +462,7 @@ function SideChatConversation({
                 <ComposerPromptEditor
                   value={prompt}
                   cursor={cursor}
-                  terminalContexts={[]}
+                  contextRecords={EMPTY_CONTEXT_RECORDS}
                   skills={[]}
                   disabled={
                     busy ||
@@ -472,7 +474,6 @@ function SideChatConversation({
                   containerClassName="px-4 pt-3 pb-2"
                   placeholderClassName="px-4 pt-3 pb-2"
                   className="max-h-48 min-h-16 overflow-y-auto text-sm outline-none"
-                  onRemoveTerminalContext={() => {}}
                   onChange={(value, nextCursor) => {
                     updatePrompt(value);
                     setCursor(nextCursor);
@@ -494,7 +495,6 @@ function SideChatConversation({
                     instanceEntries={instances}
                     modelOptionsByInstance={modelOptionsByInstance}
                     size="xs"
-                    compact
                     isComposerOwned
                     open={modelPickerOpen}
                     onOpenChange={setModelPickerOpen}

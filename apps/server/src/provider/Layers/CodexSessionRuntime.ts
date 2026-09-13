@@ -42,7 +42,10 @@ import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { SIDE_BOUNDARY_PROMPT, SIDE_DEVELOPER_INSTRUCTIONS } from "./codexSideChat.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
-import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
+import {
+  buildCodexDeveloperInstructions,
+  type T3CodeToolAvailability,
+} from "../CodexDeveloperInstructions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 const decodeV2ThreadForkResponse = Schema.decodeUnknownEffect(
   EffectCodexSchema.V2ThreadForkResponse,
@@ -70,6 +73,16 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
 
 export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | undefined): boolean {
   return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
+}
+
+function configuredMcpToolAvailability(
+  appServerArgs: ReadonlyArray<string> | undefined,
+  mcpCapabilities: ReadonlySet<string> | undefined,
+): T3CodeToolAvailability {
+  if (!hasConfiguredMcpServer(appServerArgs)) return { browser: false, device: false };
+  // Callers predating the capability set attached the browser toolkit only.
+  if (mcpCapabilities === undefined) return { browser: true, device: false };
+  return { browser: mcpCapabilities.has("preview"), device: mcpCapabilities.has("device") };
 }
 
 export const CodexResumeCursorSchema = Schema.Struct({
@@ -179,6 +192,8 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
+  /** Capabilities the session's `t3-code` MCP credential grants; drives the prompt blocks. */
+  readonly mcpCapabilities?: ReadonlySet<string>;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -227,8 +242,6 @@ export interface CodexSessionRuntimeShape {
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
   readonly interruptSideChat: (id: string) => Effect.Effect<void, CodexSessionRuntimeError>;
-  readonly detachSideChat: (id: string) => Effect.Effect<void, CodexSessionRuntimeError>;
-  readonly attachSideChat: (id: string) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly closeSideChat: (id: string) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly sideChatEvents: Stream.Stream<CodexSideChatEvent>;
 
@@ -620,7 +633,7 @@ function buildCodexCollaborationMode(input: {
   readonly interactionMode?: ProviderInteractionMode;
   readonly model?: string;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
-  readonly browserToolsAvailable?: boolean;
+  readonly browserToolsAvailable?: boolean | T3CodeToolAvailability;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
     return undefined;
@@ -655,7 +668,7 @@ export function buildTurnStartParams(input: {
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly interactionMode?: ProviderInteractionMode;
   /** Defaults to true so callers that predate the agent-access gate are unchanged. */
-  readonly browserToolsAvailable?: boolean;
+  readonly browserToolsAvailable?: boolean | T3CodeToolAvailability;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -1245,6 +1258,97 @@ function parseThreadSnapshot(
   };
 }
 
+const CodexThreadHistoryMetadata = Schema.Struct({
+  thread: Schema.Struct({
+    historyMode: Schema.optionalKey(Schema.Literals(["legacy", "paginated"])),
+  }),
+});
+const CodexTurnsPage = Schema.Struct({
+  data: Schema.Array(EffectCodexSchema.V2ThreadReadResponse__Turn),
+  nextCursor: Schema.NullOr(Schema.String),
+});
+const decodeCodexHistoryMetadata = Schema.decodeUnknownEffect(CodexThreadHistoryMetadata);
+const decodeCodexTurnsPage = Schema.decodeUnknownEffect(CodexTurnsPage);
+type CodexHistoryClient = {
+  readonly raw: Pick<CodexClient.CodexAppServerClient["Service"]["raw"], "request">;
+  readonly request: CodexClient.CodexAppServerClient["Service"]["request"];
+};
+
+const readCodexHistoryMode = Effect.fn("readCodexHistoryMode")(function* (
+  client: CodexHistoryClient,
+  threadId: string,
+) {
+  const response = yield* client.raw.request("thread/read", { threadId, includeTurns: false });
+  const metadata = yield* decodeCodexHistoryMetadata(response).pipe(
+    Effect.mapError((error) =>
+      CodexErrors.CodexAppServerRequestError.invalidPayload("thread/read", "decode-payload", error),
+    ),
+  );
+  return metadata.thread.historyMode;
+});
+
+export const readCodexThread = Effect.fn("readCodexThread")(function* (
+  client: CodexHistoryClient,
+  threadId: string,
+): Effect.fn.Return<CodexThreadSnapshot, CodexErrors.CodexAppServerError> {
+  if ((yield* readCodexHistoryMode(client, threadId)) !== "paginated") {
+    return parseThreadSnapshot(
+      yield* client.request("thread/read", { threadId, includeTurns: true }),
+    );
+  }
+  const turns: Array<CodexThreadTurnSnapshot> = [];
+  const requestedCursors = new Set<string | null>();
+  let cursor: string | null = null;
+  do {
+    if (requestedCursors.has(cursor)) {
+      return yield* CodexErrors.CodexAppServerRequestError.internalError(
+        "Thread history pagination repeated a cursor.",
+        undefined,
+        { method: "thread/turns/list", operation: "decode-payload" },
+      );
+    }
+    requestedCursors.add(cursor);
+    const response: unknown = yield* client.raw.request("thread/turns/list", {
+      threadId,
+      cursor,
+      limit: 100,
+      sortDirection: "asc",
+      itemsView: "full",
+    });
+    const page = yield* decodeCodexTurnsPage(response).pipe(
+      Effect.mapError((error) =>
+        CodexErrors.CodexAppServerRequestError.invalidPayload(
+          "thread/turns/list",
+          "decode-payload",
+          error,
+        ),
+      ),
+    );
+    turns.push(...page.data.map((turn) => ({ id: TurnId.make(turn.id), items: turn.items })));
+    cursor = page.nextCursor;
+  } while (cursor !== null);
+  return { threadId, turns };
+});
+
+export const rollbackCodexThread = Effect.fn("rollbackCodexThread")(function* (
+  client: CodexHistoryClient,
+  threadId: string,
+  numTurns: number,
+): Effect.fn.Return<CodexThreadSnapshot, CodexErrors.CodexAppServerError> {
+  if ((yield* readCodexHistoryMode(client, threadId)) !== "paginated") {
+    return parseThreadSnapshot(yield* client.request("thread/rollback", { threadId, numTurns }));
+  }
+  // Paginated threads replace history at a turn boundary instead of supporting
+  // the legacy count-based rollback endpoint.
+  const snapshot = yield* readCodexThread(client, threadId);
+  const retainedCount = Math.max(0, snapshot.turns.length - numTurns);
+  const firstRemoved = snapshot.turns[retainedCount];
+  if (firstRemoved) {
+    yield* client.raw.request("thread/revert", { threadId, beforeTurnId: firstRemoved.id });
+  }
+  return { threadId, turns: snapshot.turns.slice(0, retainedCount) };
+});
+
 export const makeCodexSessionRuntime = (
   options: CodexSessionRuntimeOptions,
 ): Effect.Effect<
@@ -1261,13 +1365,11 @@ export const makeCodexSessionRuntime = (
     const sideChatLock = yield* Semaphore.make(1);
     let sideChat: CodexSideChat | undefined;
     let sideTurnId: string | undefined;
-    const sideOwnTurnIds = new Set<string>();
     const completedSideTurns = new Set<string>();
     let parentTurnSettings: Pick<
       CodexSessionRuntimeSendTurnInput,
       "effort" | "serviceTier" | "interactionMode"
     > = {};
-    const sideTurnTimestamps = new Map<string, { startedAt?: string; completedAt?: string }>();
 
     // Retain closed IDs to suppress late notifications after unsubscribe.
     const sideChatIds = new Set<string>();
@@ -1377,19 +1479,6 @@ export const makeCodexSessionRuntime = (
           ...event,
         };
         if (owner) {
-          if (
-            event.turnId &&
-            (event.method === "turn/started" || event.method === "turn/completed")
-          ) {
-            sideOwnTurnIds.add(event.turnId);
-            const saved = sideTurnTimestamps.get(event.turnId) ?? {};
-            sideTurnTimestamps.set(event.turnId, {
-              ...saved,
-              ...(event.method === "turn/started"
-                ? { startedAt: saved.startedAt ?? fullEvent.createdAt }
-                : { completedAt: saved.completedAt ?? fullEvent.createdAt }),
-            });
-          }
           if (event.requestId) sideRequestOwners.set(event.requestId, owner);
           yield* Queue.offer(sideChatEvents, { sideChatId: owner, event: fullEvent });
           return;
@@ -2596,7 +2685,10 @@ export const makeCodexSessionRuntime = (
             ...((input.effort ?? current.effort) ? { effort: input.effort ?? current.effort } : {}),
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             interactionMode: input.interactionMode ?? current.interactionMode,
-            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+            browserToolsAvailable: configuredMcpToolAvailability(
+              options.appServerArgs,
+              options.mcpCapabilities,
+            ),
           });
           const raw = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(raw).pipe(
@@ -2608,7 +2700,6 @@ export const makeCodexSessionRuntime = (
               ),
             ),
           );
-          sideOwnTurnIds.add(response.turn.id);
           if (response.turn.status === "inProgress" && !completedSideTurns.has(response.turn.id))
             sideTurnId ??= response.turn.id;
           sideChat = {
@@ -2622,78 +2713,6 @@ export const makeCodexSessionRuntime = (
           return { threadId: options.threadId, turnId: TurnId.make(response.turn.id) };
         }).pipe(sideChatLock.withPermits(1)),
       interruptSideChat,
-      detachSideChat: (id) =>
-        Effect.gen(function* () {
-          yield* requireSideChat(id);
-          yield* client.request("thread/unsubscribe", { threadId: id });
-        }).pipe(sideChatLock.withPermits(1)),
-      attachSideChat: (id) =>
-        Effect.gen(function* () {
-          yield* requireSideChat(id);
-          const response = yield* client.request("thread/resume", { threadId: id }).pipe(
-            Effect.catch((error) =>
-              Effect.gen(function* () {
-                if (isRecoverableThreadResumeError(error)) {
-                  sideChat = undefined;
-                  sideTurnId = undefined;
-                  yield* emitEvent({
-                    kind: "notification",
-                    threadId: options.threadId,
-                    method: "thread/closed",
-                    payload: { threadId: id },
-                  });
-                }
-                return yield* Effect.fail(error);
-              }),
-            ),
-          );
-          // The fork excludes history, so recognize side turns by their send
-          // receipts/live events instead of relying on inherited turn IDs.
-          // This also recovers responses completed while disconnected.
-          sideTurnId = undefined;
-          for (const turn of response.thread.turns) {
-            if (!sideOwnTurnIds.has(turn.id)) continue;
-            if (turn.status === "inProgress") sideTurnId = turn.id;
-            const savedTimestamps = sideTurnTimestamps.get(turn.id);
-            const startedAt =
-              turn.startedAt != null
-                ? new Date(turn.startedAt * 1000).toISOString()
-                : savedTimestamps?.startedAt;
-            const completedAt =
-              turn.completedAt != null
-                ? new Date(turn.completedAt * 1000).toISOString()
-                : savedTimestamps?.completedAt;
-            yield* emitEvent({
-              kind: "notification",
-              threadId: options.threadId,
-              method: "turn/started",
-              turnId: TurnId.make(turn.id),
-              ...(startedAt ? { createdAt: startedAt } : {}),
-              payload: { threadId: id, turn },
-            });
-            const itemCreatedAt = completedAt ?? startedAt;
-            for (const item of turn.items) {
-              yield* emitEvent({
-                kind: "notification",
-                threadId: options.threadId,
-                method: "item/completed",
-                turnId: TurnId.make(turn.id),
-                itemId: ProviderItemId.make(item.id),
-                ...(itemCreatedAt ? { createdAt: itemCreatedAt } : {}),
-                payload: { threadId: id, turnId: turn.id, item },
-              });
-            }
-            if (turn.status !== "inProgress")
-              yield* emitEvent({
-                kind: "notification",
-                threadId: options.threadId,
-                method: "turn/completed",
-                turnId: TurnId.make(turn.id),
-                ...(completedAt ? { createdAt: completedAt } : {}),
-                payload: { threadId: id, turn },
-              });
-          }
-        }).pipe(sideChatLock.withPermits(1)),
       closeSideChat,
       sideChatEvents: Stream.fromQueue(sideChatEvents),
       getSession: Ref.get(sessionRef),
@@ -2726,10 +2745,13 @@ export const makeCodexSessionRuntime = (
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
-            // Derived from the session's own MCP configuration rather than the
+            // Derived from the session's own credential rather than the
             // setting, so the prompt describes the tools this turn actually
             // has even if the setting changed after the session started.
-            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+            browserToolsAvailable: configuredMcpToolAvailability(
+              options.appServerArgs,
+              options.mcpCapabilities,
+            ),
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
@@ -2802,24 +2824,17 @@ export const makeCodexSessionRuntime = (
         }),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
-        const response = yield* client.request("thread/read", {
-          threadId: providerThreadId,
-          includeTurns: true,
-        });
-        return parseThreadSnapshot(response);
+        return yield* readCodexThread(client, providerThreadId);
       }),
       rollbackThread: (numTurns) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
-          const response = yield* client.request("thread/rollback", {
-            threadId: providerThreadId,
-            numTurns,
-          });
+          const snapshot = yield* rollbackCodexThread(client, providerThreadId, numTurns);
           yield* updateSession(sessionRef, {
             status: "ready",
             activeTurnId: undefined,
           });
-          return parseThreadSnapshot(response);
+          return snapshot;
         }),
       uploadFeedback: (reason) =>
         Effect.gen(function* () {

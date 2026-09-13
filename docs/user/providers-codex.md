@@ -6,8 +6,9 @@ and custom binaries or environment variables.
 
 ## Import existing conversations
 
-Open **Settings > Projects > Import conversations**, or select a project in
-Settings to start with that project's conversations. On mobile, use **Settings > Import Codex Chats**.
+Open **Settings > General > Import conversations**, or use **Import conversations**
+from the command palette. Select a project or checkout in Settings to narrow the
+picker to its conversations. On mobile, use **Settings > Import Codex Chats**.
 Choose the Codex account on the environment that holds the conversations, then
 select whole projects or open a project to choose individual conversations. Imports
 keep their original folders and create missing T3 projects as needed. Git worktrees
@@ -49,9 +50,10 @@ chat continues. Side-chat messages do not become part of the main conversation.
 
 You can change its model, reasoning effort, speed, permissions, and Build/Plan mode.
 It shares the main chat's workspace; the branch indicator does not switch branches.
-Side chats are temporary and do not appear in the thread list. Closing the tab ends
-the conversation, and Codex can expire it while it is inactive and hidden. Start a
-new side chat to take a fresh copy of the main conversation's context.
+Side chats are temporary and do not appear in the thread list. Hiding the panel
+keeps the conversation available while its parent provider session is running.
+Closing the tab ends it. Start a new side chat to take a fresh copy of the main
+conversation's context.
 
 ## Ask Codex to start another chat
 
@@ -64,7 +66,7 @@ You can open the new chat and continue it yourself, or ask the original agent to
 read its progress and send a follow-up. Messages sent by another agent are labeled
 in the receiving chat. Each chat handles its own questions and approvals.
 
-**Agent task access** in Settings controls these tools for new Codex sessions,
+**Agent task access** in **Settings > Integrations** controls these tools for new Codex sessions,
 independently of browser access. Task tools operate within the current T3 project;
 other providers do not yet receive agent-authored task messages.
 

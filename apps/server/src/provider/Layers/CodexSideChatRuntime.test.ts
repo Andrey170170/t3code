@@ -1,6 +1,5 @@
-import * as NodeFSP from "node:fs/promises";
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { ThreadId, type ProviderEvent } from "@t3tools/contracts";
@@ -14,18 +13,16 @@ import { makeCodexSessionRuntime, type CodexSideChatEvent } from "./CodexSession
 
 const makeRuntime = (failInject = false) =>
   Effect.gen(function* () {
-    const dir = yield* Effect.acquireRelease(
-      Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-side-test-"))),
-      (dir) => Effect.promise(() => NodeFSP.rm(dir, { recursive: true, force: true })),
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-side-test-" });
+    const log = path.join(dir, "requests.jsonl");
+    const source = yield* fs.readFileString(
+      path.join(import.meta.dirname, "fixtures/codex-side-chat-peer.mjs"),
     );
-    const log = NodePath.join(dir, "requests.jsonl");
-    const binaryPath = yield* Effect.promise(async () => {
-      const source = await NodeFSP.readFile(
-        NodePath.join(import.meta.dirname, "fixtures/codex-side-chat-peer.mjs"),
-        "utf8",
-      );
-      return writeFakeCli({ directory: dir, name: "codex-peer", source });
-    });
+    const binaryPath = yield* Effect.sync(() =>
+      writeFakeCli({ directory: dir, name: "codex-peer", source }),
+    );
     const runtimeScope = yield* Scope.make();
     yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
     const runtime = yield* makeCodexSessionRuntime({
@@ -33,6 +30,8 @@ const makeRuntime = (failInject = false) =>
       binaryPath,
       cwd: dir,
       runtimeMode: "approval-required",
+      appServerArgs: ["-c", 'mcp_servers.t3-code.url="http://localhost/mcp"'],
+      mcpCapabilities: new Set(["pull-requests", "device"]),
       environment: {
         ...process.env,
         SIDE_TEST_LOG: log,
@@ -42,11 +41,13 @@ const makeRuntime = (failInject = false) =>
     yield* runtime.start();
     return {
       runtime,
-      readRequests: Effect.promise(async () =>
-        (await NodeFSP.readFile(log, "utf8"))
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line) as { method: string; params: Record<string, unknown> }),
+      readRequests: fs.readFileString(log).pipe(
+        Effect.map((contents) =>
+          contents
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line) as { method: string; params: Record<string, unknown> }),
+        ),
       ),
     };
   });
@@ -61,7 +62,6 @@ it.layer(NodeServices.layer)("native Codex side conversations", (it) => {
         const sideEvents: CodexSideChatEvent[] = [];
         const approval = yield* Deferred.make<ProviderEvent>();
         const completed = yield* Deferred.make<void>();
-        const replayed = yield* Deferred.make<void>();
         yield* runtime.events.pipe(
           Stream.runForEach((event) =>
             Effect.sync(() => {
@@ -74,8 +74,6 @@ it.layer(NodeServices.layer)("native Codex side conversations", (it) => {
           Stream.runForEach((entry) =>
             Effect.gen(function* () {
               sideEvents.push(entry);
-              if (entry.event.itemId === "replay-answer")
-                yield* Deferred.succeed(replayed, undefined);
               if (entry.event.kind === "request") yield* Deferred.succeed(approval, entry.event);
               if (entry.event.method === "turn/completed")
                 yield* Deferred.succeed(completed, undefined);
@@ -111,21 +109,6 @@ it.layer(NodeServices.layer)("native Codex side conversations", (it) => {
           sideEvents.some(({ event }) => event.method === "item/requestApproval/decision"),
         );
         assert.isTrue(sideEvents.some(({ event }) => event.textDelta === "Side answer"));
-        yield* runtime.detachSideChat(side.id);
-        yield* runtime.attachSideChat(side.id);
-        yield* Deferred.await(replayed);
-        assert.isFalse(sideEvents.some(({ event }) => event.itemId === "parent-answer"));
-        assert.isTrue(
-          sideEvents.some(
-            ({ event }) =>
-              event.method === "turn/started" &&
-              event.createdAt === new Date(1740000000 * 1000).toISOString(),
-          ),
-        );
-        assert.equal(
-          sideEvents.find(({ event }) => event.itemId === "replay-answer")?.event.createdAt,
-          new Date(1740000010 * 1000).toISOString(),
-        );
         yield* runtime.sendSideChat(side.id, { input: "hold" });
         yield* runtime.closeSideChat(side.id);
         const stale = yield* runtime
@@ -147,6 +130,11 @@ it.layer(NodeServices.layer)("native Codex side conversations", (it) => {
           ["turn/interrupt", "thread/unsubscribe"],
         );
         const turn = requests.find((request) => request.method === "turn/start")!;
+        const collaborationMode = turn.params.collaborationMode as {
+          settings: { developer_instructions: string };
+        };
+        assert.include(collaborationMode.settings.developer_instructions, "device_list");
+        assert.notInclude(collaborationMode.settings.developer_instructions, "preview_status");
         assert.equal(turn.params.effort, "low");
         assert.deepEqual(turn.params.sandboxPolicy, { type: "dangerFullAccess" });
       }),

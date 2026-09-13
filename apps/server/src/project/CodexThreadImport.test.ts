@@ -244,6 +244,7 @@ const makeExistingThread = (id: ThreadId, archivedAt: string | null = null) =>
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    pullRequests: [],
   }) satisfies OrchestrationThreadShell;
 
 it.layer(testLayer)("Codex native imports", (it) => {
