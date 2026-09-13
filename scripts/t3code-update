@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+VERSION_FILE="${REPO_ROOT}/config/t3code/VERSION"
+VERSION_PATH="config/t3code/VERSION"
+# Forgejo is the default; source builds and upstream npm remain explicit options.
+mode=forgejo
+for arg in "$@"; do
+  case $arg in --npm|--source|--repo) mode=legacy ;; esac
+done
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+  cat <<'HELP'
+Usage: t3code-update [--check | --yes] [VERSION] [--token-file PATH]
+       t3code-update --npm [--check | --yes] [VERSION]
+       t3code-update --source PATH [--ref REF] [--check | --build-only --output DIR | --yes]
+       t3code-update --repo URL --ref REF [--check | --build-only --output DIR | --yes]
+
+Defaults to the Forgejo custom tag. Install prompts before restarting the user
+service; --yes skips the prompt. --check only reports the published version.
+Authentication: PACKAGE_FOGEJO_TOKEN_FILE or --token-file PATH.
+HELP
+  exit 0
+fi
+if [[ $mode == forgejo ]]; then
+  command=install
+  confirmed=0
+  args=()
+  while (($#)); do
+    case $1 in
+      --forgejo) shift ;;
+      --check) command=check; shift ;;
+      --yes) confirmed=1; shift ;;
+      --registry|--token-file) (($# >= 2)) || exit 2; args+=("$1" "$2"); shift 2 ;;
+      -*) echo "Unknown Forgejo option: $1" >&2; exit 2 ;;
+      *) args+=(--version "$1"); shift ;;
+    esac
+  done
+  if [[ $command == install ]]; then
+    if [[ $confirmed != 1 ]]; then
+      read -r -p "Install from Forgejo and restart T3? [y/N] " reply || exit 1
+      [[ $reply =~ ^[Yy]$ ]] || { echo 'Update cancelled.'; exit 0; }
+    fi
+    args+=(--yes)
+  fi
+  exec node "$SCRIPT_DIR/t3code-forgejo.mjs" "$command" "${args[@]}"
+fi
+legacy_args=()
+for arg in "$@"; do [[ $arg == --npm ]] || legacy_args+=("$arg"); done
+set -- "${legacy_args[@]}"
+CHECK_ONLY=0
+ASSUME_YES=0
+TARGET_VERSION=""
+TEMP_VERSION_FILE=""
+VERSION_CHANGE_PENDING=0
+SOURCE=""
+GIT_REPO=""
+GIT_REF=""
+BUILD_ONLY=0
+BUILD_OUTPUT=""
+TEMP_BUILD=""
+
+usage() {
+  cat <<'EOF'
+Usage: t3code-update --forgejo [--check | --yes] [VERSION] [--token-file PATH]
+       t3code-update [--check] [--yes] [VERSION]
+       t3code-update --source PATH [--ref REF] [--check | --build-only --output DIR | --yes]
+       t3code-update --repo URL --ref REF [--check | --build-only --output DIR | --yes]
+
+Update T3 Code to npm's latest stable version, or to an exact VERSION.
+
+Options:
+  --check  Report the target version without changing or deploying anything
+  --yes    Skip the confirmation prompt
+  --source PATH  Build a local Git checkout (clean HEAD by default)
+  --repo URL     Build a remote Git repository; requires --ref
+  --ref REF      Select a commit, tag, or branch (resolved to an exact commit)
+  --build-only   Compile/package without installing or restarting T3
+  --output DIR   Retain source-build artifacts here (required for --build-only)
+  --help         Show this help
+EOF
+}
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+validate_version() {
+  [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+config_uses_version() (
+  local version=$1
+  [[ -r $HOME/.config/t3code/service.env ]] || return 1
+  source "$HOME/.config/t3code/service.env"
+  [[ ${T3CODE_ENTRY:-} == "${T3CODE_BASE}/runtime/versions/${version}/node_modules/t3/dist/bin.mjs" ]]
+)
+
+config_uses_previous_entry() (
+  [[ -n ${PREVIOUS_ENTRY:-} && -r $HOME/.config/t3code/service.env ]] || return 1
+  source "$HOME/.config/t3code/service.env"
+  [[ ${T3CODE_ENTRY:-} == "$PREVIOUS_ENTRY" ]]
+)
+
+reconcile_version_after_failure() {
+  if config_uses_version "${TARGET_VERSION}"; then
+    echo "The target runtime ${TARGET_VERSION} remains installed; leaving VERSION at ${TARGET_VERSION} to match it." >&2
+  elif config_uses_version "${CURRENT_VERSION}" || config_uses_previous_entry; then
+    echo "The previous runtime is still configured; restoring the previous npm VERSION pin." >&2
+    write_version "${CURRENT_VERSION}"
+  else
+    echo "Could not identify the configured T3 Code runtime version; leaving VERSION at ${TARGET_VERSION}." >&2
+    echo "Inspect ~/.config/t3code/service.env before restarting T3 Code." >&2
+  fi
+  VERSION_CHANGE_PENDING=0
+}
+
+cleanup() {
+  local status=$?
+
+  trap - EXIT
+  if [[ -n ${TEMP_VERSION_FILE} && -f ${TEMP_VERSION_FILE} ]]; then
+    rm -f -- "${TEMP_VERSION_FILE}"
+  fi
+  if [[ ${VERSION_CHANGE_PENDING} -eq 1 ]]; then
+    reconcile_version_after_failure || true
+  fi
+  if [[ -n ${TEMP_BUILD} ]]; then rm -rf -- "${TEMP_BUILD}"; fi
+  exit "${status}"
+}
+
+write_version() {
+  local version=$1
+
+  TEMP_VERSION_FILE="$(mktemp "${VERSION_FILE}.tmp.XXXXXX")"
+  printf '%s\n' "${version}" >"${TEMP_VERSION_FILE}"
+  chmod --reference="${VERSION_FILE}" "${TEMP_VERSION_FILE}"
+  mv -f -- "${TEMP_VERSION_FILE}" "${VERSION_FILE}"
+  TEMP_VERSION_FILE=""
+}
+
+trap cleanup EXIT
+
+while (($# > 0)); do
+  case $1 in
+    --source|--repo|--ref|--output)
+      (($# >= 2)) || die "Missing value for $1"
+      [[ -n $2 ]] || die "Empty value for $1"
+      case $1 in
+        --source) SOURCE=$2 ;;
+        --repo) GIT_REPO=$2 ;;
+        --ref) GIT_REF=$2 ;;
+        --output) BUILD_OUTPUT=$2 ;;
+      esac
+      shift
+      ;;
+    --build-only)
+      BUILD_ONLY=1
+      ;;
+    --check)
+      CHECK_ONLY=1
+      ;;
+    --yes)
+      ASSUME_YES=1
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      if (($# > 1)) || [[ -n ${TARGET_VERSION} && $# -gt 0 ]]; then
+        die "Only one VERSION may be specified."
+      fi
+      if (($# == 1)); then
+        TARGET_VERSION=$1
+      fi
+      break
+      ;;
+    -*)
+      die "Unknown option: $1"
+      ;;
+    *)
+      if [[ -n ${TARGET_VERSION} ]]; then
+        die "Only one VERSION may be specified."
+      fi
+      TARGET_VERSION=$1
+      ;;
+  esac
+  shift
+done
+
+if [[ ${EUID} -eq 0 ]]; then
+  die "Run this updater as your normal user, without sudo."
+fi
+
+CURRENT_VERSION="$(<"${VERSION_FILE}")"
+validate_version "${CURRENT_VERSION}" ||
+  die "Invalid current version in ${VERSION_FILE}: expected stable semver (X.Y.Z)."
+
+if [[ -r $HOME/.config/t3code/service.env ]]; then
+  source "$HOME/.config/t3code/service.env"
+  export PATH="$(dirname "$T3CODE_NODE"):$PATH"
+fi
+PREVIOUS_ENTRY=${T3CODE_ENTRY:-}
+
+if [[ -n $SOURCE || -n $GIT_REPO ]]; then
+  [[ -z $TARGET_VERSION ]] || die "VERSION cannot be combined with a source build."
+  [[ -z $SOURCE || -z $GIT_REPO ]] || die "Choose --source or --repo, not both."
+  [[ -z $GIT_REPO || -n $GIT_REF ]] || die "--repo requires --ref."
+  [[ $CHECK_ONLY -eq 0 || $BUILD_ONLY -eq 0 ]] || die "--check and --build-only are mutually exclusive."
+  [[ $BUILD_ONLY -eq 0 || -n $BUILD_OUTPUT ]] || die "--build-only requires --output DIR."
+  args=()
+  if [[ -n $SOURCE ]]; then args+=(--source "$SOURCE"); else args+=(--repo "$GIT_REPO"); fi
+  if [[ -n $GIT_REF ]]; then args+=(--ref "$GIT_REF"); fi
+  if [[ $CHECK_ONLY -eq 1 ]]; then
+    exec "${SCRIPT_DIR}/t3code-build" "${args[@]}" --check
+  fi
+  # Build-only runs do not touch the installed service or its configuration.
+  if [[ $BUILD_ONLY -ne 1 ]]; then
+    mkdir -p "$HOME/.config/t3code"
+    exec 8>"$HOME/.config/t3code/update.lock"
+    flock -n 8 || die "Another T3 update is in progress."
+  fi
+  if [[ -z $BUILD_OUTPUT ]]; then
+    TEMP_BUILD=$(mktemp -d)
+    BUILD_OUTPUT="$TEMP_BUILD/artifact"
+  fi
+  "${SCRIPT_DIR}/t3code-build" "${args[@]}" --output "$BUILD_OUTPUT"
+  if [[ $BUILD_ONLY -eq 1 ]]; then
+    echo "Build ready in $BUILD_OUTPUT. T3 was not restarted."
+    exit 0
+  fi
+  commit=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).commit' "$BUILD_OUTPUT/build.json")
+  [[ $commit =~ ^[0-9a-f]{40,64}$ ]] || die "Builder returned an invalid commit."
+  artifact_hash=$(sha256sum -- "$BUILD_OUTPUT/package.tgz")
+  build_id="git-$commit-${artifact_hash:0:12}"
+  echo "Built runtime: $build_id"
+  if [[ $ASSUME_YES -ne 1 ]]; then
+    read -r -p "Install this build and restart T3? [y/N] " REPLY || die "No confirmation received; update cancelled."
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then echo "Update cancelled."; exit 0; fi
+  fi
+  "${SCRIPT_DIR}/t3code-install" --package "$BUILD_OUTPUT/package.tgz" --build-id "$build_id"
+  echo "Custom build deployed. The npm VERSION pin is unchanged."
+  exit 0
+fi
+[[ -z $GIT_REF && -z $BUILD_OUTPUT && $BUILD_ONLY -eq 0 ]] || die "Source build options require --source or --repo."
+
+command -v npm >/dev/null 2>&1 || die "npm is required to query the T3 package."
+
+if [[ -z ${TARGET_VERSION} ]]; then
+  if ! TARGET_VERSION="$(npm view t3@latest version)"; then
+    die "Could not query npm for the latest stable t3 version."
+  fi
+  validate_version "${TARGET_VERSION}" ||
+    die "npm returned an invalid latest stable version: ${TARGET_VERSION}"
+else
+  validate_version "${TARGET_VERSION}" ||
+    die "Invalid target version '${TARGET_VERSION}': expected stable semver (X.Y.Z)."
+  if ! PUBLISHED_VERSION="$(npm view "t3@${TARGET_VERSION}" version)"; then
+    die "Exact t3 version ${TARGET_VERSION} does not exist on npm."
+  fi
+  if [[ ${PUBLISHED_VERSION} != "${TARGET_VERSION}" ]]; then
+    die "npm did not confirm exact t3 version ${TARGET_VERSION}."
+  fi
+fi
+
+echo "Pinned npm version: ${CURRENT_VERSION}"
+echo "Configured runtime: ${T3CODE_BUILD_ID:-${T3CODE_ENTRY:-not installed}}"
+echo "Target version:  ${TARGET_VERSION}"
+echo "Release notes: https://github.com/pingdotgg/t3code/releases/tag/v${TARGET_VERSION}"
+
+if [[ ${CHECK_ONLY} -eq 1 ]]; then
+  if [[ ${TARGET_VERSION} == "${CURRENT_VERSION}" ]]; then
+    echo "The npm release pin is current (the configured runtime may be a custom build)."
+  else
+    echo "T3 Code ${TARGET_VERSION} is available."
+  fi
+  exit 0
+fi
+
+mkdir -p "$HOME/.config/t3code"
+exec 8>"$HOME/.config/t3code/update.lock"
+flock -n 8 || die "Another T3 update is in progress."
+
+if ! git -C "${REPO_ROOT}" diff --quiet -- "${VERSION_PATH}" ||
+  ! git -C "${REPO_ROOT}" diff --cached --quiet -- "${VERSION_PATH}"; then
+  die "${VERSION_PATH} has staged or unstaged changes; resolve them before updating."
+fi
+
+if [[ ${ASSUME_YES} -ne 1 ]]; then
+  if ! read -r -p "Review the release notes, then restart T3 with ${TARGET_VERSION}? [y/N] " REPLY; then
+    echo "No confirmation received; update cancelled." >&2
+    exit 1
+  fi
+  if [[ ! ${REPLY} =~ ^[Yy]$ ]]; then
+    echo "Update cancelled."
+    exit 0
+  fi
+fi
+
+if [[ ${TARGET_VERSION} != "${CURRENT_VERSION}" ]]; then
+  write_version "${TARGET_VERSION}"
+  VERSION_CHANGE_PENDING=1
+fi
+
+if ! "${SCRIPT_DIR}/t3code-install"; then
+  echo "Deployment failed; reconciling VERSION with the configured runtime." >&2
+  exit 1
+fi
+
+VERSION_CHANGE_PENDING=0
+
+if [[ ${TARGET_VERSION} == "${CURRENT_VERSION}" ]]; then
+  echo "T3 Code ${TARGET_VERSION} was redeployed; VERSION was unchanged."
+else
+  echo "T3 Code ${TARGET_VERSION} deployed. Review and commit the VERSION diff."
+fi

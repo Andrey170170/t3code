@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+# Build an installable T3 CLI package from an exact source commit.
+set -euo pipefail
+
+SOURCE=""
+REPO=""
+REF=""
+OUTPUT=""
+REQUESTED_APP_VERSION=""
+CHECK_ONLY=0
+TEMP_DIR=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  t3code-build --source LOCAL_CLEAN_GIT_CHECKOUT [--ref COMMIT_OR_TAG] [--output DIR]
+  t3code-build --repo GIT_URL --ref COMMIT_OR_TAG [--output DIR]
+
+Build an npm tarball for the T3 CLI from an exact git commit. The input checkout
+is never modified. Without --ref, --source uses HEAD and requires a clean
+checkout. Remote builds always require --ref.
+
+Options:
+  --source PATH  Read source from a local git checkout
+  --repo URL     Fetch source from a git repository
+  --ref REF      Commit, tag, or branch to build
+  --output DIR   Write DIR/package.tgz and DIR/build.json (required to build)
+  --app-version VERSION  Embed an allocated Forgejo release version
+  --check        Resolve and report the source commit without building
+  --help         Show this help
+EOF
+}
+
+die() {
+  echo "t3code-build: $*" >&2
+  exit 1
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ -n $TEMP_DIR && -d $TEMP_DIR ]]; then
+    rm -rf -- "$TEMP_DIR"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
+need_value() {
+  (($# >= 2)) && [[ -n $2 ]] || die "$1 requires a value."
+}
+
+while (($# > 0)); do
+  case $1 in
+    --source)
+      need_value "$@"
+      SOURCE=$2
+      shift 2
+      ;;
+    --repo)
+      need_value "$@"
+      REPO=$2
+      shift 2
+      ;;
+    --ref)
+      need_value "$@"
+      REF=$2
+      shift 2
+      ;;
+    --output)
+      need_value "$@"
+      OUTPUT=$2
+      shift 2
+      ;;
+    --app-version)
+      need_value "$@"
+      REQUESTED_APP_VERSION=$2
+      shift 2
+      ;;
+    --check)
+      CHECK_ONLY=1
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      (($# == 0)) || die "Unexpected positional arguments: $*"
+      ;;
+    -*)
+      die "Unknown option: $1"
+      ;;
+    *)
+      die "Unexpected positional argument: $1"
+      ;;
+  esac
+done
+
+[[ -n $SOURCE || -n $REPO ]] || die "Specify exactly one of --source or --repo."
+[[ -z $SOURCE || -z $REPO ]] || die "--source and --repo cannot be used together."
+if [[ -n $REPO && -z $REF ]]; then
+  die "--repo requires --ref."
+fi
+if [[ $CHECK_ONLY -eq 0 && -z $OUTPUT ]]; then
+  die "--output is required unless --check is used."
+fi
+
+command -v git >/dev/null 2>&1 || die "git is required."
+
+if [[ -n $SOURCE ]]; then
+  SOURCE=$(readlink -f -- "$SOURCE") || die "Could not resolve source path."
+  git -C "$SOURCE" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+    die "Not a git checkout: $SOURCE"
+  SOURCE_ROOT=$(git -C "$SOURCE" rev-parse --show-toplevel)
+  [[ $SOURCE == "$SOURCE_ROOT" ]] ||
+    die "--source must name the root of its git checkout: $SOURCE_ROOT"
+
+  if [[ -z $REF ]]; then
+    [[ -z $(git -C "$SOURCE" status --porcelain=v1 --untracked-files=normal) ]] ||
+      die "The source checkout is dirty; commit or clean it, or select an explicit --ref."
+    REF=HEAD
+  fi
+  COMMIT=$(git -C "$SOURCE" rev-parse --verify "${REF}^{commit}" 2>/dev/null) ||
+    die "Could not resolve local ref '$REF' to a commit."
+  ORIGIN=$(git -C "$SOURCE" remote get-url origin 2>/dev/null || true)
+  SOURCE_KIND=local
+  SOURCE_LABEL=$SOURCE
+else
+  # A temporary bare fetch resolves tags, branches, and advertised commit IDs
+  # without creating or changing a working checkout.
+  TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/t3code-build.XXXXXX")
+  RESOLVE_REPO="$TEMP_DIR/resolve.git"
+  git init --bare --quiet "$RESOLVE_REPO"
+  git -C "$RESOLVE_REPO" remote add origin "$REPO"
+  git -C "$RESOLVE_REPO" fetch --quiet --depth=1 origin "$REF" ||
+    die "Could not fetch remote ref '$REF' from $REPO"
+  COMMIT=$(git -C "$RESOLVE_REPO" rev-parse --verify 'FETCH_HEAD^{commit}') ||
+    die "Remote ref '$REF' did not resolve to a commit."
+  ORIGIN=$REPO
+  SOURCE_KIND=remote
+  SOURCE_LABEL=$REPO
+fi
+
+printf 'source=%s\nref=%s\ncommit=%s\n' "$SOURCE_LABEL" "$REF" "$COMMIT"
+if [[ $CHECK_ONLY -eq 1 ]]; then
+  exit 0
+fi
+
+command -v node >/dev/null 2>&1 || die "node is required to build T3."
+command -v npm >/dev/null 2>&1 || die "npm is required to run the pinned package manager."
+NODE_MAJOR=$(node -p 'Number(process.versions.node.split(".")[0])')
+[[ $NODE_MAJOR =~ ^[0-9]+$ && $NODE_MAJOR -ge 24 ]] ||
+  die "T3 source builds require Node 24 or newer (found $(node --version))."
+
+OUTPUT=$(realpath -m -- "$OUTPUT")
+[[ ! -e "$OUTPUT/package.tgz" ]] || die "Output already exists: $OUTPUT/package.tgz"
+[[ ! -e "$OUTPUT/build.json" ]] || die "Output already exists: $OUTPUT/build.json"
+mkdir -p -- "$OUTPUT"
+
+if [[ -z $TEMP_DIR ]]; then
+  TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/t3code-build.XXXXXX")
+fi
+SNAPSHOT="$TEMP_DIR/source"
+mkdir -p -- "$SNAPSHOT"
+if [[ $SOURCE_KIND == local ]]; then
+  git -C "$SOURCE" archive --format=tar "$COMMIT" | tar -xf - -C "$SNAPSHOT"
+else
+  git -C "$RESOLVE_REPO" archive --format=tar "$COMMIT" | tar -xf - -C "$SNAPSHOT"
+fi
+
+[[ -f "$SNAPSHOT/package.json" && -f "$SNAPSHOT/pnpm-lock.yaml" ]] ||
+  die "The selected commit is not a supported T3 repository."
+[[ -f "$SNAPSHOT/apps/server/package.json" ]] ||
+  die "The selected commit has no apps/server package."
+
+PACKAGE_MANAGER=$(node -e '
+  const p = require(process.argv[1]);
+  if (typeof p.packageManager !== "string") process.exit(1);
+  process.stdout.write(p.packageManager);
+' "$SNAPSHOT/package.json") || die "package.json has no packageManager pin."
+NODE_ENGINE=$(node -e '
+  const p = require(process.argv[1]);
+  if (typeof p.engines?.node !== "string") process.exit(1);
+  process.stdout.write(p.engines.node);
+' "$SNAPSHOT/package.json") || die "package.json has no Node engine requirement."
+[[ $PACKAGE_MANAGER =~ ^pnpm@[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] ||
+  die "Unsupported packageManager pin: $PACKAGE_MANAGER"
+PNPM_VERSION=${PACKAGE_MANAGER#pnpm@}
+
+PNPM=(npm exec --yes --package="$PACKAGE_MANAGER" -- pnpm)
+if command -v pnpm >/dev/null 2>&1 && [[ $(pnpm --version 2>/dev/null) == "$PNPM_VERSION" ]]; then
+  PNPM=(pnpm)
+fi
+
+VERSION=$(node -e '
+  const p = require(process.argv[1]);
+  if (typeof p.version !== "string" || !p.version) process.exit(1);
+  process.stdout.write(p.version);
+' "$SNAPSHOT/apps/server/package.json") || die "T3 server package has no version."
+
+# Custom versions are immutable and distinct from upstream stable releases.
+if [[ -n $REQUESTED_APP_VERSION ]]; then
+  [[ $REQUESTED_APP_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+-forgejo\.[0-9]+$ &&
+     ${REQUESTED_APP_VERSION%-forgejo.*} == "${VERSION%%-*}" ]] ||
+    die "--app-version must be a Forgejo counter release for upstream ${VERSION%%-*}."
+  VERSION=$REQUESTED_APP_VERSION
+else
+  VERSION="${VERSION%%-*}-forgejo.$(git -C "${SOURCE:-$RESOLVE_REPO}" show -s --format=%ct "$COMMIT").g${COMMIT:0:12}"
+fi
+node -e '
+  const fs = require("node:fs");
+  const path = process.argv[1];
+  const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+  pkg.version = process.argv[2];
+  fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+' "$SNAPSHOT/apps/server/package.json" "$VERSION"
+export APP_VERSION="$VERSION"
+
+echo "Installing dependencies with $PACKAGE_MANAGER..." >&2
+(cd -- "$SNAPSHOT" && "${PNPM[@]}" --config.engine-strict=true install --frozen-lockfile \
+  --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...)
+
+echo "Building T3 CLI package..." >&2
+(cd -- "$SNAPSHOT" && "${PNPM[@]}" exec vp run --filter t3 build)
+for asset in dist/bin.mjs dist/service-launcher.mjs dist/client/index.html; do
+  [[ -f "$SNAPSHOT/apps/server/$asset" ]] ||
+    die "Build did not produce required package asset: apps/server/$asset"
+done
+
+METADATA="$SNAPSHOT/apps/server/t3code-build.json"
+node -e '
+  const fs = require("node:fs");
+  const data = {
+    schema: "t3code-source-build/v1",
+    commit: process.argv[2],
+    repo: process.argv[3] || null,
+    source: process.argv[4],
+    ref: process.argv[5],
+    version: process.argv[6],
+    packageManager: process.argv[7],
+    nodeEngine: process.argv[8],
+  };
+  fs.writeFileSync(process.argv[1], JSON.stringify(data, null, 2) + "\n");
+' "$METADATA" "$COMMIT" "$ORIGIN" "$SOURCE_LABEL" "$REF" "$VERSION" "$PACKAGE_MANAGER" "$NODE_ENGINE"
+(cd -- "$SNAPSHOT" && node --input-type=module -e '
+  import fs from "node:fs";
+  import { createRequire } from "node:module";
+  const require = createRequire(new URL("./apps/server/package.json", import.meta.url));
+  const { parse } = require("yaml");
+
+  const serverPath = "apps/server/package.json";
+  const server = JSON.parse(fs.readFileSync(serverPath, "utf8"));
+  const workspace = parse(fs.readFileSync("pnpm-workspace.yaml", "utf8"));
+  const catalog = workspace.catalog ?? {};
+  const resolve = (dependencies, packageName) => Object.fromEntries(
+    Object.entries(dependencies ?? {}).map(([name, spec]) => {
+      if (typeof spec !== "string" || !spec.startsWith("catalog:")) return [name, spec];
+      const explicit = spec.slice("catalog:".length).trim();
+      const key = explicit || name;
+      const value = catalog[key];
+      if (typeof value !== "string" || !value) {
+        throw new Error(`Unable to resolve ${spec} for ${packageName} dependency ${name}`);
+      }
+      return [name, value];
+    }),
+  );
+  const published = {
+    name: server.name,
+    repository: server.repository,
+    bin: server.bin,
+    type: server.type,
+    version: server.version,
+    engines: server.engines,
+    files: Array.from(new Set([...(server.files ?? []), "t3code-build.json"])),
+    dependencies: resolve(server.dependencies, "apps/server"),
+    overrides: resolve(workspace.overrides, "apps/server"),
+  };
+  fs.writeFileSync(serverPath, JSON.stringify(published, null, 2) + "\n");
+')
+
+PACK_DIR="$TEMP_DIR/package"
+mkdir -p -- "$PACK_DIR"
+echo "Packing T3 CLI npm artifact..." >&2
+# npm exec must start at the workspace root: npm cannot parse pnpm-specific
+# override selectors in the server publish manifest before pnpm starts.
+(cd -- "$SNAPSHOT" && "${PNPM[@]}" --dir apps/server pack --pack-destination "$PACK_DIR")
+mapfile -t PACKED < <(find "$PACK_DIR" -maxdepth 1 -type f -name '*.tgz' -print)
+[[ ${#PACKED[@]} -eq 1 ]] || die "Expected one npm tarball, found ${#PACKED[@]}."
+tar -tzf "${PACKED[0]}" >"$TEMP_DIR/package-contents"
+for member in package/package.json package/t3code-build.json \
+  package/dist/bin.mjs package/dist/service-launcher.mjs package/dist/client/index.html; do
+  grep -Fqx -- "$member" "$TEMP_DIR/package-contents" ||
+    die "Packed artifact is missing required file: $member"
+done
+
+SHA256=$(sha256sum "${PACKED[0]}" | awk '{print $1}')
+OUTPUT_METADATA="$TEMP_DIR/build.json"
+node -e '
+  const fs = require("node:fs");
+  const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  data.artifact = "package.tgz";
+  data.sha256 = process.argv[3];
+  fs.writeFileSync(process.argv[2], JSON.stringify(data, null, 2) + "\n");
+' "$METADATA" "$OUTPUT_METADATA" "$SHA256"
+install -m 644 -- "${PACKED[0]}" "$OUTPUT/package.tgz"
+install -m 644 -- "$OUTPUT_METADATA" "$OUTPUT/build.json"
+
+printf 'version=%s\npackage=%s\nmetadata=%s\nsha256=%s\n' \
+  "$VERSION" "$OUTPUT/package.tgz" "$OUTPUT/build.json" "$SHA256"

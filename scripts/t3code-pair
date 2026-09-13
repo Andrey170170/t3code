@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${1:-} == --help ]]; then
+  echo 'Usage: t3code-pair [DEVICE_LABEL] (prints a sensitive one-hour pairing URL and QR code)'
+  exit 0
+fi
+(($# <= 1)) || { echo 'Expected at most one device label.' >&2; exit 2; }
+source "${HOME}/.config/t3code/service.env"
+export PATH="$(dirname "$T3CODE_NODE"):${HOME}/.local/bin:${HOME}/.volta/bin:/usr/bin:/bin"
+pairing_output=$("$T3CODE_NODE" "$T3CODE_ENTRY" auth pairing create \
+  --base-dir "$T3CODE_BASE" --base-url "$T3CODE_ORIGIN" --ttl 1h --label "${1:-Browser}")
+printf '%s\n' "$pairing_output"
+pairing_url=$(sed -n 's/^Pair URL: //p' <<< "$pairing_output")
+if [[ -n $pairing_url ]] && command -v qr >/dev/null 2>&1; then
+  printf '\nScan to pair:\n'
+  printf '%s' "$pairing_url" | qr --ascii || echo 'QR rendering failed; use the link above.' >&2
+else
+  echo 'QR unavailable; install with: uv tool install qrcode==8.2' >&2
+fi

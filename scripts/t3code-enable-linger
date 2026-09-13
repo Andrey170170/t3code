@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Run manually with sudo so the user's T3 service starts at VM boot.
+set -euo pipefail
+[[ $EUID == 0 && -n ${SUDO_USER:-} && $SUDO_USER != root ]] || {
+  echo 'Run with sudo from the development user account.' >&2
+  exit 1
+}
+loginctl enable-linger "$SUDO_USER"
+loginctl show-user "$SUDO_USER" -p Linger
