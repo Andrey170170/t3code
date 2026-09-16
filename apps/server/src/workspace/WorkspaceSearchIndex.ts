@@ -1,4 +1,6 @@
 import * as NodeModule from "node:module";
+import * as NodeSea from "node:sea";
+import * as NodeURL from "node:url";
 
 import type {
   DirItem,
@@ -27,12 +29,14 @@ import type {
 } from "@t3tools/contracts";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 
-// fff-node stays external to the CLI bundle because it dlopens a native
-// library. A static `import` of an external package is a hard error inside a
-// Node single-executable (only built-ins resolve there), so load it through
-// `require`, which reads from the real filesystem in every runtime.
+// Executable archives carry fff-node's patched require export. npm installs
+// receive its import-only manifest, so resolve the ESM entry before requiring
+// it in plain Node. SEA cannot resolve external ESM specifiers.
 const requireForFff = NodeModule.createRequire(import.meta.url);
-const { FileFinder } = requireForFff("@ff-labs/fff-node") as typeof import("@ff-labs/fff-node");
+const fffEntry = NodeSea.isSea()
+  ? "@ff-labs/fff-node"
+  : NodeURL.fileURLToPath(import.meta.resolve("@ff-labs/fff-node"));
+const { FileFinder } = requireForFff(fffEntry) as typeof import("@ff-labs/fff-node");
 
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
 const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;

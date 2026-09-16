@@ -297,6 +297,15 @@ for member in package/package.json package/t3code-build.json \
     die "Packed artifact is missing required file: $member"
 done
 
+echo "Checking the package in an isolated npm installation..." >&2
+SMOKE_DIR="$TEMP_DIR/smoke"
+# Workspace patches are absent from npm's dependency install. Exercise the
+# actual package so a loader that only works in the source checkout cannot ship.
+npm install --prefix "$SMOKE_DIR" --omit=dev --no-audit --no-fund "${PACKED[0]}" >&2
+INSTALLED_VERSION=$(cd -- "$SMOKE_DIR" && node node_modules/t3/dist/bin.mjs --version)
+[[ $INSTALLED_VERSION == "t3 v$VERSION" ]] ||
+  die "Installed CLI reported an unexpected version: $INSTALLED_VERSION"
+
 SHA256=$(sha256sum "${PACKED[0]}" | awk '{print $1}')
 OUTPUT_METADATA="$TEMP_DIR/build.json"
 node -e '
