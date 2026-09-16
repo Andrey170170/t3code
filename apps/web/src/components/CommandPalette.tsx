@@ -48,7 +48,6 @@ import {
   FileSearchIcon,
   FolderIcon,
   FolderPlusIcon,
-  GitPullRequestArrowIcon,
   LinkIcon,
   MessageSquareIcon,
   PaletteIcon,
@@ -86,7 +85,7 @@ import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
-import { useProjects, useServerConfigs, useThreadShells } from "../state/entities";
+import { useProjects, useServerConfigs, useThreadShells, waitForProject } from "../state/entities";
 import { useThreadSearch } from "../state/queries";
 import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
 import {
@@ -184,6 +183,7 @@ import {
   buildSidebarProjectSnapshots,
 } from "../sidebarProjectGrouping";
 import type { Project } from "../types";
+import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
 
@@ -669,6 +669,9 @@ function OpenCommandPaletteDialog(props: {
   const cloneRepository = useAtomCommand(sourceControlEnvironment.cloneRepository, {
     reportFailure: false,
   });
+  const startProjectClone = useAtomCommand(sourceControlEnvironment.startProjectClone, {
+    reportFailure: false,
+  });
   const { environments } = useEnvironments();
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -979,8 +982,13 @@ function OpenCommandPaletteDialog(props: {
         )
       : "";
   const browsePath = useMemo(
-    () => getFilesystemBrowsePath(query, browseEnvironmentPlatform, !isRemoteProjectRepositoryStep),
-    [browseEnvironmentPlatform, isRemoteProjectRepositoryStep, query],
+    () =>
+      getFilesystemBrowsePath(
+        query,
+        browseEnvironmentPlatform,
+        browseEnvironmentId !== null && !isRemoteProjectRepositoryStep,
+      ),
+    [browseEnvironmentId, browseEnvironmentPlatform, isRemoteProjectRepositoryStep, query],
   );
   const isBrowsing = browsePath.isBrowsing;
   const browseDirectoryPath = browsePath.directoryPath;
@@ -1579,6 +1587,14 @@ function OpenCommandPaletteDialog(props: {
   );
 
   const openAddProjectFlow = useCallback(() => {
+    // With no environment at all there is nothing to browse, so the only
+    // useful next step is connecting one.
+    if (addProjectEnvironmentOptions.length === 0) {
+      setOpen(false);
+      void navigate({ to: "/settings/connections" });
+      return;
+    }
+
     if (addProjectEnvironmentOptions.length > 1 || defaultAddProjectEnvironmentId === null) {
       pushPaletteView({
         addonIcon: <FolderPlusIcon className={ADDON_ICON_CLASS} />,
@@ -1587,24 +1603,14 @@ function OpenCommandPaletteDialog(props: {
       return;
     }
 
-    const environmentId = defaultAddProjectEnvironmentId;
-    if (!environmentId) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Unable to browse projects",
-          description: "No environment is available.",
-        }),
-      );
-      return;
-    }
-
-    void startAddProjectSourceSelection(environmentId);
+    void startAddProjectSourceSelection(defaultAddProjectEnvironmentId);
   }, [
     addProjectEnvironmentGroups,
     addProjectEnvironmentOptions.length,
     defaultAddProjectEnvironmentId,
+    navigate,
     pushPaletteView,
+    setOpen,
     startAddProjectSourceSelection,
   ]);
 
@@ -1773,7 +1779,7 @@ function OpenCommandPaletteDialog(props: {
       value: "action:link-pull-request",
       searchTerms: ["link", "pull request", "pr", "attach", "stack"],
       title: "Link pull request to thread",
-      icon: <GitPullRequestArrowIcon className={ITEM_ICON_CLASS} />,
+      icon: <PullRequestGlyph.link className={ITEM_ICON_CLASS} />,
       run: async () => {
         openLinkPullRequestDialog(threadRef);
       },
@@ -1785,7 +1791,7 @@ function OpenCommandPaletteDialog(props: {
         searchTerms: ["pull requests", "linked", "stack", "prs"],
         title: "Show linked pull requests",
         disabled: visibleThreadPullRequests(activeThread.pullRequests).length === 0,
-        icon: <GitPullRequestArrowIcon className={ITEM_ICON_CLASS} />,
+        icon: <PullRequestGlyph.link className={ITEM_ICON_CLASS} />,
         run: async () => {
           useRightPanelStore.getState().open(threadRef, "pull-requests");
         },
@@ -1842,7 +1848,6 @@ function OpenCommandPaletteDialog(props: {
       "environment",
     ],
     title: "Add project",
-    disabled: defaultAddProjectEnvironmentId === null,
     icon: <FolderPlusIcon className={ITEM_ICON_CLASS} />,
     keepOpen: true,
     run: async () => {
@@ -2275,28 +2280,80 @@ function OpenCommandPaletteDialog(props: {
       return;
     }
 
+    // Older servers only offer the blocking clone: the palette has to wait
+    // for git so it can add the project afterwards.
+    if (browseEnvironment?.serverConfig?.environment.capabilities.projectCloneTracking !== true) {
+      setIsRemoteProjectCloning(true);
+      const cloneResult = await cloneRepository({
+        environmentId: addProjectCloneFlow.environmentId,
+        input: {
+          remoteUrl: addProjectCloneFlow.remoteUrl,
+          destinationPath,
+        },
+      });
+      setIsRemoteProjectCloning(false);
+      if (cloneResult._tag === "Failure") {
+        if (!isAtomCommandInterrupted(cloneResult)) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Clone failed",
+              description: errorMessage(squashAtomCommandFailure(cloneResult)),
+            }),
+          );
+        }
+        return;
+      }
+      await handleAddProject(cloneResult.value.cwd);
+      return;
+    }
+
+    // The server creates the project and clones in the background; progress
+    // shows in a toast and in the draft's composer banner, so the palette
+    // closes as soon as the clone is under way. Only problems found before
+    // git runs (bad destination, unknown repository) come back here.
+    const projectId = newProjectId();
     setIsRemoteProjectCloning(true);
-    const cloneResult = await cloneRepository({
+    const startResult = await startProjectClone({
       environmentId: addProjectCloneFlow.environmentId,
       input: {
+        projectId,
+        title: inferProjectTitleFromPath(destinationPath),
+        createdAt: new Date().toISOString(),
         remoteUrl: addProjectCloneFlow.remoteUrl,
         destinationPath,
       },
     });
     setIsRemoteProjectCloning(false);
-    if (cloneResult._tag === "Failure") {
-      if (!isAtomCommandInterrupted(cloneResult)) {
+    if (startResult._tag === "Failure") {
+      if (!isAtomCommandInterrupted(startResult)) {
         toastManager.add(
           stackedThreadToast({
             type: "error",
             title: "Clone failed",
-            description: errorMessage(squashAtomCommandFailure(cloneResult)),
+            description: errorMessage(squashAtomCommandFailure(startResult)),
           }),
         );
       }
       return;
     }
-    await handleAddProject(cloneResult.value.cwd);
+    setOpen(false);
+    const projectRef = scopeProjectRef(addProjectCloneFlow.environmentId, projectId);
+    // The create event usually lands before this call returns; give the shell
+    // stream a moment so the draft opens with its project resolved instead of
+    // flashing the project picker.
+    await waitForProject(projectRef, 3_000).catch(() => null);
+    const navigationResult = await settlePromise(() => handleNewThread(projectRef));
+    if (navigationResult._tag === "Failure") {
+      const error = squashAtomCommandFailure(navigationResult);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Failed to open project",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        }),
+      );
+    }
   }
 
   const browseTo = useCallback(

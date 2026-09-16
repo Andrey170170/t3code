@@ -68,6 +68,8 @@ export const makeCodexImportTitle = Effect.gen(function* () {
   ) {
     const current = yield* snapshots.getThreadShellById(request.threadId);
     if (Option.isNone(current) || current.value.title !== request.expectedTitle) return;
+    if (current.value.titleState?.source === "manual") return;
+    const expectedVersion = current.value.titleState?.version ?? null;
 
     const message = request.context.trim();
     if (message.length === 0) return;
@@ -85,11 +87,13 @@ export const makeCodexImportTitle = Effect.gen(function* () {
 
     const uuid = yield* crypto.randomUUIDv4;
     yield* engine.dispatch({
-      type: "thread.meta.update",
+      type: "thread.title.generate.complete",
       commandId: CommandId.make(`server:codex-import-title:${uuid}`),
       threadId: request.threadId,
       title: generated.title,
       expectedTitle: request.expectedTitle,
+      expectedVersion,
+      needsRefinement: generated.needsRefinement === true,
     });
   });
 

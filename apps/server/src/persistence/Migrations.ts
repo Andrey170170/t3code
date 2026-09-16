@@ -65,6 +65,7 @@ import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
 import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
 import Migration0052 from "./Migrations/052_TaskOperations.ts";
 import Migration0053 from "./Migrations/053_ReconcileForkSchema.ts";
+import Migration0054 from "./Migrations/054_ReconcileThreadTitleState.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -130,6 +131,7 @@ const migrationEntries = [
   [51, "ProjectionThreadMessageContext", Migration0051],
   [52, "TaskOperations", Migration0052],
   [53, "ReconcileForkSchema", Migration0053],
+  [54, "ReconcileThreadTitleState", Migration0054],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
+  CommandId,
   type ModelSelection,
   type OrchestrationCommand,
   type OrchestrationThreadShell,
@@ -57,6 +58,7 @@ function threadShell(threadId: ThreadId, title: string): OrchestrationThreadShel
 
 function serviceLayer(input: {
   readonly titles: Map<ThreadId, string>;
+  readonly titleStates?: Map<ThreadId, OrchestrationThreadShell["titleState"]>;
   readonly generateThreadTitle: TextGeneration["Service"]["generateThreadTitle"];
   readonly dispatch: OrchestrationEngineService["Service"]["dispatch"];
   readonly onSnapshot?: ((threadId: ThreadId) => Effect.Effect<void>) | undefined;
@@ -68,7 +70,12 @@ function serviceLayer(input: {
           Effect.gen(function* () {
             if (input.onSnapshot) yield* input.onSnapshot(threadId);
             const title = input.titles.get(threadId);
-            return title === undefined ? Option.none() : Option.some(threadShell(threadId, title));
+            return title === undefined
+              ? Option.none()
+              : Option.some({
+                  ...threadShell(threadId, title),
+                  titleState: input.titleStates?.get(threadId) ?? null,
+                });
           }),
       }),
     ),
@@ -98,55 +105,70 @@ it.layer(NodeServices.layer)("CodexImportTitle", (it) => {
     expect(needsCodexImportTitle("Trace attention circuits")).toBe(false);
   });
 
-  it.effect("uses the configured title model and dispatches a guarded rename", () =>
-    Effect.gen(function* () {
-      const threadId = ThreadId.make("import-title-generated");
-      const titles = new Map([[threadId, "New thread"]]);
-      const commands: Array<OrchestrationCommand> = [];
-      const generatedInputs: Array<
-        Parameters<TextGeneration["Service"]["generateThreadTitle"]>[0]
-      > = [];
-      const renamed = yield* Deferred.make<void>();
-      const layer = serviceLayer({
-        titles,
-        generateThreadTitle: (request) =>
-          Effect.sync(() => {
-            generatedInputs.push(request);
-            return { title: "Imported title" };
-          }),
-        dispatch: (command) =>
-          Effect.sync(() => {
-            commands.push(command);
-            if (command.type === "thread.meta.update" && command.title) {
-              titles.set(threadId, command.title);
-            }
-          }).pipe(Effect.andThen(Deferred.succeed(renamed, undefined)), Effect.as({ sequence: 1 })),
-      });
-
-      yield* Effect.gen(function* () {
-        const service = yield* CodexImportTitle;
-        yield* service.schedule({
-          threadId,
-          cwd: "/workspace",
-          expectedTitle: "New thread",
-          context: "Investigate imported attention traces",
+  it.effect.each([null, CommandId.make("previous-title-generation")])(
+    "uses the configured title model and guards the generated title version %s",
+    (expectedVersion) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("import-title-generated");
+        const titles = new Map([[threadId, "New thread"]]);
+        const commands: Array<OrchestrationCommand> = [];
+        const generatedInputs: Array<
+          Parameters<TextGeneration["Service"]["generateThreadTitle"]>[0]
+        > = [];
+        const renamed = yield* Deferred.make<void>();
+        const layer = serviceLayer({
+          titles,
+          titleStates: new Map([
+            [
+              threadId,
+              expectedVersion === null
+                ? null
+                : { source: "generated", version: expectedVersion, needsRefinement: true },
+            ],
+          ]),
+          generateThreadTitle: (request) =>
+            Effect.sync(() => {
+              generatedInputs.push(request);
+              return { title: "Imported title" };
+            }),
+          dispatch: (command) =>
+            Effect.sync(() => {
+              commands.push(command);
+              if (command.type === "thread.title.generate.complete") {
+                titles.set(threadId, command.title);
+              }
+            }).pipe(
+              Effect.andThen(Deferred.succeed(renamed, undefined)),
+              Effect.as({ sequence: 1 }),
+            ),
         });
-        yield* Deferred.await(renamed);
-      }).pipe(Effect.provide(layer));
 
-      expect(generatedInputs).toHaveLength(1);
-      expect(generatedInputs[0]).toMatchObject({
-        cwd: "/workspace",
-        message: "Investigate imported attention traces",
-        modelSelection: titleModel,
-      });
-      expect(commands[0]).toMatchObject({
-        type: "thread.meta.update",
-        threadId,
-        title: "Imported title",
-        expectedTitle: "New thread",
-      });
-    }),
+        yield* Effect.gen(function* () {
+          const service = yield* CodexImportTitle;
+          yield* service.schedule({
+            threadId,
+            cwd: "/workspace",
+            expectedTitle: "New thread",
+            context: "Investigate imported attention traces",
+          });
+          yield* Deferred.await(renamed);
+        }).pipe(Effect.provide(layer));
+
+        expect(generatedInputs).toHaveLength(1);
+        expect(generatedInputs[0]).toMatchObject({
+          cwd: "/workspace",
+          message: "Investigate imported attention traces",
+          modelSelection: titleModel,
+        });
+        expect(commands[0]).toMatchObject({
+          type: "thread.title.generate.complete",
+          threadId,
+          title: "Imported title",
+          expectedTitle: "New thread",
+          expectedVersion,
+          needsRefinement: false,
+        });
+      }),
   );
 
   it.effect("contains generator failure and permits a later retry", () =>

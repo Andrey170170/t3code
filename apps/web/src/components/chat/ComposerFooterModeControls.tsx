@@ -12,7 +12,7 @@ import {
   ComposerControlSeparator,
   ComposerSelectControl,
 } from "./ComposerControl";
-import { composerFloatingLayerProps } from "./composerEventScope";
+import { useComposerMenuProps } from "./composerEventScope";
 import { useComposerMenuState } from "./useComposerMenuState";
 
 export const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
@@ -25,6 +25,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
   onRuntimeModeChange: (mode: RuntimeMode) => void;
 }) {
   const sideChatPortalProps = useSideChatPortalProps();
+  const composerFloatingLayerProps = useComposerMenuProps();
   const size = props.size ?? "sm";
   const [open, setOpen] = useComposerMenuState(props.hidden);
   const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
@@ -92,6 +93,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
           <TooltipTrigger
             render={
               <ComposerSelectControl
+                data-composer-shortcut="composer.mode"
                 size={size}
                 className={size === "xs" ? undefined : "font-medium"}
                 aria-label="Runtime mode"

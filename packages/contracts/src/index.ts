@@ -25,6 +25,7 @@ export * from "./settings.ts";
 export * from "./git.ts";
 export * from "./vcs.ts";
 export * from "./sourceControl.ts";
+export * from "./projectClone.ts";
 export * from "./pullRequest.ts";
 export * from "./orchestration.ts";
 export * from "./t3ProjectFile.ts";
@@ -46,3 +47,4 @@ export * from "./rpc.ts";
 export * from "./codexThreads.ts";
 
 export * from "./sideChat.ts";
+export * from "./worktreeSetup.ts";

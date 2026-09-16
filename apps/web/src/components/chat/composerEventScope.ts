@@ -1,3 +1,7 @@
+import { useContext } from "react";
+import { SideChatFocusContext } from "./sideChatFocus";
+import { useComposerHandleContext } from "../../composerHandleContext";
+
 const COMPOSER_FLOATING_LAYER_SELECTOR = [
   '[data-composer-drawer-layer="true"]',
   '[data-chat-composer-floating-layer="true"]',
@@ -6,6 +10,27 @@ const COMPOSER_FLOATING_LAYER_SELECTOR = [
 export const composerFloatingLayerProps = {
   "data-chat-composer-floating-layer": "true",
 } as const;
+
+export function useComposerMenuProps() {
+  const composerRef = useComposerHandleContext();
+  const isSideChat = useContext(SideChatFocusContext);
+
+  return {
+    ...composerFloatingLayerProps,
+    // A side chat inherits the parent context but owns a separate editor.
+    finalFocus:
+      composerRef && !isSideChat
+        ? () => {
+            const activeElement = document.activeElement;
+            if (activeElement !== document.body && !isInsideComposerFloatingLayer(activeElement)) {
+              return false;
+            }
+            composerRef.current?.focusAtEnd();
+            return false;
+          }
+        : undefined,
+  };
+}
 
 export function isInsideComposerFloatingLayer(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest(COMPOSER_FLOATING_LAYER_SELECTOR) !== null;

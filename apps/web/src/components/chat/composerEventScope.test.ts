@@ -1,10 +1,16 @@
+import { act, createElement, useLayoutEffect } from "react";
+import { create } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { ComposerHandleContext, type ComposerHandleRef } from "../../composerHandleContext";
 import {
   isInsideCollapsedComposerControls,
   isInsideComposerFloatingLayer,
   isInsideRestingComposerControlScope,
+  useComposerMenuProps,
 } from "./composerEventScope";
+
+import { SideChatFocusContext } from "./sideChatFocus";
 
 class FakeElement {
   constructor(private readonly matchingSelector: string | null) {}
@@ -19,6 +25,72 @@ class FakeElement {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("composer menu focus", () => {
+  it("does not send a side chat menu's focus to the parent composer", async () => {
+    const focusAtEnd = vi.fn();
+    const composerRef = { current: { focusAtEnd } } as unknown as ComposerHandleRef;
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let menuProps: ReturnType<typeof useComposerMenuProps> | undefined;
+    function Probe() {
+      const props = useComposerMenuProps();
+      useLayoutEffect(() => {
+        menuProps = props;
+      }, [props]);
+      return null;
+    }
+    const renderer = await act(() =>
+      create(
+        createElement(
+          ComposerHandleContext,
+          { value: composerRef },
+          createElement(SideChatFocusContext, { value: true }, createElement(Probe)),
+        ),
+      ),
+    );
+    try {
+      menuProps?.finalFocus?.();
+      expect(focusAtEnd).not.toHaveBeenCalled();
+      expect(menuProps?.finalFocus).toBeUndefined();
+    } finally {
+      await act(() => renderer.unmount());
+    }
+  });
+
+  it.each([
+    ["an open menu", '[data-chat-composer-floating-layer="true"]', true],
+    ["an unmounted menu", null, true],
+    ["another control", "input", false],
+  ])("closes while focus is on %s", async (_label, selector, shouldFocusComposer) => {
+    const body = new FakeElement(null);
+    const editor = new FakeElement(null);
+    const activeElement = selector === null ? body : new FakeElement(selector);
+    const document = { body, activeElement };
+    const composerRef = {
+      current: { focusAtEnd: () => (document.activeElement = editor) },
+    } as unknown as ComposerHandleRef;
+    vi.stubGlobal("Element", FakeElement);
+    vi.stubGlobal("document", document);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let menuProps: ReturnType<typeof useComposerMenuProps> | undefined;
+    function Probe() {
+      const props = useComposerMenuProps();
+      useLayoutEffect(() => {
+        menuProps = props;
+      }, [props]);
+      return null;
+    }
+    const renderer = await act(() =>
+      create(createElement(ComposerHandleContext, { value: composerRef }, createElement(Probe))),
+    );
+    try {
+      expect(menuProps?.finalFocus?.()).toBe(false);
+      expect(document.activeElement).toBe(shouldFocusComposer ? editor : activeElement);
+    } finally {
+      await act(() => renderer.unmount());
+    }
+  });
 });
 
 describe("composer event scopes", () => {

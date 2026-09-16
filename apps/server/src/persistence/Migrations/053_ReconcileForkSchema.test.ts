@@ -76,9 +76,9 @@ for (const baseline of ["fresh", "upstream-51", "local-50", "local-52"] as const
         }
       }
 
-      const executed = yield* runMigrations();
+      const executed = yield* runMigrations({ toMigrationInclusive: 53 });
       assert.equal(executed.at(-1)?.[0], 53);
-      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 53 }), []);
 
       const columns = yield* sql<{ readonly name: string }>`
         PRAGMA table_info(projection_thread_messages)

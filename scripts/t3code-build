@@ -224,7 +224,9 @@ echo "Installing dependencies with $PACKAGE_MANAGER..." >&2
 
 echo "Building T3 CLI package..." >&2
 (cd -- "$SNAPSHOT" && "${PNPM[@]}" exec vp run --filter t3 build)
-for asset in dist/bin.mjs dist/service-launcher.mjs dist/client/index.html; do
+# The Node distribution runs Claude history in a sibling worker; service
+# launching now lives in bin.mjs as a hidden command.
+for asset in dist/bin.mjs dist/claude-history-worker.mjs dist/client/index.html; do
   [[ -f "$SNAPSHOT/apps/server/$asset" ]] ||
     die "Build did not produce required package asset: apps/server/$asset"
 done
@@ -290,7 +292,7 @@ mapfile -t PACKED < <(find "$PACK_DIR" -maxdepth 1 -type f -name '*.tgz' -print)
 [[ ${#PACKED[@]} -eq 1 ]] || die "Expected one npm tarball, found ${#PACKED[@]}."
 tar -tzf "${PACKED[0]}" >"$TEMP_DIR/package-contents"
 for member in package/package.json package/t3code-build.json \
-  package/dist/bin.mjs package/dist/service-launcher.mjs package/dist/client/index.html; do
+  package/dist/bin.mjs package/dist/claude-history-worker.mjs package/dist/client/index.html; do
   grep -Fqx -- "$member" "$TEMP_DIR/package-contents" ||
     die "Packed artifact is missing required file: $member"
 done

@@ -108,3 +108,10 @@ database migrations or create a backup.
 
 These helpers were ported from `~/dotfiles`. Existing dotfiles entry points are
 unchanged until installation from this repository replaces the updater link.
+
+Upstream 0.0.41 and later ship executable archives, while this fork's Forgejo
+channel retains the Node-based npm package and the service helpers above.
+Use `t3code-update` or reinstall from Forgejo to update these builds. Built-in
+`t3 update` and remote server updates reject Forgejo builds because those paths
+download upstream executable archives. Do not use `t3 service install` to replace
+the custom service; use the Forgejo installer above to preserve its settings.
