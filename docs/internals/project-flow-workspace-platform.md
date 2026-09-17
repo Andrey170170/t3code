@@ -16,8 +16,8 @@ The inspiration is the coordinator/new-or-existing-thread experience in
 The intended extension is to make it work across providers and user-controlled
 machines, with explicit workspace continuity underneath.
 
-The companion platform is currently called **Lattice Next**, a provisional name.
-Its independent repository is `~/projects/lattice-next`. It is a fresh non-Python
+The companion platform is called **Trellis**, the working name.
+Its independent repository is `~/projects/trellis`. It is a fresh non-Python
 implementation seeded from Lattice's design ideas; Rust is a candidate, not a
 selected stack. It exposes a machine-facing interface and has no standalone
 GUI/TUI product planned. One control plane and node executors are the initial
@@ -166,7 +166,7 @@ coverage when defining implementation acceptance; keep raw event streams bounded
 
 ## Design sources and maintenance
 
-Backend domain/state design lives in `~/projects/lattice-next`; its README links
+Backend domain/state design lives in `~/projects/trellis`; its README links
 the architecture, glossary, accepted direction, roadmap, and original Lattice
 design provenance. Those local paths are references, not build dependencies.
 This note is the durable T3-side product/integration rationale requested by the
