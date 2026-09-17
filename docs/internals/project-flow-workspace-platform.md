@@ -18,8 +18,10 @@ machines, with explicit workspace continuity underneath.
 
 The companion platform is called **Trellis**, the working name.
 Its independent repository is `~/projects/trellis`. It is a fresh non-Python
-implementation seeded from Lattice's design ideas; Rust is a candidate, not a
-selected stack. It exposes a machine-facing interface and has no standalone
+implementation seeded from Lattice's design ideas. Bend 2 owns its state-logic
+engine; Rust owns system integration and external effects, with an explicit
+internal protocol whose transport is still undecided. T3 consumes the platform
+interface rather than depending on that internal language split. Trellis has no standalone
 GUI/TUI product planned. One control plane and node executors are the initial
 topology.
 
