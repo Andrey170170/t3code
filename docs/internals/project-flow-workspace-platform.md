@@ -154,7 +154,9 @@ A Trellis project groups workspace branches; a workspace owns durable state/hist
 and an evolving tip; a materialization realizes that workspace on a node. Initially
 there are zero or one active materializations per workspace. Parallel alternatives
 fork separate workspaces from checkpoints; raw captures are not direct fork bases.
-Whether "fork current" creates its checkpoint in one action remains open.
+"Fork current" first establishes a checkpoint, then creates the requested children
+in one user action. Multiple alternatives share that checkpoint; an existing
+checkpoint can also be selected directly.
 Replacement of a stopped runtime is not a new branch.
 A top-level agent and its delegated subagents may share the materialization.
 One active top-level agent per workspace is a preference, not an enforced
