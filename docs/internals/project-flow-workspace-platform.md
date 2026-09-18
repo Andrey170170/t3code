@@ -217,12 +217,16 @@ and does not inherently require human approval for each integration.
 Establish source and target checkpoints at integration start and a result
 checkpoint after the merge. Distinguish the original fork/common ancestor from
 the target's state at integration start; the selected inputs remain fixed for
-that attempt. Whether to block live target advancement until apply/abort is still
-being clarified.
+that attempt. Prefer leaving the target unchanged during integration, but do not
+lock either workspace. The source may continue freely. If current target state
+still matches its input checkpoint, apply the resolved result; otherwise retain
+the result and integrate it with the newer target in another attempt. Check
+rolling state as well as named checkpoints; this is not a long-lived write lock.
 
 Keep intended contributions, candidate changes, and validation results inspectable.
 Shared project/general knowledge continues through its explicit publication flow.
-Target advancement and final application/recovery semantics are still being designed.
+Final application/runtime reconciliation, failure recovery, and code-history
+presentation remain to be designed; preserve activity/contribution provenance.
 
 ## Machines and background coordination
 
