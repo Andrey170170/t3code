@@ -225,8 +225,12 @@ rolling state as well as named checkpoints; this is not a long-lived write lock.
 
 Keep intended contributions, candidate changes, and validation results inspectable.
 Shared project/general knowledge continues through its explicit publication flow.
-Final application/runtime reconciliation, failure recovery, and code-history
-presentation remain to be designed; preserve activity/contribution provenance.
+Applying a result may restart/recreate the target materialization when needed.
+Durable workspace state and conversation history survive; preserving live processes
+is not an initial requirement. Code-only changes may apply without restart where
+supported. This is part of explicit integration apply, not the agent Stop action.
+Exact apply/failure recovery, provider reconnection, and code-history presentation
+remain to be designed; preserve activity/contribution provenance.
 
 ## Machines and background coordination
 
