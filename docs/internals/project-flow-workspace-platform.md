@@ -35,9 +35,11 @@ threads. Shared memory/library behavior is a design area, not an implemented
 requirement to ingest every transcript automatically.
 
 The workspace platform owns durable project/workspace identity, workspace state
-and lineage, machine enrollment and placement, isolation, environment reuse,
+and lineage, workspace placement, isolation, environment reuse,
 materialization, leases, capture/fork/restore, and domain-aware integration.
 T3 presents those operations and their outcomes through its backend adapter.
+Bootstrap owns fleet enrollment, machine identity, connectivity, and host
+configuration; Trellis consumes that interface and owns work inside workspaces.
 
 T3 continues to own provider protocols, conversation history, native session
 references, approvals, and user-facing thread controls. The backend does not need
@@ -49,17 +51,20 @@ and may group several workspaces or sources. Preserve that distinction until an
 explicit mapping/migration is chosen; matching names, paths, or Git remotes are
 insufficient identity rules.
 
-## Coordinator and ordinary threads are equal entry points
+## Cockpit and ordinary threads
 
-A coordinator organizes work through linked ordinary threads. Worker is a role,
-not an exclusive thread type. Users can create and use threads directly, bring
-an existing thread into an activity later, open a coordinator-created thread,
-and return to the coordinator without losing decisions or progress.
+Cockpit is the working name for the special project-free agent entry point.
+Project agents and machine agents remain uniform ordinary agents; there is no
+coordinator/worker taxonomy among them. Users can create and use threads directly,
+link an existing thread into an activity, open a Cockpit-created thread, and
+return to Cockpit without losing decisions or progress.
 
 An activity is user intent spanning zero or more projects/workspaces/threads;
-the term is design vocabulary, not a final UI label. A coordinator can remain
-project-free while work happens elsewhere. A private technical runtime or storage
-container must not force repository selection or silently grant broad host access.
+the term is design vocabulary, not a final UI label. Cockpit can remain
+project-free while work happens elsewhere. Initially its harness uses a normal
+host environment and a dedicated persistent working directory, with instructions
+and skills to keep new projects out of that directory. The directory is not a
+filesystem isolation boundary.
 
 Direct user instructions and coordinator requests require explicit ordering.
 Busy-thread dispatch, conflicting instructions, interruption, and concurrent
@@ -71,6 +76,24 @@ Keep ordinary controls available: model/provider selection, permissions, Stop,
 questions/approvals, drafts, attachments, history, and direct follow-ups. Link,
 unlink, revisit, pause coordination, and inspect provenance need clear semantics;
 unlinking must not implicitly delete a thread or its workspace.
+
+## Initial rollout and execution mode
+
+Managed Trellis projects start fresh during the initial pilot. Ordinary host mode
+remains available for established projects and machine administration; it does
+not imply Trellis adoption or workspace recovery guarantees. In Trellis mode,
+the project harness and native tools execute inside the materialization.
+
+A Host/Trellis control near the current checkpoint control is a UX candidate.
+The actual machine and host directory or managed workspace must be clear.
+Whether switching continues a conversation with a new provider session or opens
+a linked thread remains undecided; do not silently move an active operation or
+convert an existing host project.
+
+Default context is the project plus explicitly shared material, with broader
+permitted discovery in Cockpit. Branch-aware documents, freshness, cross-project
+references, and direct multi-project editing versus thread dispatch are still
+being designed. Accumulated memory is not assumed current.
 
 ## Representative interaction
 
@@ -161,7 +184,7 @@ Recheck these observations before implementation.
   that do not yet use the backend.
 
 The first useful proof should cover an ordinary thread using one managed
-workspace, then the coordinator/direct-thread round trip across two nodes. The
+workspace, then the Cockpit/direct-thread round trip on one node before expanding to two. The
 backend's recovery guarantees must be independently demonstrated. Include web,
 desktop, mobile, local/remote connections, and explicit provider capability
 coverage when defining implementation acceptance; keep raw event streams bounded.
