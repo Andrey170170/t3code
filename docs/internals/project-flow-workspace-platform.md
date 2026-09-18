@@ -187,6 +187,12 @@ links without rewriting event origins is the proposed timeline model. A linear
 UI presentation need not linearize the stored provenance graph. Native provider
 conversation history remains distinct from both activity and state restoration.
 
+Restore and Fork must be distinct actions. Restore preserves a checkpoint of
+current state, then restores the selected capture/checkpoint into the same
+workspace. Fork creates a separate workspace from a checkpoint and leaves the
+original unchanged. Neither rewinds the independent project/general knowledge
+stores. Selective restore and runtime transition details remain open.
+
 ## Replace the workspace implementation, not just the worktree button
 
 The user is willing to replace T3's worktree feature with the new backend.
