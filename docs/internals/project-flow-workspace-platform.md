@@ -214,6 +214,12 @@ required supporting changes/dependencies and validate the candidate before
 explicit application to the target. This is not just a read-only merge preview
 and does not inherently require human approval for each integration.
 
+Establish source and target checkpoints at integration start and a result
+checkpoint after the merge. Distinguish the original fork/common ancestor from
+the target's state at integration start; the selected inputs remain fixed for
+that attempt. Whether to block live target advancement until apply/abort is still
+being clarified.
+
 Keep intended contributions, candidate changes, and validation results inspectable.
 Shared project/general knowledge continues through its explicit publication flow.
 Target advancement and final application/recovery semantics are still being designed.
