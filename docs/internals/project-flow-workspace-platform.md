@@ -109,8 +109,10 @@ edits, with Git/Jujutsu backing under consideration. The publishing agent pulls
 current shared state, reconciles its candidate, and retries if another publisher
 advances the head first. Unresolved candidates stay retained; conflicting findings
 preserve their conditions/evidence. Pulling for publication does not silently
-refresh an experiment's pinned knowledge inputs. Exact paths/schema, backend,
-publication trigger, and merge mechanics remain open. This does not broaden
+refresh an experiment's pinned knowledge inputs. Publication and pulling newer
+shared context are explicit agent actions. Automatic captures preserve local
+drafts without publishing them. Exact paths/schema, backend, and merge mechanics
+remain open. This does not broaden
 visibility into deliberately isolated projects.
 
 For now, multi-project edits use a host-side conversation. Later scoped agent
