@@ -163,6 +163,14 @@ current workspace state. Do not add automatic catch-up context or conversation
 repair; keep actual target/state indicators up to date and let the agent inspect
 its environment. Automatic Trellis captures occur at top-level turn boundaries,
 not every subagent turn; explicit captures/checkpoints are available during work.
+Rolling environment tracking belongs to Trellis and proceeds independently of
+agent turns and return-point creation. Agent interruption does not imply loss of
+post-capture environment changes or cause automatic rollback.
+
+T3 Stop preserves the provider harness's normal agent-stop semantics. It does not
+stop the materialization, its services, or environment tracking; workspace shutdown
+is a separate lifecycle operation. Delegated-run cancellation follows the actual
+provider contract rather than an invented universal process-tree kill.
 
 Captures/checkpoints are cross-domain return points. Activity also has ancestry:
 a fork must not automatically receive unrelated sibling or later parent activity.
