@@ -84,6 +84,12 @@ remains available for established projects and machine administration; it does
 not imply Trellis adoption or workspace recovery guarantees. In Trellis mode,
 the project harness and native tools execute inside the materialization.
 
+Project creation can record the project and its first empty workspace before
+starting a container. The pilot has one default OCI base image; per-project base
+overrides are deferred. Expose only required system support/knowledge initially,
+without application templates or automatic Git initialization. The UI must not
+confuse a recorded project with a ready execution environment.
+
 A Host/Trellis control near the current checkpoint control is a UX candidate.
 The actual machine and host directory or managed workspace must be clear.
 Initially this selects where work starts; moving an existing conversation across
