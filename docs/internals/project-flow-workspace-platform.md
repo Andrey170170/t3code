@@ -158,8 +158,11 @@ A top-level agent and its delegated subagents may share the materialization.
 One active top-level agent per workspace is a preference, not an enforced
 single-writer rule. Independent alternatives use separate workspace forks, even
 when delegated by one agent. Many T3 threads can use the same workspace over
-time; creating a thread does not itself fork state. Showing what changed since
-a resumed thread last used the workspace remains an open UX question.
+time; creating a thread does not itself fork state. A resumed thread operates on
+current workspace state. Do not add automatic catch-up context or conversation
+repair; keep actual target/state indicators up to date and let the agent inspect
+its environment. Automatic Trellis captures occur at top-level turn boundaries,
+not every subagent turn; explicit captures/checkpoints are available during work.
 
 Captures/checkpoints are cross-domain return points. Activity also has ancestry:
 a fork must not automatically receive unrelated sibling or later parent activity.
