@@ -88,7 +88,8 @@ Project creation can record the project and its first empty workspace before
 starting a container. The pilot has one default OCI base image; per-project base
 overrides are deferred. Expose only required system support/knowledge initially,
 without application templates. File-history initialization is system setup;
-Jujutsu is a preferred candidate to evaluate with Git interoperability. The UI must not
+Jujutsu is the intended versioning direction, retaining Git interoperability;
+concrete integration still needs validation. The UI must not
 confuse a recorded project with a ready execution environment.
 
 A Host/Trellis control near the current checkpoint control is a UX candidate.
@@ -112,7 +113,7 @@ approval; observe actual publication and usefulness before tightening policy.
 Expose standard scope directories, Markdown notes, and machine-maintained
 revision/provenance metadata; ordinary project docs remain valid sources. Shared
 knowledge needs revision history and reconciliation of concurrent workspace
-edits, with Jujutsu a preferred candidate under evaluation. The publishing agent pulls
+edits, with Jujutsu the intended versioning backend pending integration proof. The publishing agent pulls
 current shared state, reconciles its candidate, and retries if another publisher
 advances the head first. Unresolved candidates stay retained; conflicting findings
 preserve their conditions/evidence. Pulling for publication does not silently
@@ -153,7 +154,12 @@ A Trellis project groups workspace branches; a workspace owns durable state/hist
 and an evolving tip; a materialization realizes that workspace on a node. Initially
 there are zero or one active materializations per workspace. Parallel alternatives
 fork separate workspaces; replacement of a stopped runtime is not a new branch.
-Same-workspace multi-agent execution is a separate open decision.
+A top-level agent and its delegated subagents may share the materialization.
+One active top-level agent per workspace is a preference, not an enforced
+single-writer rule. Independent alternatives use separate workspace forks, even
+when delegated by one agent. Many T3 threads can use the same workspace over
+time; creating a thread does not itself fork state. Showing what changed since
+a resumed thread last used the workspace remains an open UX question.
 
 Captures/checkpoints are cross-domain return points. Activity also has ancestry:
 a fork must not automatically receive unrelated sibling or later parent activity.
