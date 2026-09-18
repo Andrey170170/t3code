@@ -171,6 +171,10 @@ T3 Stop preserves the provider harness's normal agent-stop semantics. It does no
 stop the materialization, its services, or environment tracking; workspace shutdown
 is a separate lifecycle operation. Delegated-run cancellation follows the actual
 provider contract rather than an invented universal process-tree kill.
+Materializations initially require an explicit workspace stop; ending a turn,
+closing a thread, or disconnecting a client does not retire them. Idle suspension
+and resource reclamation are future work, requiring awareness of ongoing jobs and
+services. No process-preserving sleep mechanism is selected.
 
 Captures/checkpoints are cross-domain return points. Activity also has ancestry:
 a fork must not automatically receive unrelated sibling or later parent activity.
