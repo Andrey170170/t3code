@@ -94,10 +94,16 @@ restart/recovery and the exact thread binding remain to be specified.
 Default context is the project plus explicitly shared material, with broader
 permitted discovery in Cockpit. Knowledge has lineage alongside other state,
 with general cross-project/machine, project, and workspace scopes plus files/notes
-visible in materializations. Shared project knowledge can evolve independently
-of a workspace branch. Physical representation, shared revision selection,
-promotion, and restore semantics are still being designed; history does not
-make a recorded claim automatically current.
+visible in materializations. Durable notes are file-backed workspace state;
+temporary scratch is separate. Shared project knowledge evolves independently of
+a workspace branch. Sessions/experiments record selected shared revisions, expose
+newer revisions for explicit refresh, and do not rewind shared stores when a
+workspace is restored. History does not make a claim automatically current.
+
+Initially agents can publish into enabled shared scopes without per-entry human
+approval; observe actual publication and usefulness before tightening policy.
+Exact file locations/format, the publication trigger, and concurrent-edit handling
+remain open. This does not broaden visibility into deliberately isolated projects.
 
 For now, multi-project edits use a host-side conversation. Later scoped agent
 communication may let a project agent request work in another materialization.
