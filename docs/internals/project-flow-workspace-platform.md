@@ -153,7 +153,9 @@ provider is not native session migration.
 A Trellis project groups workspace branches; a workspace owns durable state/history
 and an evolving tip; a materialization realizes that workspace on a node. Initially
 there are zero or one active materializations per workspace. Parallel alternatives
-fork separate workspaces; replacement of a stopped runtime is not a new branch.
+fork separate workspaces from checkpoints; raw captures are not direct fork bases.
+Whether "fork current" creates its checkpoint in one action remains open.
+Replacement of a stopped runtime is not a new branch.
 A top-level agent and its delegated subagents may share the materialization.
 One active top-level agent per workspace is a preference, not an enforced
 single-writer rule. Independent alternatives use separate workspace forks, even
@@ -178,7 +180,7 @@ services. No process-preserving sleep mechanism is selected.
 
 Captures/checkpoints are cross-domain return points. Activity also has ancestry:
 a fork must not automatically receive unrelated sibling or later parent activity.
-Preserving ancestor events through the return point and recording integration
+Preserving ancestor events through the fork checkpoint and recording integration
 links without rewriting event origins is the proposed timeline model. A linear
 UI presentation need not linearize the stored provenance graph. Native provider
 conversation history remains distinct from both activity and state restoration.
