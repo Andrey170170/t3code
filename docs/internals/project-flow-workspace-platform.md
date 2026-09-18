@@ -102,8 +102,12 @@ workspace is restored. History does not make a claim automatically current.
 
 Initially agents can publish into enabled shared scopes without per-entry human
 approval; observe actual publication and usefulness before tightening policy.
-Exact file locations/format, the publication trigger, and concurrent-edit handling
-remain open. This does not broaden visibility into deliberately isolated projects.
+Expose standard scope directories, Markdown notes, and machine-maintained
+revision/provenance metadata; ordinary project docs remain valid sources. Shared
+knowledge needs revision history and reconciliation of concurrent workspace
+edits, with Git/Jujutsu backing under consideration. Exact paths/schema, backend,
+publication trigger, and conflict-resolution policy remain open. This does not
+broaden visibility into deliberately isolated projects.
 
 For now, multi-project edits use a host-side conversation. Later scoped agent
 communication may let a project agent request work in another materialization.
