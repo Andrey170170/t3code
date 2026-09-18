@@ -87,7 +87,8 @@ the project harness and native tools execute inside the materialization.
 Project creation can record the project and its first empty workspace before
 starting a container. The pilot has one default OCI base image; per-project base
 overrides are deferred. Expose only required system support/knowledge initially,
-without application templates or automatic Git initialization. The UI must not
+without application templates. File-history initialization is system setup;
+Jujutsu is a preferred candidate to evaluate with Git interoperability. The UI must not
 confuse a recorded project with a ready execution environment.
 
 A Host/Trellis control near the current checkpoint control is a UX candidate.
@@ -111,7 +112,7 @@ approval; observe actual publication and usefulness before tightening policy.
 Expose standard scope directories, Markdown notes, and machine-maintained
 revision/provenance metadata; ordinary project docs remain valid sources. Shared
 knowledge needs revision history and reconciliation of concurrent workspace
-edits, with Git/Jujutsu backing under consideration. The publishing agent pulls
+edits, with Jujutsu a preferred candidate under evaluation. The publishing agent pulls
 current shared state, reconciles its candidate, and retries if another publisher
 advances the head first. Unresolved candidates stay retained; conflicting findings
 preserve their conditions/evidence. Pulling for publication does not silently
@@ -145,6 +146,21 @@ thread can inform new work without being a restorable environment. Native sessio
 resume is used where supported; otherwise continuation is an explicit handoff
 with selected messages, artifacts, decisions, and workspace references. Switching
 provider is not native session migration.
+
+## Workspace identity and activity ancestry
+
+A Trellis project groups workspace branches; a workspace owns durable state/history
+and an evolving tip; a materialization realizes that workspace on a node. Initially
+there are zero or one active materializations per workspace. Parallel alternatives
+fork separate workspaces; replacement of a stopped runtime is not a new branch.
+Same-workspace multi-agent execution is a separate open decision.
+
+Captures/checkpoints are cross-domain return points. Activity also has ancestry:
+a fork must not automatically receive unrelated sibling or later parent activity.
+Preserving ancestor events through the return point and recording integration
+links without rewriting event origins is the proposed timeline model. A linear
+UI presentation need not linearize the stored provenance graph. Native provider
+conversation history remains distinct from both activity and state restoration.
 
 ## Replace the workspace implementation, not just the worktree button
 
