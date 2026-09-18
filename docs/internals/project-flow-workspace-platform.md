@@ -204,6 +204,20 @@ integration must surface which environment/config/resource domains participate.
 Existing T3 thread checkpoints need an explicit compatibility/migration policy;
 replacing a worktree manager must not silently invalidate old restore points.
 
+## Integration workspace experience
+
+An integration workspace is an ordinary workspace where an agent can inspect
+inputs and actually reconcile a merge using its normal tools. Support selection
+of individual changes across domains, including code hunks and a desired package
+from a larger experimental installation set. The agent must be able to resolve
+required supporting changes/dependencies and validate the candidate before
+explicit application to the target. This is not just a read-only merge preview
+and does not inherently require human approval for each integration.
+
+Keep intended contributions, candidate changes, and validation results inspectable.
+Shared project/general knowledge continues through its explicit publication flow.
+Target advancement and final application/recovery semantics are still being designed.
+
 ## Machines and background coordination
 
 Multi-machine workspace management belongs to the backend. T3 displays node
