@@ -86,14 +86,24 @@ the project harness and native tools execute inside the materialization.
 
 A Host/Trellis control near the current checkpoint control is a UX candidate.
 The actual machine and host directory or managed workspace must be clear.
-Whether switching continues a conversation with a new provider session or opens
-a linked thread remains undecided; do not silently move an active operation or
-convert an existing host project.
+Initially this selects where work starts; moving an existing conversation across
+hosts or divergent workspace states is not required. Do not silently relocate an
+active operation or convert an existing host project. Same-workspace runtime
+restart/recovery and the exact thread binding remain to be specified.
 
 Default context is the project plus explicitly shared material, with broader
-permitted discovery in Cockpit. Branch-aware documents, freshness, cross-project
-references, and direct multi-project editing versus thread dispatch are still
-being designed. Accumulated memory is not assumed current.
+permitted discovery in Cockpit. Knowledge has lineage alongside other state,
+with general cross-project/machine, project, and workspace scopes plus files/notes
+visible in materializations. Shared project knowledge can evolve independently
+of a workspace branch. Physical representation, shared revision selection,
+promotion, and restore semantics are still being designed; history does not
+make a recorded claim automatically current.
+
+For now, multi-project edits use a host-side conversation. Later scoped agent
+communication may let a project agent request work in another materialization.
+Project-level planning/dispatch can use this mechanism without introducing a
+separate coordinator/worker taxonomy. Materializations remain separate execution
+contexts; communication does not imply shared writable filesystems.
 
 ## Representative interaction
 
@@ -144,8 +154,9 @@ execution; T3 still needs a concrete path to the provider owner for thread
 operations. Decide that bridge explicitly rather than building a second generic
 machine registry in T3 or assuming current browser connections provide it.
 
-Distinguish creating/opening work on either node from transferring state between
-nodes. Disconnected is not stopped, and a lost response is not failed. Display
+Initial multi-machine use covers creating/opening work on either node. Explicit
+transfer of saved state is a later capability; transparent movement of a running
+materialization or its conversation is not required. Disconnected is not stopped, and a lost response is not failed. Display
 operation receipts and reconcile status before retrying work or reassigning a
 writable workspace. Backend leases govern execution ownership.
 
