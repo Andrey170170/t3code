@@ -175,8 +175,11 @@ Do not treat checkpointing as a brief freeze followed by automatic work resumpti
 The user or agent must first stop relevant work and managed workspace services
 properly. Otherwise checkpoint creation fails with an error identifying what is
 still running; it does not stop work or wait automatically. The caller decides
-whether to stop or wait, then retries. Exact blocker detection and idle harness
-handling remain open. Automatic captures may
+whether to stop or wait, then retries. Agent checkpointing is a dedicated tool
+call, ideally the only active call at that moment. Idle harness/control processes
+can stay alive; after the result, the agent can continue in the same turn without
+a user "continue" prompt. Trellis does not itself restart stopped jobs/services.
+Exact blocker detection remains open. Automatic captures may
 expire under configurable retention limits; checkpoints and required dependent
 state remain protected until deliberate removal. Retained activity records do not
 promise that every historical state remains restorable.
@@ -212,16 +215,20 @@ conversation history. Coverage follows the return point's participating domains.
 Selective historical restoration is a separate, deferred operation, distinct from
 the accepted selective integration workflow. Provisional startup behavior restores
 declared service configuration and starts services marked for automatic startup;
-arbitrary commands and experiments are not automatically rerun. Runtime transition
-details remain open.
+arbitrary commands and experiments are not automatically rerun. If restore fails,
+show that the workspace needs recovery and retain the pre-restore checkpoint and
+operation details. Recovery is explicit user/agent work, with inspection and repair
+access preserved; do not automatically roll back or silently repair the workspace.
+Runtime transition and recovery access details remain open.
 
 Archive and Delete must also be distinct. Archive is the normal retirement path
 when no work will continue in a workspace: preserve a final checkpoint, release
 its runtime, and retain its identity/history for reopening. A source or integration
 workspace with continuing work remains active after integration. Do not infer
 completion from inactivity. Explicit workspace deletion is supported, protecting
-state still required by surviving workspaces or retained return points. Treatment
-of otherwise unreferenced history on deletion remains to be specified.
+state and provenance still required by surviving workspaces or retained return
+points. Otherwise private state/checkpoints/history are released for garbage
+collection unless explicitly retained elsewhere.
 
 ## Replace the workspace implementation, not just the worktree button
 
