@@ -156,7 +156,9 @@ there are zero or one active materializations per workspace. Parallel alternativ
 fork separate workspaces from checkpoints; raw captures are not direct fork bases.
 "Fork current" first establishes a checkpoint, then creates the requested children
 in one user action. Multiple alternatives share that checkpoint; an existing
-checkpoint can also be selected directly.
+checkpoint can also be selected directly. "Fork here" on a historical capture
+may first promote it to a retained checkpoint if its required state still exists;
+promotion preserves its actual recovery coverage.
 Replacement of a stopped runtime is not a new branch.
 A top-level agent and its delegated subagents may share the materialization.
 One active top-level agent per workspace is a preference, not an enforced
@@ -166,7 +168,14 @@ time; creating a thread does not itself fork state. A resumed thread operates on
 current workspace state. Do not add automatic catch-up context or conversation
 repair; keep actual target/state indicators up to date and let the agent inspect
 its environment. Automatic Trellis captures occur at top-level turn boundaries,
-not every subagent turn; explicit captures/checkpoints are available during work.
+not every subagent turn. Explicit captures remain available during work;
+checkpoints are deliberate milestones established after active work stops properly,
+including when fork/integration/restore creates one as part of a larger action.
+Do not treat checkpointing as a brief freeze followed by automatic work resumption.
+Exact stopping behavior for jobs and services remains open. Automatic captures may
+expire under configurable retention limits; checkpoints and required dependent
+state remain protected until deliberate removal. Retained activity records do not
+promise that every historical state remains restorable.
 Rolling environment tracking belongs to Trellis and proceeds independently of
 agent turns and return-point creation. Agent interruption does not imply loss of
 post-capture environment changes or cause automatic rollback.
@@ -197,7 +206,10 @@ creates a separate workspace from a checkpoint and leaves the original unchanged
 Neither rewinds independent project/general knowledge stores or provider
 conversation history. Coverage follows the return point's participating domains.
 Selective historical restoration is a separate, deferred operation, distinct from
-the accepted selective integration workflow. Runtime transition details remain open.
+the accepted selective integration workflow. Provisional startup behavior restores
+declared service configuration and starts services marked for automatic startup;
+arbitrary commands and experiments are not automatically rerun. Runtime transition
+details remain open.
 
 ## Replace the workspace implementation, not just the worktree button
 
