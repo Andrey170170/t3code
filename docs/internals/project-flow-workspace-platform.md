@@ -172,7 +172,11 @@ not every subagent turn. Explicit captures remain available during work;
 checkpoints are deliberate milestones established after active work stops properly,
 including when fork/integration/restore creates one as part of a larger action.
 Do not treat checkpointing as a brief freeze followed by automatic work resumption.
-Exact stopping behavior for jobs and services remains open. Automatic captures may
+The user or agent must first stop relevant work and managed workspace services
+properly. Otherwise checkpoint creation fails with an error identifying what is
+still running; it does not stop work or wait automatically. The caller decides
+whether to stop or wait, then retries. Exact blocker detection and idle harness
+handling remain open. Automatic captures may
 expire under configurable retention limits; checkpoints and required dependent
 state remain protected until deliberate removal. Retained activity records do not
 promise that every historical state remains restorable.
@@ -210,6 +214,14 @@ the accepted selective integration workflow. Provisional startup behavior restor
 declared service configuration and starts services marked for automatic startup;
 arbitrary commands and experiments are not automatically rerun. Runtime transition
 details remain open.
+
+Archive and Delete must also be distinct. Archive is the normal retirement path
+when no work will continue in a workspace: preserve a final checkpoint, release
+its runtime, and retain its identity/history for reopening. A source or integration
+workspace with continuing work remains active after integration. Do not infer
+completion from inactivity. Explicit workspace deletion is supported, protecting
+state still required by surviving workspaces or retained return points. Treatment
+of otherwise unreferenced history on deletion remains to be specified.
 
 ## Replace the workspace implementation, not just the worktree button
 
