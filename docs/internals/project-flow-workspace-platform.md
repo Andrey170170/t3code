@@ -219,7 +219,10 @@ arbitrary commands and experiments are not automatically rerun. If restore fails
 show that the workspace needs recovery and retain the pre-restore checkpoint and
 operation details. Recovery is explicit user/agent work, with inspection and repair
 access preserved; do not automatically roll back or silently repair the workspace.
-Runtime transition and recovery access details remain open.
+If the materialization cannot start, use an ordinary host-mode agent with the
+failed operation details and Trellis inspection/repair tools. Recovery outside
+the workspace uses a separate host conversation; the original project thread stays
+attached to its workspace. Concrete runtime transition and repair interfaces remain open.
 
 Archive and Delete must also be distinct. Archive is the normal retirement path
 when no work will continue in a workspace: preserve a final checkpoint, release
@@ -246,6 +249,18 @@ Git remains a useful code-history substrate. Whole-workspace recovery and
 integration must surface which environment/config/resource domains participate.
 Existing T3 thread checkpoints need an explicit compatibility/migration policy;
 replacing a worktree manager must not silently invalidate old restore points.
+
+## Service registration and preview identity
+
+Persistent services require explicit user/agent registration of launch settings
+and startup behavior. An observed background command or listening port is not
+automatically a managed service. Process/port visibility can remain separate;
+VS Code-style discovery heuristics and suggestions are future work.
+
+Trellis provides logical service addresses tied to workspace/service identity,
+stable across restarts/restores and distinct for each fork. T3 should use those
+addresses rather than temporary node/port locations. Trellis owns the current
+endpoint mapping; routing transport and access/exposure policy remain open.
 
 ## Integration workspace experience
 
