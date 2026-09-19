@@ -188,10 +188,16 @@ UI presentation need not linearize the stored provenance graph. Native provider
 conversation history remains distinct from both activity and state restoration.
 
 Restore and Fork must be distinct actions. Restore preserves a checkpoint of
-current state, then restores the selected capture/checkpoint into the same
-workspace. Fork creates a separate workspace from a checkpoint and leaves the
-original unchanged. Neither rewinds the independent project/general knowledge
-stores. Selective restore and runtime transition details remain open.
+current state, then restores the full recorded state of the selected
+capture/checkpoint into the same workspace. It creates a new history record rather
+than erasing intervening work: files/code receive a new revision with the selected
+contents, and other state domains record equivalent transitions where applicable.
+The history retains the pre-restore state and the selected return point. Fork
+creates a separate workspace from a checkpoint and leaves the original unchanged.
+Neither rewinds independent project/general knowledge stores or provider
+conversation history. Coverage follows the return point's participating domains.
+Selective historical restoration is a separate, deferred operation, distinct from
+the accepted selective integration workflow. Runtime transition details remain open.
 
 ## Replace the workspace implementation, not just the worktree button
 
