@@ -304,7 +304,11 @@ remain to be designed; preserve activity/contribution provenance.
 Multi-machine workspace management belongs to the backend. T3 displays node
 capabilities, placement, readiness, recovery coverage, and operation status from
 that authority. A T3 environment and a backend node are distinct identities;
-their mapping may change as provider execution is integrated.
+their mapping may change as provider execution is integrated. Creating a project
+should not require choosing a machine/directory first: Trellis selects suitable
+placement from explicit requirements, project preferences, and state locality.
+The catalog is the normal way to find and continue work. Existing materializations
+stay put; no automatic migration/rebalancing is required initially.
 
 The coordinator's durable activity and dispatch live server-side so browser or
 mobile disconnection does not end orchestration. The backend routes workspace
@@ -316,7 +320,15 @@ Initial multi-machine use covers creating/opening work on either node. Explicit
 transfer of saved state is a later capability; transparent movement of a running
 materialization or its conversation is not required. Disconnected is not stopped, and a lost response is not failed. Display
 operation receipts and reconcile status before retrying work or reassigning a
-writable workspace. Backend leases govern execution ownership.
+writable workspace. Existing agents, builds, and services may continue local work
+during control-plane disconnection; centrally coordinated operations are unavailable
+until reconnection. Do not replace an unreachable materialization on another node.
+Backend ownership reconciliation must support this behavior.
+
+Initially one retained copy of checkpoint state on its owning node is sufficient.
+Display storage location and availability without implying machine-loss protection.
+Replication/durability hardening and control-plane decentralization are a later
+second wave, not prerequisites for the initial product.
 
 ## Current constraints that shape integration
 
