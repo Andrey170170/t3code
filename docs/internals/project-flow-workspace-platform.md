@@ -185,7 +185,10 @@ state remain protected until deliberate removal. Retained activity records do no
 promise that every historical state remains restorable.
 Rolling environment tracking belongs to Trellis and proceeds independently of
 agent turns and return-point creation. Agent interruption does not imply loss of
-post-capture environment changes or cause automatic rollback.
+post-capture environment changes or cause automatic rollback. A failed required
+domain capture produces an incomplete attempt, with failure details and retained
+evidence; do not present it as a full Restore source or allow fork-base promotion.
+Do not stop ordinary work solely because an automatic capture failed.
 
 T3 Stop preserves the provider harness's normal agent-stop semantics. It does not
 stop the materialization, its services, or environment tracking; workspace shutdown
@@ -249,6 +252,20 @@ Git remains a useful code-history substrate. Whole-workspace recovery and
 integration must surface which environment/config/resource domains participate.
 Existing T3 thread checkpoints need an explicit compatibility/migration policy;
 replacing a worktree manager must not silently invalidate old restore points.
+
+## Trellis state inclusion and environment intent
+
+Trellis inclusion is independent of Git ignore rules: managed workspace files,
+including Git-ignored/untracked environments and experiment results, are retained
+unless explicitly Trellis-excluded. Do not equate a clean Git view with no workspace
+state changes or hide capture failures behind a successful code snapshot. Large
+files should preferably live on mounted shared storage to keep runtime images
+smaller, with explicit resource recovery/sharing contracts. Trellis tracking does
+not require all retained content to be stored in Git/jj.
+
+Agents may explicitly promote useful exploratory installations into the reusable
+workspace environment definition without a separate human approval gate. Actual
+installed state remains tracked regardless; declaration is separate from capture.
 
 ## Service registration and preview identity
 
