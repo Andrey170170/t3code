@@ -261,7 +261,19 @@ unless explicitly Trellis-excluded. Do not equate a clean Git view with no works
 state changes or hide capture failures behind a successful code snapshot. Large
 files should preferably live on mounted shared storage to keep runtime images
 smaller, with explicit resource recovery/sharing contracts. Trellis tracking does
-not require all retained content to be stored in Git/jj.
+not require all retained content to be stored in Git/jj. Trellis ignore changes
+apply to subsequent captures; reclaiming older retained content is a separate
+explicit history/retention action.
+
+Project configuration exposes separate access and checkpoint-participation settings
+per storage source. A weights directory may be writable for fetching and switched
+to read-only afterward. Pinned sources retain recoverable versions and restore/fork
+into independent derived sources, leaving the original shared data untouched.
+Unpinned sources remain live/shared and are not rolled back; display observed
+versions when available and warn about differences from recorded observations.
+Do not present a version observation as a retained snapshot or equate read-only
+access with checkpoint pinning. Default pinning and propagation to existing
+workspaces remain open.
 
 Agents may explicitly promote useful exploratory installations into the reusable
 workspace environment definition without a separate human approval gate. Actual
