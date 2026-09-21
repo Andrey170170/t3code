@@ -255,12 +255,21 @@ replacing a worktree manager must not silently invalidate old restore points.
 Persistent services require explicit user/agent registration of launch settings
 and startup behavior. An observed background command or listening port is not
 automatically a managed service. Process/port visibility can remain separate;
-VS Code-style discovery heuristics and suggestions are future work.
+VS Code-style discovery heuristics and suggestions are future work. Forks inherit
+registered service declarations/startup settings. Service startup on fork
+materialization start defaults to enabled and can be disabled per project. A failed
+service must leave an otherwise usable workspace available to its agent, with
+failure details/logs for repair; service readiness is separate from workspace health.
 
 Trellis provides logical service addresses tied to workspace/service identity,
 stable across restarts/restores and distinct for each fork. T3 should use those
 addresses rather than temporary node/port locations. Trellis owns the current
-endpoint mapping; routing transport and access/exposure policy remain open.
+endpoint mapping; Bootstrap owns enrolled machines' network membership/connectivity.
+T3 owns browser preview access across that infrastructure: connecting the browser
+to one T3 environment should suffice to access workspace services on other enrolled
+machines without separately pairing each worker. This is private preview access;
+public publishing is outside this feature. Concrete routing/relay transport and
+access checks remain open.
 
 ## Integration workspace experience
 
