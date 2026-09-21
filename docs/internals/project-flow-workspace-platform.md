@@ -272,12 +272,33 @@ into independent derived sources, leaving the original shared data untouched.
 Unpinned sources remain live/shared and are not rolled back; display observed
 versions when available and warn about differences from recorded observations.
 Do not present a version observation as a retained snapshot or equate read-only
-access with checkpoint pinning. Default pinning and propagation to existing
-workspaces remain open.
+access with checkpoint pinning. Managed sources default to pinned when supported;
+external/live unpinned use must be explicit, not a silent unsupported-backend
+fallback. Project-default changes and applying them to selected existing workspaces
+are separate actions, which a UI may combine in one explicit flow. Derived sources
+initially bind to the restored/forked workspace; sharing/reuse elsewhere is explicit.
+
+Expose storage provisioning/configuration and attachment through the agent API,
+returning a usable path so a fresh project's agent can obtain storage and download
+model weights without manual host setup. The management UI remains to be designed.
 
 Agents may explicitly promote useful exploratory installations into the reusable
 workspace environment definition without a separate human approval gate. Actual
 installed state remains tracked regardless; declaration is separate from capture.
+
+## Trellis orientation for agents
+
+Host and materialization agents need context-appropriate operational instructions:
+what Trellis is, where they run, expected workflow, available API/tools, resource
+requests, and relevant restrictions/recommendations, with links to deeper reference
+instructions. Make the container/workspace context explicit for materialization
+agents. Host guidance distinguishes machine work and recovery from managed work.
+
+Bootstrap manages host/harness instruction configuration; Trellis supplies workspace
+context and API semantics; T3/provider integration delivers session context where
+needed. Keep orientation distinct from shared project memory and use runtime/API
+facts for current identity and capabilities. Concrete packaging and injection
+mechanisms remain open.
 
 ## Service registration and preview identity
 
