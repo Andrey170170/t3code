@@ -313,8 +313,14 @@ node is available, keep the project record, show useful capability/availability
 information, and allow a manual placement override for compatible preparatory work.
 For example, sketch a GPU project on a CPU node while its GPU node is down, retaining
 the unmet requirement. Do not silently queue the start request or claim the override
-supplies missing capabilities. Later saved-state transfer can support continuation
-on the capable node; its concrete workflow and milestone remain open.
+supplies missing capabilities. Explicit saved-state transfer is part of the first
+useful multi-machine milestone, following the single-node pilot. Offer relocation
+of the same workspace or a fork on the destination; default to relocation for
+sequential CPU preparation followed by GPU work. Relocation preserves workspace
+identity/history; forking creates an independent branch. Stop work properly,
+checkpoint, transfer retained state, and materialize on a compatible destination.
+Provider continuation, compatibility checks, and transfer recovery need concrete
+contracts; this is not live process migration.
 
 The coordinator's durable activity and dispatch live server-side so browser or
 mobile disconnection does not end orchestration. The backend routes workspace
@@ -322,9 +328,10 @@ execution; T3 still needs a concrete path to the provider owner for thread
 operations. Decide that bridge explicitly rather than building a second generic
 machine registry in T3 or assuming current browser connections provide it.
 
-Initial multi-machine use covers creating/opening work on either node. Explicit
-transfer of saved state is a later capability; transparent movement of a running
-materialization or its conversation is not required. Disconnected is not stopped, and a lost response is not failed. Display
+Initial multi-machine use covers creating/opening work on either node and explicit
+saved-state relocation/remote forks. Transparent movement of live processes or
+native provider sessions is not required. Disconnected is not stopped, and a lost
+response is not failed. Display
 operation receipts and reconcile status before retrying work or reassigning a
 writable workspace. Existing agents, builds, and services may continue local work
 during control-plane disconnection; centrally coordinated operations are unavailable
