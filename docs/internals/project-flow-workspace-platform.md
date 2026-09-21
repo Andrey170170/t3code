@@ -319,8 +319,14 @@ of the same workspace or a fork on the destination; default to relocation for
 sequential CPU preparation followed by GPU work. Relocation preserves workspace
 identity/history; forking creates an independent branch. Stop work properly,
 checkpoint, transfer retained state, and materialize on a compatible destination.
-Provider continuation, compatibility checks, and transfer recovery need concrete
-contracts; this is not live process migration.
+Keep the same visible thread attached to the relocated workspace where supported,
+resuming the native provider session when possible or making a supported handoff
+explicit. Do not promise universal provider-session portability. Destination
+incompatibility is a reported transfer failure, not an automatic environment
+adaptation. Preserve source state until the destination is verified usable. The
+user or a host-mode agent may fix the destination and retry or abandon the transfer.
+Concrete compatibility checks, provider continuation, and transfer recovery still
+need contracts; this is not live process migration.
 
 The coordinator's durable activity and dispatch live server-side so browser or
 mobile disconnection does not end orchestration. The backend routes workspace
