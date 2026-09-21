@@ -308,7 +308,13 @@ their mapping may change as provider execution is integrated. Creating a project
 should not require choosing a machine/directory first: Trellis selects suitable
 placement from explicit requirements, project preferences, and state locality.
 The catalog is the normal way to find and continue work. Existing materializations
-stay put; no automatic migration/rebalancing is required initially.
+stay put; no automatic migration/rebalancing is required initially. When no suitable
+node is available, keep the project record, show useful capability/availability
+information, and allow a manual placement override for compatible preparatory work.
+For example, sketch a GPU project on a CPU node while its GPU node is down, retaining
+the unmet requirement. Do not silently queue the start request or claim the override
+supplies missing capabilities. Later saved-state transfer can support continuation
+on the capable node; its concrete workflow and milestone remain open.
 
 The coordinator's durable activity and dispatch live server-side so browser or
 mobile disconnection does not end orchestration. The backend routes workspace
@@ -323,7 +329,10 @@ operation receipts and reconcile status before retrying work or reassigning a
 writable workspace. Existing agents, builds, and services may continue local work
 during control-plane disconnection; centrally coordinated operations are unavailable
 until reconnection. Do not replace an unreachable materialization on another node.
-Backend ownership reconciliation must support this behavior.
+Backend ownership reconciliation must support this behavior. Checkpoint creation
+requires the control plane and returns an unavailable error during disconnection.
+Local tracking continues; independently finalized offline checkpoints are deferred
+to later decentralization.
 
 Initially one retained copy of checkpoint state on its owning node is sufficient.
 Display storage location and availability without implying machine-loss protection.
