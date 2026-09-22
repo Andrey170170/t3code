@@ -69,6 +69,9 @@ export default defineConfig({
   fmt: {
     ignorePatterns: [
       ".repos/**",
+      // Macroscope's glob-per-line ignore grammar, not Markdown: formatting
+      // it rewrites `*` as `_` and joins lines.
+      ".macroscope/ignore.md",
       ".alchemy",
       "dist",
       "dist-electron",
@@ -106,7 +109,10 @@ export default defineConfig({
       "apps/mobile/uniwind-types.d.ts",
     ],
     plugins: ["eslint", "oxc", "react", "unicorn", "typescript"],
-    jsPlugins: ["./oxlint-plugin-t3code/index.ts"],
+    jsPlugins: ["./oxlint-plugin-t3code/index.ts", "@shadcn/lint"],
+    settings: {
+      shadcn: { ui: "~/components/ui" },
+    },
     categories: {
       correctness: "warn",
       suspicious: "warn",
@@ -165,6 +171,17 @@ export default defineConfig({
         rules: { "t3code/no-mobile-uniwind-theme-escape-hatches": "error" },
       },
       {
+        // components/ui exports own their look. App code picks a variant or size instead
+        // of restyling with className; layout classes (width, flex, margin, position) stay
+        // allowed because placement belongs to the parent. Warn-only until the existing
+        // overrides are migrated to variants; the ceiling below stops the count growing.
+        files: ["apps/web/src/**"],
+        excludeFiles: ["apps/web/src/components/ui/**"],
+        rules: {
+          "shadcn/no-restyle": ["warn", { allow: ["layout"] }],
+        },
+      },
+      {
         // Shared client code must not call APIs missing from Hermes. Our ESNext
         // TypeScript target accepts them even when they would crash mobile at launch.
         // Tests run on Node and are exempt.
@@ -184,6 +201,7 @@ export default defineConfig({
           "apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx",
           "apps/mobile/src/features/files/FileMarkdownPreview.tsx",
           "apps/mobile/src/features/files/SourceFileSurface.tsx",
+          "apps/mobile/src/features/terminal/ThreadTerminalRouteScreen.tsx",
           "apps/mobile/src/features/files/AttachmentFileScreen.tsx",
           "apps/mobile/src/features/files/ThreadFilesRouteScreen.tsx",
           "apps/mobile/src/features/files/thread-file-navigator-pane.tsx",
@@ -204,6 +222,7 @@ export default defineConfig({
           "apps/mobile/src/lib/useMobileNavigationTheme.ts",
           "apps/mobile/src/native/T3ComposerEditor.ios.tsx",
           "apps/mobile/src/native/T3ComposerEditor.native.tsx",
+          "apps/mobile/src/native/SelectableMarkdownText.android.tsx",
         ],
         rules: {
           "t3code/no-mobile-uniwind-theme-escape-hatches": ["error", { allowUniwindTheme: true }],

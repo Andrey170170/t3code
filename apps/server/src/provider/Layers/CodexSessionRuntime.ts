@@ -201,8 +201,8 @@ export interface CodexSessionRuntimeSendTurnInput {
   readonly agentOrigin?: AgentOrigin;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
-    readonly type: "image";
-    readonly url: string;
+    readonly type: "localImage";
+    readonly path: string;
   }>;
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
@@ -654,14 +654,18 @@ function buildCodexCollaborationMode(input: {
   };
 }
 
+// Match the skill grammar used by Claude/Cursor, leaving currency amounts as prose.
+const SKILL_MENTION_PATTERN =
+  /(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)(?=\s|$)/gu;
+
 export function buildTurnStartParams(input: {
   readonly threadId: string;
   readonly runtimeMode: RuntimeMode;
   readonly prompt?: string;
   readonly agentOrigin?: AgentOrigin;
   readonly attachments?: ReadonlyArray<{
-    readonly type: "image";
-    readonly url: string;
+    readonly type: "localImage";
+    readonly path: string;
   }>;
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier;
@@ -677,7 +681,7 @@ export function buildTurnStartParams(input: {
   if (input.prompt && !input.agentOrigin) {
     turnInput.push({
       type: "text",
-      text: input.prompt,
+      text: input.prompt.replace(SKILL_MENTION_PATTERN, "$1$$$2"),
     });
   }
   for (const attachment of input.agentOrigin ? [] : (input.attachments ?? [])) {
@@ -2376,6 +2380,69 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
+    yield* client.handleServerRequest("item/permissions/requestApproval", (payload) =>
+      Effect.gen(function* () {
+        const requestId = ApprovalRequestId.make(
+          yield* randomUUIDv4("app-permission-approval-request"),
+        );
+        const turnId = TurnId.make(payload.turnId);
+        const itemId = ProviderItemId.make(payload.itemId);
+        const decision = yield* Deferred.make<ProviderApprovalDecision>();
+
+        yield* Ref.update(pendingApprovalsRef, (current) => {
+          const next = new Map(current);
+          next.set(requestId, {
+            requestId,
+            jsonRpcId: payload.itemId,
+            requestKind: "permission",
+            turnId,
+            itemId,
+            decision,
+          });
+          return next;
+        });
+        yield* Ref.update(approvalCorrelationsRef, (current) => {
+          const next = new Map(current);
+          next.set(payload.itemId, {
+            requestId,
+            requestKind: "permission",
+            turnId,
+            itemId,
+          });
+          return next;
+        });
+
+        yield* emitEvent({
+          kind: "request",
+          threadId: options.threadId,
+          method: "item/permissions/requestApproval",
+          requestId,
+          requestKind: "permission",
+          ...(turnId ? { turnId } : {}),
+          ...(itemId ? { itemId } : {}),
+          payload,
+        });
+
+        const resolved = yield* Deferred.await(decision).pipe(
+          Effect.ensuring(
+            Ref.update(pendingApprovalsRef, (current) => {
+              const next = new Map(current);
+              next.delete(requestId);
+              return next;
+            }),
+          ),
+        );
+        // Approving grants the requested profile; denying answers with an
+        // empty grant so the app-server treats the permission as withheld.
+        const grantedPermissions =
+          resolved === "accept" || resolved === "acceptForSession" ? payload.permissions : {};
+        return {
+          permissions: grantedPermissions,
+          ...(resolved === "acceptForSession" ? { scope: "session" as const } : {}),
+        } satisfies EffectCodexSchema.PermissionsRequestApprovalResponse;
+      }),
+    );
+
     yield* client.handleServerRequest("item/tool/requestUserInput", (payload) =>
       Effect.gen(function* () {
         const requestId = ApprovalRequestId.make(yield* randomUUIDv4("user-input-request"));
@@ -2558,14 +2625,7 @@ export const makeCodexSessionRuntime = (
     const interruptSideChat = (id: string) =>
       Effect.gen(function* () {
         yield* requireSideChat(id);
-        if (sideTurnId)
-          yield* client.request("turn/interrupt", { threadId: id, turnId: sideTurnId });
-      });
-    const closeSideChat = (id: string) =>
-      Effect.gen(function* () {
-        if (sideChat?.id !== id) return;
-        yield* interruptSideChat(id);
-        // Resolve only the side conversation's pending requests before detaching it.
+        // Release side-owned request handlers before interrupting the transport.
         for (const [requestId, owner] of sideRequestOwners) {
           if (owner !== id) continue;
           const approval = (yield* Ref.get(pendingApprovalsRef)).get(requestId);
@@ -2573,6 +2633,13 @@ export const makeCodexSessionRuntime = (
           const userInput = (yield* Ref.get(pendingUserInputsRef)).get(requestId);
           if (userInput) yield* Deferred.succeed(userInput.answers, {});
         }
+        if (sideTurnId)
+          yield* client.request("turn/interrupt", { threadId: id, turnId: sideTurnId });
+      });
+    const closeSideChat = (id: string) =>
+      Effect.gen(function* () {
+        if (sideChat?.id !== id) return;
+        yield* interruptSideChat(id);
         yield* client.request("thread/unsubscribe", { threadId: id });
         sideChat = undefined;
         sideTurnId = undefined;
@@ -2793,6 +2860,16 @@ export const makeCodexSessionRuntime = (
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
           const session = yield* Ref.get(sessionRef);
+          // Settle parked approvals FIRST. The transport answers server
+          // requests inline on its stdin read loop, so a pending
+          // command/file/app-permission prompt blocks every incoming message,
+          // including the turn/interrupt response itself - cancelling after
+          // the RPC would deadlock Stop exactly when a card is open. Settling
+          // releases the handler, which answers the peer and unblocks the
+          // loop before the interrupts below are sent.
+          yield* settlePendingApprovals("cancel");
+          // Pending user-input prompts block the same way; settle them too.
+          yield* settlePendingUserInputs({});
           // Stop-everything: children are full threads with their own turns;
           // interrupting only the parent leaves the fleet running. Interrupt
           // each live child turn first, best-effort per child, BOUNDED: the

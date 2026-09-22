@@ -140,6 +140,25 @@ it.layer(NodeServices.layer)("native Codex side conversations", (it) => {
       }),
   );
 
+  it.effect("closes a side chat while its approval is pending", () =>
+    Effect.gen(function* () {
+      const { runtime, readRequests } = yield* makeRuntime();
+      const approval = yield* Deferred.make<void>();
+      yield* runtime.sideChatEvents.pipe(
+        Stream.runForEach(({ event }) =>
+          event.kind === "request" ? Deferred.succeed(approval, undefined) : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+      const side = yield* runtime.openSideChat;
+      yield* runtime.sendSideChat(side.id, { input: "Question" });
+      yield* Deferred.await(approval);
+      yield* runtime.closeSideChat(side.id);
+      assert.equal((yield* readRequests).at(-1)?.method, "thread/unsubscribe");
+      assert.isFalse((yield* runtime.getSession).status === "closed");
+    }),
+  );
+
   it.effect("unsubscribes a fork when hidden-boundary injection fails", () =>
     Effect.gen(function* () {
       const { runtime, readRequests } = yield* makeRuntime(true);

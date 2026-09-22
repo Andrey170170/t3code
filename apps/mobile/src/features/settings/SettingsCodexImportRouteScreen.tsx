@@ -988,7 +988,7 @@ function EnvironmentAndProviderPickers() {
   return (
     <>
       {flow.environmentOptions.length > 1 ? (
-        <SettingsSection title="Environment" card>
+        <SettingsSection title="Environment">
           {flow.environmentOptions.map((option, index) => (
             <Pressable
               accessibilityRole="radio"
@@ -1014,7 +1014,7 @@ function EnvironmentAndProviderPickers() {
         </SettingsSection>
       ) : null}
       {flow.providers.length > 1 ? (
-        <SettingsSection title="Codex account" card>
+        <SettingsSection title="Codex account">
           {flow.providers.map((provider, index) => (
             <Pressable
               accessibilityRole="radio"
@@ -1073,7 +1073,7 @@ function CheckoutChoicePanel(props: {
         </Text>
       </View>
       {checkouts.length > 0 ? (
-        <SettingsSection card>
+        <SettingsSection>
           {checkouts.map((checkout, index) => (
             <Pressable
               accessibilityRole="radio"
@@ -1255,7 +1255,7 @@ export function SettingsCodexImportRouteScreen() {
           }
         />
       ) : flow.catalog ? (
-        <SettingsSection title="Projects" card>
+        <SettingsSection title="Projects">
           {flow.catalog.projects.map((project, index) => (
             <ProjectRow
               key={normalizeProjectPathForComparison(project.cwd)}
@@ -1450,7 +1450,7 @@ export function SettingsCodexImportProjectRouteScreen({
           }
         />
       ) : (
-        <SettingsSection card>
+        <SettingsSection>
           {threads.map((candidate, index) => (
             <ConversationRow
               candidate={candidate}

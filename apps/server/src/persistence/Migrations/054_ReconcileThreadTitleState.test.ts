@@ -53,7 +53,7 @@ for (const baseline of ["fresh", "fork-53", "upstream-52"] as const) {
           : yield* sql`
         SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
       `;
-      const executed = yield* runMigrations();
+      const executed = yield* runMigrations({ toMigrationInclusive: 54 });
       assert.equal(executed.at(-1)?.[0], 54);
       if (baseline === "fork-53") {
         assert.deepStrictEqual(executed, [[54, "ReconcileThreadTitleState"]]);
@@ -64,7 +64,7 @@ for (const baseline of ["fresh", "fork-53", "upstream-52"] as const) {
           [54, "ReconcileThreadTitleState"],
         ]);
       }
-      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 54 }), []);
 
       const historyAfter = yield* sql`
         SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
@@ -102,6 +102,6 @@ for (const baseline of ["fresh", "fork-53", "upstream-52"] as const) {
       `;
       assert.ok(columns.some((column) => column.name === "agent_origin_json"));
       assert.ok(columns.some((column) => column.name === "context_json"));
-    }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 }

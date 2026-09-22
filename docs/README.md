@@ -38,6 +38,7 @@ source alone does not explain. Most code changes do not need an internal documen
 - [Connection runtime](./internals/connection-runtime.md)
 - [Project flow and workspace platform — proposed fork direction](./internals/project-flow-workspace-platform.md)
 - [Providers](./internals/providers.md)
+- [Pull request file revisions](./internals/pull-request-file-revisions.md)
 - [Model classification](./internals/model-manifest.md)
 - [Remote environments](./internals/remote.md)
 - [Server updates](./internals/server-updates.md)

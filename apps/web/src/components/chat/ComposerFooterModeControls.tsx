@@ -70,7 +70,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
               opticalSize={size === "xs" ? "default" : "large"}
             />
           )}
-          <span className="sr-only sm:not-sr-only">
+          <span data-composer-control-label className="sr-only sm:not-sr-only">
             {props.interactionMode === "plan" ? "Plan" : "Build"}
           </span>
         </TooltipTrigger>
@@ -101,7 +101,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
             }
           >
             <ComposerControlIcon icon={RuntimeModeIcon} size={size} />
-            <SelectValue>{runtimeModeOption.label}</SelectValue>
+            <SelectValue data-composer-control-label>{runtimeModeOption.label}</SelectValue>
           </TooltipTrigger>
           <SelectPopup
             {...sideChatPortalProps}
