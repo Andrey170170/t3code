@@ -38,6 +38,11 @@ The workspace platform owns durable project/workspace identity, workspace state
 and lineage, workspace placement, isolation, environment reuse,
 materialization, leases, capture/fork/restore, and domain-aware integration.
 T3 presents those operations and their outcomes through its backend adapter.
+The Trellis API is the common authority for T3, a CLI frontend, and structured
+agent tools: share operation semantics, identities, errors, and status. Require
+explicit API authentication and target/operation authorization; access to the
+local/fleet network or knowledge of a resource ID does not grant machine-level
+control. Concrete token provisioning/lifecycle and transport design remain open.
 Bootstrap owns fleet enrollment, machine identity, connectivity, and host
 configuration; Trellis consumes that interface and owns work inside workspaces.
 
@@ -70,7 +75,11 @@ Direct user instructions and coordinator requests require explicit ordering.
 Busy-thread dispatch, conflicting instructions, interruption, and concurrent
 workspace writes must have visible outcomes. User steering must not be silently
 overwritten by an older coordinator plan. Linking a thread does not automatically
-authorize every coordinator action on it.
+authorize every coordinator action on it. Queue Cockpit requests to busy threads
+by default and make pending requests visible. Stopping or redirecting current work
+requires an explicit interrupt action; queued requests must not silently override
+direct user steering. This queue belongs to T3's thread orchestration, not a second
+Trellis provider-conversation implementation.
 
 Keep ordinary controls available: model/provider selection, permissions, Stop,
 questions/approvals, drafts, attachments, history, and direct follow-ups. Link,
@@ -295,6 +304,9 @@ external/live unpinned use must be explicit, not a silent unsupported-backend
 fallback. Project-default changes and applying them to selected existing workspaces
 are separate actions, which a UI may combine in one explicit flow. Derived sources
 initially bind to the restored/forked workspace; sharing/reuse elsewhere is explicit.
+Authorized agents may discover and attach sources explicitly shared across projects,
+normally read-only. Keep project-specific sources scoped unless deliberately shared;
+discovery/attachment does not imply permission to mutate the shared source.
 
 Expose storage provisioning/configuration and attachment through the agent API,
 returning a usable path so a fresh project's agent can obtain storage and download
