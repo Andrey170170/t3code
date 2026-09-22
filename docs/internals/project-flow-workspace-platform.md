@@ -97,7 +97,10 @@ Retain files, notes, results, and conversations until explicit deletion; the ini
 version does not expire scratch data automatically. Runtime disposal is separate
 from data retention. Shared execution does not provide independent per-project
 environment recovery, and the UI must not imply full isolated-workspace guarantees.
-Exact file-history controls and runtime cleanup remain to be designed.
+Initially scratch runtimes require explicit stop; ending a turn or closing the
+client must not automatically retire them. Automatic idle cleanup is deferred.
+Exact file-history controls and explicit shared-runtime stop mechanics remain open.
+The first usable release prioritizes isolated projects; scratch follows that pilot.
 
 Do not require a graduation action or automatic environment/history/conversation
 migration. If scratch work inspires a larger project, create a new normal project
@@ -225,6 +228,11 @@ Materializations initially require an explicit workspace stop; ending a turn,
 closing a thread, or disconnecting a client does not retire them. Idle suspension
 and resource reclamation are future work, requiring awareness of ongoing jobs and
 services. No process-preserving sleep mechanism is selected.
+
+Default history presentation emphasizes branches and deliberate checkpoints, with
+automatic captures and finer activity/state details available on demand. This does
+not alter retention, restore eligibility, or underlying provenance, and does not
+prescribe the backend mapping to Git/jj commits.
 
 Captures/checkpoints are cross-domain return points. Activity also has ancestry:
 a fork must not automatically receive unrelated sibling or later parent activity.
@@ -466,8 +474,8 @@ Recheck these observations before implementation.
 - Transition for existing worktrees, thread checkpoints, cleanup, and projects
   that do not yet use the backend.
 
-The first useful proof should cover an ordinary thread using one managed
-workspace, then the Cockpit/direct-thread round trip on one node before expanding to two. The
+The first useful proof should cover an ordinary thread using one isolated managed
+workspace, prioritizing the full isolated-project workflow before scratch, then the Cockpit/direct-thread round trip on one node before expanding to two. The
 backend's recovery guarantees must be independently demonstrated. Include web,
 desktop, mobile, local/remote connections, and explicit provider capability
 coverage when defining implementation acceptance; keep raw event streams bounded.
