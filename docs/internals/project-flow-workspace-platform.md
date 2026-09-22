@@ -189,7 +189,11 @@ backend capability/coverage compatibility; and legacy checkpoint/worktree migrat
 Ownership, queue-by-default, explicit publication/pull, and isolated-first rollout
 are settled. Do not reopen them as unanswered product choices.
 
-Implement one ordinary isolated thread before Cockpit, then expand providers/nodes
-according to Trellis's roadmap. Use isolated development state. Define and verify
+Build Trellis core first, adapt an ordinary T3 isolated thread, and start dogfooding
+before broader orchestration. Bootstrap and the auth/connection project progress
+alongside that pilot and may supply dogfooding workloads. New dev-machine adoption
+then tests the integrated chain: Bootstrap enrollment/configuration, scoped central
+auth, Trellis placement/transfer, and T3 access/previews. Expand providers and CHPC
+through their own contracts. Use isolated development state. Define and verify
 claimed web/desktop/mobile and local/remote surfaces, with bounded event views.
 Backend state recovery needs independent evidence; T3 UI success alone does not prove it.
