@@ -1,489 +1,195 @@
-# Project flow and workspace-platform integration
-
-Status: proposed custom-fork direction, preserved at the user's request on
-2026-09-17. This describes intended behavior, not a shipped feature or an accepted
-wire protocol. Product ownership is agreed; schemas, UI layout, and rollout are
-still open.
-
-## Product intent
-
-T3 should let a user begin a conversation without first selecting a project,
-directory, or machine. That conversation can remain discussion, discover existing
-work, create a project, or coordinate ordinary threads across several projects.
-
-The inspiration is the coordinator/new-or-existing-thread experience in
-[Claude Projects redesigned](https://claude.com/blog/projects-redesigned).
-The intended extension is to make it work across providers and user-controlled
-machines, with explicit workspace continuity underneath.
-
-The companion platform is called **Trellis**, the working name.
-Its independent repository is `~/projects/trellis`. It is a fresh non-Python
-implementation seeded from Lattice's design ideas. Bend 2 owns its state-logic
-engine; Rust owns system integration and external effects, with an explicit
-internal protocol whose transport is still undecided. T3 consumes the platform
-interface rather than depending on that internal language split. Trellis has no standalone
-GUI/TUI product planned. One control plane and node executors are the initial
-topology.
-
-## Ownership: project experience in T3, workspace state in the backend
-
-T3 owns the human-facing project flow: discovery presentation, creation/adoption
-dialogs or conversational equivalents, goals, coordinator conversations,
-thread navigation, context selection, progress, and user decisions. A project
-overview may bring together decisions, references, artifacts, and relevant
-threads. Shared memory/library behavior is a design area, not an implemented
-requirement to ingest every transcript automatically.
-
-The workspace platform owns durable project/workspace identity, workspace state
-and lineage, workspace placement, isolation, environment reuse,
-materialization, leases, capture/fork/restore, and domain-aware integration.
-T3 presents those operations and their outcomes through its backend adapter.
-The Trellis API is the common authority for T3, a CLI frontend, and structured
-agent tools: share operation semantics, identities, errors, and status. Require
-explicit API authentication and target/operation authorization; access to the
-local/fleet network or knowledge of a resource ID does not grant machine-level
-control. Concrete token provisioning/lifecycle and transport design remain open.
-Bootstrap owns fleet enrollment, machine identity, connectivity, and host
-configuration; Trellis consumes that interface and owns work inside workspaces.
-
-T3 continues to own provider protocols, conversation history, native session
-references, approvals, and user-facing thread controls. The backend does not need
-to reimplement every provider's conversation protocol.
-
-The existing T3 term `project` means an environment-local directory-rooted record.
-The proposed backend project is a logical identity independent of machine/path
-and may group several workspaces or sources. Preserve that distinction until an
-explicit mapping/migration is chosen; matching names, paths, or Git remotes are
-insufficient identity rules.
-
-## Cockpit and ordinary threads
-
-Cockpit is the working name for the special project-free agent entry point.
-Project agents and machine agents remain uniform ordinary agents; there is no
-coordinator/worker taxonomy among them. Users can create and use threads directly,
-link an existing thread into an activity, open a Cockpit-created thread, and
-return to Cockpit without losing decisions or progress.
-
-An activity is user intent spanning zero or more projects/workspaces/threads;
-the term is design vocabulary, not a final UI label. Cockpit can remain
-project-free while work happens elsewhere. Initially its harness uses a normal
-host environment and a dedicated persistent working directory, with instructions
-and skills to keep new projects out of that directory. The directory is not a
-filesystem isolation boundary.
-
-Direct user instructions and coordinator requests require explicit ordering.
-Busy-thread dispatch, conflicting instructions, interruption, and concurrent
-workspace writes must have visible outcomes. User steering must not be silently
-overwritten by an older coordinator plan. Linking a thread does not automatically
-authorize every coordinator action on it. Queue Cockpit requests to busy threads
-by default and make pending requests visible. Stopping or redirecting current work
-requires an explicit interrupt action; queued requests must not silently override
-direct user steering. This queue belongs to T3's thread orchestration, not a second
-Trellis provider-conversation implementation.
-
-Keep ordinary controls available: model/provider selection, permissions, Stop,
-questions/approvals, drafts, attachments, history, and direct follow-ups. Link,
-unlink, revisit, pause coordination, and inspect provenance need clear semantics;
-unlinking must not implicitly delete a thread or its workspace.
-
-## Scratch work through ordinary project creation
-
-Offer scratch creation through the normal T3 project flow and Trellis API. Cockpit
-can invoke the same operation, but scratch is not a special Cockpit-only feature.
-It covers one-off scripts, quick data processing, and visualizations, using a shared
-container/runtime with common tools and separate project directories.
-
-Retain files, notes, results, and conversations until explicit deletion; the initial
-version does not expire scratch data automatically. Runtime disposal is separate
-from data retention. Shared execution does not provide independent per-project
-environment recovery, and the UI must not imply full isolated-workspace guarantees.
-Initially scratch runtimes require explicit stop; ending a turn or closing the
-client must not automatically retire them. Automatic idle cleanup is deferred.
-Exact file-history controls and explicit shared-runtime stop mechanics remain open.
-The first usable release prioritizes isolated projects; scratch follows that pilot.
-
-Do not require a graduation action or automatic environment/history/conversation
-migration. If scratch work inspires a larger project, create a new normal project
-and copy selected notes/files through ordinary operations. This is sufficient for
-the initial scope.
-
-## Initial rollout and execution mode
-
-Managed Trellis projects start fresh during the initial pilot. Ordinary host mode
-remains available for established projects and machine administration; it does
-not imply Trellis adoption or workspace recovery guarantees. In Trellis mode,
-the project harness and native tools execute inside the materialization.
-
-Project creation can record the project and its first empty workspace before
-starting a container. The pilot has one default OCI base image; per-project base
-overrides are deferred. Expose only required system support/knowledge initially,
-without application templates. File-history initialization is system setup;
-Jujutsu is the intended versioning direction, retaining Git interoperability;
-concrete integration still needs validation. The UI must not
-confuse a recorded project with a ready execution environment.
-
-A Host/Trellis control near the current checkpoint control is a UX candidate.
-The actual machine and host directory or managed workspace must be clear.
-Initially this selects where work starts; moving an existing conversation across
-hosts or divergent workspace states is not required. Do not silently relocate an
-active operation or convert an existing host project. Same-workspace runtime
-restart/recovery and the exact thread binding remain to be specified.
-
-Default context is the project plus explicitly shared material, with broader
-permitted discovery in Cockpit. Knowledge has lineage alongside other state,
-with general cross-project/machine, project, and workspace scopes plus files/notes
-visible in materializations. Durable notes are file-backed workspace state;
-temporary scratch is separate. Shared project knowledge evolves independently of
-a workspace branch. Sessions/experiments record selected shared revisions, expose
-newer revisions for explicit refresh, and do not rewind shared stores when a
-workspace is restored. History does not make a claim automatically current.
-
-Initially agents can publish into enabled shared scopes without per-entry human
-approval; observe actual publication and usefulness before tightening policy.
-Expose standard scope directories, Markdown notes, and machine-maintained
-revision/provenance metadata; ordinary project docs remain valid sources. Shared
-knowledge needs revision history and reconciliation of concurrent workspace
-edits, with Jujutsu the intended versioning backend pending integration proof. The publishing agent pulls
-current shared state, reconciles its candidate, and retries if another publisher
-advances the head first. Unresolved candidates stay retained; conflicting findings
-preserve their conditions/evidence. Pulling for publication does not silently
-refresh an experiment's pinned knowledge inputs. Publication and pulling newer
-shared context are explicit agent actions. Automatic captures preserve local
-drafts without publishing them. Exact paths/schema, backend, and merge mechanics
-remain open. This does not broaden
-visibility into deliberately isolated projects.
-
-For now, multi-project edits use a host-side conversation. Later scoped agent
-communication may let a project agent request work in another materialization.
-Project-level planning/dispatch can use this mechanism without introducing a
-separate coordinator/worker taxonomy. Materializations remain separate execution
-contexts; communication does not imply shared writable filesystems.
-
-## Representative interaction
-
-1. Start a new conversation without choosing a project.
-2. Describe a goal or reference existing work; inspect relevant projects and
-   threads with their machine/provider context.
-3. Create/adopt a project, link an existing thread, or prepare an isolated
-   workspace from a chosen source/checkpoint through the backend.
-4. Open or resume an ordinary provider thread in that execution target.
-5. Work directly in the thread, then return to the coordinator with the relevant
-   progress, artifacts, and decisions preserved.
-6. Close and reopen the client while the server-side work remains observable;
-   reconnect without repeating accepted operations.
-
-Conversation context and execution state are separate selections. A previous
-thread can inform new work without being a restorable environment. Native session
-resume is used where supported; otherwise continuation is an explicit handoff
-with selected messages, artifacts, decisions, and workspace references. Switching
-provider is not native session migration.
-
-## Workspace identity and activity ancestry
-
-A Trellis project groups workspace branches; a workspace owns durable state/history
-and an evolving tip; a materialization realizes that workspace on a node. Initially
-there are zero or one active materializations per workspace. Parallel alternatives
-fork separate workspaces from checkpoints; raw captures are not direct fork bases.
-"Fork current" first establishes a checkpoint, then creates the requested children
-in one user action. Multiple alternatives share that checkpoint; an existing
-checkpoint can also be selected directly. "Fork here" on a historical capture
-may first promote it to a retained checkpoint if its required state still exists;
-promotion preserves its actual recovery coverage.
-Replacement of a stopped runtime is not a new branch.
-A top-level agent and its delegated subagents may share the materialization.
-One active top-level agent per workspace is a preference, not an enforced
-single-writer rule. Independent alternatives use separate workspace forks, even
-when delegated by one agent. Many T3 threads can use the same workspace over
-time; creating a thread does not itself fork state. A resumed thread operates on
-current workspace state. Do not add automatic catch-up context or conversation
-repair; keep actual target/state indicators up to date and let the agent inspect
-its environment. Automatic Trellis captures occur at top-level turn boundaries,
-not every subagent turn. Explicit captures remain available during work;
-checkpoints are deliberate milestones established after active work stops properly,
-including when fork/integration/restore creates one as part of a larger action.
-Do not treat checkpointing as a brief freeze followed by automatic work resumption.
-The user or agent must first stop relevant work and managed workspace services
-properly. Otherwise checkpoint creation fails with an error identifying what is
-still running; it does not stop work or wait automatically. The caller decides
-whether to stop or wait, then retries. Agent checkpointing is a dedicated tool
-call, ideally the only active call at that moment. Idle harness/control processes
-can stay alive; after the result, the agent can continue in the same turn without
-a user "continue" prompt. Trellis does not itself restart stopped jobs/services.
-Exact blocker detection remains open. Automatic captures may
-expire under configurable retention limits; checkpoints and required dependent
-state remain protected until deliberate removal. Retained activity records do not
-promise that every historical state remains restorable.
-Rolling environment tracking belongs to Trellis and proceeds independently of
-agent turns and return-point creation. Agent interruption does not imply loss of
-post-capture environment changes or cause automatic rollback. A failed required
-domain capture produces an incomplete attempt, with failure details and retained
-evidence; do not present it as a full Restore source or allow fork-base promotion.
-Do not stop ordinary work solely because an automatic capture failed.
-
-T3 Stop preserves the provider harness's normal agent-stop semantics. It does not
-stop the materialization, its services, or environment tracking; workspace shutdown
-is a separate lifecycle operation. Delegated-run cancellation follows the actual
-provider contract rather than an invented universal process-tree kill.
-Materializations initially require an explicit workspace stop; ending a turn,
-closing a thread, or disconnecting a client does not retire them. Idle suspension
-and resource reclamation are future work, requiring awareness of ongoing jobs and
-services. No process-preserving sleep mechanism is selected.
-
-Default history presentation emphasizes branches and deliberate checkpoints, with
-automatic captures and finer activity/state details available on demand. This does
-not alter retention, restore eligibility, or underlying provenance, and does not
-prescribe the backend mapping to Git/jj commits.
-
-Captures/checkpoints are cross-domain return points. Activity also has ancestry:
-a fork must not automatically receive unrelated sibling or later parent activity.
-Preserving ancestor events through the fork checkpoint and recording integration
-links without rewriting event origins is the proposed timeline model. A linear
-UI presentation need not linearize the stored provenance graph. Native provider
-conversation history remains distinct from both activity and state restoration.
-
-Restore and Fork must be distinct actions. Restore preserves a checkpoint of
-current state, then restores the full recorded state of the selected
-capture/checkpoint into the same workspace. It creates a new history record rather
-than erasing intervening work: files/code receive a new revision with the selected
-contents, and other state domains record equivalent transitions where applicable.
-The history retains the pre-restore state and the selected return point. Fork
-creates a separate workspace from a checkpoint and leaves the original unchanged.
-Neither rewinds independent project/general knowledge stores or provider
-conversation history. Coverage follows the return point's participating domains.
-Selective historical restoration is a separate, deferred operation, distinct from
-the accepted selective integration workflow. Provisional startup behavior restores
-declared service configuration and starts services marked for automatic startup;
-arbitrary commands and experiments are not automatically rerun. If restore fails,
-show that the workspace needs recovery and retain the pre-restore checkpoint and
-operation details. Recovery is explicit user/agent work, with inspection and repair
-access preserved; do not automatically roll back or silently repair the workspace.
-If the materialization cannot start, use an ordinary host-mode agent with the
-failed operation details and Trellis inspection/repair tools. Recovery outside
-the workspace uses a separate host conversation; the original project thread stays
-attached to its workspace. Concrete runtime transition and repair interfaces remain open.
-
-Archive and Delete must also be distinct. Archive is the normal retirement path
-when no work will continue in a workspace: preserve a final checkpoint, release
-its runtime, and retain its identity/history for reopening. A source or integration
-workspace with continuing work remains active after integration. Do not infer
-completion from inactivity. Explicit workspace deletion is supported, protecting
-state and provenance still required by surviving workspaces or retained return
-points. Otherwise private state/checkpoints/history are released for garbage
-collection unless explicitly retained elsewhere.
-
-## Replace the workspace implementation, not just the worktree button
-
-The user is willing to replace T3's worktree feature with the new backend.
-Use a logical workspace handle and declared execution capabilities throughout.
-The handle must support the runtime/transport needed by a provider, rather than
-merely supply another host directory.
-
-Provider execution, terminals, file and attachment access, previews/services,
-diffs, checkpoint capture/restore, VCS status, merge/PR behavior, and cleanup must
-refer to the same workspace state. T3 and the backend must not both believe they
-own materialization or independently restore the same files.
-
-Git remains a useful code-history substrate. Whole-workspace recovery and
-integration must surface which environment/config/resource domains participate.
-Existing T3 thread checkpoints need an explicit compatibility/migration policy;
-replacing a worktree manager must not silently invalidate old restore points.
-
-## Trellis state inclusion and environment intent
-
-Trellis inclusion is independent of Git ignore rules: managed workspace files,
-including Git-ignored/untracked environments and experiment results, are retained
-unless explicitly Trellis-excluded. Do not equate a clean Git view with no workspace
-state changes or hide capture failures behind a successful code snapshot. Large
-files should preferably live on mounted shared storage to keep runtime images
-smaller, with explicit resource recovery/sharing contracts. Trellis tracking does
-not require all retained content to be stored in Git/jj. Trellis ignore changes
-apply to subsequent captures; reclaiming older retained content is a separate
-explicit history/retention action.
-
-Project configuration exposes separate access and checkpoint-participation settings
-per storage source. A weights directory may be writable for fetching and switched
-to read-only afterward. Pinned sources retain recoverable versions and restore/fork
-into independent derived sources, leaving the original shared data untouched.
-Unpinned sources remain live/shared and are not rolled back; display observed
-versions when available and warn about differences from recorded observations.
-Do not present a version observation as a retained snapshot or equate read-only
-access with checkpoint pinning. Managed sources default to pinned when supported;
-external/live unpinned use must be explicit, not a silent unsupported-backend
-fallback. Project-default changes and applying them to selected existing workspaces
-are separate actions, which a UI may combine in one explicit flow. Derived sources
-initially bind to the restored/forked workspace; sharing/reuse elsewhere is explicit.
-Authorized agents may discover and attach sources explicitly shared across projects,
-normally read-only. Keep project-specific sources scoped unless deliberately shared;
-discovery/attachment does not imply permission to mutate the shared source.
-
-Expose storage provisioning/configuration and attachment through the agent API,
-returning a usable path so a fresh project's agent can obtain storage and download
-model weights without manual host setup. The management UI remains to be designed.
-
-Agents may explicitly promote useful exploratory installations into the reusable
-workspace environment definition without a separate human approval gate. Actual
-installed state remains tracked regardless; declaration is separate from capture.
-
-## Trellis orientation for agents
-
-Host and materialization agents need context-appropriate operational instructions:
-what Trellis is, where they run, expected workflow, available API/tools, resource
-requests, and relevant restrictions/recommendations, with links to deeper reference
-instructions. Make the container/workspace context explicit for materialization
-agents. Host guidance distinguishes machine work and recovery from managed work.
-
-Bootstrap manages host/harness instruction configuration; Trellis supplies workspace
-context and API semantics; T3/provider integration delivers session context where
-needed. Keep orientation distinct from shared project memory and use runtime/API
-facts for current identity and capabilities. Concrete packaging and injection
-mechanisms remain open.
-
-## Service registration and preview identity
-
-Persistent services require explicit user/agent registration of launch settings
-and startup behavior. An observed background command or listening port is not
-automatically a managed service. Process/port visibility can remain separate;
-VS Code-style discovery heuristics and suggestions are future work. Forks inherit
-registered service declarations/startup settings. Service startup on fork
-materialization start defaults to enabled and can be disabled per project. A failed
-service must leave an otherwise usable workspace available to its agent, with
-failure details/logs for repair; service readiness is separate from workspace health.
-
-Trellis provides logical service addresses tied to workspace/service identity,
-stable across restarts/restores and distinct for each fork. T3 should use those
-addresses rather than temporary node/port locations. Trellis owns the current
-endpoint mapping; Bootstrap owns enrolled machines' network membership/connectivity.
-T3 owns browser preview access across that infrastructure: connecting the browser
-to one T3 environment should suffice to access workspace services on other enrolled
-machines without separately pairing each worker. This is private preview access;
-public publishing is outside this feature. Concrete routing/relay transport and
-access checks remain open.
-
-## Integration workspace experience
-
-An integration workspace is an ordinary workspace where an agent can inspect
-inputs and actually reconcile a merge using its normal tools. Support selection
-of individual changes across domains, including code hunks and a desired package
-from a larger experimental installation set. The agent must be able to resolve
-required supporting changes/dependencies and validate the candidate before
-explicit application to the target. This is not just a read-only merge preview
-and does not inherently require human approval for each integration.
-
-Establish source and target checkpoints at integration start and a result
-checkpoint after the merge. Distinguish the original fork/common ancestor from
-the target's state at integration start; the selected inputs remain fixed for
-that attempt. Prefer leaving the target unchanged during integration, but do not
-lock either workspace. The source may continue freely. If current target state
-still matches its input checkpoint, apply the resolved result; otherwise retain
-the result and integrate it with the newer target in another attempt. Check
-rolling state as well as named checkpoints; this is not a long-lived write lock.
-
-Keep intended contributions, candidate changes, and validation results inspectable.
-Shared project/general knowledge continues through its explicit publication flow.
-Applying a result may restart/recreate the target materialization when needed.
-Durable workspace state and conversation history survive; preserving live processes
-is not an initial requirement. Code-only changes may apply without restart where
-supported. This is part of explicit integration apply, not the agent Stop action.
-Exact apply/failure recovery, provider reconnection, and code-history presentation
-remain to be designed; preserve activity/contribution provenance.
-
-## Machines and background coordination
-
-Multi-machine workspace management belongs to the backend. T3 displays node
-capabilities, placement, readiness, recovery coverage, and operation status from
-that authority. A T3 environment and a backend node are distinct identities;
-their mapping may change as provider execution is integrated. Creating a project
-should not require choosing a machine/directory first: Trellis selects suitable
-placement from explicit requirements, project preferences, and state locality.
-The catalog is the normal way to find and continue work. Existing materializations
-stay put; no automatic migration/rebalancing is required initially. When no suitable
-node is available, keep the project record, show useful capability/availability
-information, and allow a manual placement override for compatible preparatory work.
-For example, sketch a GPU project on a CPU node while its GPU node is down, retaining
-the unmet requirement. Do not silently queue the start request or claim the override
-supplies missing capabilities. Explicit saved-state transfer is part of the first
-useful multi-machine milestone, following the single-node pilot. Offer relocation
-of the same workspace or a fork on the destination; default to relocation for
-sequential CPU preparation followed by GPU work. Relocation preserves workspace
-identity/history; forking creates an independent branch. Stop work properly,
-checkpoint, transfer retained state, and materialize on a compatible destination.
-Keep the same visible thread attached to the relocated workspace where supported,
-resuming the native provider session when possible or making a supported handoff
-explicit. Do not promise universal provider-session portability. Destination
-incompatibility is a reported transfer failure, not an automatic environment
-adaptation. Preserve source state until the destination is verified usable. The
-user or a host-mode agent may fix the destination and retry or abandon the transfer.
-Concrete compatibility checks, provider continuation, and transfer recovery still
-need contracts; this is not live process migration.
-
-The coordinator's durable activity and dispatch live server-side so browser or
-mobile disconnection does not end orchestration. The backend routes workspace
-execution; T3 still needs a concrete path to the provider owner for thread
-operations. Decide that bridge explicitly rather than building a second generic
-machine registry in T3 or assuming current browser connections provide it.
-
-Initial multi-machine use covers creating/opening work on either node and explicit
-saved-state relocation/remote forks. Transparent movement of live processes or
-native provider sessions is not required. Disconnected is not stopped, and a lost
-response is not failed. Display
-operation receipts and reconcile status before retrying work or reassigning a
-writable workspace. Existing agents, builds, and services may continue local work
-during control-plane disconnection; centrally coordinated operations are unavailable
-until reconnection. Do not replace an unreachable materialization on another node.
-Backend ownership reconciliation must support this behavior. Checkpoint creation
-requires the control plane and returns an unavailable error during disconnection.
-Local tracking continues; independently finalized offline checkpoints are deferred
-to later decentralization.
-
-Initially one retained copy of checkpoint state on its owning node is sufficient.
-Display storage location and availability without implying machine-loss protection.
-Replication/durability hardening and control-plane decentralization are a later
-second wave, not prerequisites for the initial product.
-
-## Current constraints that shape integration
-
-Source baseline: `dev_vm` at `b7587c1e5c30820f5cdddd04ca5b8aaabed372b5`.
-Recheck these observations before implementation.
-
-- [Thread contracts](../../packages/contracts/src/orchestration.ts) require a
-  project; project-free conversation persistence needs a deliberate schema/model
-  decision. A synthetic project might serve a prototype but is not the product
-  model by default.
-- [Connection registry](../../packages/client-runtime/src/connection/registry.ts)
-  federates environments in clients. It does not give a server-hosted coordinator
-  automatic access to every server a browser can reach.
-- [TaskService](../../apps/server/src/mcp/TaskService.ts) already supports durable
-  agent-authored task operations, but scopes them to a project and Codex. Preserve
-  its authority checks while designing broader coordinator capabilities; removing
-  those checks alone is not the new interface.
-- [Workspace resolution](../../apps/server/src/checkpointing/Utils.ts) and
-  [provider startup](../../apps/server/src/provider/Layers/ProviderService.ts)
-  assume host-visible paths. Isolation and remote execution require a broader
-  execution adapter used consistently by surrounding features.
-
-## Decisions still needed
-
-- Durable activity and project-free conversation representation in T3.
-- Mapping logical backend projects/workspaces to existing T3 records.
-- Provider launch/connection inside isolated materializations and thread routing
-  across execution owners, including native-resume constraints.
-- Ordering and authority for direct-user/coordinator messages and workspace use.
-- Shared context/decision/artifact ownership, selection, and update rules.
-- Authentication, capability negotiation, request receipts, event subscriptions,
-  and compatibility between T3 and backend releases.
-- Transition for existing worktrees, thread checkpoints, cleanup, and projects
-  that do not yet use the backend.
-
-The first useful proof should cover an ordinary thread using one isolated managed
-workspace, prioritizing the full isolated-project workflow before scratch, then the Cockpit/direct-thread round trip on one node before expanding to two. The
-backend's recovery guarantees must be independently demonstrated. Include web,
-desktop, mobile, local/remote connections, and explicit provider capability
-coverage when defining implementation acceptance; keep raw event streams bounded.
-
-## Design sources and maintenance
-
-Backend domain/state design lives in `~/projects/trellis`; its README links
-the architecture, glossary, accepted direction, roadmap, and original Lattice
-design provenance. Those local paths are references, not build dependencies.
-This note is the durable T3-side product/integration rationale requested by the
-user. Update it as choices change instead of appending competing accounts.
+# Project flow and Trellis integration
+
+Consolidated 2026-09-22. Accepted product direction; no Trellis integration is
+implemented or validated by this note. Backend semantics live in
+[the Trellis state model](../../../trellis/docs/state-model.md); implementation
+sequencing lives in [its roadmap](../../../trellis/docs/roadmap.md). This document
+owns T3-specific experience, provider seams, and integration constraints.
+
+## Experience and ownership
+
+Start without selecting a project in **Cockpit**, or use an ordinary thread directly.
+Create/find managed work through the catalog without choosing its machine/path first.
+Cockpit remains an ongoing conversation and can link ordinary threads that users
+open and steer directly. Other agents are uniform; coordinator/worker is not a
+permanent type distinction. An activity may span zero or more projects/threads.
+
+| Component                      | Authority                                                                                                     |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| T3/provider adapters           | Conversations/transcripts, provider sessions, dispatch, direct/coordinated UX, management and previews        |
+| Trellis                        | Logical projects/workspaces, placement, state/history/recovery, execution, storage/services                   |
+| Bootstrap                      | Fleet enrollment/connectivity and host/user/harness configuration; workspace application goes through Trellis |
+| Future connection/auth manager | External-account lifecycle and scoped connections; product remains unselected                                 |
+| Existing CHPC project          | Cluster staging, scheduler/jobs and results through an adapter                                                |
+
+See [ecosystem overview](../../../trellis/docs/ecosystem.md). Trellis is a fresh
+headless Bend 2/Rust implementation inspired by Lattice; no standalone GUI/TUI.
+Its API is unified for T3, a CLI frontend, and structured tools. Require explicit
+credentials and target/operation authorization: LAN membership and resource IDs do
+not grant machine control. Token lifecycle/transport must be specified before remote use.
+
+T3's current directory-rooted environment-local project record is not the desired
+Trellis project entity. Paths or matching Git remotes are not identity mappings.
+A T3 environment is not inherently a Trellis node. Do not build a second fleet or
+state authority in T3, or independently restore the files Trellis owns.
+
+## First release and execution modes
+
+Prioritize a fresh isolated project on one node and one provider before scratch,
+multiple nodes, or adoption. Host mode remains available for existing projects and
+machine work; selecting it does not imply adoption or recovery coverage.
+In managed isolated mode the harness and native tools run inside the materialization.
+
+A project can exist before execution: metadata, empty initialized history, one
+workspace, one default OCI base, only required system scaffolding. A catalog record
+is not necessarily a ready environment. Expose the actual machine/mode/target;
+a toggle near checkpoint controls was a UX candidate, not a fixed design.
+
+Cockpit initially runs in a normal host environment with a dedicated persistent cwd.
+Instructions direct project creation through Trellis; the cwd is not isolation.
+Cross-project edits initially use host conversations. Broader scoped inter-agent
+communication follows later, without permanent agent classes.
+
+Many threads can reuse one workspace. Resumed old threads operate on its current
+state without automatic catch-up summaries or conversation repair. Main agents
+and cooperating subagents may share a materialization; independent alternatives
+use separate workspace forks. Initially each isolated workspace has at most one
+active materialization, including across nodes.
+
+## Direct control and dispatch
+
+Persist Cockpit activity, thread references, routing, and dispatch server-side;
+browser closure must not stop orchestration. Link/unlink does not create/delete
+workspace state. Keep ordinary model/provider controls, permissions, Stop, drafts,
+attachments, direct follow-ups, and native history available.
+
+Queue Cockpit requests to busy threads visibly by default. Stopping or redirecting
+work requires an explicit interrupt action, and stale queued plans cannot silently
+override direct user steering. Exact sequencing/receipts need an implementation,
+not a renewed product decision about whether takeover is allowed.
+
+T3 Stop requests the provider's normal agent stop, including its actual delegated
+cancellation behavior. It does not stop the runtime, services, or environment tracker.
+Both isolated and scratch runtimes stop explicitly initially; turn completion,
+client disconnect, and idle time do not retire them.
+
+## One execution-target interface
+
+Replace the worktree implementation through a logical workspace handle used by:
+provider launch/protocol connection, terminal/native tools, files/attachments,
+diffs/history, previews/services, VCS/PR, capture/restore, integration, and cleanup.
+An adapter that only substitutes a host cwd cannot support isolated/remote execution.
+Mark unsupported paths rather than letting them act on the server's unrelated files.
+
+Trellis handles workspace operations; T3 retains native provider protocol/session
+ownership. A node-side launch/connection bridge is an integration candidate. Preserve
+existing adapters where possible, but qualify actual auth, cwd, transport, Stop, and
+resume behavior for each supported provider. Exact node-runner transport remains open.
+
+Host/materialization agents need a short operational orientation: actual context,
+Trellis purpose, API/tools, storage/service requests, expectations and reference links.
+Bootstrap installs host/harness guidance; Trellis supplies workspace facts/semantics;
+T3 injects session context where appropriate. This is not shared project memory.
+
+## History and recovery UX
+
+Branches and deliberate checkpoints are the default view; automatic captures and
+finer state/activity details are optional. Clean Git status does not mean unchanged
+Trellis state: Git-ignored files and actual environment mutations may be retained.
+Do not present a successful code snapshot as a successful full workspace capture.
+
+| Action/status   | T3 must communicate                                                                                                                                        |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Checkpoint      | Caller stops work/services; blockers produce an error. Dedicated tool returns to the still-running agent; no user "continue" required.                     |
+| Capture         | Automatic at top-level boundaries. Required-domain failure is incomplete, not a Restore/fork source.                                                       |
+| Fork            | Separate workspace from checkpoint; current-state checkpoint or promotion of a complete retained historical capture may be part of one action.             |
+| Restore         | Full participating state in the same workspace, preserving pre-restore checkpoint and adding history; does not rewind native transcripts/shared knowledge. |
+| Recovery needed | Retain outcomes/logs and allow explicit agent/user repair, not silent rollback. Host recovery thread can repair an unstartable materialization.            |
+| Integration     | Ordinary integration workspace; fixed S0/T0, selective changes, result R; an advanced target needs another integration, not overwrite.                     |
+| Archive/delete  | Separate operations; archive retains completed work, delete releases private history subject to surviving references.                                      |
+
+These are UI obligations; [state model](../../../trellis/docs/state-model.md) owns
+complete backend rules. Existing T3 checkpoints/worktrees need an explicit migration/
+compatibility policy that preserves old restore points and unmanaged host behavior.
+
+## Storage, knowledge, and services
+
+Storage UI/API exposes independent access, pinning, and sharing settings. Supported
+managed sources default pinned; live/unpinned use is explicit. Project-default
+changes and application to selected workspaces are separate. Restore/fork of pinned
+sources uses independent derived bindings; live resources stay untouched, with
+observed version differences shown where available. Explicitly cross-project shared
+sources can be discovered/reused, normally read-only; attachment grants no implicit writes.
+Agents can provision/attach storage and receive a usable path without manual host setup.
+
+Knowledge is file-backed general/project/workspace state with selected shared revisions.
+Pull and publish are explicit. The later publishing agent reconciles conflicts against
+the current head; retain unresolved candidates and avoid silent overwrite or refreshing
+experiment inputs. T3 exposes selection/publication provenance rather than treating
+memory as perpetually current. Shared stores are not rolled back with a workspace.
+
+Register services explicitly; do not promote observed ports automatically. Fork
+startup is configurable/default enabled. A failed dev server leaves its workspace
+usable for repair. Trellis maps stable workspace/service addresses to current ports;
+forks get distinct addresses. Bootstrap supplies private fleet connectivity. T3
+makes previews accessible through an existing browser connection without pairing
+each worker separately. This is not public publishing.
+
+## Multi-machine continuation
+
+Trellis supplies node capabilities, placement, operation status, coverage, and
+content locations. No suitable node produces useful failure details while retaining
+the project; manual preparatory override is allowed, not a claim of missing capability.
+No automatic placement queue or rebalancing is required initially.
+
+The first useful multi-node release includes relocation and remote forks. Sequential
+CPU-to-GPU continuation defaults to relocating the same workspace; independent work
+can fork. Transfer retained checkpoint state after properly stopping work; no live
+process migration. Preserve the source until the destination is verified usable.
+Incompatibility fails transfer; the user/host agent fixes and retries or abandons.
+
+Retain the same visible conversation where supported, using native resume or explicit
+supported handoff. Same-thread UX is not a universal provider portability guarantee.
+The single-node pilot need not support arbitrary conversation moves between hosts or
+divergent workspace states. Same-workspace relocation is the later explicit workflow.
+
+Disconnected is not stopped, and a lost response is not proof of failure. Existing
+local work/tracking continues through control-plane disconnection; central operations
+including checkpoints fail unavailable. Never replace an unreachable runtime elsewhere
+without ownership reconciliation. Display one-copy durability honestly; replication
+and control-plane decentralization are a later hardening wave.
+
+## Scratch after the isolated pilot
+
+Scratch is ordinary project creation through the same API, available to Cockpit and
+normal agents. Support one-off scripts, data processing, and visualizations in shared
+execution with separate persistent directories and reduced environment guarantees.
+Files/results/conversations do not expire automatically. Explicit runtime stop
+must not delete them. Exact file-history controls and shared-runtime mechanics are open.
+
+No graduation or environment/history/conversation migration is required. A larger
+idea starts a new isolated project with selected copied notes/files.
+
+## Historical source evidence and remaining engineering work
+
+The original source audit used `dev_vm` at
+`b7587c1e5c30820f5cdddd04ca5b8aaabed372b5`. These are historical findings to refresh
+before implementation, not verified-current runtime claims:
+
+| Finding                                                    | Source pointers in this repo                                                                                                                      |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Durable threads require project association                | [thread contracts](../../packages/contracts/src/orchestration.ts), [decider](../../apps/server/src/orchestration/decider.ts)                      |
+| Environment federation belongs to clients                  | [connection registry](../../packages/client-runtime/src/connection/registry.ts)                                                                   |
+| Existing task operations are same-project/Codex scoped     | [TaskService](../../apps/server/src/mcp/TaskService.ts)                                                                                           |
+| Execution/checkpoint paths assume host-visible directories | [workspace utilities](../../apps/server/src/checkpointing/Utils.ts), [provider service](../../apps/server/src/provider/Layers/ProviderService.ts) |
+
+Resolve project-free persistence and logical ID mapping; provider/node runner transport;
+API auth/token provisioning; queue ordering/receipts; private preview transport;
+backend capability/coverage compatibility; and legacy checkpoint/worktree migration.
+Ownership, queue-by-default, explicit publication/pull, and isolated-first rollout
+are settled. Do not reopen them as unanswered product choices.
+
+Implement one ordinary isolated thread before Cockpit, then expand providers/nodes
+according to Trellis's roadmap. Use isolated development state. Define and verify
+claimed web/desktop/mobile and local/remote surfaces, with bounded event views.
+Backend state recovery needs independent evidence; T3 UI success alone does not prove it.
