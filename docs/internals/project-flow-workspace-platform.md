@@ -77,6 +77,24 @@ questions/approvals, drafts, attachments, history, and direct follow-ups. Link,
 unlink, revisit, pause coordination, and inspect provenance need clear semantics;
 unlinking must not implicitly delete a thread or its workspace.
 
+## Scratch work through ordinary project creation
+
+Offer scratch creation through the normal T3 project flow and Trellis API. Cockpit
+can invoke the same operation, but scratch is not a special Cockpit-only feature.
+It covers one-off scripts, quick data processing, and visualizations, using a shared
+container/runtime with common tools and separate project directories.
+
+Retain files, notes, results, and conversations until explicit deletion; the initial
+version does not expire scratch data automatically. Runtime disposal is separate
+from data retention. Shared execution does not provide independent per-project
+environment recovery, and the UI must not imply full isolated-workspace guarantees.
+Exact file-history controls and runtime cleanup remain to be designed.
+
+Do not require a graduation action or automatic environment/history/conversation
+migration. If scratch work inspires a larger project, create a new normal project
+and copy selected notes/files through ordinary operations. This is sufficient for
+the initial scope.
+
 ## Initial rollout and execution mode
 
 Managed Trellis projects start fresh during the initial pilot. Ordinary host mode
