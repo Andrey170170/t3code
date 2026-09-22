@@ -133,6 +133,6 @@ for (const baseline of ["fresh", "upstream-51", "local-50", "local-52"] as const
         `;
         assert.deepStrictEqual(skipped, []);
       }
-    }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 }
