@@ -86,36 +86,38 @@ function NewTrellisProjectDialog(props: {
             repository, and opens a new thread in it.
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="grid gap-4">
-          <div className="grid gap-1.5">
-            <Label htmlFor="trellis-project-name">Name (optional)</Label>
-            <Input
-              id="trellis-project-name"
-              placeholder="Leave empty for a default name"
-              value={name}
-              disabled={pending}
-              onChange={(event) => setName(event.target.value)}
-              onKeyDown={submitOnEnter}
-              autoFocus
-            />
+        <DialogPanel>
+          <div className="grid gap-4">
+            <div className="grid gap-1.5">
+              <Label htmlFor="trellis-project-name">Name (optional)</Label>
+              <Input
+                id="trellis-project-name"
+                placeholder="Leave empty for a default name"
+                value={name}
+                disabled={pending}
+                onChange={(event) => setName(event.target.value)}
+                onKeyDown={submitOnEnter}
+                autoFocus
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="trellis-project-git-url">Git URL (optional)</Label>
+              <Input
+                id="trellis-project-git-url"
+                placeholder="https://github.com/owner/repo.git"
+                value={gitUrl}
+                disabled={pending}
+                onChange={(event) => setGitUrl(event.target.value)}
+                onKeyDown={submitOnEnter}
+              />
+            </div>
+            {pending && trimmedGitUrl.length > 0 ? (
+              <p className="text-muted-foreground text-xs">
+                Cloning can take a while for large repositories.
+              </p>
+            ) : null}
+            {error ? <p className="text-destructive text-xs">{error}</p> : null}
           </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="trellis-project-git-url">Git URL (optional)</Label>
-            <Input
-              id="trellis-project-git-url"
-              placeholder="https://github.com/owner/repo.git"
-              value={gitUrl}
-              disabled={pending}
-              onChange={(event) => setGitUrl(event.target.value)}
-              onKeyDown={submitOnEnter}
-            />
-          </div>
-          {pending && trimmedGitUrl.length > 0 ? (
-            <p className="text-muted-foreground text-xs">
-              Cloning can take a while for large repositories.
-            </p>
-          ) : null}
-          {error ? <p className="text-destructive text-xs">{error}</p> : null}
         </DialogPanel>
         <DialogFooter variant="bare">
           <Button variant="outline" onClick={props.onClose} disabled={pending}>
