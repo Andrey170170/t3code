@@ -68,7 +68,9 @@ import { ServerConfig } from "../../config.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 import * as WorkspacePaths from "../../workspace/WorkspacePaths.ts";
 import { PullRequestService } from "../../pullRequest/PullRequestService.ts";
+import { TrellisError } from "@t3tools/contracts";
 import * as Trellis from "../../trellis/Trellis.ts";
+import * as TrellisBaseline from "../../trellis/TrellisBaseline.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
@@ -166,7 +168,9 @@ function createTrellisHarness(input: {
   readonly root: string;
   readonly cwd: string;
   readonly workspaceKind: "scratch" | "dedicated";
+  readonly baselineFailures?: number;
 }) {
+  let baselineFailures = input.baselineFailures ?? 0;
   const snapshots: Array<Trellis.TrellisSnapshot> = [];
   const rollbacks: Array<{ readonly target: string; readonly snapshot: string }> = [];
   const env = { root: input.root, bin: "trellis", shimDir: "/trellis-shims" };
@@ -209,19 +213,21 @@ function createTrellisHarness(input: {
       }),
     listSnapshots: () => Effect.sync(() => [...snapshots]),
     createSnapshot: ({ thread, turn }) =>
-      Effect.sync(() => {
-        const snapshot = {
-          id: `snap-${snapshots.length + 1}`,
-          workspace_id: "ws-1",
-          seq: snapshots.length + 1,
-          kind: "turn",
-          thread,
-          turn,
-          created_at: 0,
-        };
-        snapshots.push(snapshot);
-        return snapshot;
-      }),
+      turn === "baseline" && baselineFailures-- > 0
+        ? Effect.fail(new TrellisError({ message: "Trellis is restarting" }))
+        : Effect.sync(() => {
+            const snapshot = {
+              id: `snap-${snapshots.length + 1}`,
+              workspace_id: "ws-1",
+              seq: snapshots.length + 1,
+              kind: "turn",
+              thread,
+              turn,
+              created_at: 0,
+            };
+            snapshots.push(snapshot);
+            return snapshot;
+          }),
     rollback: (entry) =>
       Effect.sync(() => {
         rollbacks.push(entry);
@@ -387,6 +393,7 @@ describe("CheckpointReactor", () => {
     readonly pullRequestRefreshCalls?: Array<string>;
     readonly pullRequestRefresh?: Effect.Effect<void>;
     readonly trellisWorkspaceKind?: "scratch" | "dedicated";
+    readonly trellisBaselineFailures?: number;
   }) {
     const trellisRoot =
       options?.trellisWorkspaceKind === undefined
@@ -410,6 +417,7 @@ describe("CheckpointReactor", () => {
             root: trellisRoot,
             cwd,
             workspaceKind: options.trellisWorkspaceKind,
+            baselineFailures: options.trellisBaselineFailures ?? 0,
           });
     const provider = createProviderServiceHarness(
       cwd,
@@ -466,7 +474,11 @@ describe("CheckpointReactor", () => {
 
     const layer = CheckpointReactorLive.pipe(
       Layer.provideMerge(
-        trellis === undefined ? Layer.empty : Layer.succeed(Trellis.Trellis, trellis.service),
+        trellis === undefined
+          ? Layer.empty
+          : TrellisBaseline.layer.pipe(
+              Layer.provideMerge(Layer.succeed(Trellis.Trellis, trellis.service)),
+            ),
       ),
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
@@ -2539,6 +2551,43 @@ describe("CheckpointReactor", () => {
           }),
         ]),
       );
+    });
+
+    it("retries a missing baseline at the next turn start", async () => {
+      const harness = await createHarness({
+        trellisWorkspaceKind: "scratch",
+        initializeGit: false,
+        seedFilesystemCheckpoints: false,
+        threadWorktreePath: null,
+        // Both baseline attempts of the first turn start (message sent and
+        // turn start requested) fail.
+        trellisBaselineFailures: 2,
+      });
+
+      await runTrellisTurn(harness);
+      expect(harness.trellis?.snapshots.map((entry) => entry.turn)).toEqual(["turn-trellis-1"]);
+
+      await run(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-trellis-turn-start-2"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-trellis-2"),
+            role: "user",
+            text: "again",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt,
+        }),
+      );
+      await harness.drain();
+      expect(harness.trellis?.snapshots.map((entry) => [entry.thread, entry.turn])).toEqual([
+        ["thread-1", "turn-trellis-1"],
+        ["thread-1", "baseline"],
+      ]);
     });
 
     it("stops provider sessions in a dedicated workspace before rolling it back", async () => {

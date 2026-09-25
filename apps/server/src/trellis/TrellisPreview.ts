@@ -68,6 +68,9 @@ export class TrellisPreview extends Context.Service<
   }
 >()("t3/trellis/TrellisPreview") {}
 
+const readFailure = (what: string) =>
+  new PreviewTrellisError({ detail: `could not read ${what} to find its workspace` });
+
 const make = Effect.gen(function* () {
   const trellis = yield* Trellis;
   const snapshots = yield* ProjectionSnapshotQuery;
@@ -76,9 +79,10 @@ const make = Effect.gen(function* () {
   const trellisCwdOf = Effect.fn("TrellisPreview.trellisCwdOf")(function* (threadId: ThreadId) {
     const root = yield* trellis.expectedRoot;
     if (root === null) return null;
+    // A read failure must not fall back to the host's localhost.
     const thread = yield* snapshots
       .getThreadShellById(threadId)
-      .pipe(Effect.orElseSucceed(() => Option.none()));
+      .pipe(Effect.mapError(() => readFailure("the thread")));
     if (Option.isNone(thread)) return null;
     const cwd = thread.value.worktreePath ?? (yield* projectRoot(thread.value.projectId));
     return cwd !== null && isTrellisManagedPath(root, cwd) ? cwd : null;
@@ -87,7 +91,7 @@ const make = Effect.gen(function* () {
   const projectRoot = (projectId: ProjectId) =>
     snapshots.getProjectShellById(projectId).pipe(
       Effect.map((project) => (Option.isSome(project) ? project.value.workspaceRoot : null)),
-      Effect.orElseSucceed(() => null),
+      Effect.mapError(() => readFailure("the project")),
     );
 
   const publish = (cwd: string, port: number) =>

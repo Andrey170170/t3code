@@ -6,6 +6,7 @@ import * as Option from "effect/Option";
 import { describe, expect } from "vite-plus/test";
 
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { PersistenceSqlError } from "../persistence/Errors.ts";
 import { TrellisError } from "@t3tools/contracts";
 import { Trellis } from "./Trellis.ts";
 import * as TrellisPreview from "./TrellisPreview.ts";
@@ -47,6 +48,8 @@ describe("TrellisPreview service", () => {
   const makeLayer = (input: {
     readonly workspaceRoot: string;
     readonly fail?: boolean;
+    readonly readFails?: boolean;
+    readonly missingThread?: boolean;
     readonly published: Array<{ target: string; port: number }>;
   }) => {
     const unused = () => Effect.die(new Error("unused"));
@@ -81,9 +84,15 @@ describe("TrellisPreview service", () => {
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery)({
           getThreadShellById: () =>
-            Effect.succeed(
-              Option.some({ projectId: ProjectId.make("p"), worktreePath: null } as never),
-            ),
+            input.readFails
+              ? Effect.fail(
+                  new PersistenceSqlError({ operation: "test", detail: "database is locked" }),
+                )
+              : Effect.succeed(
+                  input.missingThread
+                    ? Option.none()
+                    : Option.some({ projectId: ProjectId.make("p"), worktreePath: null } as never),
+                ),
           getProjectShellById: () =>
             Effect.succeed(Option.some({ workspaceRoot: input.workspaceRoot } as never)),
         }),
@@ -133,6 +142,26 @@ describe("TrellisPreview service", () => {
       ).pipe(Effect.flip);
       expect(error._tag).toBe("PreviewTrellisError");
       expect(error.message).toContain("workspace is not running");
+    }),
+  );
+
+  it.effect("fails on a read-model error instead of loading the host's localhost", () =>
+    Effect.gen(function* () {
+      const layer = makeLayer({ workspaceRoot: IDEA, readFails: true, published: [] });
+      const error = yield* resolve("http://localhost:5173/", layer).pipe(Effect.flip);
+      expect(error._tag).toBe("PreviewTrellisError");
+      // Non-loopback URLs never need the read model.
+      expect(yield* resolve("https://example.com/", layer)).toBe("https://example.com/");
+    }),
+  );
+
+  it.effect("leaves the URL unchanged for a thread that does not exist", () =>
+    Effect.gen(function* () {
+      const url = yield* resolve(
+        "http://localhost:5173/",
+        makeLayer({ workspaceRoot: IDEA, missingThread: true, published: [] }),
+      );
+      expect(url).toBe("http://localhost:5173/");
     }),
   );
 

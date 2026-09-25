@@ -42,8 +42,8 @@ import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 import * as PullRequestService from "../../pullRequest/PullRequestService.ts";
 import * as Trellis from "../../trellis/Trellis.ts";
+import * as TrellisBaseline from "../../trellis/TrellisBaseline.ts";
 import {
-  BASELINE_TURN,
   isTrellisCheckpointRef,
   TRELLIS_CHECKPOINT_REF_PREFIX,
   selectRollbackSnapshot,
@@ -116,6 +116,7 @@ const make = Effect.gen(function* () {
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const pullRequests = yield* PullRequestService.PullRequestService;
   const trellis = yield* Effect.serviceOption(Trellis.Trellis);
+  const trellisBaseline = yield* Effect.serviceOption(TrellisBaseline.TrellisBaseline);
   const queuedEntryRefreshes = new Set<string>();
   const entryRefreshWorker = yield* makeDrainableWorker((cwd: string) =>
     Effect.sync(() => queuedEntryRefreshes.delete(cwd)).pipe(
@@ -292,28 +293,10 @@ const make = Effect.gen(function* () {
           Effect.map((managed) => (managed ? cwd : undefined)),
         );
 
-  const ensureTrellisBaseline = Effect.fn("ensureTrellisBaseline")(function* (
-    threadId: ThreadId,
-    cwd: string,
-  ) {
-    if (Option.isNone(trellis)) return;
-    const client = trellis.value;
-    yield* Effect.gen(function* () {
-      const snapshots = yield* client.listSnapshots(cwd);
-      if (snapshots.some((entry) => entry.thread === threadId && entry.turn === BASELINE_TURN)) {
-        return;
-      }
-      yield* client.createSnapshot({ target: cwd, thread: threadId, turn: BASELINE_TURN });
-    }).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("Trellis baseline snapshot failed", {
-          threadId,
-          cwd,
-          detail: error.message,
-        }),
-      ),
-    );
-  });
+  // Shared with the provider command reactor, which takes the baseline
+  // before it sends a turn; retried at every turn start until it exists.
+  const ensureTrellisBaseline = (threadId: ThreadId, cwd: string) =>
+    Option.isNone(trellisBaseline) ? Effect.void : trellisBaseline.value.ensure(threadId, cwd);
 
   const snapshotTrellisTurn = Effect.fn("snapshotTrellisTurn")(function* (input: {
     readonly threadId: ThreadId;
@@ -689,10 +672,8 @@ const make = Effect.gen(function* () {
       0,
     );
     const trellisCwd = yield* trellisCwdOf(workspaceCwd);
-    const trellisBaseline =
-      trellisCwd !== undefined && currentTurnCount === 0
-        ? ensureTrellisBaseline(thread.id, trellisCwd)
-        : Effect.void;
+    // Fast (a Btrfs snapshot), so it goes before the git capture.
+    if (trellisCwd !== undefined) yield* ensureTrellisBaseline(thread.id, trellisCwd);
 
     const captureGitBaseline = Effect.gen(function* () {
       const checkpointCwd = yield* gitCheckpointCwd(workspaceCwd);
@@ -720,7 +701,7 @@ const make = Effect.gen(function* () {
         createdAt: input.createdAt,
       });
     });
-    yield* thenAlways(captureGitBaseline, trellisBaseline);
+    yield* captureGitBaseline;
   });
 
   const refreshLocalGitStatusFromTurnCompletion = Effect.fn(

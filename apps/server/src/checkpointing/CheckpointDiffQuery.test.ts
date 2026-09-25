@@ -483,6 +483,8 @@ describe("CheckpointDiffQuery.layer", () => {
 
 describe("Trellis-only turns", () => {
   const threadId = ThreadId.make("thread-trellis");
+  const baselineRef = checkpointRefForThreadTurn(threadId, 0);
+  const gitRef = (turn: number) => `refs/t3/checkpoints/x/turn/${turn}`;
   const checkpoint = (turnCount: number, ref: string) => ({
     turnId: TurnId.make(`turn-${turnCount}`),
     checkpointTurnCount: turnCount,
@@ -495,77 +497,123 @@ describe("Trellis-only turns", () => {
   const mixed = [
     checkpoint(1, "trellis:snap-1"),
     checkpoint(2, "trellis:snap-2"),
-    checkpoint(3, "refs/t3/checkpoints/x/turn/3"),
-    checkpoint(4, "refs/t3/checkpoints/x/turn/4"),
+    checkpoint(3, gitRef(3)),
+    checkpoint(4, gitRef(4)),
+    checkpoint(5, gitRef(5)),
   ];
+  const context = {
+    threadId,
+    projectId: ProjectId.make("p"),
+    workspaceRoot: "/trellis/workspaces/ws/project/idea",
+    worktreePath: null,
+  };
+  const timeout = (cwd: string) =>
+    new VcsProcessTimeoutError({ operation: "test.diff", command: "git", cwd, timeoutMs: 1 });
 
-  it("diffs from the first git checkpoint when the git baseline is missing", () => {
-    expect(CheckpointDiffQuery.gitDiffBaseAfterTrellisTurns(mixed, 4)).toBe(
-      "refs/t3/checkpoints/x/turn/3",
+  // A store whose turn-0 baseline diff fails; `baselineExists` says whether
+  // that is a missing ref or some other failure such as a timeout.
+  const makeLayer = (input: {
+    readonly checkpoints: ReadonlyArray<ReturnType<typeof checkpoint>>;
+    readonly baselineExists: boolean;
+    readonly froms: Array<string>;
+  }) =>
+    CheckpointDiffQuery.layer.pipe(
+      Layer.provide(
+        Layer.mock(CheckpointStore.CheckpointStore)({
+          hasCheckpointRef: ({ checkpointRef }) =>
+            Effect.succeed(checkpointRef === baselineRef ? input.baselineExists : true),
+          diffCheckpoints: ({ fromCheckpointRef, cwd }) =>
+            Effect.suspend(() => {
+              input.froms.push(fromCheckpointRef);
+              return fromCheckpointRef === baselineRef
+                ? Effect.fail(timeout(cwd))
+                : Effect.succeed(`patch from ${fromCheckpointRef}`);
+            }),
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
+          getFullThreadDiffContext: () =>
+            Effect.succeed(
+              Option.some({
+                ...context,
+                latestCheckpointTurnCount: 5,
+                toCheckpointRef: CheckpointRef.make(gitRef(5)),
+              }),
+            ),
+          getThreadCheckpointContext: () =>
+            Effect.succeed(Option.some({ ...context, checkpoints: input.checkpoints })),
+        }),
+      ),
     );
+
+  const fullThread = (layer: ReturnType<typeof makeLayer>) =>
+    Effect.gen(function* () {
+      const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+      return yield* query.getFullThreadDiff({ threadId, toTurnCount: 5 });
+    }).pipe(Effect.provide(layer));
+  const turnDiff = (
+    layer: ReturnType<typeof makeLayer>,
+    fromTurnCount: number,
+    toTurnCount: number,
+  ) =>
+    Effect.gen(function* () {
+      const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+      return yield* query.getTurnDiff({ threadId, fromTurnCount, toTurnCount });
+    }).pipe(Effect.provide(layer));
+
+  it("finds leading Trellis-only turns and the first git checkpoint of a range", () => {
+    expect(CheckpointDiffQuery.startsWithTrellisOnlyTurns(mixed)).toBe(true);
+    expect(CheckpointDiffQuery.startsWithTrellisOnlyTurns(mixed.slice(2))).toBe(false);
+    expect(CheckpointDiffQuery.firstGitCheckpointBetween(mixed, 1, 5)).toBe(gitRef(3));
     // The first git checkpoint itself has nothing earlier to diff against.
-    expect(CheckpointDiffQuery.gitDiffBaseAfterTrellisTurns(mixed, 3)).toBeNull();
-    // Threads without Trellis-only turns keep the usual error.
-    expect(CheckpointDiffQuery.gitDiffBaseAfterTrellisTurns(mixed.slice(2), 4)).toBeUndefined();
+    expect(CheckpointDiffQuery.firstGitCheckpointBetween(mixed, 2, 3)).toBeNull();
   });
 
-  it.effect("serves a full-thread diff of a mixed history from its first git checkpoint", () =>
+  it.effect("diffs a full thread from its first git checkpoint when the baseline is absent", () =>
     Effect.gen(function* () {
       const froms: Array<string> = [];
-      const layer = CheckpointDiffQuery.layer.pipe(
-        Layer.provide(
-          Layer.mock(CheckpointStore.CheckpointStore)({
-            diffCheckpoints: ({ fromCheckpointRef, cwd }) =>
-              Effect.suspend(() => {
-                froms.push(fromCheckpointRef);
-                return fromCheckpointRef === checkpointRefForThreadTurn(threadId, 0)
-                  ? Effect.fail(
-                      new VcsProcessTimeoutError({
-                        operation: "test.diff",
-                        command: "git",
-                        cwd,
-                        timeoutMs: 1,
-                      }),
-                    )
-                  : Effect.succeed("patch");
-              }),
-          }),
-        ),
-        Layer.provide(
-          Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
-            getFullThreadDiffContext: () =>
-              Effect.succeed(
-                Option.some({
-                  threadId,
-                  projectId: ProjectId.make("p"),
-                  workspaceRoot: "/trellis/workspaces/ws/project/idea",
-                  worktreePath: null,
-                  latestCheckpointTurnCount: 4,
-                  toCheckpointRef: CheckpointRef.make("refs/t3/checkpoints/x/turn/4"),
-                }),
-              ),
-            getThreadCheckpointContext: () =>
-              Effect.succeed(
-                Option.some({
-                  threadId,
-                  projectId: ProjectId.make("p"),
-                  workspaceRoot: "/trellis/workspaces/ws/project/idea",
-                  worktreePath: null,
-                  checkpoints: mixed,
-                }),
-              ),
-          }),
-        ),
+      const result = yield* fullThread(
+        makeLayer({ checkpoints: mixed, baselineExists: false, froms }),
       );
-      const result = yield* Effect.gen(function* () {
-        const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
-        return yield* query.getFullThreadDiff({ threadId, toTurnCount: 4 });
-      }).pipe(Effect.provide(layer));
-      expect(result.diff).toBe("patch");
-      expect(froms).toEqual([
-        checkpointRefForThreadTurn(threadId, 0),
-        "refs/t3/checkpoints/x/turn/3",
-      ]);
+      expect(result.diff).toBe(`patch from ${gitRef(3)}`);
+      expect(froms).toEqual([baselineRef, gitRef(3)]);
+    }),
+  );
+
+  it.effect("diffs a turn-0 range from the first git checkpoint when the baseline is absent", () =>
+    Effect.gen(function* () {
+      const result = yield* turnDiff(
+        makeLayer({ checkpoints: mixed, baselineExists: false, froms: [] }),
+        0,
+        5,
+      );
+      expect(result.diff).toBe(`patch from ${gitRef(3)}`);
+    }),
+  );
+
+  it.effect("keeps a timeout an error when the baseline exists or turns are all git", () =>
+    Effect.gen(function* () {
+      const present = yield* fullThread(
+        makeLayer({ checkpoints: mixed, baselineExists: true, froms: [] }),
+      ).pipe(Effect.flip);
+      expect(present._tag).toBe("VcsProcessTimeoutError");
+      const gitOnly = yield* turnDiff(
+        makeLayer({ checkpoints: mixed.slice(2), baselineExists: false, froms: [] }),
+        0,
+        5,
+      ).pipe(Effect.flip);
+      expect(gitOnly._tag).toBe("VcsProcessTimeoutError");
+    }),
+  );
+
+  it.effect("diffs the git part of a range that starts in Trellis-only turns", () =>
+    Effect.gen(function* () {
+      const froms: Array<string> = [];
+      const layer = makeLayer({ checkpoints: mixed, baselineExists: false, froms });
+      expect((yield* turnDiff(layer, 1, 5)).diff).toBe(`patch from ${gitRef(3)}`);
+      expect((yield* turnDiff(layer, 2, 3)).diff).toBe("");
+      expect(froms).toEqual([gitRef(3)]);
     }),
   );
 });
