@@ -1,18 +1,27 @@
 import {
   ProjectId,
   ThreadId,
+  TRELLIS_LANDING_PAD_PROJECT_ID,
   type OrchestrationCommand,
   type OrchestrationShellSnapshot,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { it as effectIt } from "@effect/vitest";
 import { describe, expect, it } from "vite-plus/test";
 
+import { ServerConfig } from "../config.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { Trellis, type TrellisProjectView, type TrellisWorkspaceView } from "./Trellis.ts";
+import {
+  isTrellisManagedPath,
+  makeTestTrellis,
+  Trellis,
+  type TrellisProjectView,
+  type TrellisWorkspaceView,
+} from "./Trellis.ts";
 import * as TrellisCatalog from "./TrellisCatalog.ts";
 
 const ROOT = "/trellis";
@@ -304,6 +313,105 @@ describe("planCatalogSync", () => {
   });
 });
 
+describe("trashTargetOf", () => {
+  const forked = dedicated("prj-a", "App", [workspace("ws-a"), workspace("ws-b", "experiment")]);
+
+  it("trashes the whole item from an idea or primary workspace, one fork from a fork", () => {
+    expect(TrellisCatalog.trashTargetOf([idea("idea-a", "Sketch")], `${SCRATCH}/idea-a/`)).toEqual({
+      kind: "project",
+      id: "idea-a",
+      name: "Sketch",
+    });
+    expect(TrellisCatalog.trashTargetOf([forked], `${ROOT}/workspaces/ws-a/project`)).toEqual({
+      kind: "project",
+      id: "prj-a",
+      name: "App",
+    });
+    expect(TrellisCatalog.trashTargetOf([forked], `${ROOT}/workspaces/ws-b/project`)).toEqual({
+      kind: "workspace",
+      id: "ws-b",
+      name: "App · experiment",
+    });
+  });
+
+  it("finds nothing for host folders or items already in the trash", () => {
+    expect(TrellisCatalog.trashTargetOf([forked], "/home/me/code")).toBeNull();
+    expect(
+      TrellisCatalog.trashTargetOf(
+        [idea("idea-a", "Sketch", { deleted_at: 100 })],
+        `${SCRATCH}/idea-a`,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("splitFindHits", () => {
+  it("opens the workspace that matched rather than the project's primary one", () => {
+    const item = dedicated("prj-a", "App", [workspace("ws-a"), workspace("ws-b", "experiment")]);
+    const entries = TrellisCatalog.splitFindHits(ROOT, [
+      {
+        project: item,
+        matches: [
+          { path: `${ROOT}/workspaces/ws-b/project/src/unique.ts`, snippet: "only in the fork" },
+        ],
+      },
+    ]);
+    expect(entries.map((entry) => [entry.workspaceRoot, entry.title])).toEqual([
+      [`${ROOT}/workspaces/ws-b/project`, "App · experiment"],
+    ]);
+  });
+
+  it("keeps one entry per matching workspace and uses the primary for name matches", () => {
+    const item = dedicated("prj-a", "App", [workspace("ws-a"), workspace("ws-b", "experiment")]);
+    const both = TrellisCatalog.splitFindHits(ROOT, [
+      {
+        project: item,
+        matches: [
+          { path: `${ROOT}/workspaces/ws-a/project/a.md`, snippet: "a" },
+          { path: `${ROOT}/workspaces/ws-b/project/b.md`, snippet: "b" },
+        ],
+      },
+      { project: idea("idea-a", "Sketch"), matches: [] },
+    ]);
+    expect(both.map((entry) => entry.workspaceRoot)).toEqual([
+      `${ROOT}/workspaces/ws-a/project`,
+      `${ROOT}/workspaces/ws-b/project`,
+      `${SCRATCH}/idea-a`,
+    ]);
+    const nameOnly = TrellisCatalog.splitFindHits(ROOT, [{ project: item, matches: [] }]);
+    expect(nameOnly.map((entry) => entry.workspaceRoot)).toEqual([
+      `${ROOT}/workspaces/ws-a/project`,
+    ]);
+  });
+});
+
+describe("trashItems", () => {
+  it("lists ideas with their expiry, keeps projects until emptied and folds forks of trashed projects", () => {
+    const items = TrellisCatalog.trashItems({
+      projects: [
+        { id: "idea-a", kind: "idea", name: "Sketch", deleted_at: 1_000 },
+        { id: "prj-a", kind: "project", name: "App", deleted_at: 2_000 },
+      ],
+      workspaces: [
+        { id: "ws-a", kind: "dedicated", name: "main", project_id: "prj-a", deleted_at: 2_000 },
+        { id: "ws-c", kind: "dedicated", name: "try", project_id: "prj-live", deleted_at: 3_000 },
+      ],
+      purge_after_days: 30,
+    });
+    expect(items).toEqual([
+      { kind: "workspace", id: "ws-c", name: "try", deletedAt: 3_000, expiresAt: null },
+      { kind: "project", id: "prj-a", name: "App", deletedAt: 2_000, expiresAt: null },
+      {
+        kind: "idea",
+        id: "idea-a",
+        name: "Sketch",
+        deletedAt: 1_000,
+        expiresAt: 1_000 + 30 * 86_400,
+      },
+    ]);
+  });
+});
+
 describe("TrellisCatalog service", () => {
   const emptyShell: OrchestrationShellSnapshot = {
     snapshotSequence: 0,
@@ -312,14 +420,16 @@ describe("TrellisCatalog service", () => {
     updatedAt: "2026-01-01T00:00:00.000Z",
   };
 
-  function makeHarness() {
+  function makeHarness(options: { readonly shell?: OrchestrationShellSnapshot } = {}) {
     const items: Array<TrellisProjectView> = [];
     const dispatched: Array<OrchestrationCommand> = [];
+    const trashed: Array<string> = [];
     const env = { root: ROOT, bin: "trellis", shimDir: "/shims" };
     const unused = () => Effect.die(new Error("unused"));
     const layer = TrellisCatalog.layer.pipe(
       Layer.provide(
         Layer.succeed(Trellis, {
+          ...makeTestTrellis({ env }),
           current: Effect.succeed(env),
           refresh: Effect.succeed(env),
           expectedRoot: Effect.succeed(ROOT),
@@ -333,6 +443,8 @@ describe("TrellisCatalog service", () => {
               return created;
             }),
           createProject: unused,
+          trashProject: (id) => Effect.sync(() => void trashed.push(`project:${id}`)),
+          trashWorkspace: (id) => Effect.sync(() => void trashed.push(`workspace:${id}`)),
           describe: unused,
           find: unused,
           resolve: unused,
@@ -354,13 +466,20 @@ describe("TrellisCatalog service", () => {
       ),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery)({
-          getShellSnapshot: () => Effect.succeed(emptyShell),
+          getShellSnapshot: () => Effect.succeed(options.shell ?? emptyShell),
           getArchivedShellSnapshot: () => Effect.succeed(emptyShell),
+          getProjectShellById: (id) =>
+            Effect.succeed(
+              Option.fromNullishOr(
+                (options.shell ?? emptyShell).projects.find((entry) => entry.id === id),
+              ),
+            ),
         }),
       ),
+      Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-trellis-catalog-" })),
       Layer.provide(NodeServices.layer),
     );
-    return { layer, items, dispatched };
+    return { layer, items, dispatched, trashed };
   }
 
   effectIt.effect("creates a new idea's T3 project and returns its id", () =>
@@ -398,6 +517,54 @@ describe("TrellisCatalog service", () => {
       expect(
         harness.dispatched.filter((command) => command.type === "project.create"),
       ).toHaveLength(1);
+    }),
+  );
+
+  effectIt.effect("prepares a new-idea draft without creating an idea", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness();
+      const target = yield* Effect.gen(function* () {
+        const catalog = yield* TrellisCatalog.TrellisCatalog;
+        return yield* catalog.prepareIdeaDraft;
+      }).pipe(Effect.provide(harness.layer));
+      expect(target.projectId).toBe(TRELLIS_LANDING_PAD_PROJECT_ID);
+      expect(harness.items).toEqual([]);
+      expect(harness.dispatched).toEqual([
+        expect.objectContaining({
+          type: "project.create",
+          projectId: TRELLIS_LANDING_PAD_PROJECT_ID,
+          workspaceRoot: target.workspaceRoot,
+        }),
+      ]);
+      // Outside every Trellis path, so the catalog sync never touches it.
+      expect(isTrellisManagedPath(ROOT, target.workspaceRoot)).toBe(false);
+    }),
+  );
+
+  effectIt.effect("moves a deleted project's Trellis fork to the trash", () =>
+    Effect.gen(function* () {
+      const forkRoot = `${ROOT}/workspaces/ws-b/project`;
+      const harness = makeHarness({
+        shell: {
+          ...emptyShell,
+          projects: [
+            {
+              id: ProjectId.make("p-fork"),
+              title: "App · experiment",
+              workspaceRoot: forkRoot,
+            } as unknown as OrchestrationShellSnapshot["projects"][number],
+          ],
+        },
+      });
+      harness.items.push(
+        dedicated("prj-a", "App", [workspace("ws-a"), workspace("ws-b", "experiment")]),
+      );
+      const result = yield* Effect.gen(function* () {
+        const catalog = yield* TrellisCatalog.TrellisCatalog;
+        return yield* catalog.trashProject(ProjectId.make("p-fork"));
+      }).pipe(Effect.provide(harness.layer));
+      expect(result).toEqual({ trashed: "workspace", name: "App · experiment" });
+      expect(harness.trashed).toEqual(["workspace:ws-b"]);
     }),
   );
 });

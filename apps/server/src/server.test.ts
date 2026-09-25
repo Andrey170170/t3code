@@ -39,6 +39,7 @@ import {
   ResolvedKeybindingRule,
   type ServerLifecycleStreamEvent,
   ThreadId,
+  TRELLIS_LANDING_PAD_PROJECT_ID,
   TurnId,
   UsageLimitSourceId,
   WS_METHODS,
@@ -551,6 +552,7 @@ const buildAppUnderTest = (options?: {
     terminalManager?: Partial<TerminalManager.TerminalManager["Service"]>;
     orchestrationEngine?: Partial<OrchestrationEngine.OrchestrationEngineService["Service"]>;
     threadDeletionReactor?: Partial<ThreadDeletionReactor["Service"]>;
+    trellisCatalog?: Partial<TrellisCatalog.TrellisCatalog["Service"]>;
     analyticsService?: Partial<AnalyticsService.AnalyticsService["Service"]>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]>;
     checkpointDiffQuery?: Partial<CheckpointDiffQuery.CheckpointDiffQuery["Service"]>;
@@ -1018,7 +1020,15 @@ const buildAppUnderTest = (options?: {
             drain: Effect.void,
             requestSync: () => Effect.void,
           }),
-          TrellisCatalog.layerDisabled,
+          options?.layers?.trellisCatalog
+            ? Layer.effect(
+                TrellisCatalog.TrellisCatalog,
+                Effect.map(Effect.service(TrellisCatalog.TrellisCatalog), (disabled) => ({
+                  ...disabled,
+                  ...options.layers?.trellisCatalog,
+                })),
+              ).pipe(Layer.provide(TrellisCatalog.layerDisabled))
+            : TrellisCatalog.layerDisabled,
           TrellisNaming.layerDisabled,
           TrellisPreview.layerDisabled,
         ),
@@ -11498,6 +11508,80 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         baseRefName: "main",
         path: null,
       });
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("creates the Trellis idea on a new-idea draft's first send and starts there", () =>
+    Effect.gen(function* () {
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      const newIdea = vi.fn(() =>
+        Effect.succeed({
+          projectId: ProjectId.make("project-idea-1"),
+          workspaceRoot: "/trellis/workspaces/ws-scratch/project/idea-1",
+          name: "Idea",
+        }),
+      );
+      yield* buildAppUnderTest({
+        layers: {
+          trellisCatalog: { newIdea },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+        },
+      });
+
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-landing-pad-turn-start"),
+            threadId: ThreadId.make("thread-landing-pad"),
+            message: {
+              messageId: MessageId.make("msg-landing-pad"),
+              role: "user",
+              text: "an idea",
+              attachments: [],
+            },
+            modelSelection: defaultModelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            bootstrap: {
+              createThread: {
+                projectId: TRELLIS_LANDING_PAD_PROJECT_ID,
+                title: "New idea",
+                modelSelection: defaultModelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: null,
+                createdAt,
+              },
+            },
+            createdAt,
+          }),
+        ),
+      );
+
+      assert.equal(newIdea.mock.calls.length, 1);
+      const create = dispatchedCommands.find((command) => command.type === "thread.create");
+      assert.deepInclude(create, {
+        projectId: ProjectId.make("project-idea-1"),
+        worktreePath: null,
+        branch: null,
+      });
+      assert.isFalse(
+        dispatchedCommands.some(
+          (command) =>
+            "projectId" in command && command.projectId === TRELLIS_LANDING_PAD_PROJECT_ID,
+        ),
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

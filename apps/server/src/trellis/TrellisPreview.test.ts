@@ -8,7 +8,7 @@ import { describe, expect } from "vite-plus/test";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
 import { TrellisError } from "@t3tools/contracts";
-import { Trellis } from "./Trellis.ts";
+import { Trellis, makeTestTrellis } from "./Trellis.ts";
 import * as TrellisPreview from "./TrellisPreview.ts";
 
 const ROOT = "/trellis";
@@ -57,6 +57,7 @@ describe("TrellisPreview service", () => {
     return TrellisPreview.layer.pipe(
       Layer.provide(
         Layer.succeed(Trellis, {
+          ...makeTestTrellis({ env }),
           current: Effect.succeed(env),
           refresh: Effect.succeed(env),
           expectedRoot: Effect.succeed(ROOT),

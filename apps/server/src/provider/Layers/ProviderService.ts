@@ -1006,6 +1006,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const expectedRoot = yield* client.expectedRoot;
     const decision = TrellisProviderSession.decideTrellisLaunch({
       env,
+      enabled: yield* client.enabled,
       expectedRoot,
       driverKind: input.driverKind,
       cwd: input.cwd,

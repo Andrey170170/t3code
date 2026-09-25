@@ -3,9 +3,12 @@
  * Trellis - client for the optional local Trellis workspace service.
  *
  * Trellis manages isolated workspaces (Btrfs subvolumes run as rootless podman
- * containers). Its API is JSON over HTTP on a Unix socket. When the socket is
- * absent or unreachable, `current` is null and every Trellis-aware seam in T3
- * behaves exactly as without Trellis.
+ * containers). Its API is JSON over HTTP on a Unix socket. The integration is
+ * off until the `trellis.enabled` server setting turns it on; while it is off
+ * nothing talks to the socket. When it is off or Trellis is unreachable,
+ * `current` is null and every Trellis-aware seam in T3 behaves as without
+ * Trellis, except that Trellis project paths (see `expectedRoot`) are never
+ * treated as ordinary host folders.
  *
  * Project files live at `<root>/workspaces/<ws>/project[/<idea>]`, and the same
  * path exists inside the workspace container, so T3 reads files and git state
@@ -32,6 +35,7 @@ import * as Semaphore from "effect/Semaphore";
 
 import { ServerConfig } from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 
 export const DEFAULT_TRELLIS_SOCKET = "/trellis/state/api.sock";
 
@@ -69,6 +73,8 @@ export const TrellisSnapshot = Schema.Struct({
   workspace_id: Schema.String,
   seq: Schema.Finite,
   kind: Schema.String,
+  /** Pinned snapshots survive thinning. Absent from older Trellis versions. */
+  pinned: Schema.optional(Schema.Boolean),
   thread: Schema.NullOr(Schema.String),
   turn: Schema.NullOr(Schema.String),
   created_at: Schema.Finite,
@@ -87,7 +93,27 @@ export const TrellisResolved = Schema.Struct({
 });
 export type TrellisResolved = typeof TrellisResolved.Type;
 
+/** A trashed project or workspace as `GET /v1/trash` lists it. */
+export const TrellisTrashEntryView = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.String,
+  name: Schema.String,
+  project_id: Schema.optional(Schema.NullOr(Schema.String)),
+  deleted_at: Schema.NullOr(Schema.Finite),
+  /** When Trellis removes it for good; null keeps it until the trash is emptied. */
+  expires_at: Schema.optional(Schema.NullOr(Schema.Finite)),
+});
+export type TrellisTrashEntryView = typeof TrellisTrashEntryView.Type;
+
+export const TrellisTrashView = Schema.Struct({
+  projects: Schema.Array(TrellisTrashEntryView),
+  workspaces: Schema.Array(TrellisTrashEntryView),
+  purge_after_days: Schema.optional(Schema.Finite),
+});
+export type TrellisTrashView = typeof TrellisTrashView.Type;
+
 const TrellisStatusView = Schema.Struct({ root: Schema.String });
+const TrellisPurgeView = Schema.Struct({ purged: Schema.Finite });
 const TrellisRollbackView = Schema.Struct({ undo_snapshot: Schema.optional(Schema.Unknown) });
 const TrellisDescribeView = Schema.Struct({
   ignored: Schema.optional(Schema.Array(Schema.String)),
@@ -104,6 +130,17 @@ export interface TrellisEnv {
   readonly bin: string;
   readonly shimDir: string | null;
 }
+
+/** See `TrellisState` in the contracts. */
+export interface TrellisConnection {
+  readonly state: "disabled" | "unavailable" | "ready";
+  readonly root: string | null;
+  readonly socketPath: string;
+}
+
+/** Message for work in a Trellis project path while the integration is off. */
+export const TRELLIS_DISABLED_MESSAGE =
+  "The Trellis integration is turned off on this server, so this project's workspace is unavailable. Turn it on in Settings → Trellis and try again.";
 
 /** True when `cwd` is inside a Trellis project directory (`<root>/workspaces/<ws>/project`). */
 export const isTrellisManagedPath = isSharedTrellisManagedPath;
@@ -122,12 +159,20 @@ export class Trellis extends Context.Service<
   {
     /** Last known state; null when Trellis is disabled or unreachable. */
     readonly current: Effect.Effect<TrellisEnv | null>;
-    /** Re-reads `/v1/status` (and creates provider shims on first success). */
-    readonly refresh: Effect.Effect<TrellisEnv | null>;
     /**
-     * Where Trellis project paths live even while Trellis is unreachable: the
-     * last reported root, else the root implied by the socket path. Work in
-     * those paths must fail rather than silently run on the host.
+     * Re-reads `/v1/status` (and creates provider shims on first success).
+     * Null without touching the socket while the integration is off.
+     */
+    readonly refresh: Effect.Effect<TrellisEnv | null>;
+    /** Whether the `trellis.enabled` setting is on. */
+    readonly enabled: Effect.Effect<boolean>;
+    /** Disabled, unavailable or ready, from the setting and the last refresh. */
+    readonly connection: Effect.Effect<TrellisConnection>;
+    /**
+     * Where Trellis project paths live even while Trellis is off or
+     * unreachable: the last root Trellis reported (persisted across restarts),
+     * else the root implied by the socket path. Work in those paths must fail
+     * rather than silently run on the host.
      */
     readonly expectedRoot: Effect.Effect<string | null>;
     /** The `trellis` binary, for `trellis exec`. */
@@ -172,6 +217,17 @@ export class Trellis extends Context.Service<
       readonly thread: string;
       readonly turn: string;
     }) => Effect.Effect<TrellisSnapshot, TrellisError>;
+    /** Pins a snapshot so thinning keeps it. */
+    readonly pinSnapshot: (id: string) => Effect.Effect<void, TrellisError>;
+    /** Moves a project (with all its workspaces) to the trash. */
+    readonly trashProject: (id: string) => Effect.Effect<void, TrellisError>;
+    /** Moves one fork to the trash; the last one trashes its project. */
+    readonly trashWorkspace: (id: string) => Effect.Effect<void, TrellisError>;
+    readonly restoreProject: (id: string) => Effect.Effect<TrellisProjectView, TrellisError>;
+    readonly restoreWorkspace: (id: string) => Effect.Effect<void, TrellisError>;
+    readonly listTrash: Effect.Effect<TrellisTrashView, TrellisError>;
+    /** Permanently removes everything in the trash. */
+    readonly emptyTrash: Effect.Effect<number, TrellisError>;
     /**
      * Idea targets restore only the folder; workspace targets restart the
      * container. Returns the snapshot holding the state from just before.
@@ -200,7 +256,7 @@ interface RawResponse {
 
 function requestOverSocket(input: {
   readonly socketPath: string;
-  readonly method: "GET" | "POST";
+  readonly method: "GET" | "POST" | "PATCH" | "DELETE";
   readonly path: string;
   readonly body: unknown;
   readonly timeoutMs: number;
@@ -258,35 +314,56 @@ export const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const processRunner = yield* ProcessRunner.ProcessRunner;
+  const serverSettings = yield* ServerSettingsService;
   const socketPath = yield* Config.String("TRELLIS_SOCKET").pipe(
     Config.withDefault(DEFAULT_TRELLIS_SOCKET),
   );
   const bin = yield* Config.String("TRELLIS_BIN").pipe(Config.withDefault("trellis"));
   const shimDir = NodePath.join(serverConfig.stateDir, "trellis-shims");
+  // The last root Trellis reported, kept so its paths stay recognizable while
+  // the integration is off or Trellis is down, including after a restart.
+  const rootFile = NodePath.join(serverConfig.stateDir, "trellis-root");
   const state = yield* Ref.make<TrellisEnv | null>(null);
-  const lastRoot = yield* Ref.make<string | null>(rootFromSocketPath(socketPath));
+  const persistedRoot = yield* fileSystem.readFileString(rootFile).pipe(
+    Effect.map((text) => text.trim()),
+    Effect.map((text) => (text.startsWith("/") ? text : null)),
+    Effect.orElseSucceed(() => null),
+  );
+  const lastRoot = yield* Ref.make<string | null>(persistedRoot);
   let lastShimAttemptMs = 0;
+
+  const enabled = serverSettings.getSettings.pipe(
+    Effect.map((value) => value.trellis.enabled),
+    Effect.orElseSucceed(() => false),
+  );
 
   const call = <S extends Schema.Top>(
     schema: S,
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "PATCH" | "DELETE",
     path: string,
     options: { readonly body?: unknown; readonly timeoutMs?: number } = {},
   ) =>
-    Effect.tryPromise({
-      try: (signal) =>
-        requestOverSocket({
-          socketPath,
-          method,
-          path,
-          body: options.body,
-          timeoutMs: options.timeoutMs ?? 15_000,
-          signal,
-        }),
-      catch: (cause) =>
-        new TrellisError({
-          message: `Trellis is unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
-        }),
+    Effect.gen(function* () {
+      if (!(yield* enabled)) {
+        return yield* new TrellisError({
+          message: "The Trellis integration is turned off on this server.",
+        });
+      }
+      return yield* Effect.tryPromise({
+        try: (signal) =>
+          requestOverSocket({
+            socketPath,
+            method,
+            path,
+            body: options.body,
+            timeoutMs: options.timeoutMs ?? 15_000,
+            signal,
+          }),
+        catch: (cause) =>
+          new TrellisError({
+            message: `Trellis is unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
+          }),
+      });
     }).pipe(
       Effect.flatMap((response) =>
         response.status >= 400
@@ -329,10 +406,15 @@ export const make = Effect.gen(function* () {
   // let a slower refresh overwrite a newer result.
   const refreshLock = yield* Semaphore.make(1);
   const refresh = Effect.gen(function* () {
+    const previous = yield* Ref.get(state);
+    if (!(yield* enabled)) {
+      if (previous !== null) yield* Effect.logInfo("Trellis integration turned off");
+      yield* Ref.set(state, null);
+      return null;
+    }
     const status = yield* call(TrellisStatusView, "GET", "/v1/status", { timeoutMs: 3_000 }).pipe(
       Effect.option,
     );
-    const previous = yield* Ref.get(state);
     if (status._tag === "None") {
       if (previous !== null) yield* Effect.logInfo("Trellis became unavailable");
       yield* Ref.set(state, null);
@@ -348,7 +430,16 @@ export const make = Effect.gen(function* () {
       return previous;
     }
     lastShimAttemptMs = now;
-    yield* Ref.set(lastRoot, status.value.root);
+    if ((yield* Ref.get(lastRoot)) !== status.value.root) {
+      yield* Ref.set(lastRoot, status.value.root);
+      yield* fileSystem
+        .writeFileString(rootFile, `${status.value.root}\n`)
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("could not persist the Trellis root", { rootFile, cause }),
+          ),
+        );
+    }
     const next: TrellisEnv = {
       root: status.value.root,
       bin,
@@ -359,12 +450,29 @@ export const make = Effect.gen(function* () {
     return next;
   }).pipe(refreshLock.withPermits(1));
 
-  yield* refresh;
+  const expectedRoot = Ref.get(lastRoot).pipe(
+    Effect.map((root) => root ?? rootFromSocketPath(socketPath)),
+  );
+
+  const connection = Effect.gen(function* () {
+    const on = yield* enabled;
+    const env = on ? yield* Ref.get(state) : null;
+    return {
+      state: !on ? "disabled" : env === null ? "unavailable" : "ready",
+      root: env?.root ?? (yield* expectedRoot),
+      socketPath,
+    } satisfies TrellisConnection;
+  });
 
   return Trellis.of({
-    current: Ref.get(state),
+    // Null as soon as the setting turns off, before the next refresh.
+    current: Effect.gen(function* () {
+      return (yield* enabled) ? yield* Ref.get(state) : null;
+    }),
     refresh,
-    expectedRoot: Ref.get(lastRoot),
+    enabled,
+    connection,
+    expectedRoot,
     bin,
     listWorkspaces: ({ all }) =>
       call(Schema.Array(TrellisWorkspaceView), "GET", `/v1/workspaces${all ? "?all=true" : ""}`),
@@ -407,6 +515,27 @@ export const make = Effect.gen(function* () {
         // checkpoint worker, so a hung Trellis must not stall other threads.
         timeoutMs: 15_000,
       }),
+    pinSnapshot: (id) =>
+      call(TrellisSnapshot, "PATCH", `/v1/snapshots/${encodeURIComponent(id)}`, {
+        body: { pinned: true },
+      }).pipe(Effect.asVoid),
+    trashProject: (id) =>
+      call(Schema.Unknown, "DELETE", `/v1/projects/${encodeURIComponent(id)}`).pipe(Effect.asVoid),
+    trashWorkspace: (id) =>
+      call(Schema.Unknown, "DELETE", `/v1/workspaces/${encodeURIComponent(id)}`).pipe(
+        Effect.asVoid,
+      ),
+    restoreProject: (id) =>
+      call(TrellisProjectView, "POST", `/v1/projects/${encodeURIComponent(id)}/restore`),
+    restoreWorkspace: (id) =>
+      call(Schema.Unknown, "POST", `/v1/workspaces/${encodeURIComponent(id)}/restore`).pipe(
+        Effect.asVoid,
+      ),
+    listTrash: call(TrellisTrashView, "GET", "/v1/trash"),
+    emptyTrash: call(TrellisPurgeView, "POST", "/v1/trash/purge", {
+      body: { all: true },
+      timeoutMs: 5 * 60_000,
+    }).pipe(Effect.map((view) => view.purged)),
     rollback: ({ target, snapshot }) =>
       call(TrellisRollbackView, "POST", "/v1/rollback", {
         body: { target, snapshot },
@@ -469,3 +598,46 @@ export const refuseWorktreeIn = <E>(
           managed ? Effect.fail(makeError(TRELLIS_WORKTREE_REFUSAL)) : Effect.void,
         ),
       );
+
+/**
+ * A Trellis service for tests: ready at `env` (or off with `env: null`),
+ * with every operation failing loudly unless overridden.
+ */
+export function makeTestTrellis(
+  overrides: Partial<Trellis["Service"]> & { readonly env?: TrellisEnv | null } = {},
+): Trellis["Service"] {
+  const { env = { root: "/trellis", bin: "trellis", shimDir: "/shims" }, ...rest } = overrides;
+  const unused = () => Effect.die(new Error("unused Trellis operation"));
+  return Trellis.of({
+    current: Effect.succeed(env),
+    refresh: Effect.succeed(env),
+    enabled: Effect.succeed(env !== null),
+    connection: Effect.succeed({
+      state: env === null ? "disabled" : "ready",
+      root: env?.root ?? null,
+      socketPath: DEFAULT_TRELLIS_SOCKET,
+    }),
+    expectedRoot: Effect.succeed(env?.root ?? null),
+    bin: env?.bin ?? "trellis",
+    listWorkspaces: unused,
+    listProjects: unused,
+    createIdea: unused,
+    createProject: unused,
+    describe: unused,
+    find: unused,
+    resolve: unused,
+    listSnapshots: unused,
+    createSnapshot: unused,
+    pinSnapshot: () => Effect.void,
+    trashProject: unused,
+    trashWorkspace: unused,
+    restoreProject: unused,
+    restoreWorkspace: unused,
+    listTrash: Effect.die(new Error("unused Trellis operation")),
+    emptyTrash: Effect.die(new Error("unused Trellis operation")),
+    rollback: unused,
+    preview: unused,
+    primer: unused,
+    ...rest,
+  });
+}

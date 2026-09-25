@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { describe, expect } from "vite-plus/test";
 
-import { Trellis, type TrellisSnapshot } from "./Trellis.ts";
+import { Trellis, type TrellisSnapshot, makeTestTrellis } from "./Trellis.ts";
 import * as TrellisBaseline from "./TrellisBaseline.ts";
 
 const ROOT = "/trellis";
@@ -23,6 +23,7 @@ function makeHarness(input: {
   const layer = TrellisBaseline.layer.pipe(
     Layer.provide(
       Layer.succeed(Trellis, {
+        ...makeTestTrellis({ env }),
         current: Effect.succeed(env),
         refresh: Effect.succeed(env),
         expectedRoot: Effect.succeed(ROOT),

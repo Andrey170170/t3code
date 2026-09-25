@@ -12,6 +12,7 @@ import { it } from "@effect/vitest";
 import { afterEach, describe, expect } from "vite-plus/test";
 
 import { ServerConfig } from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as Trellis from "./Trellis.ts";
 
 // Talks to a fake Trellis API on a real Unix socket.
@@ -28,7 +29,9 @@ describe("Trellis client", () => {
     },
   ) {
     const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-trellis-client-"));
-    const socketPath = NodePath.join(dir, "api.sock");
+    // The conventional `<root>/state/api.sock`, so `<root>` is implied.
+    NodeFS.mkdirSync(NodePath.join(dir, "state"));
+    const socketPath = NodePath.join(dir, "state", "api.sock");
     const requests: Array<{ method: string; url: string; body: string }> = [];
     const server = NodeHttp.createServer((request, response) => {
       const chunks: Array<Buffer> = [];
@@ -54,8 +57,9 @@ describe("Trellis client", () => {
       server.close();
       NodeFS.rmSync(dir, { recursive: true, force: true });
     });
-    const layer = (socket: string) =>
+    const layer = (socket: string, enabled = true) =>
       Trellis.layer.pipe(
+        Layer.provide(ServerSettings.layerTest({ trellis: { enabled } })),
         Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-trellis-client-" })),
         Layer.provide(NodeServices.layer),
         Layer.provide(
@@ -69,9 +73,9 @@ describe("Trellis client", () => {
       socketPath,
       bin,
       missingLayer: layer(NodePath.join(dir, "missing.sock")),
-      listen: () =>
+      listen: (enabled = true) =>
         new Promise<ReturnType<typeof layer>>((resolve) =>
-          server.listen(socketPath, () => resolve(layer(socketPath))),
+          server.listen(socketPath, () => resolve(layer(socketPath, enabled))),
         ),
     };
   }
@@ -79,11 +83,36 @@ describe("Trellis client", () => {
   it.effect("is disabled when the socket is absent", () =>
     Effect.gen(function* () {
       const harness = setup(() => ({ body: {} }));
-      const current = yield* Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
         const trellis = yield* Trellis.Trellis;
-        return yield* trellis.current;
+        return { refreshed: yield* trellis.refresh, connection: yield* trellis.connection };
       }).pipe(Effect.provide(harness.missingLayer));
-      expect(current).toBeNull();
+      expect(result.refreshed).toBeNull();
+      expect(result.connection.state).toBe("unavailable");
+    }),
+  );
+
+  it.effect("never touches the socket while the integration is off", () =>
+    Effect.gen(function* () {
+      const harness = setup(() => ({ body: { root: "/trellis" } }));
+      const layer = yield* Effect.promise(() => harness.listen(false));
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        const refreshed = yield* trellis.refresh;
+        const error = yield* trellis.listProjects({ all: true }).pipe(Effect.flip);
+        return {
+          refreshed,
+          error,
+          connection: yield* trellis.connection,
+          expectedRoot: yield* trellis.expectedRoot,
+        };
+      }).pipe(Effect.provide(layer));
+      expect(result.refreshed).toBeNull();
+      expect(result.error.message).toContain("turned off");
+      expect(result.connection.state).toBe("disabled");
+      // Trellis paths stay recognizable without asking Trellis.
+      expect(result.expectedRoot).toBe(NodePath.dirname(NodePath.dirname(harness.socketPath)));
+      expect(harness.requests).toEqual([]);
     }),
   );
 
@@ -95,9 +124,10 @@ describe("Trellis client", () => {
           return { status: 404, body: { error: "unknown target" } };
         return { body: [] };
       });
-      const layer = yield* Effect.promise(harness.listen);
+      const layer = yield* Effect.promise(() => harness.listen());
       const result = yield* Effect.gen(function* () {
         const trellis = yield* Trellis.Trellis;
+        yield* trellis.refresh;
         const current = yield* trellis.current;
         const projects = yield* trellis.listProjects({ all: true });
         const error = yield* trellis.describe({ target: "/x", name: "Name" }).pipe(Effect.flip);

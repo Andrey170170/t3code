@@ -15,7 +15,7 @@ import * as NodePath from "node:path";
 
 import type { ThreadId } from "@t3tools/contracts";
 
-import { isTrellisManagedPath, type TrellisEnv } from "./Trellis.ts";
+import { isTrellisManagedPath, TRELLIS_DISABLED_MESSAGE, type TrellisEnv } from "./Trellis.ts";
 
 export interface TrellisProviderSessionConfig {
   /** Directory holding the `codex` and `claude` shims. */
@@ -38,12 +38,15 @@ export const TRELLIS_OUTSIDE_WORKSPACE_MESSAGE =
 
 /**
  * Where a provider session for `cwd` must run. `expectedRoot` keeps Trellis
- * project paths off the host while Trellis is unreachable (`env` null).
+ * project paths off the host while Trellis is off (`enabled` false) or
+ * unreachable (`env` null).
  * `projectRoot` is the thread's project folder: a thread of a Trellis project
  * whose cwd lies elsewhere is refused rather than run on the host.
  */
 export function decideTrellisLaunch(input: {
   readonly env: TrellisEnv | null;
+  /** The integration setting; defaults to on. */
+  readonly enabled?: boolean;
   readonly expectedRoot: string | null;
   readonly driverKind: string;
   readonly cwd: string | undefined;
@@ -58,6 +61,9 @@ export function decideTrellisLaunch(input: {
     return input.projectRoot !== undefined && isTrellisManagedPath(root, input.projectRoot)
       ? { kind: "unsupported", message: TRELLIS_OUTSIDE_WORKSPACE_MESSAGE }
       : { kind: "host" };
+  }
+  if (input.enabled === false) {
+    return { kind: "unsupported", message: TRELLIS_DISABLED_MESSAGE };
   }
   if (env === null) {
     return {

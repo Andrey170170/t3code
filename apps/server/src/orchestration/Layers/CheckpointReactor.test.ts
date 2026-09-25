@@ -177,6 +177,7 @@ function createTrellisHarness(input: {
   const workspacePath = NodePath.join(input.root, "workspaces", "ws-1", "project");
   const unused = () => Effect.die(new Error("Unused Trellis call in test"));
   const service: Trellis.Trellis["Service"] = {
+    ...Trellis.makeTestTrellis({ env }),
     current: Effect.succeed(env),
     refresh: Effect.succeed(env),
     expectedRoot: Effect.succeed(input.root),

@@ -6,6 +6,7 @@ import {
   ThreadLinkedPullRequest,
   UserInputRequestedPayload,
   isImportedAgentSessionMessageId,
+  isTrellisLandingPad,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
@@ -381,6 +382,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         projectId: command.projectId,
       });
+      // New-idea drafts move to their idea's project on the first send.
+      if (isTrellisLandingPad(command.projectId)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Threads cannot be created in the new-idea landing pad.",
+        });
+      }
       yield* requireThreadAbsent({
         readModel,
         command,

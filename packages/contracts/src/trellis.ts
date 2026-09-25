@@ -10,12 +10,88 @@ export class TrellisError extends Schema.TaggedError<TrellisError>()("TrellisErr
   message: Schema.String,
 }) {}
 
-/** `available: false` means Trellis is not installed or not running; hide Trellis UI. */
+/**
+ * The hidden project that new-idea drafts belong to until their first send,
+ * which creates the Trellis idea and moves the thread into its project.
+ * Clients never list it. Its folder is an empty directory the server owns.
+ */
+export const TRELLIS_LANDING_PAD_PROJECT_ID = ProjectId.make("trellis-landing-pad");
+
+export const isTrellisLandingPad = (projectId: string): boolean =>
+  projectId === TRELLIS_LANDING_PAD_PROJECT_ID;
+
+/**
+ * `disabled`: the integration is off in this environment's settings.
+ * `unavailable`: it is on, but the Trellis service does not answer.
+ * `ready`: Trellis actions work. Trellis UI shows only when `ready`.
+ */
+export const TrellisState = Schema.Literals(["disabled", "unavailable", "ready"]);
+export type TrellisState = typeof TrellisState.Type;
+
 export const TrellisStatus = Schema.Struct({
+  /** Absent from servers that predate the settings switch; read `available` there. */
+  state: Schema.optionalKey(TrellisState),
+  /** True exactly when `state` is `ready`. */
   available: Schema.Boolean,
+  /** Where Trellis project paths live; also reported while disabled or unavailable when known. */
   root: Schema.optionalKey(Schema.String),
+  /** The API socket the server uses or would use. */
+  socketPath: Schema.optionalKey(Schema.String),
 });
 export type TrellisStatus = typeof TrellisStatus.Type;
+
+/** Where a new idea's draft starts: the landing pad project. */
+export const TrellisIdeaDraftTarget = Schema.Struct({
+  projectId: ProjectId,
+  workspaceRoot: Schema.String,
+});
+export type TrellisIdeaDraftTarget = typeof TrellisIdeaDraftTarget.Type;
+
+export const TrellisTrashProjectInput = Schema.Struct({
+  projectId: ProjectId,
+});
+export type TrellisTrashProjectInput = typeof TrellisTrashProjectInput.Type;
+
+/** `workspace` when the T3 project was one fork of a Trellis project. */
+export const TrellisTrashProjectResult = Schema.Struct({
+  trashed: Schema.Literals(["project", "workspace"]),
+  name: Schema.String,
+});
+export type TrellisTrashProjectResult = typeof TrellisTrashProjectResult.Type;
+
+export const TrellisTrashItem = Schema.Struct({
+  /** `workspace` is one trashed fork of a project that is still live. */
+  kind: Schema.Literals(["idea", "project", "workspace"]),
+  id: Schema.String,
+  name: Schema.String,
+  /** Unix seconds. */
+  deletedAt: Schema.Finite,
+  /** Unix seconds when it is removed for good; null when it stays until the trash is emptied. */
+  expiresAt: Schema.NullOr(Schema.Finite),
+});
+export type TrellisTrashItem = typeof TrellisTrashItem.Type;
+
+export const TrellisTrashList = Schema.Struct({
+  items: Schema.Array(TrellisTrashItem),
+});
+export type TrellisTrashList = typeof TrellisTrashList.Type;
+
+export const TrellisRestoreInput = Schema.Struct({
+  kind: Schema.Literals(["idea", "project", "workspace"]),
+  id: TrimmedNonEmptyString,
+});
+export type TrellisRestoreInput = typeof TrellisRestoreInput.Type;
+
+export const TrellisRestoreResult = Schema.Struct({
+  /** The T3 project of the restored item, once synced; null if it is not there yet. */
+  projectId: Schema.NullOr(ProjectId),
+});
+export type TrellisRestoreResult = typeof TrellisRestoreResult.Type;
+
+export const TrellisEmptyTrashResult = Schema.Struct({
+  purged: Schema.Finite,
+});
+export type TrellisEmptyTrashResult = typeof TrellisEmptyTrashResult.Type;
 
 export const TrellisNewIdeaInput = Schema.Struct({
   name: Schema.optionalKey(TrimmedNonEmptyString),
@@ -42,6 +118,10 @@ export const TrellisFindInput = Schema.Struct({
 });
 export type TrellisFindInput = typeof TrellisFindInput.Type;
 
+/**
+ * One Trellis item's matches within one workspace: a hit in a fork is its
+ * own entry, so opening it lands in that fork's T3 project.
+ */
 export const TrellisFindHit = Schema.Struct({
   /** Null when no T3 project exists for the hit (for example a trashed item). */
   projectId: Schema.NullOr(ProjectId),

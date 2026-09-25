@@ -70,6 +70,7 @@ import {
   RpcClientId,
   EnvironmentAuthorizationError,
   ThreadId,
+  isTrellisLandingPad,
   type TerminalAttachStreamEvent,
   type TerminalError,
   type TerminalEvent,
@@ -1789,12 +1790,49 @@ const makeWsRpcLayer = (
           return yield* runBootstrap;
         });
 
+      // A new-idea draft belongs to the hidden landing pad project. Its first
+      // send creates the Trellis idea, and the thread is created in the idea's
+      // project instead, in the project folder (Trellis refuses worktrees).
+      const promoteIdeaDraft = (
+        command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
+      ) =>
+        Effect.gen(function* () {
+          const createThread = command.bootstrap?.createThread;
+          if (createThread === undefined || !isTrellisLandingPad(createThread.projectId)) {
+            return command;
+          }
+          const idea = yield* trellisCatalog.newIdea({}).pipe(
+            Effect.mapError(
+              (error) =>
+                new OrchestrationDispatchCommandError({
+                  message: `Could not create the Trellis idea: ${error.message}`,
+                }),
+            ),
+          );
+          yield* Effect.logInfo("Trellis idea created from a new-idea draft", {
+            threadId: command.threadId,
+            projectId: idea.projectId,
+            workspaceRoot: idea.workspaceRoot,
+          });
+          return {
+            ...command,
+            bootstrap: {
+              createThread: {
+                ...createThread,
+                projectId: idea.projectId,
+                branch: null,
+                worktreePath: null,
+              },
+            },
+          };
+        });
+
       const dispatchNormalizedCommand = (
         normalizedCommand: OrchestrationCommand,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
         const dispatchEffect =
           normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
-            ? dispatchBootstrapTurnStart(normalizedCommand)
+            ? promoteIdeaDraft(normalizedCommand).pipe(Effect.flatMap(dispatchBootstrapTurnStart))
             : dispatchFromClient(normalizedCommand).pipe(
                 Effect.tap(({ sequence }) =>
                   // Returning from thread.create is the handoff point at which
@@ -3214,6 +3252,32 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.trellisNewIdea, trellisCatalog.newIdea(input), {
             "rpc.aggregate": "trellis",
           }),
+        [WS_METHODS.trellisPrepareIdeaDraft]: () =>
+          observeRpcEffect(WS_METHODS.trellisPrepareIdeaDraft, trellisCatalog.prepareIdeaDraft, {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisTrashProject]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisTrashProject,
+            trellisCatalog.trashProject(input.projectId),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisListTrash]: () =>
+          observeRpcEffect(
+            WS_METHODS.trellisListTrash,
+            trellisCatalog.listTrash.pipe(Effect.map((items) => ({ items }))),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisRestore]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisRestore, trellisCatalog.restore(input), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisEmptyTrash]: () =>
+          observeRpcEffect(
+            WS_METHODS.trellisEmptyTrash,
+            trellisCatalog.emptyTrash.pipe(Effect.map((purged) => ({ purged }))),
+            { "rpc.aggregate": "trellis" },
+          ),
         [WS_METHODS.trellisNewProject]: (input) =>
           observeRpcEffect(WS_METHODS.trellisNewProject, trellisCatalog.newProject(input), {
             "rpc.aggregate": "trellis",

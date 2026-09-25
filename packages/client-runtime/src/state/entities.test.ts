@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   ProjectId,
+  TRELLIS_LANDING_PAD_PROJECT_ID,
   ProviderInstanceId,
   ThreadId,
   type OrchestrationShellSnapshot,
@@ -380,6 +381,37 @@ describe("environment entity projections", () => {
     expect(
       harness.registry.get(harness.projects.environmentProjectsAtom(offEnvironmentId)),
     ).toHaveLength(2);
+  });
+
+  it("never lists the Trellis landing pad but still resolves it by id", () => {
+    const harness = makeHarness();
+    harness.registry.set(
+      harness.shellStateAtom,
+      AsyncResult.success(
+        shellState({
+          ...SNAPSHOT,
+          projects: [
+            ...SNAPSHOT.projects,
+            {
+              ...SNAPSHOT.projects[0]!,
+              id: TRELLIS_LANDING_PAD_PROJECT_ID,
+              title: "New idea",
+              workspaceRoot: "/t3/state/trellis-landing-pad",
+            },
+          ],
+        }),
+      ),
+    );
+    const listed = harness.registry.get(harness.projects.projectsAtom);
+    expect(listed.map((project) => project.id)).toEqual([PROJECT_ID, OTHER_PROJECT_ID]);
+    expect(
+      harness.registry.get(
+        harness.projects.projectAtom({
+          environmentId: ENVIRONMENT_ID,
+          projectId: TRELLIS_LANDING_PAD_PROJECT_ID,
+        }),
+      )?.title,
+    ).toBe("New idea");
   });
 
   it("keeps scoped identities and list order across project and environment changes", () => {
