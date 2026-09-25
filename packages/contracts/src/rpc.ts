@@ -15,6 +15,15 @@ import {
   CodexThreadsImportInput,
   CodexThreadsImportResult,
 } from "./codexThreads.ts";
+import {
+  TrellisCreateResult,
+  TrellisError,
+  TrellisFindInput,
+  TrellisFindResult,
+  TrellisNewIdeaInput,
+  TrellisNewProjectInput,
+  TrellisStatus,
+} from "./trellis.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
@@ -316,6 +325,12 @@ export const WS_METHODS = {
   sideChatSubscribe: "sideChat.subscribe",
   codexThreadsList: "codexThreads.list",
   codexThreadsImport: "codexThreads.import",
+
+  // Trellis workspace service methods
+  trellisGetStatus: "trellis.getStatus",
+  trellisNewIdea: "trellis.newIdea",
+  trellisNewProject: "trellis.newProject",
+  trellisFind: "trellis.find",
   assetsCreateUrl: "assets.createUrl",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -1031,6 +1046,27 @@ const WsCodexThreadsImportRpc = Rpc.make(WS_METHODS.codexThreadsImport, {
   error: Schema.Union([CodexThreadError, EnvironmentAuthorizationError]),
 });
 
+const WsTrellisGetStatusRpc = Rpc.make(WS_METHODS.trellisGetStatus, {
+  payload: Schema.Struct({}),
+  success: TrellisStatus,
+  error: EnvironmentAuthorizationError,
+});
+const WsTrellisNewIdeaRpc = Rpc.make(WS_METHODS.trellisNewIdea, {
+  payload: TrellisNewIdeaInput,
+  success: TrellisCreateResult,
+  error: Schema.Union([TrellisError, EnvironmentAuthorizationError]),
+});
+const WsTrellisNewProjectRpc = Rpc.make(WS_METHODS.trellisNewProject, {
+  payload: TrellisNewProjectInput,
+  success: TrellisCreateResult,
+  error: Schema.Union([TrellisError, EnvironmentAuthorizationError]),
+});
+const WsTrellisFindRpc = Rpc.make(WS_METHODS.trellisFind, {
+  payload: TrellisFindInput,
+  success: TrellisFindResult,
+  error: Schema.Union([TrellisError, EnvironmentAuthorizationError]),
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1544,6 +1580,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsSideChatSubscribeRpc,
   WsCodexThreadsListRpc,
   WsCodexThreadsImportRpc,
+  WsTrellisGetStatusRpc,
+  WsTrellisNewIdeaRpc,
+  WsTrellisNewProjectRpc,
+  WsTrellisFindRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,
