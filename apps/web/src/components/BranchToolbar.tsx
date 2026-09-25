@@ -68,6 +68,8 @@ export interface BranchToolbarHandle {
 
 interface BranchToolbarProps {
   forceNewWorktree?: boolean;
+  /** Pins the workspace to the current checkout, e.g. in a Trellis project. */
+  worktreesUnavailable?: boolean;
   ref?: Ref<BranchToolbarHandle>;
   environmentId: EnvironmentId;
   threadId: ThreadId;
@@ -483,6 +485,7 @@ function useLabelsOverflow(element: HTMLDivElement | null): boolean {
 
 export const BranchToolbar = memo(function BranchToolbar({
   forceNewWorktree = false,
+  worktreesUnavailable = false,
   ref,
   environmentId,
   threadId,
@@ -524,14 +527,16 @@ export const BranchToolbar = memo(function BranchToolbar({
   const activeWorktreePath = forceNewWorktree
     ? null
     : (serverThread?.worktreePath ?? draftThread?.worktreePath ?? null);
-  const effectiveEnvMode =
-    (forceNewWorktree ? "worktree" : effectiveEnvModeOverride) ??
-    resolveEffectiveEnvMode({
-      activeWorktreePath,
-      hasServerThread: serverThread !== null,
-      draftThreadEnvMode: draftThread?.envMode,
-    });
-  const envModeLocked = envLocked || (serverThread !== null && activeWorktreePath !== null);
+  const effectiveEnvMode = worktreesUnavailable
+    ? "local"
+    : ((forceNewWorktree ? "worktree" : effectiveEnvModeOverride) ??
+      resolveEffectiveEnvMode({
+        activeWorktreePath,
+        hasServerThread: serverThread !== null,
+        draftThreadEnvMode: draftThread?.envMode,
+      }));
+  const envModeLocked =
+    envLocked || worktreesUnavailable || (serverThread !== null && activeWorktreePath !== null);
 
   // "Previous worktree" hops a draft into the most recently active worktree
   // of this project — the "keep going where I just was" follow-up flow. Only
@@ -696,11 +701,13 @@ export const BranchToolbar = memo(function BranchToolbar({
           threadId={threadId}
           {...(draftId ? { draftId } : {})}
           envLocked={envLocked}
-          {...(forceNewWorktree
-            ? { effectiveEnvModeOverride: "worktree" }
-            : effectiveEnvModeOverride
-              ? { effectiveEnvModeOverride }
-              : {})}
+          {...(worktreesUnavailable
+            ? { effectiveEnvModeOverride: "local" }
+            : forceNewWorktree
+              ? { effectiveEnvModeOverride: "worktree" }
+              : effectiveEnvModeOverride
+                ? { effectiveEnvModeOverride }
+                : {})}
           {...(activeThreadBranchOverride !== undefined ? { activeThreadBranchOverride } : {})}
           {...(onActiveThreadBranchOverrideChange ? { onActiveThreadBranchOverrideChange } : {})}
           startFromOrigin={startFromOrigin}
