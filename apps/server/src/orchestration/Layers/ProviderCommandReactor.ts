@@ -1512,13 +1512,36 @@ const make = Effect.gen(function* () {
     }
 
     // A Trellis thread's baseline must exist before the agent can write, so
-    // "revert to the start" restores the real starting state.
+    // "revert to the start" restores the real starting state. Without it the
+    // turn is not started.
     if (Option.isSome(trellisBaseline)) {
       const project = yield* resolveProject(thread.projectId);
-      yield* trellisBaseline.value.ensure(
-        thread.id,
-        resolveThreadWorkspaceCwd({ thread, projects: project ? [project] : [] }),
-      );
+      const baseline = yield* trellisBaseline.value
+        .ensure(
+          thread.id,
+          resolveThreadWorkspaceCwd({ thread, projects: project ? [project] : [] }),
+        )
+        .pipe(Effect.result);
+      if (baseline._tag === "Failure") {
+        const detail = `Trellis could not snapshot the workspace before this turn; the turn was not started. ${baseline.failure.message}`;
+        yield* setThreadSessionErrorOnTurnStartFailure({
+          threadId: event.payload.threadId,
+          detail,
+          createdAt: event.payload.createdAt,
+        }).pipe(
+          Effect.andThen(appendTurnStartFailure("Trellis snapshot failed", detail)),
+          Effect.catchCause((cause) =>
+            Effect.logWarning(
+              "provider command reactor failed to report a Trellis snapshot failure",
+              {
+                threadId: event.payload.threadId,
+                cause: Cause.pretty(cause),
+              },
+            ),
+          ),
+        );
+        return;
+      }
     }
 
     const send = providerService

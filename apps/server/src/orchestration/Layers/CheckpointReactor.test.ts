@@ -2553,7 +2553,7 @@ describe("CheckpointReactor", () => {
       );
     });
 
-    it("retries a missing baseline at the next turn start", async () => {
+    it("does not record a late baseline after a turn ran without one", async () => {
       const harness = await createHarness({
         trellisWorkspaceKind: "scratch",
         initializeGit: false,
@@ -2584,9 +2584,10 @@ describe("CheckpointReactor", () => {
         }),
       );
       await harness.drain();
+      // A snapshot of the modified workspace would be a false start. (With a
+      // provider, the first turn would not have started without it.)
       expect(harness.trellis?.snapshots.map((entry) => [entry.thread, entry.turn])).toEqual([
         ["thread-1", "turn-trellis-1"],
-        ["thread-1", "baseline"],
       ]);
     });
 

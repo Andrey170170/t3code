@@ -294,9 +294,20 @@ const make = Effect.gen(function* () {
         );
 
   // Shared with the provider command reactor, which takes the baseline
-  // before it sends a turn; retried at every turn start until it exists.
+  // before it sends a turn and does not start the turn without it; here a
+  // failure is only logged.
   const ensureTrellisBaseline = (threadId: ThreadId, cwd: string) =>
-    Option.isNone(trellisBaseline) ? Effect.void : trellisBaseline.value.ensure(threadId, cwd);
+    Option.isNone(trellisBaseline)
+      ? Effect.void
+      : trellisBaseline.value.ensure(threadId, cwd).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Trellis baseline snapshot failed", {
+              threadId,
+              cwd,
+              detail: error.message,
+            }),
+          ),
+        );
 
   const snapshotTrellisTurn = Effect.fn("snapshotTrellisTurn")(function* (input: {
     readonly threadId: ThreadId;

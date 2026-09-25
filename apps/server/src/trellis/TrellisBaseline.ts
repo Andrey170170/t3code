@@ -3,15 +3,18 @@
  * thread's first turn, which "revert to the start" restores.
  *
  * The provider command reactor ensures it right before it sends a turn to the
- * provider, so the agent cannot write before the baseline exists. The
- * checkpoint reactor ensures it too, at turn start. Both go through this one
- * service: it is serialized and remembers threads whose baseline exists, so
- * the work runs once. A failed attempt is logged and retried at the next turn
- * (the baseline then holds the state before that turn); it never fails a turn.
+ * provider and does not start the turn when it cannot be taken, so no agent
+ * writes before the baseline exists. The checkpoint reactor also ensures it
+ * at turn start and only logs failures. Both go through this one service,
+ * which is serialized and remembers settled threads.
+ *
+ * A thread whose turns already ran without a baseline (it predates Trellis
+ * snapshots, or Trellis was off) never gets one later: a snapshot of the
+ * modified workspace would be a false "start". Such threads never block.
  *
  * @module trellis/TrellisBaseline
  */
-import type { ThreadId } from "@t3tools/contracts";
+import type { ThreadId, TrellisError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -23,35 +26,37 @@ import { BASELINE_TURN } from "./TrellisCheckpoints.ts";
 export class TrellisBaseline extends Context.Service<
   TrellisBaseline,
   {
-    /** Takes the thread's baseline snapshot of `cwd` unless it exists. No-op outside Trellis. */
-    readonly ensure: (threadId: ThreadId, cwd: string | undefined) => Effect.Effect<void>;
+    /**
+     * Takes the thread's baseline snapshot of `cwd` unless it exists or the
+     * thread's turns already ran. Fails when Trellis cannot list or take the
+     * snapshot. No-op outside Trellis and for settled threads.
+     */
+    readonly ensure: (
+      threadId: ThreadId,
+      cwd: string | undefined,
+    ) => Effect.Effect<void, TrellisError>;
   }
 >()("t3/trellis/TrellisBaseline") {}
 
 const make = Effect.gen(function* () {
   const trellis = yield* Trellis;
   const lock = yield* Semaphore.make(1);
-  const captured = new Set<ThreadId>();
+  // Threads with a baseline, or whose turns ran without one.
+  const settled = new Set<ThreadId>();
 
   const ensure: TrellisBaseline["Service"]["ensure"] = (threadId, cwd) =>
     Effect.gen(function* () {
-      if (cwd === undefined || captured.has(threadId)) return;
+      if (cwd === undefined || settled.has(threadId)) return;
       if (!(yield* isTrellisPath(trellis, cwd))) return;
-      const snapshots = yield* trellis.listSnapshots(cwd);
-      if (!snapshots.some((entry) => entry.thread === threadId && entry.turn === BASELINE_TURN)) {
+      const ofThread = (yield* trellis.listSnapshots(cwd)).filter(
+        (entry) => entry.thread === threadId,
+      );
+      // Any snapshot of this thread means a baseline exists or turns ran.
+      if (ofThread.length === 0) {
         yield* trellis.createSnapshot({ target: cwd, thread: threadId, turn: BASELINE_TURN });
       }
-      captured.add(threadId);
-    }).pipe(
-      lock.withPermits(1),
-      Effect.catch((error) =>
-        Effect.logWarning("Trellis baseline snapshot failed; retrying at the next turn", {
-          threadId,
-          cwd,
-          detail: error.message,
-        }),
-      ),
-    );
+      settled.add(threadId);
+    }).pipe(lock.withPermits(1));
 
   return TrellisBaseline.of({ ensure });
 });
