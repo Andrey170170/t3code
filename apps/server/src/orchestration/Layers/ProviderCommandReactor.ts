@@ -1511,6 +1511,8 @@ const make = Effect.gen(function* () {
         .ensure(
           thread.id,
           resolveThreadWorkspaceCwd({ thread, projects: project ? [project] : [] }),
+          // A previous turn means the workspace already changed.
+          { turnsRan: thread.latestTurn !== null },
         )
         .pipe(Effect.result);
       if (baseline._tag === "Failure") {

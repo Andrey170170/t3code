@@ -17,6 +17,7 @@ function makeHarness(input: {
 }) {
   const failures = { list: input.failures?.list ?? 0, create: input.failures?.create ?? 0 };
   const created: Array<string> = [];
+  const pinned: Array<string> = [];
   const env = { root: ROOT, bin: "trellis", shimDir: null };
   const unused = () => Effect.die(new Error("unused"));
   const fail = () => Effect.fail(new TrellisError({ message: "Trellis is restarting" }));
@@ -54,31 +55,37 @@ function makeHarness(input: {
                 input.snapshots.push(snapshot);
                 return snapshot;
               }),
+        pinSnapshot: (id) => Effect.sync(() => void pinned.push(id)),
         rollback: unused,
         preview: unused,
         primer: unused,
       }),
     ),
   );
-  return { layer, created };
+  return { layer, created, pinned };
 }
 
-const snapshot = (turn: string): TrellisSnapshot => ({
+const snapshot = (turn: string, pinned?: boolean): TrellisSnapshot => ({
   id: `snap-${turn}`,
   workspace_id: "ws-1",
   seq: 1,
   kind: "turn",
+  ...(pinned === undefined ? {} : { pinned }),
   thread: threadId,
   turn,
   created_at: 0,
 });
 
-const ensureTimes = (harness: ReturnType<typeof makeHarness>, times: number) =>
+const ensureTimes = (
+  harness: ReturnType<typeof makeHarness>,
+  times: number,
+  options?: { readonly turnsRan?: boolean },
+) =>
   Effect.gen(function* () {
     const baseline = yield* TrellisBaseline.TrellisBaseline;
     const results: Array<"ok" | string> = [];
     for (let index = 0; index < times; index += 1) {
-      const result = yield* baseline.ensure(threadId, CWD).pipe(Effect.result);
+      const result = yield* baseline.ensure(threadId, CWD, options).pipe(Effect.result);
       results.push(result._tag === "Success" ? "ok" : result.failure.message);
     }
     return results;
@@ -90,6 +97,25 @@ describe("TrellisBaseline", () => {
       const harness = makeHarness({ snapshots: [] });
       expect(yield* ensureTimes(harness, 2)).toEqual(["ok", "ok"]);
       expect(harness.created).toEqual(["baseline"]);
+      // Pinned, so thinning never removes the thread's starting point.
+      expect(harness.pinned).toEqual(["snap-1"]);
+    }),
+  );
+
+  it.effect("pins a baseline taken before baselines were pinned", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({ snapshots: [snapshot("baseline", false)] });
+      expect(yield* ensureTimes(harness, 1)).toEqual(["ok"]);
+      expect(harness.created).toEqual([]);
+      expect(harness.pinned).toEqual(["snap-baseline"]);
+    }),
+  );
+
+  it.effect("takes no baseline when T3 knows turns ran, even with every snapshot thinned", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({ snapshots: [] });
+      expect(yield* ensureTimes(harness, 1, { turnsRan: true })).toEqual(["ok"]);
+      expect(harness.created).toEqual([]);
     }),
   );
 

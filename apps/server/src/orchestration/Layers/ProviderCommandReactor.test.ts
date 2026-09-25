@@ -712,7 +712,9 @@ describe("ProviderCommandReactor", () => {
       });
       yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
 
-      expect(ensure).toHaveBeenCalledWith(ThreadId.make("thread-1"), "/tmp/provider-project");
+      expect(ensure).toHaveBeenCalledWith(ThreadId.make("thread-1"), "/tmp/provider-project", {
+        turnsRan: false,
+      });
       expect(ensure.mock.invocationCallOrder[0]).toBeLessThan(
         harness.sendTurn.mock.invocationCallOrder[0]!,
       );

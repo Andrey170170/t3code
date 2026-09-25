@@ -20,6 +20,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import type * as PlatformError from "effect/PlatformError";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
@@ -52,6 +53,9 @@ import {
 } from "../../trellis/TrellisCheckpoints.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+
+/** Retries of a failed post-turn Trellis snapshot before it is reported. */
+const TRELLIS_SNAPSHOT_RETRIES = 2;
 
 type ReactorInput =
   | {
@@ -296,10 +300,10 @@ const make = Effect.gen(function* () {
   // Shared with the provider command reactor, which takes the baseline
   // before it sends a turn and does not start the turn without it; here a
   // failure is only logged.
-  const ensureTrellisBaseline = (threadId: ThreadId, cwd: string) =>
+  const ensureTrellisBaseline = (threadId: ThreadId, cwd: string, turnsRan: boolean) =>
     Option.isNone(trellisBaseline)
       ? Effect.void
-      : trellisBaseline.value.ensure(threadId, cwd).pipe(
+      : trellisBaseline.value.ensure(threadId, cwd, { turnsRan }).pipe(
           Effect.catch((error) =>
             Effect.logWarning("Trellis baseline snapshot failed", {
               threadId,
@@ -309,22 +313,41 @@ const make = Effect.gen(function* () {
           ),
         );
 
+  // A turn's snapshot is retried briefly; a snapshot that still fails is
+  // reported on the thread, because restoring files to that turn will not be
+  // possible even when its git checkpoint is ready.
   const snapshotTrellisTurn = Effect.fn("snapshotTrellisTurn")(function* (input: {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;
     readonly cwd: string;
+    readonly createdAt: string;
   }) {
     if (Option.isNone(trellis)) return undefined;
     return yield* trellis.value
       .createSnapshot({ target: input.cwd, thread: input.threadId, turn: input.turnId })
       .pipe(
+        Effect.retry({
+          schedule: Schedule.exponential("250 millis"),
+          times: TRELLIS_SNAPSHOT_RETRIES,
+        }),
         Effect.catch((error) =>
           Effect.logWarning("Trellis turn snapshot failed", {
             threadId: input.threadId,
             turnId: input.turnId,
             cwd: input.cwd,
             detail: error.message,
-          }).pipe(Effect.as(undefined)),
+          }).pipe(
+            Effect.andThen(
+              appendCaptureFailureActivity({
+                threadId: input.threadId,
+                turnId: input.turnId,
+                detail: `Trellis could not snapshot the workspace after this turn (${error.message}), so its files cannot be restored to this point.`,
+                createdAt: input.createdAt,
+              }),
+            ),
+            Effect.catch(() => Effect.void),
+            Effect.as(undefined),
+          ),
         ),
       );
   });
@@ -600,6 +623,7 @@ const make = Effect.gen(function* () {
               threadId: thread.id,
               turnId,
               cwd: trellisCwd,
+              createdAt: event.createdAt,
             });
             if (checkpointCwd || snapshot === undefined) return;
             yield* dispatchTrellisCheckpoint({
@@ -684,7 +708,9 @@ const make = Effect.gen(function* () {
     );
     const trellisCwd = yield* trellisCwdOf(workspaceCwd);
     // Fast (a Btrfs snapshot), so it goes before the git capture.
-    if (trellisCwd !== undefined) yield* ensureTrellisBaseline(thread.id, trellisCwd);
+    if (trellisCwd !== undefined) {
+      yield* ensureTrellisBaseline(thread.id, trellisCwd, currentTurnCount > 0);
+    }
 
     const captureGitBaseline = Effect.gen(function* () {
       const checkpointCwd = yield* gitCheckpointCwd(workspaceCwd);
@@ -940,6 +966,30 @@ const make = Effect.gen(function* () {
     return true;
   });
 
+  // Titles of other threads with a provider session that is running (or
+  // starting) a turn inside or above `scope`, a canonical path.
+  const activeThreadTitlesInScope = Effect.fn("activeThreadTitlesInScope")(function* (
+    threadId: ThreadId,
+    scope: string,
+  ) {
+    const sessions = (yield* providerService.listSessions()).filter(
+      (session) =>
+        session.threadId !== threadId &&
+        (session.status === "running" ||
+          session.status === "connecting" ||
+          session.activeTurnId !== undefined),
+    );
+    if (sessions.length === 0) return [];
+    const ids = yield* sessionsInScope(scope, sessions, (path) =>
+      fileSystem.realPath(path).pipe(Effect.orElseSucceed(() => path)),
+    );
+    if (ids.length === 0) return [];
+    const shell = yield* projectionSnapshotQuery.getShellSnapshot();
+    return ids.map(
+      (id) => shell.threads.find((thread) => thread.id === id)?.title ?? "Another thread",
+    );
+  });
+
   // Rolls a Trellis project path back to the snapshot for checkpoint
   // `turnCount`. An idea restores only its folder; a dedicated workspace
   // restarts its container, so provider sessions inside it are stopped first
@@ -978,11 +1028,12 @@ const make = Effect.gen(function* () {
       const canonicalScope = yield* fileSystem
         .realPath(scope.path)
         .pipe(Effect.orElseSucceed(() => scope.path));
-      if (!(yield* isScopeUnshared(input.thread.id, canonicalScope))) {
+      // Only work in progress blocks a restore: idle and archived threads
+      // have nothing to lose that the undo snapshot does not keep.
+      const busy = yield* activeThreadTitlesInScope(input.thread.id, canonicalScope);
+      if (busy.length > 0) {
         return yield* fail(
-          scope.restartsWorkspace
-            ? "Restoring files rolls back the whole Trellis workspace, and another thread uses it. Rewind the conversation without restoring files instead."
-            : "Another thread uses this Trellis idea, so restoring its files could erase that thread's work. Rewind the conversation without restoring files instead.",
+          `${busy.map((title) => `"${title}"`).join(", ")} ${busy.length === 1 ? "is" : "are"} working in this ${scope.restartsWorkspace ? "Trellis workspace" : "Trellis idea"} right now, and restoring files would overwrite that work. Wait for ${busy.length === 1 ? "it" : "them"} to finish or stop ${busy.length === 1 ? "it" : "them"}, then try again.`,
         );
       }
       const selection = selectRollbackSnapshot({
@@ -993,8 +1044,8 @@ const make = Effect.gen(function* () {
       });
       if (selection._tag === "Missing") return yield* fail(selection.detail);
       if (scope.restartsWorkspace) {
-        // Canonical paths, as `isScopeUnshared` compares: a symlinked root
-        // must not leave a provider running through the restart.
+        // Idle sessions too, by canonical path: a symlinked root must not
+        // leave a provider running through the restart.
         const threadIds = yield* sessionsInScope(
           canonicalScope,
           yield* providerService.listSessions(),
