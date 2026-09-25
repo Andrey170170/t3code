@@ -1090,9 +1090,16 @@ function OpenCommandPaletteDialog(props: {
       getFilesystemBrowsePath(
         query,
         browseEnvironmentPlatform,
-        browseEnvironmentId !== null && !isRemoteProjectRepositoryStep,
+        // Find in Trellis takes free text; a query like "/tmp" is not a path.
+        browseEnvironmentId !== null && !isRemoteProjectRepositoryStep && !isTrellisFindView,
       ),
-    [browseEnvironmentId, browseEnvironmentPlatform, isRemoteProjectRepositoryStep, query],
+    [
+      browseEnvironmentId,
+      browseEnvironmentPlatform,
+      isRemoteProjectRepositoryStep,
+      isTrellisFindView,
+      query,
+    ],
   );
   const isBrowsing = browsePath.isBrowsing;
   const browseDirectoryPath = browsePath.directoryPath;
@@ -2747,9 +2754,11 @@ function OpenCommandPaletteDialog(props: {
   }, [addProjectCloneFlow]);
 
   let displayedGroups: CommandPaletteView["groups"] = filteredGroups;
+  // Hits for an earlier query stay hidden until the current one is searched.
+  const trellisFindHitsCurrent = trellisFind.searchedQuery === query.trim();
   if (isTrellisFindView) {
     displayedGroups =
-      trellis === null || trellisFind.hits.length === 0
+      trellis === null || !trellisFindHitsCurrent || trellisFind.hits.length === 0
         ? []
         : [
             {
@@ -3233,7 +3242,7 @@ function OpenCommandPaletteDialog(props: {
                 emptyStateMessage:
                   query.trim().length === 0
                     ? "Search Trellis ideas and projects by name or content."
-                    : trellisFind.isPending
+                    : trellisFind.isPending || !trellisFindHitsCurrent
                       ? "Searching Trellis…"
                       : (trellisFind.error ?? "No matching ideas or projects."),
               }

@@ -1,26 +1,48 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { ProjectId, type TrellisFindHit } from "@t3tools/contracts";
-import { isLoopbackPreviewUrl, isTrellisWorkspaceRoot, trellisFindHitSummary } from "./trellis";
+import {
+  isLoopbackPreviewUrl,
+  isTrellisWorkspaceRoot,
+  pickTrellisEnvironment,
+  trellisFindHitSummary,
+} from "./trellis";
 
 describe("isTrellisWorkspaceRoot", () => {
-  it("matches directories inside <root>/workspaces/", () => {
-    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/scratch/idea", "/srv/trellis")).toBe(
+  it("matches project directories inside <root>/workspaces/<ws>/", () => {
+    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/project", "/srv/trellis")).toBe(true);
+    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/project/sub", "/srv/trellis/")).toBe(
       true,
     );
-    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/p1", "/srv/trellis/")).toBe(true);
   });
 
-  it("rejects the workspaces directory itself, siblings and lookalike prefixes", () => {
-    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/", "/srv/trellis")).toBe(false);
-    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces", "/srv/trellis")).toBe(false);
-    expect(isTrellisWorkspaceRoot("/srv/trellis/state/x", "/srv/trellis")).toBe(false);
-    expect(isTrellisWorkspaceRoot("/srv/trellis-old/workspaces/x", "/srv/trellis")).toBe(false);
+  it("rejects workspace directories that are not the project, and lookalike prefixes", () => {
+    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1", "/srv/trellis")).toBe(false);
+    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/state", "/srv/trellis")).toBe(false);
+    expect(isTrellisWorkspaceRoot("/srv/trellis-old/workspaces/w1/project", "/srv/trellis")).toBe(
+      false,
+    );
   });
 
   it("is false without a root, so an unavailable Trellis marks nothing", () => {
-    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/x", undefined)).toBe(false);
-    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/x", "")).toBe(false);
+    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/project", undefined)).toBe(false);
+    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/project", null)).toBe(false);
+    expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/project", "")).toBe(false);
+  });
+});
+
+describe("pickTrellisEnvironment", () => {
+  const active = { id: "active", available: true };
+  const primary = { id: "primary", available: true };
+
+  it("prefers the active environment when it runs Trellis", () => {
+    expect(pickTrellisEnvironment(active, primary)).toBe(active);
+  });
+
+  it("falls back to the primary environment, then to none", () => {
+    expect(pickTrellisEnvironment({ ...active, available: false }, primary)).toBe(primary);
+    expect(pickTrellisEnvironment(null, primary)).toBe(primary);
+    expect(pickTrellisEnvironment(null, { ...primary, available: false })).toBeNull();
   });
 });
 

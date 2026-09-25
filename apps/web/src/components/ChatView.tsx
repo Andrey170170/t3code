@@ -483,7 +483,7 @@ import {
 } from "./ChatView.logic";
 import type { ThreadSyncPhase } from "../threadSync";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
-import { useTrellisEnvironment } from "~/hooks/useTrellis";
+import { useTrellisRoot } from "~/hooks/useTrellis";
 import { isTrellisWorkspaceRoot } from "~/lib/trellis";
 import { useComposerHandleContext } from "../composerHandleContext";
 import {
@@ -5945,13 +5945,11 @@ export default function ChatView(props: ChatViewProps) {
   }, []);
 
   const activeWorktreePath = activeThread?.worktreePath ?? null;
-  const trellisEnvironment = useTrellisEnvironment();
+  const trellisRoot = useTrellisRoot(environmentId);
   // Trellis restores files from its own snapshots; the server refuses when
   // another thread shares the idea folder or workspace.
   const activeIsTrellisProject =
-    activeProject !== null &&
-    trellisEnvironment?.environmentId === environmentId &&
-    isTrellisWorkspaceRoot(activeProject.workspaceRoot, trellisEnvironment.root);
+    activeProject !== null && isTrellisWorkspaceRoot(activeProject.workspaceRoot, trellisRoot);
   const canRevertFiles = activeWorktreePath !== null || activeIsTrellisProject;
   const derivedEnvMode: DraftThreadEnvMode = resolveEffectiveEnvMode({
     activeWorktreePath,
@@ -7530,6 +7528,13 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const multipleModelSelections = queuedMessage ? null : sendCtx.multipleModelSelections;
+    if (multipleModelSelections !== null && activeIsTrellisProject) {
+      setThreadError(
+        activeThread.id,
+        "Sending to several models needs git worktrees, which Trellis projects don't use. Pick one model, or use `trellis fork` for parallel work.",
+      );
+      return;
+    }
     if (
       multipleModelSelections !== null &&
       serverConfig?.environment.capabilities.requiredWorktreeBootstrap !== true
@@ -10243,7 +10248,7 @@ export default function ChatView(props: ChatViewProps) {
                             multipleModelSelections={multipleModelSelections}
                             supportsMultipleModels={
                               serverConfig?.environment.capabilities.requiredWorktreeBootstrap ===
-                              true
+                                true && !activeIsTrellisProject
                             }
                             onMultipleModelSelectionsChange={setMultipleModelSelections}
                             composerRef={composerRef}

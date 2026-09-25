@@ -1,28 +1,47 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { SproutIcon } from "lucide-react";
 
+import { useTrellisRoot } from "~/hooks/useTrellis";
 import { isTrellisWorkspaceRoot } from "~/lib/trellis";
 import type { SidebarProjectSnapshot } from "~/sidebarProjectGrouping";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
+type MemberProject = SidebarProjectSnapshot["memberProjects"][number];
+
 /**
  * Marks a project picker row whose group has a member in a Trellis workspace
- * of the Trellis environment. Renders nothing when Trellis is unavailable.
+ * of that member's environment. Renders nothing where Trellis is unavailable.
  */
 export function TrellisWorkspaceBadge(props: {
   readonly group: Pick<SidebarProjectSnapshot, "memberProjects">;
-  readonly trellis: { readonly environmentId: EnvironmentId; readonly root: string | null } | null;
 }) {
-  const { trellis } = props;
-  if (
-    trellis === null ||
-    !props.group.memberProjects.some(
-      (member) =>
-        member.environmentId === trellis.environmentId &&
-        isTrellisWorkspaceRoot(member.workspaceRoot, trellis.root),
-    )
-  ) {
-    return null;
+  const environmentIds = [
+    ...new Set(props.group.memberProjects.map((member) => member.environmentId)),
+  ];
+  return (
+    <TrellisEnvironmentCheck environmentIds={environmentIds} members={props.group.memberProjects} />
+  );
+}
+
+/**
+ * Checks the group's environments one per component, so each can query its
+ * own Trellis status, and renders at most one badge.
+ */
+function TrellisEnvironmentCheck(props: {
+  readonly environmentIds: ReadonlyArray<EnvironmentId>;
+  readonly members: ReadonlyArray<MemberProject>;
+}) {
+  const [environmentId = null, ...rest] = props.environmentIds;
+  const root = useTrellisRoot(environmentId);
+  if (environmentId === null) return null;
+  const matches = props.members.some(
+    (member) =>
+      member.environmentId === environmentId && isTrellisWorkspaceRoot(member.workspaceRoot, root),
+  );
+  if (!matches) {
+    return rest.length > 0 ? (
+      <TrellisEnvironmentCheck environmentIds={rest} members={props.members} />
+    ) : null;
   }
   return (
     <Tooltip>

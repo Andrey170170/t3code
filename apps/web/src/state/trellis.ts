@@ -2,7 +2,8 @@ import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
 } from "@t3tools/client-runtime/state/runtime";
-import { WS_METHODS } from "@t3tools/contracts";
+import { type EnvironmentId, WS_METHODS } from "@t3tools/contracts";
+import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
 
 import { connectionAtomRuntime } from "../connection/runtime";
 
@@ -40,3 +41,31 @@ export const trellisEnvironment = {
     tag: WS_METHODS.trellisResolvePreviewUrl,
   }),
 };
+
+/** Environments with a new-idea request in flight, shared by every entry point. */
+export const trellisIdeaPendingAtom = Atom.make<ReadonlyArray<EnvironmentId>>([]).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("trellis:idea-pending"),
+);
+
+/**
+ * Runs `create` unless an idea is already being created in the environment,
+ * so a repeated shortcut or a second entry point creates one idea. Returns
+ * whether `create` ran.
+ */
+export async function runExclusiveTrellisIdea(
+  registry: AtomRegistry.AtomRegistry,
+  environmentId: EnvironmentId,
+  create: () => Promise<void>,
+): Promise<boolean> {
+  if (registry.get(trellisIdeaPendingAtom).includes(environmentId)) return false;
+  registry.update(trellisIdeaPendingAtom, (pending) => [...pending, environmentId]);
+  try {
+    await create();
+    return true;
+  } finally {
+    registry.update(trellisIdeaPendingAtom, (pending) =>
+      pending.filter((pendingId) => pendingId !== environmentId),
+    );
+  }
+}

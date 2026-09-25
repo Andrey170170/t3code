@@ -60,16 +60,14 @@ function NewTrellisProjectDialog(props: {
     if (pending) return;
     setError(null);
     setPending(true);
-    const failure = await newProject(props.environmentId, {
+    const result = await newProject(props.environmentId, {
       ...(trimmedName.length > 0 ? { name: trimmedName } : {}),
       ...(trimmedGitUrl.length > 0 ? { gitUrl: trimmedGitUrl } : {}),
     });
     setPending(false);
-    if (failure !== null) {
-      setError(failure);
-      return;
-    }
-    props.onClose();
+    // Interrupted keeps the dialog open with the entered values for a retry.
+    if (result._tag === "Failed") setError(result.message);
+    if (result._tag === "Created") props.onClose();
   };
 
   const submitOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {

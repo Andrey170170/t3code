@@ -1,18 +1,31 @@
 import type { TrellisFindHit } from "@t3tools/contracts";
 import { isLoopbackHost, normalizePreviewUrl } from "@t3tools/shared/preview";
+import { isTrellisManagedPath } from "@t3tools/shared/trellis";
 
 /**
- * Whether a project directory is a Trellis workspace. Trellis-managed projects
- * are ordinary T3 projects whose workspace root lies inside `<root>/workspaces/`,
- * where `root` comes from the environment's Trellis status.
+ * Whether a project directory is a Trellis workspace: a project directory
+ * `<root>/workspaces/<ws>/project` or below it, where `root` comes from the
+ * environment's Trellis status. False without a root.
  */
 export function isTrellisWorkspaceRoot(
   workspaceRoot: string,
   trellisRoot: string | null | undefined,
 ): boolean {
-  if (!trellisRoot) return false;
-  const prefix = `${trellisRoot.replace(/\/+$/, "")}/workspaces/`;
-  return workspaceRoot.startsWith(prefix) && workspaceRoot.length > prefix.length;
+  return trellisRoot ? isTrellisManagedPath(trellisRoot, workspaceRoot) : false;
+}
+
+/**
+ * The environment Trellis entry points target: the active thread's or
+ * project's environment when it runs Trellis, otherwise the primary one when
+ * it does. Null hides the entry points.
+ */
+export function pickTrellisEnvironment<T extends { readonly available: boolean }>(
+  active: T | null,
+  primary: T | null,
+): T | null {
+  if (active?.available === true) return active;
+  if (primary?.available === true) return primary;
+  return null;
 }
 
 /**
