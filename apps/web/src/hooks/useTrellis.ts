@@ -1,4 +1,3 @@
-import { useAtomValue } from "@effect/atom-react";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
@@ -6,9 +5,10 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import type {
   EnvironmentId,
-  TrellisCreateResult,
+  ProjectId,
   TrellisFindHit,
   TrellisNewProjectInput,
+  TrellisState,
 } from "@t3tools/contracts";
 import { useParams } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
@@ -16,16 +16,11 @@ import { useCallback, useMemo } from "react";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { pickTrellisEnvironment } from "~/lib/trellis";
-import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { waitForProject } from "~/state/entities";
-import { usePrimaryEnvironmentId } from "~/state/environments";
+import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useDebouncedValue } from "~/state/queries";
 import { useEnvironmentQuery } from "~/state/query";
-import {
-  runExclusiveTrellisIdea,
-  trellisEnvironment,
-  trellisIdeaPendingAtom,
-} from "~/state/trellis";
+import { trellisEnvironment } from "~/state/trellis";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { resolveThreadRouteTarget } from "~/threadRoutes";
 import { useNewThreadHandler } from "./useHandleNewThread";
@@ -35,30 +30,35 @@ const EMPTY_HITS: ReadonlyArray<TrellisFindHit> = [];
 
 interface TrellisEnvironment {
   readonly environmentId: EnvironmentId;
+  readonly state: TrellisState;
   readonly available: boolean;
   readonly root: string | null;
 }
 
 /** Trellis status of one environment; null while unknown or without an environment. */
-function useTrellisStatusFor(environmentId: EnvironmentId | null): TrellisEnvironment | null {
+export function useTrellisStatusFor(
+  environmentId: EnvironmentId | null,
+): TrellisEnvironment | null {
   const status = useEnvironmentQuery(
     environmentId === null ? null : trellisEnvironment.status({ environmentId, input: {} }),
   ).data;
   const available = status?.available === true;
+  // Servers that predate the setting report only `available`.
+  const state = status?.state ?? (available ? "ready" : "unavailable");
   const root = status?.root ?? null;
   return useMemo(
-    () => (environmentId === null ? null : { environmentId, available, root }),
-    [available, environmentId, root],
+    () => (environmentId === null ? null : { environmentId, state, available, root }),
+    [available, environmentId, root, state],
   );
 }
 
 /**
- * The Trellis root of an environment while its server reports a running
- * Trellis service; null otherwise, which marks nothing as Trellis-managed.
+ * Where an environment's Trellis project paths live, also while its
+ * integration is off or Trellis is down: those projects stay Trellis
+ * workspaces. Null marks nothing as Trellis-managed.
  */
 export function useTrellisRoot(environmentId: EnvironmentId | null): string | null {
-  const status = useTrellisStatusFor(environmentId);
-  return status?.available === true ? status.root : null;
+  return useTrellisStatusFor(environmentId)?.root ?? null;
 }
 
 /** Environment of the routed thread or draft, if any. */
@@ -77,28 +77,28 @@ function useActiveEnvironmentId(): EnvironmentId | null {
 
 /**
  * The environment Trellis entry points (new idea, new project, find) target:
- * the active thread's environment when it runs Trellis, otherwise the primary
- * one when it does. Null hides every Trellis entry point.
+ * the active thread's environment when Trellis is ready there, otherwise the
+ * primary one when it is. `label` names it when several environments are
+ * connected, so entry points can say where they create. Null hides every
+ * Trellis entry point.
  */
 export function useTrellisEnvironment(): {
   readonly environmentId: EnvironmentId;
   readonly root: string | null;
+  readonly label: string | null;
 } | null {
   const active = useTrellisStatusFor(useActiveEnvironmentId());
   const primary = useTrellisStatusFor(usePrimaryEnvironmentId());
   const picked = pickTrellisEnvironment(active, primary);
   const environmentId = picked?.environmentId ?? null;
   const root = picked?.root ?? null;
+  const several = useEnvironments().environments.length > 1;
+  const environmentLabel = useEnvironment(environmentId)?.label ?? null;
+  const label = several ? environmentLabel : null;
   return useMemo(
-    () => (environmentId === null ? null : { environmentId, root }),
-    [environmentId, root],
+    () => (environmentId === null ? null : { environmentId, root, label }),
+    [environmentId, label, root],
   );
-}
-
-/** Whether a new idea is being created in the environment, from any entry point. */
-export function useTrellisIdeaPending(environmentId: EnvironmentId | null): boolean {
-  const pending = useAtomValue(trellisIdeaPendingAtom);
-  return environmentId !== null && pending.includes(environmentId);
 }
 
 export type TrellisNewProjectResult =
@@ -111,28 +111,31 @@ function failureMessage(error: unknown, fallback: string): string {
 }
 
 /**
- * Creates Trellis ideas and projects, then opens a new thread in the T3
- * project the server created for them. `newIdea` reports failures as a toast
- * and ignores calls while an idea is already being created in the
- * environment; `newProject` returns its outcome so a dialog can show errors
- * inline.
+ * Starts Trellis ideas and creates Trellis projects. `newIdea` opens a draft
+ * in the environment's landing pad; nothing exists in Trellis until its
+ * first message is sent, which creates the idea. It reports failures as a
+ * toast. `newProject` creates the project right away and returns its outcome
+ * so a dialog can show errors inline.
  */
 export function useTrellisCreate() {
   const handleNewThread = useNewThreadHandler();
-  const runNewIdea = useAtomCommand(trellisEnvironment.newIdea, { reportFailure: false });
+  const runPrepareIdeaDraft = useAtomCommand(trellisEnvironment.prepareIdeaDraft, {
+    reportFailure: false,
+  });
   const runNewProject = useAtomCommand(trellisEnvironment.newProject, { reportFailure: false });
 
-  const openCreated = useCallback(
-    async (environmentId: EnvironmentId, created: TrellisCreateResult) => {
-      const projectRef = scopeProjectRef(environmentId, created.projectId);
+  const openDraftIn = useCallback(
+    async (environmentId: EnvironmentId, projectId: ProjectId, errorTitle: string) => {
+      const projectRef = scopeProjectRef(environmentId, projectId);
       // The server answers once the project is in its read model; the shell
       // stream may deliver it a moment later.
       await waitForProject(projectRef, 5_000).catch(() => null);
-      await handleNewThread(projectRef).catch((error: unknown) => {
+      // Trellis projects run in their project folder, never in a git worktree.
+      await handleNewThread(projectRef, { envMode: "local" }).catch((error: unknown) => {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: `Created ${created.name}, but could not open it`,
+            title: errorTitle,
             description: failureMessage(error, "An error occurred."),
           }),
         );
@@ -143,27 +146,25 @@ export function useTrellisCreate() {
 
   const newIdea = useCallback(
     async (environmentId: EnvironmentId): Promise<void> => {
-      await runExclusiveTrellisIdea(appAtomRegistry, environmentId, async () => {
-        const result = await runNewIdea({ environmentId, input: {} });
-        if (result._tag === "Failure") {
-          if (!isAtomCommandInterrupted(result)) {
-            toastManager.add(
-              stackedThreadToast({
-                type: "error",
-                title: "Could not create idea",
-                description: failureMessage(
-                  squashAtomCommandFailure(result),
-                  "Trellis did not respond.",
-                ),
-              }),
-            );
-          }
-          return;
+      const result = await runPrepareIdeaDraft({ environmentId, input: {} });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not start a new idea",
+              description: failureMessage(
+                squashAtomCommandFailure(result),
+                "Trellis did not respond.",
+              ),
+            }),
+          );
         }
-        await openCreated(environmentId, result.value);
-      });
+        return;
+      }
+      await openDraftIn(environmentId, result.value.projectId, "Could not open the new idea");
     },
-    [openCreated, runNewIdea],
+    [openDraftIn, runPrepareIdeaDraft],
   );
 
   const newProject = useCallback(
@@ -183,13 +184,61 @@ export function useTrellisCreate() {
               ),
             };
       }
-      await openCreated(environmentId, result.value);
+      await openDraftIn(
+        environmentId,
+        result.value.projectId,
+        `Created ${result.value.name}, but could not open it`,
+      );
       return { _tag: "Created" };
     },
-    [openCreated, runNewProject],
+    [openDraftIn, runNewProject],
   );
 
   return { newIdea, newProject };
+}
+
+/**
+ * Moves the Trellis item behind a T3 project to the Trellis trash and reports
+ * the outcome as a toast. The catalog sync then archives the project's
+ * conversations. Resolves to whether it was trashed.
+ */
+export function useTrellisTrash() {
+  const run = useAtomCommand(trellisEnvironment.trashProject, { reportFailure: false });
+  return useCallback(
+    async (environmentId: EnvironmentId, projectId: ProjectId, title: string) => {
+      const result = await run({ environmentId, input: { projectId } });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: `Could not move "${title}" to the Trellis trash`,
+              description: failureMessage(
+                squashAtomCommandFailure(result),
+                "Trellis did not respond.",
+              ),
+            }),
+          );
+        }
+        return false;
+      }
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: `Moved "${result.value.name}" to the Trellis trash`,
+          description: "Restore it from Settings → Trellis.",
+        }),
+      );
+      return true;
+    },
+    [run],
+  );
+}
+
+/** Keeps an environment's Trellis status loaded so event handlers can read it. */
+export function TrellisStatusProbe(props: { readonly environmentId: EnvironmentId }): null {
+  useTrellisStatusFor(props.environmentId);
+  return null;
 }
 
 /**

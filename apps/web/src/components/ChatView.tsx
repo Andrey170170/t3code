@@ -1,6 +1,6 @@
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
-import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import { isTrellisLandingPad, type UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import {
   collectProviderUsageLimits,
   hasProviderUsageLimits,
@@ -5971,10 +5971,13 @@ export default function ChatView(props: ChatViewProps) {
 
   const activeWorktreePath = activeThread?.worktreePath ?? null;
   const trellisRoot = useTrellisRoot(environmentId);
-  // Trellis restores files from its own snapshots; the server refuses when
-  // another thread shares the idea folder or workspace.
+  // Trellis restores files from its own snapshots; the server refuses while
+  // another thread is working in the idea folder or workspace. A new-idea
+  // draft (the landing pad) becomes a Trellis idea on its first send.
   const activeIsTrellisProject =
-    activeProject !== null && isTrellisWorkspaceRoot(activeProject.workspaceRoot, trellisRoot);
+    activeProject !== null &&
+    (isTrellisLandingPad(activeProject.id) ||
+      isTrellisWorkspaceRoot(activeProject.workspaceRoot, trellisRoot));
   const canRevertFiles = activeWorktreePath !== null || activeIsTrellisProject;
   const derivedEnvMode: DraftThreadEnvMode = resolveEffectiveEnvMode({
     activeWorktreePath,

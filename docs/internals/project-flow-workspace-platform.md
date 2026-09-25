@@ -170,6 +170,20 @@ must not delete them. Exact file-history controls and shared-runtime mechanics a
 No graduation or environment/history/conversation migration is required. A larger
 idea starts a new isolated project with selected copied notes/files.
 
+## Integration traps in T3
+
+- The integration is opt-in per environment (`trellis.enabled`). Off means no
+  socket traffic, but Trellis project paths must still never run on the host,
+  so the server keeps the last reported root in `<state>/trellis-root`
+  ([Trellis.ts](../../apps/server/src/trellis/Trellis.ts)).
+- A new idea is created lazily. Its draft belongs to a hidden landing pad
+  project with a fixed id (`TRELLIS_LANDING_PAD_PROJECT_ID`) rooted in an empty
+  T3-owned folder. The first send's bootstrap creates the idea and rewrites
+  the thread's project before `thread.create` (`promoteIdeaDraft` in
+  [ws.ts](../../apps/server/src/ws.ts)); the decider refuses threads in the
+  landing pad, and client project lists filter it out while by-id lookups
+  still resolve it.
+
 ## Historical source evidence and remaining engineering work
 
 The original source audit used `dev_vm` at

@@ -2008,6 +2008,8 @@ function OpenCommandPaletteDialog(props: {
 
   if (trellis !== null) {
     const trellisEnvironmentId = trellis.environmentId;
+    // Names the destination when several environments are connected.
+    const onEnvironment = trellis.label === null ? "" : ` on ${trellis.label}`;
     const trellisFindView: CommandPaletteView = {
       addonIcon: <SproutIcon className={ADDON_ICON_CLASS} />,
       groups: [{ value: TRELLIS_FIND_GROUP, label: "Trellis", items: [] }],
@@ -2018,7 +2020,7 @@ function OpenCommandPaletteDialog(props: {
         value: "action:trellis:new-idea",
         searchTerms: ["new idea", "trellis", "scratch", "sketch", "workspace"],
         title: "New idea",
-        description: "Start a thread in a fresh Trellis idea folder",
+        description: `Draft a thread; its Trellis idea is created when you send${onEnvironment}`,
         icon: <LightbulbIcon className={ITEM_ICON_CLASS} />,
         shortcutCommand: "trellis.newIdea",
         run: async () => {
@@ -2030,6 +2032,7 @@ function OpenCommandPaletteDialog(props: {
         value: "action:trellis:new-project",
         searchTerms: ["new trellis project", "trellis", "workspace", "clone", "git", "project"],
         title: "New Trellis project...",
+        ...(trellis.label === null ? {} : { description: `On ${trellis.label}` }),
         icon: <SproutIcon className={ITEM_ICON_CLASS} />,
         run: async () => {
           openNewTrellisProjectDialog(trellisEnvironmentId);
@@ -2040,6 +2043,7 @@ function OpenCommandPaletteDialog(props: {
         value: "action:trellis:find",
         searchTerms: ["find in trellis", "trellis", "search", "ideas", "projects", "workspace"],
         title: "Find in Trellis...",
+        ...(trellis.label === null ? {} : { description: `On ${trellis.label}` }),
         icon: <SproutIcon className={ITEM_ICON_CLASS} />,
         keepOpen: true,
         run: async () => {

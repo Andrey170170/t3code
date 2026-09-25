@@ -3,9 +3,11 @@ import { describe, expect, it } from "vite-plus/test";
 import { ProjectId, type TrellisFindHit } from "@t3tools/contracts";
 import {
   isLoopbackPreviewUrl,
+  isTrellisIdeaPath,
   isTrellisWorkspaceRoot,
   pickTrellisEnvironment,
   trellisFindHitSummary,
+  trellisRemovalOf,
 } from "./trellis";
 
 describe("isTrellisWorkspaceRoot", () => {
@@ -28,6 +30,34 @@ describe("isTrellisWorkspaceRoot", () => {
     expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/project", undefined)).toBe(false);
     expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/project", null)).toBe(false);
     expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/project", "")).toBe(false);
+  });
+});
+
+describe("trellisRemovalOf", () => {
+  const idea = "/srv/trellis/workspaces/w1/project/idea-1";
+
+  it("trashes Trellis projects while Trellis is ready", () => {
+    expect(trellisRemovalOf(idea, { available: true, root: "/srv/trellis" })).toBe("trash");
+  });
+
+  it("keeps recognizing Trellis projects while Trellis is off or down", () => {
+    expect(trellisRemovalOf(idea, { available: false, root: "/srv/trellis" })).toBe("offline");
+  });
+
+  it("leaves ordinary projects and unknown statuses alone", () => {
+    expect(trellisRemovalOf("/home/me/code", { available: true, root: "/srv/trellis" })).toBe(
+      "none",
+    );
+    expect(trellisRemovalOf(idea, null)).toBe("none");
+  });
+});
+
+describe("isTrellisIdeaPath", () => {
+  it("tells idea folders from workspace roots", () => {
+    expect(isTrellisIdeaPath("/srv/trellis/workspaces/w1/project/idea-1", "/srv/trellis/")).toBe(
+      true,
+    );
+    expect(isTrellisIdeaPath("/srv/trellis/workspaces/w1/project", "/srv/trellis")).toBe(false);
   });
 });
 

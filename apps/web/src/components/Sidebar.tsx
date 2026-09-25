@@ -121,11 +121,7 @@ import {
 } from "../threadSelectionStore";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
-import {
-  useTrellisCreate,
-  useTrellisEnvironment,
-  useTrellisIdeaPending,
-} from "../hooks/useTrellis";
+import { useTrellisCreate, useTrellisEnvironment } from "../hooks/useTrellis";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings } from "../hooks/useSettings";
@@ -2234,7 +2230,6 @@ export default function Sidebar() {
   const newThreadContext = useHandleNewThread();
   const trellis = useTrellisEnvironment();
   const { newIdea: newTrellisIdea } = useTrellisCreate();
-  const trellisIdeaPending = useTrellisIdeaPending(trellis?.environmentId ?? null);
   const openAddProjectCommandPalette = useCallback(
     () => openCommandPalette({ open: "add-project" }),
     [],
@@ -4569,7 +4564,7 @@ export default function Sidebar() {
                       void newTrellisIdea(trellis.environmentId);
                     }
               }
-              newIdeaPending={trellisIdeaPending}
+              newIdeaEnvironmentLabel={trellis?.label}
               newIdeaShortcutLabel={shortcutLabelForCommand(keybindings, "trellis.newIdea")}
               onNewThread={handleNewThreadClick}
               newThreadDisabled={projects.length === 0}

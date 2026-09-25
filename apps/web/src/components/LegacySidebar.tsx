@@ -112,6 +112,10 @@ import {
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { useShortcutModifierState } from "../shortcutModifierState";
 import { ensureLocalApi, readLocalApi } from "../localApi";
+import { useTrellisTrash } from "../hooks/useTrellis";
+import { isTrellisIdeaPath, trellisRemovalOf, trellisTrashConfirmation } from "../lib/trellis";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { readTrellisStatus } from "../state/trellis";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
@@ -1545,10 +1549,37 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [deleteProject, sidebarThreads],
   );
 
+  const trashTrellisProject = useTrellisTrash();
   const handleRemoveProject = useCallback(
     async (member: SidebarProjectGroupMember) => {
       const api = readLocalApi();
       if (!api) {
+        return;
+      }
+
+      // A Trellis-managed project goes to the Trellis trash; deleting only
+      // T3's entry would not last, since the catalog sync recreates it.
+      const trellisStatus = readTrellisStatus(appAtomRegistry, member.environmentId);
+      if (trellisRemovalOf(member.workspaceRoot, trellisStatus) === "trash") {
+        const confirmed = await api.dialogs.confirm(
+          trellisTrashConfirmation({
+            label: member.title,
+            kind:
+              trellisStatus?.root && isTrellisIdeaPath(member.workspaceRoot, trellisStatus.root)
+                ? "idea"
+                : "project",
+            count: 1,
+          }).join("\n"),
+          { variant: "destructive" },
+        );
+        if (!confirmed) return;
+        if (await trashTrellisProject(member.environmentId, member.id, member.title)) {
+          const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
+          const draftStore = useComposerDraftStore.getState();
+          const projectDraftThread = draftStore.getDraftThreadByProjectRef(memberProjectRef);
+          if (projectDraftThread) draftStore.clearDraftThread(projectDraftThread.draftId);
+          draftStore.clearProjectDraftThreadId(memberProjectRef);
+        }
         return;
       }
 
@@ -1673,7 +1704,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         );
       }
     },
-    [memberThreadCountByPhysicalKey, removeProject],
+    [memberThreadCountByPhysicalKey, removeProject, trashTrellisProject],
   );
 
   const handleProjectButtonContextMenu = useCallback(

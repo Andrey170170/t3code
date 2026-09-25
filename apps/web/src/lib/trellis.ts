@@ -15,6 +15,45 @@ export function isTrellisWorkspaceRoot(
 }
 
 /**
+ * What deleting a T3 project does to its Trellis item: `trash` moves it to
+ * the Trellis trash (the project is Trellis-managed and Trellis is ready),
+ * `offline` means it is Trellis-managed but Trellis cannot be reached, so
+ * only T3's entry could be removed, and `none` is an ordinary project.
+ */
+export function trellisRemovalOf(
+  workspaceRoot: string,
+  status: { readonly available: boolean; readonly root?: string | null | undefined } | null,
+): "trash" | "offline" | "none" {
+  if (!isTrellisWorkspaceRoot(workspaceRoot, status?.root)) return "none";
+  return status?.available === true ? "trash" : "offline";
+}
+
+/** Whether a Trellis project path is an idea folder in scratch rather than a workspace root. */
+export function isTrellisIdeaPath(workspaceRoot: string, trellisRoot: string): boolean {
+  const relative = workspaceRoot
+    .slice(trellisRoot.replace(/\/+$/, "").length)
+    .split("/")
+    .filter((segment) => segment.length > 0);
+  // workspaces/<ws>/project/<idea>
+  return relative.length > 3;
+}
+
+/** Confirmation lines for moving Trellis-managed projects to the trash. */
+export function trellisTrashConfirmation(input: {
+  readonly label: string;
+  readonly kind: "idea" | "project";
+  readonly count: number;
+}): ReadonlyArray<string> {
+  return [
+    input.count === 1
+      ? `Move ${input.kind} "${input.label}" to the Trellis trash?`
+      : `Move ${input.count} Trellis projects to the Trellis trash?`,
+    "Its files and history go to the trash; its conversations are archived, not deleted.",
+    "Restore it from Settings → Trellis. Ideas are removed for good after 30 days; projects stay until you empty the trash.",
+  ];
+}
+
+/**
  * The environment Trellis entry points target: the active thread's or
  * project's environment when it runs Trellis, otherwise the primary one when
  * it does. Null hides the entry points.
