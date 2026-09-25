@@ -44,7 +44,9 @@ import * as PullRequestService from "../../pullRequest/PullRequestService.ts";
 import * as Trellis from "../../trellis/Trellis.ts";
 import {
   BASELINE_TURN,
+  isTrellisCheckpointRef,
   pathsOverlap,
+  TRELLIS_CHECKPOINT_REF_PREFIX,
   selectRollbackSnapshot,
   trellisRestoreScope,
 } from "../../trellis/TrellisCheckpoints.ts";
@@ -71,9 +73,6 @@ function sameId(left: string | null | undefined, right: string | null | undefine
   }
   return left === right;
 }
-
-/** Checkpoint refs for turns captured only as Trellis snapshots (the cwd is not a git repo). */
-const TRELLIS_CHECKPOINT_REF_PREFIX = "trellis:";
 
 /** Runs `first`, then `second` whatever `first`'s outcome, then returns `first`'s result. */
 const thenAlways = <A, E, R, R2>(
@@ -284,11 +283,13 @@ const make = Effect.gen(function* () {
   // completed or aborted turn. They are taken after the git capture so they
   // include its checkpoint refs. Failures are logged and never fail a turn.
 
+  // Includes paths under the expected root while Trellis is down, so their
+  // files are never restored through git; Trellis operations then fail.
   const trellisCwdOf = (cwd: string | undefined) =>
     Option.isNone(trellis)
       ? Effect.succeed(undefined)
-      : Trellis.envForCwd(trellis.value, cwd).pipe(
-          Effect.map((env) => (env === null ? undefined : cwd)),
+      : Trellis.isTrellisPath(trellis.value, cwd).pipe(
+          Effect.map((managed) => (managed ? cwd : undefined)),
         );
 
   const ensureTrellisBaseline = Effect.fn("ensureTrellisBaseline")(function* (
@@ -982,6 +983,11 @@ const make = Effect.gen(function* () {
     const client = trellis.value;
     return yield* Effect.gen(function* () {
       const scope = trellisRestoreScope(yield* client.resolve(input.cwd));
+      if (scope === null) {
+        return yield* fail(
+          "This folder is in the shared Trellis scratch workspace but not inside an idea, so restoring it would roll back every idea. Rewind the conversation without restoring files instead.",
+        );
+      }
       const canonicalScope = yield* fileSystem
         .realPath(scope.path)
         .pipe(Effect.orElseSucceed(() => scope.path));
@@ -1018,7 +1024,16 @@ const make = Effect.gen(function* () {
           );
         }
       }
-      yield* client.rollback({ target: input.cwd, snapshot: selection.snapshotId });
+      const { undoSnapshot } = yield* client.rollback({
+        target: input.cwd,
+        snapshot: selection.snapshotId,
+      });
+      yield* Effect.logInfo("Trellis rollback restored files for a checkpoint revert", {
+        threadId: input.thread.id,
+        turnCount: input.turnCount,
+        snapshot: selection.snapshotId,
+        undoSnapshot,
+      });
       yield* refreshWorkspaceEntries(input.cwd);
       return true;
     }).pipe(
@@ -1058,7 +1073,10 @@ const make = Effect.gen(function* () {
       preferSessionRuntime: true,
     }).pipe(
       Effect.catch((error) =>
-        event.payload.restoreFiles === false ? Effect.succeed(undefined) : Effect.fail(error),
+        // Git state only matters for restoring files outside Trellis.
+        event.payload.restoreFiles === false || trellisCwd !== undefined
+          ? Effect.succeed(undefined)
+          : Effect.fail(error),
       ),
     );
 
@@ -1159,7 +1177,7 @@ const make = Effect.gen(function* () {
     for (const checkpoint of thread.checkpoints) {
       if (
         checkpoint.checkpointTurnCount > event.payload.turnCount &&
-        !checkpoint.checkpointRef.startsWith(TRELLIS_CHECKPOINT_REF_PREFIX)
+        !isTrellisCheckpointRef(checkpoint.checkpointRef)
       ) {
         staleCheckpointRefs.push(checkpoint.checkpointRef);
       }

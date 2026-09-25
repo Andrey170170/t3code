@@ -106,6 +106,38 @@ export function desiredProjects(
   return desired;
 }
 
+/** `<ws>` when `root` is exactly `<trellis root>/workspaces/<ws>/project`. */
+function workspaceIdOfRoot(trellisRoot: string, root: string): string | null {
+  const relative = NodePath.posix
+    .relative(NodePath.posix.join(trellisRoot, "workspaces"), root)
+    .split("/");
+  return relative.length === 2 && relative[1] === "project" && relative[0] ? relative[0] : null;
+}
+
+/**
+ * Workspaces that T3 projects point at but the live listing does not
+ * mention. Only these need a (costlier) workspace listing to learn whether
+ * they were deleted.
+ */
+export function unlistedWorkspaceIds(input: {
+  readonly root: string;
+  readonly items: ReadonlyArray<TrellisProjectView>;
+  readonly projects: ReadonlyArray<CatalogProject>;
+}): ReadonlyArray<string> {
+  const listed = new Set<string>();
+  for (const item of input.items) {
+    if (!isLive(item)) continue;
+    listed.add(item.workspace_id);
+    for (const workspace of item.workspaces) listed.add(workspace.id);
+  }
+  const unlisted = new Set<string>();
+  for (const project of input.projects) {
+    const id = workspaceIdOfRoot(input.root, normalizeRoot(project.workspaceRoot));
+    if (id !== null && !listed.has(id)) unlisted.add(id);
+  }
+  return [...unlisted];
+}
+
 /**
  * Commands that bring the T3 projects in line with the Trellis catalog.
  * `items` must include trashed and graduated items (`?all=true`). Projects
@@ -116,6 +148,8 @@ export function planCatalogSync(input: {
   readonly items: ReadonlyArray<TrellisProjectView>;
   readonly projects: ReadonlyArray<CatalogProject>;
   readonly threads: ReadonlyArray<CatalogThread>;
+  /** Workspaces Trellis reports as deleted; see `unlistedWorkspaceIds`. */
+  readonly deletedWorkspaceIds: ReadonlySet<string>;
 }): ReadonlyArray<CatalogSyncAction> {
   const actions: Array<CatalogSyncAction> = [];
   const projectsByRoot = new Map<string, CatalogProject>();
@@ -135,26 +169,18 @@ export function planCatalogSync(input: {
     }
   }
 
-  // Paths of trashed or graduated items, and workspace roots of workspaces
-  // that no longer exist (trashed forks disappear from the listing).
+  // Retire only on a positive signal: the path of a trashed or graduated
+  // item, or the root of a workspace Trellis reports as deleted (a trashed
+  // fork). Absence from the listing is never enough.
   const retiredRoots = new Set<string>();
-  const liveWorkspaceIds = new Set<string>();
   for (const item of input.items) {
-    if (isLive(item)) {
-      liveWorkspaceIds.add(item.workspace_id);
-      for (const workspace of item.workspaces) liveWorkspaceIds.add(workspace.id);
-    } else {
-      retiredRoots.add(normalizeRoot(item.path));
-      for (const workspace of item.workspaces) retiredRoots.add(normalizeRoot(workspace.path));
-    }
+    if (!isLive(item)) retiredRoots.add(normalizeRoot(item.path));
   }
-  const workspacesDir = NodePath.posix.join(input.root, "workspaces");
   for (const [root, project] of projectsByRoot) {
     if (desiredRoots.has(root) || !isTrellisManagedPath(input.root, root)) continue;
-    const relative = NodePath.posix.relative(workspacesDir, root).split("/");
-    const goneWorkspace =
-      relative.length === 2 && relative[1] === "project" && !liveWorkspaceIds.has(relative[0]!);
-    if (!retiredRoots.has(root) && !goneWorkspace) continue;
+    const workspaceId = workspaceIdOfRoot(input.root, root);
+    const deletedWorkspace = workspaceId !== null && input.deletedWorkspaceIds.has(workspaceId);
+    if (!retiredRoots.has(root) && !deletedWorkspace) continue;
     const threads = input.threads.filter((thread) => thread.projectId === project.id);
     const archiveThreadIds = threads
       .filter((thread) => !thread.archived)
@@ -281,15 +307,24 @@ const make = Effect.gen(function* () {
     if (previous?.fingerprint === fingerprint && !(yield* Ref.get(dirty))) {
       return previous.ids;
     }
-    yield* Ref.set(dirty, false);
     const t3 = yield* readT3;
+    yield* Ref.set(dirty, false);
     const ids = new Map<string, ProjectId>();
     for (const project of t3.projects) ids.set(normalizeRoot(project.workspaceRoot), project.id);
+    const unlisted = unlistedWorkspaceIds({ root: env.root, items, projects: t3.projects });
+    const deletedWorkspaceIds = new Set(
+      unlisted.length === 0
+        ? []
+        : (yield* trellis.listWorkspaces({ all: true }))
+            .filter((workspace) => workspace.deleted_at !== null && unlisted.includes(workspace.id))
+            .map((workspace) => workspace.id),
+    );
     const actions = planCatalogSync({
       root: env.root,
       items,
       projects: t3.projects,
       threads: t3.threads,
+      deletedWorkspaceIds,
     });
     let failed = false;
     for (const action of actions) {
@@ -363,11 +398,14 @@ const make = Effect.gen(function* () {
                       .withPermits(1)(pushRename(event.payload.projectId, title))
                       .pipe(
                         Effect.andThen(syncNow),
-                        Effect.catch((error) =>
-                          Effect.logWarning("failed to push project rename to Trellis", {
-                            projectId: event.payload.projectId,
-                            detail: error.message,
-                          }),
+                        Effect.catchCause((cause) =>
+                          // Keep the subscription alive whatever happens here.
+                          Cause.hasInterruptsOnly(cause)
+                            ? Effect.interrupt
+                            : Effect.logWarning("failed to push project rename to Trellis", {
+                                projectId: event.payload.projectId,
+                                cause: Cause.pretty(cause),
+                              }),
                         ),
                       ),
               ),

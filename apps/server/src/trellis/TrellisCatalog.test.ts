@@ -23,7 +23,9 @@ const workspace = (id: string, name = "main"): TrellisWorkspaceView => ({
   kind: id === "ws-scratch" ? "scratch" : "dedicated",
   name,
   path: `${ROOT}/workspaces/${id}/project`,
+  deleted_at: null,
 });
+const noDeletedWorkspaces: ReadonlySet<string> = new Set();
 
 const idea = (
   id: string,
@@ -76,6 +78,7 @@ describe("planCatalogSync", () => {
       ],
       projects: [],
       threads: [],
+      deletedWorkspaceIds: noDeletedWorkspaces,
     });
     expect(actions).toEqual([
       { type: "create", workspaceRoot: `${SCRATCH}/idea-a`, title: "Sketch" },
@@ -101,6 +104,7 @@ describe("planCatalogSync", () => {
         project("p-b2", `${ROOT}/workspaces/ws-b2/project`, "Engine · experiment"),
       ],
       threads: [],
+      deletedWorkspaceIds: noDeletedWorkspaces,
     });
     expect(actions).toEqual([
       { type: "rename", projectId: ProjectId.make("p-b"), title: "Engine" },
@@ -124,6 +128,7 @@ describe("planCatalogSync", () => {
         { id: ThreadId.make("t-1"), projectId: ProjectId.make("p-trashed"), archived: false },
         { id: ThreadId.make("t-2"), projectId: ProjectId.make("p-trashed"), archived: true },
       ],
+      deletedWorkspaceIds: noDeletedWorkspaces,
     });
     expect(actions).toEqual([
       {
@@ -149,6 +154,7 @@ describe("planCatalogSync", () => {
         project("p-b", `${ROOT}/workspaces/ws-b/project`, "Engine"),
         project("p-fork", `${ROOT}/workspaces/ws-fork/project`, "Engine · fork"),
       ],
+      deletedWorkspaceIds: new Set(["ws-fork"]),
     };
     expect(
       TrellisCatalog.planCatalogSync({
@@ -176,6 +182,34 @@ describe("planCatalogSync", () => {
     ).toEqual([]);
   });
 
+  it("does not retire a workspace root only because the listing omits it", () => {
+    const input = {
+      root: ROOT,
+      items: [],
+      projects: [project("p-b", `${ROOT}/workspaces/ws-b/project`, "Engine")],
+    };
+    expect(TrellisCatalog.unlistedWorkspaceIds(input)).toEqual(["ws-b"]);
+    expect(
+      TrellisCatalog.planCatalogSync({
+        ...input,
+        threads: [],
+        deletedWorkspaceIds: noDeletedWorkspaces,
+      }),
+    ).toEqual([]);
+  });
+
+  it("never retires the shared scratch root when an idea is trashed", () => {
+    expect(
+      TrellisCatalog.planCatalogSync({
+        root: ROOT,
+        items: [idea("idea-trashed", "Trashed", { deleted_at: 100 })],
+        projects: [project("p-scratch", SCRATCH)],
+        threads: [],
+        deletedWorkspaceIds: noDeletedWorkspaces,
+      }),
+    ).toEqual([]);
+  });
+
   it("never touches projects outside Trellis project paths or unknown idea folders", () => {
     const actions = TrellisCatalog.planCatalogSync({
       root: ROOT,
@@ -186,6 +220,7 @@ describe("planCatalogSync", () => {
         project("p-rootfs", `${ROOT}/workspaces/ws-x/rootfs`),
       ],
       threads: [],
+      deletedWorkspaceIds: noDeletedWorkspaces,
     });
     expect(actions).toEqual([]);
   });
@@ -209,6 +244,9 @@ describe("TrellisCatalog service", () => {
         Layer.succeed(Trellis, {
           current: Effect.succeed(env),
           refresh: Effect.succeed(env),
+          expectedRoot: Effect.succeed(ROOT),
+          bin: "trellis",
+          listWorkspaces: unused,
           listProjects: () => Effect.sync(() => [...items]),
           createIdea: ({ name }) =>
             Effect.sync(() => {

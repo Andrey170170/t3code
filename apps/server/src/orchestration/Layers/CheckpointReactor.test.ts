@@ -175,6 +175,9 @@ function createTrellisHarness(input: {
   const service: Trellis.Trellis["Service"] = {
     current: Effect.succeed(env),
     refresh: Effect.succeed(env),
+    expectedRoot: Effect.succeed(input.root),
+    bin: "trellis",
+    listWorkspaces: unused,
     listProjects: unused,
     createIdea: unused,
     createProject: unused,
@@ -183,7 +186,13 @@ function createTrellisHarness(input: {
     primer: unused,
     resolve: () =>
       Effect.succeed({
-        workspace: { id: "ws-1", kind: input.workspaceKind, name: "main", path: workspacePath },
+        workspace: {
+          id: "ws-1",
+          kind: input.workspaceKind,
+          name: "main",
+          path: workspacePath,
+          deleted_at: null,
+        },
         project: {
           id: "prj-1",
           kind: input.workspaceKind === "scratch" ? "idea" : "project",
@@ -211,7 +220,11 @@ function createTrellisHarness(input: {
         snapshots.push(snapshot);
         return snapshot;
       }),
-    rollback: (entry) => Effect.sync(() => void rollbacks.push(entry)),
+    rollback: (entry) =>
+      Effect.sync(() => {
+        rollbacks.push(entry);
+        return { undoSnapshot: "snap-undo" };
+      }),
   };
   return { service, snapshots, rollbacks };
 }

@@ -10,17 +10,21 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as PtyAdapter from "../terminal/PtyAdapter.ts";
-import { isTrellisManagedPath, Trellis, type TrellisEnv } from "./Trellis.ts";
+import { isTrellisManagedPath, Trellis } from "./Trellis.ts";
 
-/** The spawn input for a terminal in `input.cwd`: a login bash inside the workspace. */
+/**
+ * The spawn input for a terminal in `input.cwd`: a login bash inside the
+ * workspace for a Trellis project path (`root` is the current or expected
+ * Trellis root). If Trellis is down, `trellis exec` reports it in the terminal.
+ */
 export function trellisTerminalSpawnInput(
-  env: TrellisEnv | null,
+  trellis: { readonly root: string | null; readonly bin: string },
   input: PtyAdapter.PtySpawnInput,
 ): PtyAdapter.PtySpawnInput {
-  if (env === null || !isTrellisManagedPath(env.root, input.cwd)) return input;
+  if (trellis.root === null || !isTrellisManagedPath(trellis.root, input.cwd)) return input;
   return {
     ...input,
-    shell: env.bin,
+    shell: trellis.bin,
     args: ["exec", "--tty", "--cwd", input.cwd, "--", "bash", "-l"],
   };
 }
@@ -32,8 +36,10 @@ export const layer = Layer.effect(
     const trellis = yield* Trellis;
     return PtyAdapter.PtyAdapter.of({
       spawn: (input) =>
-        trellis.current.pipe(
-          Effect.flatMap((env) => host.spawn(trellisTerminalSpawnInput(env, input))),
+        trellis.expectedRoot.pipe(
+          Effect.flatMap((root) =>
+            host.spawn(trellisTerminalSpawnInput({ root, bin: trellis.bin }, input)),
+          ),
         ),
     });
   }),

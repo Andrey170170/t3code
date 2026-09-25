@@ -32,15 +32,27 @@ export type TrellisLaunchDecision =
 // Driver kinds that have a Trellis shim.
 const SUPPORTED_DRIVERS: ReadonlySet<string> = new Set(["codex", "claudeAgent"]);
 
-/** Where a provider session for `cwd` must run. */
+/**
+ * Where a provider session for `cwd` must run. `expectedRoot` keeps Trellis
+ * project paths off the host while Trellis is unreachable (`env` null).
+ */
 export function decideTrellisLaunch(input: {
   readonly env: TrellisEnv | null;
+  readonly expectedRoot: string | null;
   readonly driverKind: string;
   readonly cwd: string | undefined;
 }): TrellisLaunchDecision {
   const { env, cwd } = input;
-  if (env === null || cwd === undefined || !isTrellisManagedPath(env.root, cwd)) {
+  const root = env?.root ?? input.expectedRoot;
+  if (root === null || cwd === undefined || !isTrellisManagedPath(root, cwd)) {
     return { kind: "host" };
+  }
+  if (env === null) {
+    return {
+      kind: "unsupported",
+      message:
+        "Trellis is not running, so this project's workspace is unavailable. Start Trellis and try again.",
+    };
   }
   if (!SUPPORTED_DRIVERS.has(input.driverKind)) {
     return {

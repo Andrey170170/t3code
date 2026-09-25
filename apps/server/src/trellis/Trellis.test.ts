@@ -21,21 +21,42 @@ describe("isTrellisManagedPath", () => {
 
 describe("decideTrellisLaunch", () => {
   it("keeps sessions on the host when Trellis is disabled or the cwd is elsewhere", () => {
-    expect(decideTrellisLaunch({ env: null, driverKind: "cursor", cwd: idea })).toEqual({
+    expect(
+      decideTrellisLaunch({ env: null, expectedRoot: null, driverKind: "cursor", cwd: idea }),
+    ).toEqual({
       kind: "host",
     });
-    expect(decideTrellisLaunch({ env, driverKind: "cursor", cwd: "/home/me/code" })).toEqual({
+    expect(
+      decideTrellisLaunch({
+        env,
+        expectedRoot: env.root,
+        driverKind: "cursor",
+        cwd: "/home/me/code",
+      }),
+    ).toEqual({
       kind: "host",
     });
     // Probes run without a project cwd.
-    expect(decideTrellisLaunch({ env, driverKind: "codex", cwd: undefined })).toEqual({
+    expect(
+      decideTrellisLaunch({ env, expectedRoot: env.root, driverKind: "codex", cwd: undefined }),
+    ).toEqual({
       kind: "host",
     });
   });
 
+  it("refuses a Trellis project path while Trellis is unreachable", () => {
+    const decision = decideTrellisLaunch({
+      env: null,
+      expectedRoot: "/trellis",
+      driverKind: "codex",
+      cwd: idea,
+    });
+    expect(decision.kind === "unsupported" && decision.message).toContain("Trellis is not running");
+  });
+
   it("runs Codex and Claude through the shims inside a Trellis project path", () => {
     for (const driverKind of ["codex", "claudeAgent"]) {
-      expect(decideTrellisLaunch({ env, driverKind, cwd: idea })).toEqual({
+      expect(decideTrellisLaunch({ env, expectedRoot: env.root, driverKind, cwd: idea })).toEqual({
         kind: "workspace",
         shimDir: env.shimDir,
       });
@@ -44,14 +65,19 @@ describe("decideTrellisLaunch", () => {
 
   it("refuses other providers and missing shims inside a Trellis project path", () => {
     for (const driverKind of ["cursor", "grok", "opencode", "antigravity"]) {
-      const decision = decideTrellisLaunch({ env, driverKind, cwd: idea });
+      const decision = decideTrellisLaunch({ env, expectedRoot: env.root, driverKind, cwd: idea });
       expect(decision.kind).toBe("unsupported");
       expect(decision.kind === "unsupported" && decision.message).toContain(
         "not supported inside Trellis workspaces yet",
       );
     }
     expect(
-      decideTrellisLaunch({ env: { ...env, shimDir: null }, driverKind: "codex", cwd: idea }).kind,
+      decideTrellisLaunch({
+        env: { ...env, shimDir: null },
+        expectedRoot: env.root,
+        driverKind: "codex",
+        cwd: idea,
+      }).kind,
     ).toBe("unsupported");
   });
 });
@@ -90,7 +116,7 @@ describe("trellisTerminalSpawnInput", () => {
   it("spawns other terminals unchanged", () => {
     const host = { ...input, cwd: "/home/me/code" };
     expect(trellisTerminalSpawnInput(env, host)).toBe(host);
-    expect(trellisTerminalSpawnInput(null, input)).toBe(input);
+    expect(trellisTerminalSpawnInput({ root: null, bin: env.bin }, input)).toBe(input);
   });
 });
 
@@ -150,6 +176,7 @@ describe("trellisRestoreScope", () => {
     kind,
     name: "main",
     path: "/trellis/workspaces/ws-1/project",
+    deleted_at: null,
   });
   const project = (kind: string) => ({
     id: "p",
@@ -170,9 +197,7 @@ describe("trellisRestoreScope", () => {
     expect(
       trellisRestoreScope({ workspace: workspace("dedicated"), project: project("project") }),
     ).toEqual({ path: "/trellis/workspaces/ws-1/project", restartsWorkspace: true });
-    expect(trellisRestoreScope({ workspace: workspace("scratch"), project: null })).toEqual({
-      path: "/trellis/workspaces/ws-1/project",
-      restartsWorkspace: true,
-    });
+    // A scratch path outside any idea would roll back every idea.
+    expect(trellisRestoreScope({ workspace: workspace("scratch"), project: null })).toBeNull();
   });
 });

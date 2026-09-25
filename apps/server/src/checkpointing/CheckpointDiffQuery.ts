@@ -32,6 +32,7 @@ import {
 import type { CheckpointServiceError } from "./Errors.ts";
 import { checkpointRefForThreadTurn } from "./Utils.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
+import { isTrellisCheckpointRef } from "../trellis/TrellisCheckpoints.ts";
 
 /** Service tag for checkpoint diff queries. */
 export class CheckpointDiffQuery extends Context.Service<
@@ -165,15 +166,19 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      const diff = yield* checkpointStore
-        .diffCheckpoints({
-          cwd: workspaceCwd,
-          fromCheckpointRef,
-          toCheckpointRef,
-          fallbackFromToHead: false,
-          ignoreWhitespace,
-        })
-        .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"));
+      // Turns recorded only as Trellis snapshots have no git diff.
+      const diff =
+        isTrellisCheckpointRef(fromCheckpointRef) || isTrellisCheckpointRef(toCheckpointRef)
+          ? ""
+          : yield* checkpointStore
+              .diffCheckpoints({
+                cwd: workspaceCwd,
+                fromCheckpointRef,
+                toCheckpointRef,
+                fallbackFromToHead: false,
+                ignoreWhitespace,
+              })
+              .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"));
 
       const turnDiff = buildTurnDiffResult(input, diff);
       if (!isTurnDiffResult(turnDiff)) {
@@ -255,15 +260,17 @@ export const make = Effect.gen(function* () {
       });
     }
 
-    const diff = yield* checkpointStore
-      .diffCheckpoints({
-        cwd: workspaceCwd,
-        fromCheckpointRef: checkpointRefForThreadTurn(input.threadId, 0),
-        toCheckpointRef: threadContext.value.toCheckpointRef as CheckpointRef,
-        fallbackFromToHead: false,
-        ignoreWhitespace,
-      })
-      .pipe(Effect.withSpan("checkpoint.fullThread.diffCheckpoints"));
+    const diff = isTrellisCheckpointRef(threadContext.value.toCheckpointRef)
+      ? ""
+      : yield* checkpointStore
+          .diffCheckpoints({
+            cwd: workspaceCwd,
+            fromCheckpointRef: checkpointRefForThreadTurn(input.threadId, 0),
+            toCheckpointRef: threadContext.value.toCheckpointRef as CheckpointRef,
+            fallbackFromToHead: false,
+            ignoreWhitespace,
+          })
+          .pipe(Effect.withSpan("checkpoint.fullThread.diffCheckpoints"));
 
     const turnDiff = buildTurnDiffResult(
       {

@@ -17,11 +17,13 @@ import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 
 import { TrellisError } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
@@ -35,6 +37,7 @@ export const TrellisWorkspaceView = Schema.Struct({
   kind: Schema.String,
   name: Schema.String,
   path: Schema.String,
+  deleted_at: Schema.NullOr(Schema.Finite),
 });
 export type TrellisWorkspaceView = typeof TrellisWorkspaceView.Type;
 
@@ -75,6 +78,7 @@ export const TrellisResolved = Schema.Struct({
 export type TrellisResolved = typeof TrellisResolved.Type;
 
 const TrellisStatusView = Schema.Struct({ root: Schema.String });
+const TrellisRollbackView = Schema.Struct({ undo_snapshot: Schema.optional(Schema.Unknown) });
 const TrellisPrimerView = Schema.Struct({ primer: Schema.String });
 const TrellisErrorBody = Schema.Struct({ error: Schema.String });
 
@@ -98,15 +102,13 @@ export function isTrellisManagedPath(root: string, cwd: string): boolean {
   return workspace !== undefined && workspace !== "" && project === "project";
 }
 
-/** The Trellis project directory containing `cwd`, i.e. `<root>/workspaces/<ws>/project`. */
-export function trellisWorkspaceProjectDir(root: string, cwd: string): string | null {
-  if (!isTrellisManagedPath(root, cwd)) return null;
-  const relative = NodePath.posix.relative(
-    NodePath.posix.join(root, "workspaces"),
-    NodePath.posix.normalize(cwd),
-  );
-  const [workspace] = relative.split("/");
-  return NodePath.posix.join(root, "workspaces", workspace ?? "", "project");
+/** `<root>` for a socket at the conventional `<root>/state/api.sock`, else null. */
+export function rootFromSocketPath(socketPath: string): string | null {
+  const stateDir = NodePath.posix.dirname(socketPath);
+  return NodePath.posix.basename(socketPath) === "api.sock" &&
+    NodePath.posix.basename(stateDir) === "state"
+    ? NodePath.posix.dirname(stateDir)
+    : null;
 }
 
 export class Trellis extends Context.Service<
@@ -116,6 +118,18 @@ export class Trellis extends Context.Service<
     readonly current: Effect.Effect<TrellisEnv | null>;
     /** Re-reads `/v1/status` (and creates provider shims on first success). */
     readonly refresh: Effect.Effect<TrellisEnv | null>;
+    /**
+     * Where Trellis project paths live even while Trellis is unreachable: the
+     * last reported root, else the root implied by the socket path. Work in
+     * those paths must fail rather than silently run on the host.
+     */
+    readonly expectedRoot: Effect.Effect<string | null>;
+    /** The `trellis` binary, for `trellis exec`. */
+    readonly bin: string;
+    /** `all` includes trashed workspaces; this listing queries container state. */
+    readonly listWorkspaces: (options: {
+      readonly all: boolean;
+    }) => Effect.Effect<ReadonlyArray<TrellisWorkspaceView>, TrellisError>;
     /** `all` includes trashed and graduated items; the list never includes container state. */
     readonly listProjects: (options: {
       readonly all: boolean;
@@ -145,11 +159,14 @@ export class Trellis extends Context.Service<
       readonly thread: string;
       readonly turn: string;
     }) => Effect.Effect<TrellisSnapshot, TrellisError>;
-    /** Idea targets restore only the folder; workspace targets restart the container. */
+    /**
+     * Idea targets restore only the folder; workspace targets restart the
+     * container. Returns the snapshot holding the state from just before.
+     */
     readonly rollback: (input: {
       readonly target: string;
       readonly snapshot: string;
-    }) => Effect.Effect<void, TrellisError>;
+    }) => Effect.Effect<{ readonly undoSnapshot: string | null }, TrellisError>;
     /** Short agent orientation for sessions started in `target`. */
     readonly primer: (target: string) => Effect.Effect<string, TrellisError>;
   }
@@ -226,6 +243,8 @@ export const make = Effect.gen(function* () {
   const bin = yield* Config.String("TRELLIS_BIN").pipe(Config.withDefault("trellis"));
   const shimDir = NodePath.join(serverConfig.stateDir, "trellis-shims");
   const state = yield* Ref.make<TrellisEnv | null>(null);
+  const lastRoot = yield* Ref.make<string | null>(rootFromSocketPath(socketPath));
+  let lastShimAttemptMs = 0;
 
   const call = <S extends Schema.Top>(
     schema: S,
@@ -295,9 +314,17 @@ export const make = Effect.gen(function* () {
       yield* Ref.set(state, null);
       return null;
     }
-    if (previous !== null && previous.root === status.value.root) {
+    // A failed shim setup is retried at most once a minute.
+    const now = yield* Clock.currentTimeMillis;
+    if (
+      previous !== null &&
+      previous.root === status.value.root &&
+      (previous.shimDir !== null || now - lastShimAttemptMs < 60_000)
+    ) {
       return previous;
     }
+    lastShimAttemptMs = now;
+    yield* Ref.set(lastRoot, status.value.root);
     const next: TrellisEnv = {
       root: status.value.root,
       bin,
@@ -313,6 +340,10 @@ export const make = Effect.gen(function* () {
   return Trellis.of({
     current: Ref.get(state),
     refresh,
+    expectedRoot: Ref.get(lastRoot),
+    bin,
+    listWorkspaces: ({ all }) =>
+      call(Schema.Array(TrellisWorkspaceView), "GET", `/v1/workspaces${all ? "?all=true" : ""}`),
     listProjects: ({ all }) =>
       call(
         Schema.Array(TrellisProjectView),
@@ -345,10 +376,21 @@ export const make = Effect.gen(function* () {
         timeoutMs: 120_000,
       }),
     rollback: ({ target, snapshot }) =>
-      call(Schema.Unknown, "POST", "/v1/rollback", {
+      call(TrellisRollbackView, "POST", "/v1/rollback", {
         body: { target, snapshot },
         timeoutMs: 10 * 60_000,
-      }).pipe(Effect.asVoid),
+      }).pipe(
+        Effect.map((view) => {
+          const undo = view.undo_snapshot;
+          const id =
+            typeof undo === "string"
+              ? undo
+              : Predicate.hasProperty(undo, "id") && typeof undo.id === "string"
+                ? undo.id
+                : null;
+          return { undoSnapshot: id };
+        }),
+      ),
     primer: (target) =>
       call(TrellisPrimerView, "GET", `/v1/primer?${query({ target })}`, { timeoutMs: 5_000 }).pipe(
         Effect.map((view) => view.primer),
@@ -358,12 +400,15 @@ export const make = Effect.gen(function* () {
 
 export const layer = Layer.effect(Trellis, make).pipe(Layer.provide(ProcessRunner.layer));
 
-/** The Trellis state if `cwd` is a Trellis project path, else null. */
-export const envForCwd = Effect.fn("Trellis.envForCwd")(function* (
+/**
+ * True when `cwd` is a Trellis project path, including while Trellis is
+ * unreachable, so callers never treat such a path as an ordinary host folder.
+ */
+export const isTrellisPath = Effect.fn("Trellis.isTrellisPath")(function* (
   trellis: Trellis["Service"],
   cwd: string | undefined,
 ) {
-  if (cwd === undefined) return null;
-  const env = yield* trellis.current;
-  return env !== null && isTrellisManagedPath(env.root, cwd) ? env : null;
+  if (cwd === undefined) return false;
+  const root = yield* trellis.expectedRoot;
+  return root !== null && isTrellisManagedPath(root, cwd);
 });

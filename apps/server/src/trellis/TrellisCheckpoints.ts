@@ -16,6 +16,15 @@ import type { TrellisResolved, TrellisSnapshot } from "./Trellis.ts";
 /** The `turn` tag of the snapshot taken before a thread's first turn. */
 export const BASELINE_TURN = "baseline";
 
+/**
+ * Checkpoint refs of turns recorded only as Trellis snapshots (the cwd is not
+ * a git repository). They have no git diff.
+ */
+export const TRELLIS_CHECKPOINT_REF_PREFIX = "trellis:";
+
+export const isTrellisCheckpointRef = (ref: string) =>
+  ref.startsWith(TRELLIS_CHECKPOINT_REF_PREFIX);
+
 export type RollbackSnapshotSelection =
   | { readonly _tag: "Found"; readonly snapshotId: string }
   | { readonly _tag: "Missing"; readonly detail: string };
@@ -61,14 +70,18 @@ export function selectRollbackSnapshot(input: {
 
 /**
  * What a rollback of a path restores: the idea folder for an idea in scratch,
- * otherwise the whole workspace (which also restarts its container).
+ * or the whole dedicated workspace (which also restarts its container). Null
+ * for a scratch path outside any live idea, where a rollback would reach
+ * every idea.
  */
 export function trellisRestoreScope(resolved: TrellisResolved): {
   readonly path: string;
   readonly restartsWorkspace: boolean;
-} {
-  if (resolved.workspace.kind === "scratch" && resolved.project?.kind === "idea") {
-    return { path: resolved.project.path, restartsWorkspace: false };
+} | null {
+  if (resolved.workspace.kind === "scratch") {
+    return resolved.project?.kind === "idea"
+      ? { path: resolved.project.path, restartsWorkspace: false }
+      : null;
   }
   return { path: resolved.workspace.path, restartsWorkspace: true };
 }

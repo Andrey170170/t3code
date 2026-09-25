@@ -5257,6 +5257,9 @@ describe("Trellis project paths", () => {
   const trellisLayer = Layer.succeed(Trellis.Trellis, {
     current: Effect.succeed(env),
     refresh: Effect.succeed(env),
+    expectedRoot: Effect.succeed(trellisRoot),
+    bin: "trellis",
+    listWorkspaces: unused,
     listProjects: unused,
     createIdea: unused,
     createProject: unused,

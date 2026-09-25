@@ -986,8 +986,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly cwd: string | undefined;
   }) {
     if (Option.isNone(trellis)) return { kind: "host" } as const;
+    const client = trellis.value;
+    // Trellis may have come up since the last poll.
+    const env =
+      (yield* client.current) ??
+      ((yield* Trellis.isTrellisPath(client, input.cwd)) ? yield* client.refresh : null);
     const decision = TrellisProviderSession.decideTrellisLaunch({
-      env: yield* trellis.value.current,
+      env,
+      expectedRoot: yield* client.expectedRoot,
       driverKind: input.driverKind,
       cwd: input.cwd,
     });
