@@ -483,6 +483,8 @@ import {
 } from "./ChatView.logic";
 import type { ThreadSyncPhase } from "../threadSync";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
+import { useTrellisEnvironment } from "~/hooks/useTrellis";
+import { isTrellisWorkspaceRoot } from "~/lib/trellis";
 import { useComposerHandleContext } from "../composerHandleContext";
 import {
   awaitAttachmentUploads,
@@ -5943,6 +5945,14 @@ export default function ChatView(props: ChatViewProps) {
   }, []);
 
   const activeWorktreePath = activeThread?.worktreePath ?? null;
+  const trellisEnvironment = useTrellisEnvironment();
+  // Trellis restores files from its own snapshots; the server refuses when
+  // another thread shares the idea folder or workspace.
+  const activeIsTrellisProject =
+    activeProject !== null &&
+    trellisEnvironment?.environmentId === environmentId &&
+    isTrellisWorkspaceRoot(activeProject.workspaceRoot, trellisEnvironment.root);
+  const canRevertFiles = activeWorktreePath !== null || activeIsTrellisProject;
   const derivedEnvMode: DraftThreadEnvMode = resolveEffectiveEnvMode({
     activeWorktreePath,
     hasServerThread: isServerThread,
@@ -10629,14 +10639,16 @@ export default function ChatView(props: ChatViewProps) {
             <AlertDialogDescription>
               Rewind chat to before this message. Your prompt and attachments return to the
               composer.
-              {activeWorktreePath === null
-                ? " Files stay as they are because this thread shares the project directory."
-                : null}
+              {activeIsTrellisProject
+                ? " Trellis can restore the files from its snapshot of that turn; restoring a dedicated workspace restarts it."
+                : activeWorktreePath === null
+                  ? " Files stay as they are because this thread shares the project directory."
+                  : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
-            {activeWorktreePath !== null ? (
+            {canRevertFiles ? (
               <Button
                 variant="destructive"
                 onClick={() => {
