@@ -194,6 +194,8 @@ export interface CodexSessionRuntimeOptions {
   readonly appServerArgs?: ReadonlyArray<string>;
   /** Capabilities the session's `t3-code` MCP credential grants; drives the prompt blocks. */
   readonly mcpCapabilities?: ReadonlySet<string>;
+  /** Thread-level developer instructions, e.g. the Trellis workspace primer. */
+  readonly developerInstructions?: string;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -596,6 +598,7 @@ function buildThreadStartParams(input: {
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
+  readonly developerInstructions?: string | undefined;
 }): EffectCodexSchema.V2ThreadStartParams {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   return {
@@ -605,6 +608,7 @@ function buildThreadStartParams(input: {
     approvalsReviewer: config.approvalsReviewer,
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+    ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {}),
   };
 }
 
@@ -794,6 +798,7 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
+  readonly developerInstructions?: string | undefined;
 }): Effect.Effect<typeof CodexThreadResumeMetadata.Type, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -801,6 +806,7 @@ export const openCodexThread = (input: {
     runtimeMode: input.runtimeMode,
     model: input.requestedModel,
     serviceTier: input.serviceTier,
+    developerInstructions: input.developerInstructions,
   });
 
   if (resumeThreadId === undefined) {
@@ -1352,6 +1358,16 @@ export const rollbackCodexThread = Effect.fn("rollbackCodexThread")(function* (
   }
   return { threadId, turns: snapshot.turns.slice(0, retainedCount) };
 });
+
+/** Developer instructions of a side-chat fork: configured, session, then side-chat rules. */
+export function sideChatDeveloperInstructions(
+  configured: string | undefined,
+  session: string | undefined,
+): string {
+  return [configured, session?.trim(), SIDE_DEVELOPER_INSTRUCTIONS]
+    .filter((part): part is string => part !== undefined && part.length > 0)
+    .join("\n\n");
+}
 
 export const makeCodexSessionRuntime = (
   options: CodexSessionRuntimeOptions,
@@ -2583,6 +2599,17 @@ export const makeCodexSessionRuntime = (
       yield* client.notify("initialized", undefined);
 
       const requestedModel = normalizeCodexModelSlug(options.model);
+      // Thread-level instructions replace the configured ones, so keep those first.
+      const extraInstructions = options.developerInstructions;
+      const developerInstructions = extraInstructions
+        ? yield* client.request("config/read", { cwd: options.cwd, includeLayers: false }).pipe(
+            Effect.map((config) => {
+              const existing = config.config.developer_instructions?.trim();
+              return existing ? `${existing}\n\n${extraInstructions}` : extraInstructions;
+            }),
+            Effect.orElseSucceed(() => extraInstructions),
+          )
+        : undefined;
 
       const opened = yield* openCodexThread({
         client,
@@ -2592,6 +2619,7 @@ export const makeCodexSessionRuntime = (
         requestedModel,
         serviceTier: options.serviceTier,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        developerInstructions,
       });
 
       const providerThreadId = opened.thread.id;
@@ -2694,9 +2722,12 @@ export const makeCodexSessionRuntime = (
           // Paginated ephemeral forks inherit context without returning turn history.
           excludeTurns: true,
           ...(parentSession.model ? { model: parentSession.model } : {}),
-          developerInstructions: existingInstructions
-            ? `${existingInstructions}\n\n${SIDE_DEVELOPER_INSTRUCTIONS}`
-            : SIDE_DEVELOPER_INSTRUCTIONS,
+          // Fork instructions replace the thread's, so carry the session's
+          // own (e.g. the Trellis workspace primer) as well.
+          developerInstructions: sideChatDeveloperInstructions(
+            existingInstructions,
+            options.developerInstructions,
+          ),
           ...(parentTurnSettings.effort
             ? { config: { model_reasoning_effort: parentTurnSettings.effort } }
             : {}),

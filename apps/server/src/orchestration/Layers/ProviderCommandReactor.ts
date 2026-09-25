@@ -35,6 +35,7 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import * as TrellisBaseline from "../../trellis/TrellisBaseline.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import {
   ProviderAdapterProcessError,
@@ -216,6 +217,7 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerAuthService = yield* ProviderAuthService;
   const providerService = yield* ProviderService;
+  const trellisBaseline = yield* Effect.serviceOption(TrellisBaseline.TrellisBaseline);
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -1507,6 +1509,39 @@ const make = Effect.gen(function* () {
 
     if (Option.isNone(sendTurnRequest)) {
       return;
+    }
+
+    // A Trellis thread's baseline must exist before the agent can write, so
+    // "revert to the start" restores the real starting state. Without it the
+    // turn is not started.
+    if (Option.isSome(trellisBaseline)) {
+      const project = yield* resolveProject(thread.projectId);
+      const baseline = yield* trellisBaseline.value
+        .ensure(
+          thread.id,
+          resolveThreadWorkspaceCwd({ thread, projects: project ? [project] : [] }),
+        )
+        .pipe(Effect.result);
+      if (baseline._tag === "Failure") {
+        const detail = `Trellis could not snapshot the workspace before this turn; the turn was not started. ${baseline.failure.message}`;
+        yield* setThreadSessionErrorOnTurnStartFailure({
+          threadId: event.payload.threadId,
+          detail,
+          createdAt: event.payload.createdAt,
+        }).pipe(
+          Effect.andThen(appendTurnStartFailure("Trellis snapshot failed", detail)),
+          Effect.catchCause((cause) =>
+            Effect.logWarning(
+              "provider command reactor failed to report a Trellis snapshot failure",
+              {
+                threadId: event.payload.threadId,
+                cause: Cause.pretty(cause),
+              },
+            ),
+          ),
+        );
+        return;
+      }
     }
 
     const send = providerService

@@ -41,6 +41,15 @@ describe("RPC authorization scopes", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.cloudInstallRelayClient)).toBe(AuthRelayWriteScope);
   });
 
+  it("requires operate access to publish a Trellis workspace port for a preview", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.trellisResolvePreviewUrl)).toBe(
+      requiredScopeForRpcMethod(WS_METHODS.previewOpen),
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.trellisResolvePreviewUrl)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+
   it("requires permission to operate on a thread before uploading feedback", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.providerUploadFeedback)).toBe(
       AuthOrchestrationOperateScope,

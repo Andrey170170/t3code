@@ -16,6 +16,8 @@ import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
 import { StorageCleanup } from "../../storageCleanup.ts";
+import { TrellisCatalog } from "../../trellis/TrellisCatalog.ts";
+import { TrellisNaming } from "../../trellis/TrellisNaming.ts";
 
 describe("OrchestrationReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<OrchestrationReactor, never> | null = null;
@@ -106,6 +108,29 @@ describe("OrchestrationReactor", () => {
           }),
         ),
         Layer.provideMerge(
+          Layer.succeed(TrellisNaming, {
+            start: () => {
+              started.push("trellis-naming");
+              return Effect.void;
+            },
+            handleEvent: () => Effect.void,
+            drain: Effect.void,
+          }),
+        ),
+        Layer.provideMerge(
+          Layer.succeed(TrellisCatalog, {
+            start: () => {
+              started.push("trellis-catalog");
+              return Effect.void;
+            },
+            syncNow: Effect.succeed(new Map()),
+            status: Effect.succeed({ available: false }),
+            newIdea: () => Effect.die("unused"),
+            newProject: () => Effect.die("unused"),
+            find: () => Effect.die("unused"),
+          }),
+        ),
+        Layer.provideMerge(
           Layer.succeed(AgentAwarenessRelay.AgentAwarenessRelay, {
             publishThread: () => Effect.void,
             start: () => {
@@ -131,6 +156,8 @@ describe("OrchestrationReactor", () => {
       "pull-request-sync-reactor",
       "agent-awareness-relay",
       "storage-cleanup",
+      "trellis-catalog",
+      "trellis-naming",
     ]);
 
     await Effect.runPromise(Scope.close(scope, Exit.void));

@@ -327,3 +327,34 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
 
   return { prompt, outputSchema };
 }
+
+export interface ProjectNamePromptInput {
+  /** The first user message, or the thread contents for a refinement. */
+  message: string;
+  /** Present when refining a name generated earlier. */
+  previousName?: string | undefined;
+}
+
+const PROJECT_NAME_PROMPT = `Name a new project so the user can find it again weeks later in a list of projects.
+Return JSON with keys name and description.
+
+Rules for name:
+- 2-4 words naming the subject, like a folder or notebook title.
+- No quotes, emoji, dates, version numbers, or trailing punctuation.
+- Do not describe the process (research, plan, fix, help) unless it is the subject.
+
+Rules for description:
+- One plain sentence, under 120 characters, saying what the project is about.`;
+
+/** Name and one-line description for a Trellis project, from its first thread. */
+export function buildProjectNamePrompt(input: ProjectNamePromptInput) {
+  const prompt =
+    input.previousName === undefined
+      ? `${PROJECT_NAME_PROMPT}\n\nFirst user message:\n${limitTitleMessage(input.message, 8_000)}`
+      : `${PROJECT_NAME_PROMPT}\nThe project is currently named ${JSON.stringify(input.previousName)}. Keep that name if it is still accurate.\n\nThread contents so far:\n${limitTitleMessage(input.message, 8_000)}`;
+  const outputSchema = Schema.Struct({
+    name: Schema.String,
+    description: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  });
+  return { prompt, outputSchema };
+}

@@ -86,6 +86,8 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as Trellis from "../../trellis/Trellis.ts";
+import * as TrellisProviderSession from "../../trellis/TrellisProviderSession.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -484,6 +486,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
   const issueMcpCredential =
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
+  const trellis = yield* Effect.serviceOption(Trellis.Trellis);
   const fileSystem = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -967,8 +970,84 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
   const clearMcpSession = (threadId: ThreadId) =>
     McpSessionRegistry.revokeActiveMcpThread(threadId).pipe(
-      Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+      Effect.tap(() =>
+        Effect.sync(() => {
+          McpProviderSession.clearMcpProviderSession(threadId);
+          TrellisProviderSession.clearTrellisProviderSession(threadId);
+        }),
+      ),
     );
+
+  // A session whose cwd is a Trellis project path runs inside the workspace.
+  // Fails before any credential is issued when the provider cannot run there.
+  // The thread's project folder, when the read model is available.
+  const projectRootOf = (threadId: ThreadId) =>
+    Option.isNone(projectionQuery)
+      ? Effect.succeed(undefined)
+      : Effect.gen(function* () {
+          const thread = yield* projectionQuery.value.getThreadShellById(threadId);
+          if (Option.isNone(thread)) return undefined;
+          const project = yield* projectionQuery.value.getProjectShellById(thread.value.projectId);
+          return Option.isSome(project) ? project.value.workspaceRoot : undefined;
+        }).pipe(Effect.orElseSucceed(() => undefined));
+
+  const decideTrellisLaunch = Effect.fn("ProviderService.decideTrellisLaunch")(function* (input: {
+    readonly operation: string;
+    readonly threadId: ThreadId;
+    readonly driverKind: string;
+    readonly cwd: string | undefined;
+  }) {
+    if (Option.isNone(trellis)) return { kind: "host" } as const;
+    const client = trellis.value;
+    // Trellis may have come up since the last poll.
+    const env =
+      (yield* client.current) ??
+      ((yield* Trellis.isTrellisPath(client, input.cwd)) ? yield* client.refresh : null);
+    const expectedRoot = yield* client.expectedRoot;
+    const decision = TrellisProviderSession.decideTrellisLaunch({
+      env,
+      expectedRoot,
+      driverKind: input.driverKind,
+      cwd: input.cwd,
+      projectRoot: expectedRoot === null ? undefined : yield* projectRootOf(input.threadId),
+    });
+    if (decision.kind === "unsupported") {
+      return yield* toValidationError(input.operation, decision.message);
+    }
+    return decision;
+  });
+
+  // Records the launch for the adapter, after `prepareMcpSession`: the MCP
+  // endpoint must point at the host from inside the workspace network.
+  const prepareTrellisSession = Effect.fn("ProviderService.prepareTrellisSession")(function* (
+    threadId: ThreadId,
+    cwd: string | undefined,
+    decision: TrellisProviderSession.TrellisLaunchDecision,
+  ) {
+    if (decision.kind !== "workspace" || Option.isNone(trellis) || cwd === undefined) {
+      TrellisProviderSession.clearTrellisProviderSession(threadId);
+      return;
+    }
+    const primer = yield* trellis.value.primer(cwd).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("Trellis primer unavailable; starting without it", {
+          threadId,
+          detail: error.message,
+        }).pipe(Effect.as(null)),
+      ),
+    );
+    TrellisProviderSession.setTrellisProviderSession(threadId, {
+      shimDir: decision.shimDir,
+      primer: primer?.trim() ? primer : null,
+    });
+    const mcp = McpProviderSession.readMcpProviderSession(threadId);
+    if (mcp) {
+      McpProviderSession.setMcpProviderSession({
+        ...mcp,
+        endpoint: TrellisProviderSession.rewriteLoopbackUrl(mcp.endpoint),
+      });
+    }
+  });
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
@@ -1277,7 +1356,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
+      const trellisLaunch = yield* decideTrellisLaunch({
+        operation: input.operation,
+        threadId: input.binding.threadId,
+        driverKind: adapter.provider,
+        cwd: persistedCwd,
+      });
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
+      yield* prepareTrellisSession(input.binding.threadId, persistedCwd, trellisLaunch);
       const resumed = yield* adapter
         .startSession({
           threadId: input.binding.threadId,
@@ -1508,7 +1594,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
         yield* clearTurnAnalyticsSession(resolvedInstanceId, threadId);
+        const trellisLaunch = yield* decideTrellisLaunch({
+          operation: "ProviderService.startSession",
+          threadId,
+          driverKind: resolvedProvider,
+          cwd: effectiveCwd,
+        });
         yield* prepareMcpSession(threadId, resolvedInstanceId);
+        yield* prepareTrellisSession(threadId, effectiveCwd, trellisLaunch);
         const session = yield* adapter
           .startSession({
             ...input,

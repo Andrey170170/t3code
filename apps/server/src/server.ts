@@ -35,6 +35,12 @@ import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
+import * as Trellis from "./trellis/Trellis.ts";
+import * as TrellisCatalog from "./trellis/TrellisCatalog.ts";
+import * as TrellisNaming from "./trellis/TrellisNaming.ts";
+import * as TrellisPreview from "./trellis/TrellisPreview.ts";
+import * as TrellisBaseline from "./trellis/TrellisBaseline.ts";
+import * as TrellisPtyAdapter from "./trellis/TrellisPtyAdapter.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -177,7 +183,8 @@ const ApplicationObservabilityLive = ObservabilityLive.pipe(
   Layer.provideMerge(ResourceAttributionLayerLive),
 );
 
-const PtyAdapterLive = NodePtyAdapter.layer;
+// Terminals in Trellis project paths run inside the workspace container.
+const PtyAdapterLive = TrellisPtyAdapter.layer.pipe(Layer.provide(NodePtyAdapter.layer));
 
 const ServerSettingsLayerLive = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
@@ -256,6 +263,10 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(ThreadSettlementReactor.layer),
   Layer.provideMerge(PullRequestSyncReactor.layer),
+  Layer.provideMerge(TrellisNaming.layer),
+  Layer.provideMerge(TrellisPreview.layer),
+  Layer.provideMerge(TrellisBaseline.layer),
+  Layer.provideMerge(TrellisCatalog.layer),
   Layer.provideMerge(ThreadPullRequestReactor.layer),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
   Layer.provideMerge(RuntimeReceiptBusLive),
@@ -504,6 +515,8 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
+  // Optional local workspace service; disabled when its socket is absent.
+  Layer.provideMerge(Trellis.layer),
   // Both read a user-owned file out of the state directory and stream changes
   // to clients; neither depends on the other.
   Layer.provideMerge(

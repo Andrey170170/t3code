@@ -78,6 +78,9 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as Trellis from "../../trellis/Trellis.ts";
+import * as TrellisProviderSession from "../../trellis/TrellisProviderSession.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
@@ -5243,5 +5246,129 @@ sideRoutingFixture.layer("ProviderService native side chat routing", (it) => {
         assert.equal(sideRoutingAdapter.startSession.mock.calls.length, started + 1);
         assert.equal(sideRoutingAdapter.sendTurn.mock.calls.length, 0);
       }),
+  );
+});
+
+describe("Trellis project paths", () => {
+  const trellisRoot = fixtureCwd("trellis");
+  const ideaCwd = fixtureCwd("trellis/workspaces/ws-1/project/idea-1");
+  const env = { root: trellisRoot, bin: "trellis", shimDir: "/trellis-shims" };
+  const unused = () => Effect.die(new Error("unused"));
+  const trellisLayer = Layer.succeed(Trellis.Trellis, {
+    current: Effect.succeed(env),
+    refresh: Effect.succeed(env),
+    expectedRoot: Effect.succeed(trellisRoot),
+    bin: "trellis",
+    listWorkspaces: unused,
+    listProjects: unused,
+    createIdea: unused,
+    createProject: unused,
+    describe: unused,
+    find: unused,
+    resolve: unused,
+    listSnapshots: unused,
+    createSnapshot: unused,
+    rollback: unused,
+    preview: unused,
+    primer: () => Effect.succeed("You are inside Trellis idea idea-1."),
+  });
+
+  const startIn = (driver: ProviderDriverKind, threadId: ThreadId, cwd: string) =>
+    Effect.gen(function* () {
+      const adapter = makeFakeCodexAdapter(driver);
+      const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+        Layer.provide(SqlitePersistenceMemory),
+      );
+      const providerLayer = makeProviderServiceLive({
+        issueMcpCredential: (request) =>
+          Effect.succeed({
+            config: {
+              environmentId: "env-1" as never,
+              threadId: request.threadId,
+              providerSessionId: "session-1",
+              providerInstanceId: request.providerInstanceId,
+              endpoint: "http://127.0.0.1:3773/mcp",
+              authorizationHeader: "Bearer token",
+              capabilities: request.capabilities,
+            },
+          }),
+      }).pipe(
+        Layer.provide(
+          Layer.succeed(
+            ProviderAdapterRegistry.ProviderAdapterRegistry,
+            makeAdapterRegistryMock({ [driver]: adapter.adapter }),
+          ),
+        ),
+        Layer.provide(ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer))),
+        Layer.provide(trellisLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+        Layer.provide(NodeServices.layer),
+      );
+      // Read the per-thread launch state before the layer's shutdown clears it.
+      return yield* Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const exit = yield* provider
+          .startSession(threadId, {
+            provider: driver,
+            providerInstanceId: ProviderInstanceId.make(driver),
+            threadId,
+            cwd,
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.exit);
+        return {
+          exit,
+          adapter,
+          trellisSession: TrellisProviderSession.readTrellisProviderSession(threadId),
+          mcpEndpoint: McpProviderSession.readMcpProviderSession(threadId)?.endpoint,
+        };
+      }).pipe(Effect.provide(providerLayer));
+    });
+
+  it.effect("runs Codex through the shim with the primer and a host-reachable MCP URL", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-trellis-codex");
+      const result = yield* startIn(CODEX_DRIVER, threadId, ideaCwd);
+
+      assert.equal(Exit.isSuccess(result.exit), true);
+      assert.deepEqual(result.trellisSession, {
+        shimDir: "/trellis-shims",
+        primer: "You are inside Trellis idea idea-1.",
+      });
+      assert.equal(result.mcpEndpoint, "http://host.containers.internal:3773/mcp");
+    }),
+  );
+
+  it.effect("refuses providers without a Trellis shim instead of running them on the host", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-trellis-cursor");
+      const { exit, adapter } = yield* startIn(CURSOR_DRIVER, threadId, ideaCwd);
+
+      assert.equal(Exit.isFailure(exit), true);
+      assert.include(
+        Cause.pretty(Exit.isFailure(exit) ? exit.cause : Cause.empty),
+        "not supported inside Trellis workspaces yet",
+      );
+      assert.equal(adapter.startSession.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("leaves sessions outside Trellis project paths on the host", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-host-cursor");
+      const result = yield* startIn(CURSOR_DRIVER, threadId, fixtureCwd("host-project"));
+
+      assert.equal(Exit.isSuccess(result.exit), true);
+      assert.equal(result.trellisSession, undefined);
+      assert.equal(result.mcpEndpoint, "http://127.0.0.1:3773/mcp");
+    }),
   );
 });

@@ -24,12 +24,14 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildProjectNamePrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   normalizeCliError,
   sanitizeCommitSubject,
   sanitizePrTitle,
+  sanitizeOneLine,
   sanitizeThreadTitle,
   toJsonSchemaObject,
 } from "./TextGenerationUtils.ts";
@@ -102,7 +104,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle",
+      | "generateThreadTitle"
+      | "generateProjectName",
     value: unknown,
     detail: string,
   ): Effect.Effect<string, TextGenerationError> =>
@@ -132,7 +135,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateProjectName";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -187,7 +191,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     const runClaudeCommand = Effect.fn("runClaudeJson.runClaudeCommand")(function* () {
       // Titles need only the supplied prompt, not configuration from the checkout.
       const workingDirectory =
-        operation === "generateThreadTitle"
+        operation === "generateThreadTitle" || operation === "generateProjectName"
           ? yield* fileSystem
               .makeTempDirectoryScoped({ prefix: "t3code-claude-title-" })
               .pipe(
@@ -410,10 +414,30 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       };
     });
 
+  const generateProjectName: TextGeneration.TextGeneration["Service"]["generateProjectName"] =
+    Effect.fn("ClaudeTextGeneration.generateProjectName")(function* (input) {
+      const { prompt, outputSchema } = buildProjectNamePrompt({
+        message: input.message,
+        previousName: input.previousName,
+      });
+      const generated = yield* runClaudeJson({
+        operation: "generateProjectName",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+      return {
+        name: sanitizeOneLine(generated.name, 40),
+        description: sanitizeOneLine(generated.description, 160),
+      };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateProjectName,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

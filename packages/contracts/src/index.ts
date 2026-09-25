@@ -45,6 +45,7 @@ export * from "./usage.ts";
 export * from "./rpc.ts";
 
 export * from "./codexThreads.ts";
+export * from "./trellis.ts";
 
 export * from "./sideChat.ts";
 export * from "./worktreeSetup.ts";

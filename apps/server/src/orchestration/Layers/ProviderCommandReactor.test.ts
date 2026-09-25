@@ -74,6 +74,8 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { ServerActivation } from "../../serverActivation.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import { TrellisBaseline } from "../../trellis/TrellisBaseline.ts";
+import { TrellisError } from "@t3tools/contracts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -187,6 +189,7 @@ describe("ProviderCommandReactor", () => {
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
     readonly tryHandlePromptCommandEffect?: ProviderAuthService["Service"]["tryHandlePromptCommand"];
+    readonly trellisBaseline?: TrellisBaseline["Service"];
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -490,6 +493,11 @@ describe("ProviderCommandReactor", () => {
           generateThreadTitle,
         }),
       ),
+      Layer.provideMerge(
+        input?.trellisBaseline === undefined
+          ? Layer.empty
+          : Layer.succeed(TrellisBaseline, input.trellisBaseline),
+      ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
@@ -634,6 +642,82 @@ describe("ProviderCommandReactor", () => {
       },
     };
   }
+
+  effectIt.effect("does not start the turn when the Trellis baseline cannot be taken", () =>
+    Effect.gen(function* () {
+      const attempted = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          trellisBaseline: {
+            ensure: () =>
+              Deferred.succeed(attempted, undefined).pipe(
+                Effect.andThen(Effect.fail(new TrellisError({ message: "Trellis is restarting" }))),
+              ),
+          },
+        }),
+      );
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-trellis-baseline-failed"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: MessageId.make("message-trellis-baseline-failed"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* Deferred.await(attempted);
+      yield* Effect.promise(() => harness.drain());
+
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(thread?.activities).toContainEqual(
+        expect.objectContaining({
+          kind: "provider.turn.start.failed",
+          summary: "Trellis snapshot failed",
+          payload: expect.objectContaining({
+            detail: expect.stringContaining("the turn was not started"),
+          }),
+        }),
+      );
+      expect(thread?.session?.status).not.toBe("running");
+    }),
+  );
+
+  effectIt.effect("takes the Trellis baseline before the provider can start the turn", () =>
+    Effect.gen(function* () {
+      const ensure = vi.fn<TrellisBaseline["Service"]["ensure"]>(() => Effect.void);
+      const harness = yield* Effect.promise(() => createHarness({ trellisBaseline: { ensure } }));
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-trellis-baseline-order"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: MessageId.make("message-trellis-baseline-order"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+
+      expect(ensure).toHaveBeenCalledWith(ThreadId.make("thread-1"), "/tmp/provider-project");
+      expect(ensure.mock.invocationCallOrder[0]).toBeLessThan(
+        harness.sendTurn.mock.invocationCallOrder[0]!,
+      );
+    }),
+  );
 
   effectIt.effect.each(["new", "ready", "stopped"] as const)(
     "handles sign-out for a %s thread before worktree repair, text helpers, or startup",

@@ -57,6 +57,7 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as TrellisProviderSession from "../../trellis/TrellisProviderSession.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -2570,11 +2571,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        // In a Trellis project path the shim runs codex inside the workspace.
+        const trellisSession = TrellisProviderSession.readTrellisProviderSession(input.threadId);
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
-          binaryPath: codexConfig.binaryPath,
+          binaryPath: trellisSession
+            ? TrellisProviderSession.trellisShimPath(trellisSession, "codex")
+            : codexConfig.binaryPath,
+          ...(trellisSession?.primer ? { developerInstructions: trellisSession.primer } : {}),
           launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
           ...(options?.environment ? { environment: options.environment } : {}),
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),

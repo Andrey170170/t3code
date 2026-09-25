@@ -1,6 +1,6 @@
 import {
   CommandId,
-  type CheckpointRef,
+  CheckpointRef,
   EventId,
   MessageId,
   type ProjectId,
@@ -14,6 +14,7 @@ import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -40,6 +41,15 @@ import type { OrchestrationDispatchError } from "../Errors.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 import * as PullRequestService from "../../pullRequest/PullRequestService.ts";
+import * as Trellis from "../../trellis/Trellis.ts";
+import * as TrellisBaseline from "../../trellis/TrellisBaseline.ts";
+import {
+  isTrellisCheckpointRef,
+  TRELLIS_CHECKPOINT_REF_PREFIX,
+  selectRollbackSnapshot,
+  sessionsInScope,
+  trellisRestoreScope,
+} from "../../trellis/TrellisCheckpoints.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -63,6 +73,18 @@ function sameId(left: string | null | undefined, right: string | null | undefine
   }
   return left === right;
 }
+
+/** Runs `first`, then `second` whatever `first`'s outcome, then returns `first`'s result. */
+const thenAlways = <A, E, R, R2>(
+  first: Effect.Effect<A, E, R>,
+  second: Effect.Effect<void, never, R2>,
+) =>
+  Effect.exit(first).pipe(
+    Effect.tap(() => second),
+    Effect.flatMap((exit) =>
+      Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause),
+    ),
+  );
 
 function checkpointStatusFromRuntime(status: string | undefined): "ready" | "missing" | "error" {
   switch (status) {
@@ -93,6 +115,8 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const pullRequests = yield* PullRequestService.PullRequestService;
+  const trellis = yield* Effect.serviceOption(Trellis.Trellis);
+  const trellisBaseline = yield* Effect.serviceOption(TrellisBaseline.TrellisBaseline);
   const queuedEntryRefreshes = new Set<string>();
   const entryRefreshWorker = yield* makeDrainableWorker((cwd: string) =>
     Effect.sync(() => queuedEntryRefreshes.delete(cwd)).pipe(
@@ -203,16 +227,14 @@ const make = Effect.gen(function* () {
     return project ? [project] : [];
   });
 
-  // Resolves the workspace CWD for checkpoint operations, preferring the
-  // active provider session CWD and falling back to the thread/project config.
-  // Returns undefined when no CWD can be determined or the workspace is not
-  // a git repository.
-  const resolveCheckpointCwd = Effect.fn("resolveCheckpointCwd")(function* (input: {
+  // Resolves the workspace CWD, preferring the active provider session CWD
+  // and falling back to the thread/project config.
+  const resolveWorkspaceCwd = Effect.fn("resolveWorkspaceCwd")(function* (input: {
     readonly threadId: ThreadId;
     readonly thread: { readonly projectId: ProjectId; readonly worktreePath: string | null };
     readonly projects: ReadonlyArray<{ readonly id: ProjectId; readonly workspaceRoot: string }>;
     readonly preferSessionRuntime: boolean;
-  }): Effect.fn.Return<string | undefined, CheckpointStoreError> {
+  }): Effect.fn.Return<string | undefined> {
     const fromSession = yield* resolveSessionRuntimeForThread(input.threadId);
     const fromThread = resolveThreadWorkspaceCwd({
       thread: input.thread,
@@ -229,7 +251,23 @@ const make = Effect.gen(function* () {
           onNone: () => undefined,
           onSome: (runtime) => runtime.cwd,
         }));
+    return cwd;
+  });
 
+  // The workspace CWD for git checkpoint operations; undefined when no CWD can
+  // be determined or the workspace is not a git repository.
+  const resolveCheckpointCwd = Effect.fn("resolveCheckpointCwd")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly thread: { readonly projectId: ProjectId; readonly worktreePath: string | null };
+    readonly projects: ReadonlyArray<{ readonly id: ProjectId; readonly workspaceRoot: string }>;
+    readonly preferSessionRuntime: boolean;
+  }): Effect.fn.Return<string | undefined, CheckpointStoreError> {
+    return yield* gitCheckpointCwd(yield* resolveWorkspaceCwd(input));
+  });
+
+  const gitCheckpointCwd = Effect.fn("gitCheckpointCwd")(function* (
+    cwd: string | undefined,
+  ): Effect.fn.Return<string | undefined, CheckpointStoreError> {
     if (!cwd) {
       return undefined;
     }
@@ -237,6 +275,114 @@ const make = Effect.gen(function* () {
       return undefined;
     }
     return cwd;
+  });
+
+  // ---- Trellis snapshots
+  //
+  // A cwd inside a Trellis project path also gets whole-workspace snapshots:
+  // one tagged as the thread's baseline before its first turn, and one per
+  // completed or aborted turn. They are taken after the git capture so they
+  // include its checkpoint refs. Failures are logged and never fail a turn.
+
+  // Includes paths under the expected root while Trellis is down, so their
+  // files are never restored through git; Trellis operations then fail.
+  const trellisCwdOf = (cwd: string | undefined) =>
+    Option.isNone(trellis)
+      ? Effect.succeed(undefined)
+      : Trellis.isTrellisPath(trellis.value, cwd).pipe(
+          Effect.map((managed) => (managed ? cwd : undefined)),
+        );
+
+  // Shared with the provider command reactor, which takes the baseline
+  // before it sends a turn and does not start the turn without it; here a
+  // failure is only logged.
+  const ensureTrellisBaseline = (threadId: ThreadId, cwd: string) =>
+    Option.isNone(trellisBaseline)
+      ? Effect.void
+      : trellisBaseline.value.ensure(threadId, cwd).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Trellis baseline snapshot failed", {
+              threadId,
+              cwd,
+              detail: error.message,
+            }),
+          ),
+        );
+
+  const snapshotTrellisTurn = Effect.fn("snapshotTrellisTurn")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly cwd: string;
+  }) {
+    if (Option.isNone(trellis)) return undefined;
+    return yield* trellis.value
+      .createSnapshot({ target: input.cwd, thread: input.threadId, turn: input.turnId })
+      .pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("Trellis turn snapshot failed", {
+            threadId: input.threadId,
+            turnId: input.turnId,
+            cwd: input.cwd,
+            detail: error.message,
+          }).pipe(Effect.as(undefined)),
+        ),
+      );
+  });
+
+  // Records a checkpoint for a turn captured only by a Trellis snapshot, so
+  // the turn can be reverted. It has no file summary.
+  const dispatchTrellisCheckpoint = Effect.fn("dispatchTrellisCheckpoint")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly thread: {
+      readonly messages: ReadonlyArray<{
+        readonly id: MessageId;
+        readonly role: string;
+        readonly turnId: TurnId | null;
+      }>;
+    };
+    readonly snapshotId: string;
+    readonly turnCount: number;
+    readonly status: "ready" | "missing" | "error";
+    readonly assistantMessageId: MessageId | undefined;
+    readonly createdAt: string;
+  }) {
+    const checkpointRef = CheckpointRef.make(`${TRELLIS_CHECKPOINT_REF_PREFIX}${input.snapshotId}`);
+    const assistantMessageId =
+      input.assistantMessageId ??
+      input.thread.messages
+        .toReversed()
+        .find((entry) => entry.role === "assistant" && entry.turnId === input.turnId)?.id ??
+      MessageId.make(`assistant:${input.turnId}`);
+    yield* orchestrationEngine.dispatch({
+      type: "thread.turn.diff.complete",
+      commandId: yield* serverCommandId("trellis-turn-checkpoint"),
+      threadId: input.threadId,
+      turnId: input.turnId,
+      completedAt: input.createdAt,
+      checkpointRef,
+      status: input.status,
+      files: [],
+      assistantMessageId,
+      checkpointTurnCount: input.turnCount,
+      createdAt: input.createdAt,
+    });
+    yield* receiptBus.publish({
+      type: "checkpoint.diff.finalized",
+      threadId: input.threadId,
+      turnId: input.turnId,
+      checkpointTurnCount: input.turnCount,
+      checkpointRef,
+      status: input.status,
+      createdAt: input.createdAt,
+    });
+    yield* receiptBus.publish({
+      type: "turn.processing.quiesced",
+      threadId: input.threadId,
+      turnId: input.turnId,
+      checkpointTurnCount: input.turnCount,
+      createdAt: input.createdAt,
+    });
   });
 
   // Capture the completed turn's files, then publish its summary and receipts.
@@ -419,13 +565,15 @@ const make = Effect.gen(function* () {
       }
 
       const projects = yield* resolveThreadProjects(thread.projectId);
-      const checkpointCwd = yield* resolveCheckpointCwd({
+      const workspaceCwd = yield* resolveWorkspaceCwd({
         threadId: thread.id,
         thread,
         projects,
         preferSessionRuntime: true,
       });
-      if (!checkpointCwd) {
+      const trellisCwd = yield* trellisCwdOf(workspaceCwd);
+      const checkpointCwd = yield* gitCheckpointCwd(workspaceCwd);
+      if (!checkpointCwd && !trellisCwd) {
         return;
       }
 
@@ -442,19 +590,56 @@ const make = Effect.gen(function* () {
         ? existingPlaceholder.checkpointTurnCount
         : currentTurnCount + 1;
 
-      yield* captureAndDispatchCheckpoint({
-        threadId: thread.id,
-        turnId,
-        thread,
-        cwd: checkpointCwd,
-        turnCount: nextTurnCount,
-        status:
-          event.type === "turn.aborted"
-            ? "ready"
-            : checkpointStatusFromRuntime(event.payload.state),
-        assistantMessageId: existingPlaceholder?.assistantMessageId ?? undefined,
-        createdAt: event.createdAt,
-      });
+      const status =
+        event.type === "turn.aborted" ? "ready" : checkpointStatusFromRuntime(event.payload.state);
+      const assistantMessageId = existingPlaceholder?.assistantMessageId ?? undefined;
+
+      const captureTrellis = trellisCwd
+        ? Effect.gen(function* () {
+            const snapshot = yield* snapshotTrellisTurn({
+              threadId: thread.id,
+              turnId,
+              cwd: trellisCwd,
+            });
+            if (checkpointCwd || snapshot === undefined) return;
+            yield* dispatchTrellisCheckpoint({
+              threadId: thread.id,
+              turnId,
+              thread,
+              snapshotId: snapshot.id,
+              turnCount: nextTurnCount,
+              status,
+              assistantMessageId,
+              createdAt: event.createdAt,
+            });
+          }).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("failed to record Trellis turn checkpoint", {
+                threadId: thread.id,
+                turnId,
+                detail: error.message,
+              }),
+            ),
+          )
+        : Effect.void;
+
+      if (!checkpointCwd) {
+        yield* captureTrellis;
+        return;
+      }
+      yield* thenAlways(
+        captureAndDispatchCheckpoint({
+          threadId: thread.id,
+          turnId,
+          thread,
+          cwd: checkpointCwd,
+          turnCount: nextTurnCount,
+          status,
+          assistantMessageId,
+          createdAt: event.createdAt,
+        }),
+        captureTrellis,
+      );
     },
   );
 
@@ -470,21 +655,42 @@ const make = Effect.gen(function* () {
         return;
       }
 
-      const projects = yield* resolveThreadProjects(thread.projectId);
-      const checkpointCwd = yield* resolveCheckpointCwd({
-        threadId: thread.id,
-        thread,
-        projects,
-        preferSessionRuntime: false,
-      });
+      yield* ensurePreTurnBaselines({ thread, createdAt: event.createdAt });
+    },
+  );
+
+  // Captures the git baseline ref for the next turn and, for a Trellis
+  // project path, the thread's baseline snapshot before its first turn.
+  const ensurePreTurnBaselines = Effect.fn("ensurePreTurnBaselines")(function* (input: {
+    readonly thread: {
+      readonly id: ThreadId;
+      readonly projectId: ProjectId;
+      readonly worktreePath: string | null;
+      readonly checkpoints: ReadonlyArray<{ readonly checkpointTurnCount: number }>;
+    };
+    readonly createdAt: string;
+  }) {
+    const { thread } = input;
+    const projects = yield* resolveThreadProjects(thread.projectId);
+    const workspaceCwd = yield* resolveWorkspaceCwd({
+      threadId: thread.id,
+      thread,
+      projects,
+      preferSessionRuntime: false,
+    });
+    const currentTurnCount = thread.checkpoints.reduce(
+      (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
+      0,
+    );
+    const trellisCwd = yield* trellisCwdOf(workspaceCwd);
+    // Fast (a Btrfs snapshot), so it goes before the git capture.
+    if (trellisCwd !== undefined) yield* ensureTrellisBaseline(thread.id, trellisCwd);
+
+    const captureGitBaseline = Effect.gen(function* () {
+      const checkpointCwd = yield* gitCheckpointCwd(workspaceCwd);
       if (!checkpointCwd) {
         return;
       }
-
-      const currentTurnCount = thread.checkpoints.reduce(
-        (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
-        0,
-      );
       const baselineCheckpointRef = checkpointRefForThreadTurn(thread.id, currentTurnCount);
       const baselineExists = yield* checkpointStore.hasCheckpointRef({
         cwd: checkpointCwd,
@@ -503,10 +709,11 @@ const make = Effect.gen(function* () {
         threadId: thread.id,
         checkpointTurnCount: currentTurnCount,
         checkpointRef: baselineCheckpointRef,
-        createdAt: event.createdAt,
+        createdAt: input.createdAt,
       });
-    },
-  );
+    });
+    yield* captureGitBaseline;
+  });
 
   const refreshLocalGitStatusFromTurnCompletion = Effect.fn(
     "refreshLocalGitStatusFromTurnCompletion",
@@ -676,47 +883,12 @@ const make = Effect.gen(function* () {
       }
     }
 
-    const threadId = event.payload.threadId;
-    const thread = yield* resolveThreadDetail(threadId);
+    const thread = yield* resolveThreadDetail(event.payload.threadId);
     if (!thread) {
       return;
     }
 
-    const projects = yield* resolveThreadProjects(thread.projectId);
-    const checkpointCwd = yield* resolveCheckpointCwd({
-      threadId,
-      thread,
-      projects,
-      preferSessionRuntime: false,
-    });
-    if (!checkpointCwd) {
-      return;
-    }
-
-    const currentTurnCount = thread.checkpoints.reduce(
-      (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
-      0,
-    );
-    const baselineCheckpointRef = checkpointRefForThreadTurn(threadId, currentTurnCount);
-    const baselineExists = yield* checkpointStore.hasCheckpointRef({
-      cwd: checkpointCwd,
-      checkpointRef: baselineCheckpointRef,
-    });
-    if (baselineExists) {
-      return;
-    }
-
-    yield* checkpointStore.captureCheckpoint({
-      cwd: checkpointCwd,
-      checkpointRef: baselineCheckpointRef,
-    });
-    yield* receiptBus.publish({
-      type: "checkpoint.baseline.captured",
-      threadId,
-      checkpointTurnCount: currentTurnCount,
-      checkpointRef: baselineCheckpointRef,
-      createdAt: event.occurredAt,
-    });
+    yield* ensurePreTurnBaselines({ thread, createdAt: event.occurredAt });
   });
 
   // Checkpoints contain the whole checkout, so restoring a shared cwd can erase a sibling's work.
@@ -727,23 +899,28 @@ const make = Effect.gen(function* () {
     if (thread.worktreePath === null) return false;
     const canonicalCwd = yield* fileSystem.realPath(cwd);
     if ((yield* fileSystem.realPath(thread.worktreePath)) !== canonicalCwd) return false;
+    return yield* isScopeUnshared(thread.id, canonicalCwd);
+  });
+
+  // True when no other thread (active or archived) or open provider session
+  // works inside, or above, the canonical `scope` path.
+  const isScopeUnshared = Effect.fn("isScopeUnshared")(function* (
+    threadId: ThreadId,
+    scope: string,
+  ) {
     const active = yield* projectionSnapshotQuery.getShellSnapshot();
     const archived = yield* projectionSnapshotQuery.getArchivedShellSnapshot();
     const projects = [...active.projects, ...archived.projects];
     const paths = new Set<string>();
     for (const other of [...active.threads, ...archived.threads]) {
-      if (other.id === thread.id) continue;
+      if (other.id === threadId) continue;
       const candidate =
         other.worktreePath ??
         projects.find((project) => project.id === other.projectId)?.workspaceRoot;
       if (candidate !== undefined) paths.add(candidate);
     }
     for (const session of yield* providerService.listSessions()) {
-      if (
-        session.threadId !== thread.id &&
-        session.status !== "closed" &&
-        session.cwd !== undefined
-      )
+      if (session.threadId !== threadId && session.status !== "closed" && session.cwd !== undefined)
         paths.add(session.cwd);
     }
     for (const candidate of paths) {
@@ -763,9 +940,98 @@ const make = Effect.gen(function* () {
         );
       };
       // Parent and nested owners can both have files inside the restore target.
-      if (isWithin(canonicalCwd, otherCwd) || isWithin(otherCwd, canonicalCwd)) return false;
+      if (isWithin(scope, otherCwd) || isWithin(otherCwd, scope)) return false;
     }
     return true;
+  });
+
+  // Rolls a Trellis project path back to the snapshot for checkpoint
+  // `turnCount`. An idea restores only its folder; a dedicated workspace
+  // restarts its container, so provider sessions inside it are stopped first
+  // and resume on the next turn. Returns null after recording a failure.
+  const restoreTrellisSnapshot = Effect.fn("restoreTrellisSnapshot")(function* (input: {
+    readonly thread: {
+      readonly id: ThreadId;
+      readonly checkpoints: ReadonlyArray<{
+        readonly checkpointTurnCount: number;
+        readonly turnId: TurnId;
+      }>;
+    };
+    readonly turnCount: number;
+    readonly cwd: string;
+    readonly createdAt: string;
+  }) {
+    const fail = (detail: string) =>
+      appendRevertFailureActivity({
+        threadId: input.thread.id,
+        turnCount: input.turnCount,
+        detail,
+        createdAt: input.createdAt,
+      }).pipe(
+        Effect.catch(() => Effect.void),
+        Effect.as(null),
+      );
+    if (Option.isNone(trellis)) return yield* fail("Trellis is unavailable.");
+    const client = trellis.value;
+    return yield* Effect.gen(function* () {
+      const scope = trellisRestoreScope(yield* client.resolve(input.cwd));
+      if (scope === null) {
+        return yield* fail(
+          "This folder is in the shared Trellis scratch workspace but not inside an idea, so restoring it would roll back every idea. Rewind the conversation without restoring files instead.",
+        );
+      }
+      const canonicalScope = yield* fileSystem
+        .realPath(scope.path)
+        .pipe(Effect.orElseSucceed(() => scope.path));
+      if (!(yield* isScopeUnshared(input.thread.id, canonicalScope))) {
+        return yield* fail(
+          scope.restartsWorkspace
+            ? "Restoring files rolls back the whole Trellis workspace, and another thread uses it. Rewind the conversation without restoring files instead."
+            : "Another thread uses this Trellis idea, so restoring its files could erase that thread's work. Rewind the conversation without restoring files instead.",
+        );
+      }
+      const selection = selectRollbackSnapshot({
+        threadId: input.thread.id,
+        turnCount: input.turnCount,
+        checkpoints: input.thread.checkpoints,
+        snapshots: yield* client.listSnapshots(input.cwd),
+      });
+      if (selection._tag === "Missing") return yield* fail(selection.detail);
+      if (scope.restartsWorkspace) {
+        // Canonical paths, as `isScopeUnshared` compares: a symlinked root
+        // must not leave a provider running through the restart.
+        const threadIds = yield* sessionsInScope(
+          canonicalScope,
+          yield* providerService.listSessions(),
+          (path) => fileSystem.realPath(path).pipe(Effect.orElseSucceed(() => path)),
+        );
+        for (const threadId of threadIds) {
+          const sessionThreadId = ThreadId.make(threadId);
+          yield* providerService.stopSession({ threadId: sessionThreadId }).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("failed to stop provider session before Trellis rollback", {
+                threadId: sessionThreadId,
+                detail: error.message,
+              }),
+            ),
+          );
+        }
+      }
+      const { undoSnapshot } = yield* client.rollback({
+        target: input.cwd,
+        snapshot: selection.snapshotId,
+      });
+      yield* Effect.logInfo("Trellis rollback restored files for a checkpoint revert", {
+        threadId: input.thread.id,
+        turnCount: input.turnCount,
+        snapshot: selection.snapshotId,
+        undoSnapshot,
+      });
+      yield* refreshWorkspaceEntries(input.cwd);
+      return { undoSnapshot };
+    }).pipe(
+      Effect.catchTag("TrellisError", (error) => fail(`Trellis rollback failed: ${error.message}`)),
+    );
   });
 
   const handleRevertRequested = Effect.fn("handleRevertRequested")(function* (
@@ -784,14 +1050,26 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    const projects = yield* resolveThreadProjects(thread.projectId);
+    const trellisCwd = yield* trellisCwdOf(
+      yield* resolveWorkspaceCwd({
+        threadId: event.payload.threadId,
+        thread,
+        projects,
+        preferSessionRuntime: true,
+      }),
+    );
     const checkpointCwd = yield* resolveCheckpointCwd({
       threadId: event.payload.threadId,
       thread,
-      projects: yield* resolveThreadProjects(thread.projectId),
+      projects,
       preferSessionRuntime: true,
     }).pipe(
       Effect.catch((error) =>
-        event.payload.restoreFiles === false ? Effect.succeed(undefined) : Effect.fail(error),
+        // Git state only matters for restoring files outside Trellis.
+        event.payload.restoreFiles === false || trellisCwd !== undefined
+          ? Effect.succeed(undefined)
+          : Effect.fail(error),
       ),
     );
 
@@ -812,7 +1090,17 @@ const make = Effect.gen(function* () {
 
     yield* providerService.assertConversationRollbackSupported(event.payload.threadId);
 
-    if (event.payload.restoreFiles !== false) {
+    let trellisRestore: { readonly undoSnapshot: string | null } | null = null;
+    if (event.payload.restoreFiles !== false && trellisCwd !== undefined) {
+      // Trellis owns the files of its project paths: never git-restore them.
+      trellisRestore = yield* restoreTrellisSnapshot({
+        thread,
+        turnCount: event.payload.turnCount,
+        cwd: trellisCwd,
+        createdAt: now,
+      });
+      if (trellisRestore === null) return;
+    } else if (event.payload.restoreFiles !== false) {
       if (!checkpointCwd) {
         yield* appendRevertFailureActivity({
           threadId: event.payload.threadId,
@@ -873,15 +1161,41 @@ const make = Effect.gen(function* () {
 
     const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
-      yield* providerService.rollbackConversation({
-        threadId: event.payload.threadId,
-        numTurns: rolledBackTurns,
-      });
+      const rewound = yield* providerService
+        .rollbackConversation({
+          threadId: event.payload.threadId,
+          numTurns: rolledBackTurns,
+        })
+        .pipe(
+          Effect.as(true),
+          Effect.catch((error) => {
+            // Files already moved back: tell the user how to undo that.
+            if (trellisRestore === null) return Effect.fail(error);
+            const undo = trellisRestore.undoSnapshot;
+            return appendRevertFailureActivity({
+              threadId: event.payload.threadId,
+              turnCount: event.payload.turnCount,
+              detail: `Trellis restored the files, but rewinding the conversation failed: ${error.message}${
+                undo === null
+                  ? ""
+                  : ` To undo the file restore, roll back to Trellis snapshot ${undo} (\`trellis rollback --target ${trellisCwd} ${undo}\`).`
+              }`,
+              createdAt: now,
+            }).pipe(
+              Effect.catch(() => Effect.void),
+              Effect.as(false),
+            );
+          }),
+        );
+      if (!rewound) return;
     }
 
     const staleCheckpointRefs: Array<CheckpointRef> = [];
     for (const checkpoint of thread.checkpoints) {
-      if (checkpoint.checkpointTurnCount > event.payload.turnCount) {
+      if (
+        checkpoint.checkpointTurnCount > event.payload.turnCount &&
+        !isTrellisCheckpointRef(checkpoint.checkpointRef)
+      ) {
         staleCheckpointRefs.push(checkpoint.checkpointRef);
       }
     }

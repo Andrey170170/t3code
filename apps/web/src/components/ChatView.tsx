@@ -483,6 +483,8 @@ import {
 } from "./ChatView.logic";
 import type { ThreadSyncPhase } from "../threadSync";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
+import { useTrellisRoot } from "~/hooks/useTrellis";
+import { isTrellisWorkspaceRoot } from "~/lib/trellis";
 import { useComposerHandleContext } from "../composerHandleContext";
 import {
   awaitAttachmentUploads,
@@ -5943,6 +5945,12 @@ export default function ChatView(props: ChatViewProps) {
   }, []);
 
   const activeWorktreePath = activeThread?.worktreePath ?? null;
+  const trellisRoot = useTrellisRoot(environmentId);
+  // Trellis restores files from its own snapshots; the server refuses when
+  // another thread shares the idea folder or workspace.
+  const activeIsTrellisProject =
+    activeProject !== null && isTrellisWorkspaceRoot(activeProject.workspaceRoot, trellisRoot);
+  const canRevertFiles = activeWorktreePath !== null || activeIsTrellisProject;
   const derivedEnvMode: DraftThreadEnvMode = resolveEffectiveEnvMode({
     activeWorktreePath,
     hasServerThread: isServerThread,
@@ -5955,9 +5963,12 @@ export default function ChatView(props: ChatViewProps) {
     activeThread.worktreePath === null &&
     !envLocked,
   );
-  const envMode: DraftThreadEnvMode = canOverrideServerThreadEnvMode
-    ? (pendingServerThreadEnvMode ?? draftThread?.envMode ?? derivedEnvMode)
-    : derivedEnvMode;
+  // Trellis projects never get git worktrees: those would run on the host.
+  const envMode: DraftThreadEnvMode = activeIsTrellisProject
+    ? "local"
+    : canOverrideServerThreadEnvMode
+      ? (pendingServerThreadEnvMode ?? draftThread?.envMode ?? derivedEnvMode)
+      : derivedEnvMode;
   const activeThreadBranch =
     canOverrideServerThreadEnvMode && pendingServerThreadBranch !== undefined
       ? pendingServerThreadBranch
@@ -7517,6 +7528,13 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const multipleModelSelections = queuedMessage ? null : sendCtx.multipleModelSelections;
+    if (multipleModelSelections !== null && activeIsTrellisProject) {
+      setThreadError(
+        activeThread.id,
+        "Sending to several models needs git worktrees, which Trellis projects don't use. Pick one model, or use `trellis fork` for parallel work.",
+      );
+      return;
+    }
     if (
       multipleModelSelections !== null &&
       serverConfig?.environment.capabilities.requiredWorktreeBootstrap !== true
@@ -10230,7 +10248,7 @@ export default function ChatView(props: ChatViewProps) {
                             multipleModelSelections={multipleModelSelections}
                             supportsMultipleModels={
                               serverConfig?.environment.capabilities.requiredWorktreeBootstrap ===
-                              true
+                                true && !activeIsTrellisProject
                             }
                             onMultipleModelSelectionsChange={setMultipleModelSelections}
                             composerRef={composerRef}
@@ -10370,7 +10388,10 @@ export default function ChatView(props: ChatViewProps) {
                           {mountComposerContextStrip && (
                             <div className="pointer-events-auto">
                               <BranchToolbar
-                                forceNewWorktree={multipleModelSelections !== null}
+                                forceNewWorktree={
+                                  multipleModelSelections !== null && !activeIsTrellisProject
+                                }
+                                worktreesUnavailable={activeIsTrellisProject}
                                 ref={branchToolbarRef}
                                 environmentId={activeThread.environmentId}
                                 threadId={activeThread.id}
@@ -10629,14 +10650,16 @@ export default function ChatView(props: ChatViewProps) {
             <AlertDialogDescription>
               Rewind chat to before this message. Your prompt and attachments return to the
               composer.
-              {activeWorktreePath === null
-                ? " Files stay as they are because this thread shares the project directory."
-                : null}
+              {activeIsTrellisProject
+                ? " Trellis can restore the files from its snapshot of that turn; restoring a dedicated workspace restarts it."
+                : activeWorktreePath === null
+                  ? " Files stay as they are because this thread shares the project directory."
+                  : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
-            {activeWorktreePath !== null ? (
+            {canRevertFiles ? (
               <Button
                 variant="destructive"
                 onClick={() => {
