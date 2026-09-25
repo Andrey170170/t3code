@@ -128,6 +128,7 @@ import { OrchestrationThreadSettleBlockedError } from "./orchestration/Errors.ts
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ThreadDeletionReactor } from "./orchestration/Services/ThreadDeletionReactor.ts";
 import * as PullRequestSyncReactor from "./orchestration/PullRequestSyncReactor.ts";
+import * as TrellisCatalog from "./trellis/TrellisCatalog.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStoreLive } from "./persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEventStore.ts";
@@ -1003,6 +1004,7 @@ const buildAppUnderTest = (options?: {
             drain: Effect.void,
             requestSync: () => Effect.void,
           }),
+          TrellisCatalog.layerDisabled,
         ),
       ),
       Layer.provide(

@@ -86,6 +86,8 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as Trellis from "../../trellis/Trellis.ts";
+import * as TrellisProviderSession from "../../trellis/TrellisProviderSession.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -484,6 +486,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
   const issueMcpCredential =
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
+  const trellis = yield* Effect.serviceOption(Trellis.Trellis);
   const fileSystem = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -967,8 +970,64 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
   const clearMcpSession = (threadId: ThreadId) =>
     McpSessionRegistry.revokeActiveMcpThread(threadId).pipe(
-      Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+      Effect.tap(() =>
+        Effect.sync(() => {
+          McpProviderSession.clearMcpProviderSession(threadId);
+          TrellisProviderSession.clearTrellisProviderSession(threadId);
+        }),
+      ),
     );
+
+  // A session whose cwd is a Trellis project path runs inside the workspace.
+  // Fails before any credential is issued when the provider cannot run there.
+  const decideTrellisLaunch = Effect.fn("ProviderService.decideTrellisLaunch")(function* (input: {
+    readonly operation: string;
+    readonly driverKind: string;
+    readonly cwd: string | undefined;
+  }) {
+    if (Option.isNone(trellis)) return { kind: "host" } as const;
+    const decision = TrellisProviderSession.decideTrellisLaunch({
+      env: yield* trellis.value.current,
+      driverKind: input.driverKind,
+      cwd: input.cwd,
+    });
+    if (decision.kind === "unsupported") {
+      return yield* toValidationError(input.operation, decision.message);
+    }
+    return decision;
+  });
+
+  // Records the launch for the adapter, after `prepareMcpSession`: the MCP
+  // endpoint must point at the host from inside the workspace network.
+  const prepareTrellisSession = Effect.fn("ProviderService.prepareTrellisSession")(function* (
+    threadId: ThreadId,
+    cwd: string | undefined,
+    decision: TrellisProviderSession.TrellisLaunchDecision,
+  ) {
+    if (decision.kind !== "workspace" || Option.isNone(trellis) || cwd === undefined) {
+      TrellisProviderSession.clearTrellisProviderSession(threadId);
+      return;
+    }
+    const primer = yield* trellis.value.primer(cwd).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("Trellis primer unavailable; starting without it", {
+          threadId,
+          detail: error.message,
+        }).pipe(Effect.as(null)),
+      ),
+    );
+    TrellisProviderSession.setTrellisProviderSession(threadId, {
+      shimDir: decision.shimDir,
+      primer: primer?.trim() ? primer : null,
+    });
+    const mcp = McpProviderSession.readMcpProviderSession(threadId);
+    if (mcp) {
+      McpProviderSession.setMcpProviderSession({
+        ...mcp,
+        endpoint: TrellisProviderSession.rewriteLoopbackUrl(mcp.endpoint),
+      });
+    }
+  });
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
@@ -1277,7 +1336,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
+      const trellisLaunch = yield* decideTrellisLaunch({
+        operation: input.operation,
+        driverKind: adapter.provider,
+        cwd: persistedCwd,
+      });
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
+      yield* prepareTrellisSession(input.binding.threadId, persistedCwd, trellisLaunch);
       const resumed = yield* adapter
         .startSession({
           threadId: input.binding.threadId,
@@ -1508,7 +1573,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
         yield* clearTurnAnalyticsSession(resolvedInstanceId, threadId);
+        const trellisLaunch = yield* decideTrellisLaunch({
+          operation: "ProviderService.startSession",
+          driverKind: resolvedProvider,
+          cwd: effectiveCwd,
+        });
         yield* prepareMcpSession(threadId, resolvedInstanceId);
+        yield* prepareTrellisSession(threadId, effectiveCwd, trellisLaunch);
         const session = yield* adapter
           .startSession({
             ...input,

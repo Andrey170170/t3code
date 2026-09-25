@@ -89,6 +89,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as TrellisProviderSession from "../../trellis/TrellisProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
@@ -4830,7 +4831,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         callbackOptions,
       ) => runPromise(handleResumeDialog(request, callbackOptions));
 
-      const claudeBinaryPath = claudeSdkExecutablePath;
+      // In a Trellis project path the shim runs Claude inside the workspace.
+      const trellisSession = TrellisProviderSession.readTrellisProviderSession(input.threadId);
+      const claudeBinaryPath = trellisSession
+        ? TrellisProviderSession.trellisShimPath(trellisSession, "claude")
+        : claudeSdkExecutablePath;
       const {
         "permission-mode": launchArgPermissionMode,
         "dangerously-skip-permissions": launchArgSkipPermissions,
@@ -4918,7 +4923,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           type: "preset",
           preset: "claude_code",
           // Model and effort can change after this session-level prompt is set.
-          append: buildRuntimeInstructions({ harness: "Claude Code" }),
+          append: trellisSession?.primer
+            ? `${buildRuntimeInstructions({ harness: "Claude Code" })}\n\n${trellisSession.primer}`
+            : buildRuntimeInstructions({ harness: "Claude Code" }),
         },
         settingSources: [...CLAUDE_SETTING_SOURCES],
         // `ultracode` is a Claude Code setting, not an API effort level. It is

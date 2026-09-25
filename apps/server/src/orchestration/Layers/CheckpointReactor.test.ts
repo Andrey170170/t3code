@@ -68,6 +68,7 @@ import { ServerConfig } from "../../config.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 import * as WorkspacePaths from "../../workspace/WorkspacePaths.ts";
 import { PullRequestService } from "../../pullRequest/PullRequestService.ts";
+import * as Trellis from "../../trellis/Trellis.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
@@ -99,6 +100,7 @@ function createProviderServiceHarness(
   const assertConversationRollbackSupported = vi.fn<
     ProviderServiceShape["assertConversationRollbackSupported"]
   >(() => Effect.void);
+  const stopSession = vi.fn<ProviderServiceShape["stopSession"]>(() => Effect.void);
 
   const unsupported = <A>() =>
     Effect.die(new Error("Unsupported provider call in test")) as Effect.Effect<A, never>;
@@ -123,7 +125,7 @@ function createProviderServiceHarness(
     interruptTurn: () => unsupported(),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
-    stopSession: () => unsupported(),
+    stopSession,
     listSessions,
     getCapabilities: () => Effect.succeed({ sessionModelSwitch: "in-session" }),
     assertConversationRollbackSupported,
@@ -153,8 +155,65 @@ function createProviderServiceHarness(
     service,
     assertConversationRollbackSupported,
     rollbackConversation,
+    stopSession,
     emit,
   };
+}
+
+// An in-memory Trellis whose workspace `ws-1` holds `cwd`: an idea folder in
+// scratch, or the project directory of a dedicated workspace.
+function createTrellisHarness(input: {
+  readonly root: string;
+  readonly cwd: string;
+  readonly workspaceKind: "scratch" | "dedicated";
+}) {
+  const snapshots: Array<Trellis.TrellisSnapshot> = [];
+  const rollbacks: Array<{ readonly target: string; readonly snapshot: string }> = [];
+  const env = { root: input.root, bin: "trellis", shimDir: "/trellis-shims" };
+  const workspacePath = NodePath.join(input.root, "workspaces", "ws-1", "project");
+  const unused = () => Effect.die(new Error("Unused Trellis call in test"));
+  const service: Trellis.Trellis["Service"] = {
+    current: Effect.succeed(env),
+    refresh: Effect.succeed(env),
+    listProjects: unused,
+    createIdea: unused,
+    createProject: unused,
+    describe: unused,
+    find: unused,
+    primer: unused,
+    resolve: () =>
+      Effect.succeed({
+        workspace: { id: "ws-1", kind: input.workspaceKind, name: "main", path: workspacePath },
+        project: {
+          id: "prj-1",
+          kind: input.workspaceKind === "scratch" ? "idea" : "project",
+          name: "Idea",
+          description: "",
+          workspace_id: "ws-1",
+          path: input.cwd,
+          deleted_at: null,
+          graduated_to: null,
+          workspaces: [],
+        },
+      }),
+    listSnapshots: () => Effect.sync(() => [...snapshots]),
+    createSnapshot: ({ thread, turn }) =>
+      Effect.sync(() => {
+        const snapshot = {
+          id: `snap-${snapshots.length + 1}`,
+          workspace_id: "ws-1",
+          seq: snapshots.length + 1,
+          kind: "turn",
+          thread,
+          turn,
+          created_at: 0,
+        };
+        snapshots.push(snapshot);
+        return snapshot;
+      }),
+    rollback: (entry) => Effect.sync(() => void rollbacks.push(entry)),
+  };
+  return { service, snapshots, rollbacks };
 }
 
 async function waitForThread(
@@ -223,8 +282,10 @@ function runGit(cwd: string, args: ReadonlyArray<string>) {
   });
 }
 
-function createGitRepository() {
-  const cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-checkpoint-handler-"));
+function createGitRepository(
+  cwd = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-checkpoint-handler-")),
+) {
+  NodeFS.mkdirSync(cwd, { recursive: true });
   runGit(cwd, ["init", "--initial-branch=main"]);
   runGit(cwd, ["config", "user.email", "test@example.com"]);
   runGit(cwd, ["config", "user.name", "Test User"]);
@@ -310,12 +371,31 @@ describe("CheckpointReactor", () => {
     readonly gitStatusRefreshCalls?: Array<string>;
     readonly pullRequestRefreshCalls?: Array<string>;
     readonly pullRequestRefresh?: Effect.Effect<void>;
+    readonly trellisWorkspaceKind?: "scratch" | "dedicated";
   }) {
-    const cwd = createGitRepository();
+    const trellisRoot =
+      options?.trellisWorkspaceKind === undefined
+        ? undefined
+        : NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-checkpoint-trellis-"));
+    const cwd = createGitRepository(
+      trellisRoot === undefined
+        ? undefined
+        : options?.trellisWorkspaceKind === "scratch"
+          ? NodePath.join(trellisRoot, "workspaces", "ws-1", "project", "idea-1")
+          : NodePath.join(trellisRoot, "workspaces", "ws-1", "project"),
+    );
     if (options?.initializeGit === false) {
       NodeFS.rmSync(NodePath.join(cwd, ".git"), { recursive: true });
     }
-    tempDirs.push(cwd);
+    tempDirs.push(trellisRoot ?? cwd);
+    const trellis =
+      trellisRoot === undefined || options?.trellisWorkspaceKind === undefined
+        ? undefined
+        : createTrellisHarness({
+            root: trellisRoot,
+            cwd,
+            workspaceKind: options.trellisWorkspaceKind,
+          });
     const provider = createProviderServiceHarness(
       cwd,
       options?.hasSession ?? true,
@@ -370,6 +450,9 @@ describe("CheckpointReactor", () => {
     });
 
     const layer = CheckpointReactorLive.pipe(
+      Layer.provideMerge(
+        trellis === undefined ? Layer.empty : Layer.succeed(Trellis.Trellis, trellis.service),
+      ),
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(RuntimeReceiptBusTest),
@@ -516,6 +599,7 @@ describe("CheckpointReactor", () => {
       drain,
       nextReceipt: Queue.take(receipts),
       pullRequestRefreshes,
+      trellis,
     };
   }
 
@@ -2280,4 +2364,150 @@ describe("CheckpointReactor", () => {
       }
     },
   );
+
+  describe("Trellis project paths", () => {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const run = <A, E>(effect: Effect.Effect<A, E, never>) => {
+      if (runtime === null) throw new Error("Checkpoint test runtime was not initialized.");
+      return runtime.runPromise(effect);
+    };
+
+    // Runs one turn through the reactor: the domain turn start takes the
+    // baseline, the runtime completion takes the turn snapshot.
+    async function runTrellisTurn(harness: Awaited<ReturnType<typeof createHarness>>) {
+      await run(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-trellis-turn-start"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-trellis-1"),
+            role: "user",
+            text: "start",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt,
+        }),
+      );
+      harness.provider.emit({
+        type: "turn.completed",
+        eventId: EventId.make("evt-trellis-turn-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt,
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId("turn-trellis-1"),
+        payload: { state: "completed" },
+      });
+      while ((await run(harness.nextReceipt)).type !== "checkpoint.diff.finalized") {
+        // Skip receipts published before the turn's checkpoint.
+      }
+    }
+
+    async function requestRevertToStart(harness: Awaited<ReturnType<typeof createHarness>>) {
+      await run(
+        harness.engine.dispatch({
+          type: "thread.checkpoint.revert",
+          commandId: CommandId.make("cmd-trellis-revert"),
+          threadId: ThreadId.make("thread-1"),
+          turnCount: 0,
+          createdAt,
+        }),
+      );
+      await harness.drain();
+    }
+
+    it("snapshots a non-git idea per turn and restores the baseline through Trellis", async () => {
+      const harness = await createHarness({
+        trellisWorkspaceKind: "scratch",
+        initializeGit: false,
+        seedFilesystemCheckpoints: false,
+        threadWorktreePath: null,
+      });
+
+      await runTrellisTurn(harness);
+      expect(harness.trellis?.snapshots.map((entry) => [entry.thread, entry.turn])).toEqual([
+        ["thread-1", "baseline"],
+        ["thread-1", "turn-trellis-1"],
+      ]);
+      const thread = (await harness.readModel()).threads[0];
+      expect(
+        thread?.checkpoints.map((entry) => [entry.checkpointTurnCount, entry.checkpointRef]),
+      ).toEqual([[1, "trellis:snap-2"]]);
+
+      await requestRevertToStart(harness);
+      expect(harness.trellis?.rollbacks).toEqual([{ target: harness.cwd, snapshot: "snap-1" }]);
+      expect(harness.provider.stopSession).not.toHaveBeenCalled();
+      expect(harness.provider.rollbackConversation).toHaveBeenCalledWith({
+        threadId: ThreadId.make("thread-1"),
+        numTurns: 1,
+      });
+    });
+
+    it("keeps git checkpoints for a git idea and still restores through Trellis", async () => {
+      const harness = await createHarness({
+        trellisWorkspaceKind: "scratch",
+        seedFilesystemCheckpoints: false,
+        threadWorktreePath: null,
+      });
+
+      await runTrellisTurn(harness);
+      expect(
+        gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1)),
+      ).toBe(true);
+      NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "changed\n", "utf8");
+
+      await requestRevertToStart(harness);
+      expect(harness.trellis?.rollbacks).toEqual([{ target: harness.cwd, snapshot: "snap-1" }]);
+      // Trellis owns the files: the git checkpoint was not restored.
+      expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe(
+        "changed\n",
+      );
+    });
+
+    it("refuses to restore an idea another thread uses", async () => {
+      const harness = await createHarness({
+        trellisWorkspaceKind: "scratch",
+        initializeGit: false,
+        seedFilesystemCheckpoints: false,
+        threadWorktreePath: null,
+        secondThreadSharingWorktree: true,
+      });
+
+      await runTrellisTurn(harness);
+      await requestRevertToStart(harness);
+      expect(harness.trellis?.rollbacks).toEqual([]);
+      expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(thread?.activities).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "checkpoint.revert.failed",
+            payload: expect.objectContaining({
+              detail: expect.stringContaining("Another thread uses this Trellis idea"),
+            }),
+          }),
+        ]),
+      );
+    });
+
+    it("stops provider sessions in a dedicated workspace before rolling it back", async () => {
+      const harness = await createHarness({
+        trellisWorkspaceKind: "dedicated",
+        initializeGit: false,
+        seedFilesystemCheckpoints: false,
+        threadWorktreePath: null,
+      });
+
+      await runTrellisTurn(harness);
+      await requestRevertToStart(harness);
+      expect(harness.provider.stopSession).toHaveBeenCalledWith({
+        threadId: ThreadId.make("thread-1"),
+      });
+      expect(harness.trellis?.rollbacks).toEqual([{ target: harness.cwd, snapshot: "snap-1" }]);
+    });
+  });
 });

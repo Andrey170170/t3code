@@ -144,6 +144,7 @@ import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolve
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import { CodexThreadClient } from "./project/CodexThreadClient.ts";
+import * as TrellisCatalog from "./trellis/TrellisCatalog.ts";
 import { CodexThreadImport } from "./project/CodexThreadImport.ts";
 import { importRecentAgentThreads } from "./project/AgentSessionImporter.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
@@ -636,6 +637,7 @@ const makeWsRpcLayer = (
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
       const codexThreadImport = yield* CodexThreadImport;
       const codexThreadClient = yield* CodexThreadClient;
+      const trellisCatalog = yield* TrellisCatalog.TrellisCatalog;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
@@ -3171,6 +3173,22 @@ const makeWsRpcLayer = (
           ),
         [WS_METHODS.codexThreadsList]: (input) => codexThreadImport.list(input),
         [WS_METHODS.codexThreadsImport]: (input) => codexThreadImport.adopt(input),
+        [WS_METHODS.trellisGetStatus]: () =>
+          observeRpcEffect(WS_METHODS.trellisGetStatus, trellisCatalog.status, {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisNewIdea]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisNewIdea, trellisCatalog.newIdea(input), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisNewProject]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisNewProject, trellisCatalog.newProject(input), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisFind]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisFind, trellisCatalog.find(input.query), {
+            "rpc.aggregate": "trellis",
+          }),
         [WS_METHODS.agentSessionsScan]: () =>
           observeRpcEffect(WS_METHODS.agentSessionsScan, agentSessionScanner.scan, {
             "rpc.aggregate": "workspace",
