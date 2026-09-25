@@ -183,6 +183,7 @@ function createTrellisHarness(input: {
     createProject: unused,
     describe: unused,
     find: unused,
+    preview: unused,
     primer: unused,
     resolve: () =>
       Effect.succeed({

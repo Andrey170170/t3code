@@ -93,6 +93,7 @@ const TrellisDescribeView = Schema.Struct({
   // Older Trellis versions.
   ignored_pinned: Schema.optional(Schema.Array(Schema.String)),
 });
+const TrellisPreviewView = Schema.Struct({ host_port: Schema.Finite, url: Schema.String });
 const TrellisPrimerView = Schema.Struct({ primer: Schema.String });
 const TrellisErrorBody = Schema.Struct({ error: Schema.String });
 
@@ -187,6 +188,14 @@ export class Trellis extends Context.Service<
       readonly target: string;
       readonly snapshot: string;
     }) => Effect.Effect<{ readonly undoSnapshot: string | null }, TrellisError>;
+    /**
+     * Publishes a workspace port on the preview host (idempotent per
+     * workspace and port). `url` is reachable from the user's browser.
+     */
+    readonly preview: (input: {
+      readonly target: string;
+      readonly port: number;
+    }) => Effect.Effect<{ readonly hostPort: number; readonly url: string }, TrellisError>;
     /** Short agent orientation for sessions started in `target`. */
     readonly primer: (target: string) => Effect.Effect<string, TrellisError>;
   }
@@ -422,6 +431,10 @@ export const make = Effect.gen(function* () {
                 : null;
           return { undoSnapshot: id };
         }),
+      ),
+    preview: ({ target, port }) =>
+      call(TrellisPreviewView, "POST", "/v1/previews", { body: { target, port } }).pipe(
+        Effect.map((view) => ({ hostPort: view.host_port, url: view.url })),
       ),
     primer: (target) =>
       call(TrellisPrimerView, "GET", `/v1/primer?${query({ target })}`, { timeoutMs: 5_000 }).pipe(

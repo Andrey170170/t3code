@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { ProjectId, type TrellisFindHit } from "@t3tools/contracts";
-import { isTrellisWorkspaceRoot, trellisFindHitSummary } from "./trellis";
+import { isLoopbackPreviewUrl, isTrellisWorkspaceRoot, trellisFindHitSummary } from "./trellis";
 
 describe("isTrellisWorkspaceRoot", () => {
   it("matches directories inside <root>/workspaces/", () => {
@@ -51,5 +51,16 @@ describe("trellisFindHitSummary", () => {
 
   it("falls back to the description when nothing matched inside files", () => {
     expect(trellisFindHitSummary(hit({}))).toBe("A loose thought");
+  });
+});
+
+describe("isLoopbackPreviewUrl", () => {
+  it("recognizes loopback preview URLs only", () => {
+    expect(isLoopbackPreviewUrl("localhost:5173")).toBe(true);
+    expect(isLoopbackPreviewUrl("http://127.0.0.1:3000/x")).toBe(true);
+    expect(isLoopbackPreviewUrl("http://[::1]:8080")).toBe(true);
+    expect(isLoopbackPreviewUrl("http://0.0.0.0:4000")).toBe(true);
+    expect(isLoopbackPreviewUrl("https://example.com")).toBe(false);
+    expect(isLoopbackPreviewUrl("http://node.ts.net:21001/")).toBe(false);
   });
 });

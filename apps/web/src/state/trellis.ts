@@ -35,4 +35,8 @@ export const trellisEnvironment = {
     label: "environment-data:trellis:new-project",
     tag: WS_METHODS.trellisNewProject,
   }),
+  resolvePreviewUrl: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:resolve-preview-url",
+    tag: WS_METHODS.trellisResolvePreviewUrl,
+  }),
 };

@@ -83,6 +83,7 @@ function makeHarness(input: {
         listSnapshots: unused,
         createSnapshot: unused,
         rollback: unused,
+        preview: unused,
         primer: unused,
       }),
     ),

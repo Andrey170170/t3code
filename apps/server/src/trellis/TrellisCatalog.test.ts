@@ -339,6 +339,7 @@ describe("TrellisCatalog service", () => {
           listSnapshots: unused,
           createSnapshot: unused,
           rollback: unused,
+          preview: unused,
           primer: unused,
         }),
       ),

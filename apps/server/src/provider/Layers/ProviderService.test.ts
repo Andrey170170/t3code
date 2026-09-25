@@ -5269,6 +5269,7 @@ describe("Trellis project paths", () => {
     listSnapshots: unused,
     createSnapshot: unused,
     rollback: unused,
+    preview: unused,
     primer: () => Effect.succeed("You are inside Trellis idea idea-1."),
   });
 

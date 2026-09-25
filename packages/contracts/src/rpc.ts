@@ -22,6 +22,8 @@ import {
   TrellisFindResult,
   TrellisNewIdeaInput,
   TrellisNewProjectInput,
+  TrellisResolvePreviewUrlInput,
+  TrellisResolvePreviewUrlResult,
   TrellisStatus,
 } from "./trellis.ts";
 import * as Schema from "effect/Schema";
@@ -218,6 +220,7 @@ import {
   PreviewReportStatusInput,
   PreviewResizeInput,
   PreviewSessionSnapshot,
+  PreviewTrellisError,
 } from "./preview.ts";
 import {
   DeviceActionInput,
@@ -331,6 +334,7 @@ export const WS_METHODS = {
   trellisNewIdea: "trellis.newIdea",
   trellisNewProject: "trellis.newProject",
   trellisFind: "trellis.find",
+  trellisResolvePreviewUrl: "trellis.resolvePreviewUrl",
   assetsCreateUrl: "assets.createUrl",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -1067,6 +1071,12 @@ const WsTrellisFindRpc = Rpc.make(WS_METHODS.trellisFind, {
   error: Schema.Union([TrellisError, EnvironmentAuthorizationError]),
 });
 
+const WsTrellisResolvePreviewUrlRpc = Rpc.make(WS_METHODS.trellisResolvePreviewUrl, {
+  payload: TrellisResolvePreviewUrlInput,
+  success: TrellisResolvePreviewUrlResult,
+  error: Schema.Union([PreviewTrellisError, EnvironmentAuthorizationError]),
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1584,6 +1594,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsTrellisNewIdeaRpc,
   WsTrellisNewProjectRpc,
   WsTrellisFindRpc,
+  WsTrellisResolvePreviewUrlRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,

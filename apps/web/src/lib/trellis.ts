@@ -1,4 +1,5 @@
 import type { TrellisFindHit } from "@t3tools/contracts";
+import { isLoopbackHost, normalizePreviewUrl } from "@t3tools/shared/preview";
 
 /**
  * Whether a project directory is a Trellis workspace. Trellis-managed projects
@@ -25,4 +26,13 @@ export function trellisFindHitSummary(hit: TrellisFindHit, maxSnippets = 2): str
     .filter((snippet) => snippet.length > 0);
   if (snippets.length > 0) return snippets.join(" · ");
   return hit.description.replace(/\s+/g, " ").trim();
+}
+
+/** Whether a preview URL points at loopback (`localhost`, `127.0.0.1`, `[::1]`, `0.0.0.0`). */
+export function isLoopbackPreviewUrl(url: string): boolean {
+  try {
+    return isLoopbackHost(new URL(normalizePreviewUrl(url)).hostname);
+  } catch {
+    return false;
+  }
 }

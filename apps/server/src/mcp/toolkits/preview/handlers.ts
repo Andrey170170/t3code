@@ -10,6 +10,7 @@ import {
   type ToolActivityIcon,
   type ThreadId,
   type PreviewAutomationOperation,
+  type PreviewAutomationNavigateInput,
   type PreviewAutomationOpenInput,
   type PreviewAutomationRecordingStatus,
   type PreviewAutomationResizeResult,
@@ -29,6 +30,7 @@ import { resolveAttachmentRelativePath } from "../../../attachmentPaths.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
+import * as TrellisPreview from "../../../trellis/TrellisPreview.ts";
 import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
 
 /**
@@ -186,54 +188,97 @@ export const claimPreviewRecording = Effect.fn("PreviewToolkit.claimRecording")(
   return { ...recording, id: finalId, path: finalPath };
 });
 
-const handlers = {
-  preview_status: (input) => invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
-  preview_open: (input) =>
-    invokeTargeted<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
-  preview_navigate: (input) =>
-    invokeTargeted<PreviewAutomationStatus>("navigate", input, input.timeoutMs),
-  preview_resize: (input) =>
-    invokeTargeted<PreviewAutomationResizeResult>("resize", input, input.timeoutMs),
-  preview_set_appearance: (input) =>
-    invokeTargeted<PreviewAutomationSetColorSchemeResult>("setColorScheme", input),
-  preview_snapshot: (input) => {
-    // Output selection and saving are MCP-only; the browser still produces a complete snapshot.
-    const { includeImage: _includeImage, save: _save, ...operationInput } = input ?? {};
-    return invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
-  },
-  preview_click: (input) => invokeTargeted<object>("click", input, input.timeoutMs),
-  preview_type: (input) => invokeTargeted<object>("type", input, input.timeoutMs),
-  preview_press: (input) => invokeTargeted<object>("press", input),
-  preview_scroll: (input) => invokeTargeted<object>("scroll", input),
-  preview_evaluate: ({ tabId, ...input }) =>
-    invoke<unknown>("evaluate", input, undefined, tabId).pipe(
-      Effect.map(({ result, toolIcon }) => ({
-        value: result ?? null,
-        ...(toolIcon ? { toolIcon } : {}),
-      })),
-    ),
-  preview_wait_for: (input) => invokeTargeted<object>("waitFor", input, input.timeoutMs),
-  preview_recording_start: (input) =>
-    invokeTargeted<PreviewAutomationRecordingStatus>("recordingStart", input ?? {}),
-  preview_recording_stop: (input) =>
-    Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.requireMcpCapability("preview");
-      const { tabId, ...operationInput } = input;
-      const response = yield* invoke<unknown>(
-        "recordingStop",
-        { ...operationInput, transferToEnvironment: true },
-        PREVIEW_RECORDING_STOP_TIMEOUT_MS,
-        tabId,
-      );
-      const artifact = yield* claimPreviewRecording(scope.threadId, response.result);
-      return { ...artifact, ...(response.toolIcon ? { toolIcon: response.toolIcon } : {}) };
-    }),
-} satisfies Parameters<typeof PreviewToolkit.toLayer>[0];
-
-const { preview_snapshot, ...standardHandlers } = handlers;
-
-export const PreviewStandardToolkitHandlersLive = PreviewStandardToolkit.toLayer(standardHandlers);
-
-export const PreviewSnapshotToolkitHandlersLive = PreviewSnapshotToolkit.toLayer({
-  preview_snapshot,
+/**
+ * In a Trellis thread, a loopback URL or environment port means the
+ * workspace: resolve it to the Trellis preview address before a browser
+ * client loads it. Other threads are unchanged.
+ */
+const resolveTrellisOpen = Effect.fn("PreviewToolkit.resolveTrellisOpen")(function* (
+  preview: TrellisPreview.TrellisPreview["Service"],
+  input: PreviewAutomationOpenInput,
+) {
+  if (input.url === undefined) return input;
+  const scope = yield* McpInvocationContext.requireMcpCapability("preview");
+  return { ...input, url: yield* preview.resolveUrl(scope.threadId, input.url) };
 });
+
+const resolveTrellisNavigate = Effect.fn("PreviewToolkit.resolveTrellisNavigate")(function* (
+  preview: TrellisPreview.TrellisPreview["Service"],
+  input: PreviewAutomationNavigateInput,
+) {
+  const scope = yield* McpInvocationContext.requireMcpCapability("preview");
+  const target = input.target;
+  if (target?.kind === "environment-port") {
+    const url = yield* preview.resolvePort(scope.threadId, target);
+    if (url === null) return input;
+    const { target: _target, ...rest } = input;
+    return { ...rest, url };
+  }
+  const url = target?.kind === "url" ? target.url : input.url;
+  if (url === undefined) return input;
+  const resolved = yield* preview.resolveUrl(scope.threadId, url);
+  if (resolved === url) return input;
+  const { target: _target, ...rest } = input;
+  return { ...rest, url: resolved };
+});
+
+const makeHandlers = (preview: TrellisPreview.TrellisPreview["Service"]) =>
+  ({
+    preview_status: (input) => invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
+    preview_open: (input) =>
+      resolveTrellisOpen(preview, normalizePreviewOpenInput(input)).pipe(
+        Effect.flatMap((resolved) => invokeTargeted<PreviewAutomationStatus>("open", resolved)),
+      ),
+    preview_navigate: (input) =>
+      resolveTrellisNavigate(preview, input).pipe(
+        Effect.flatMap((resolved) =>
+          invokeTargeted<PreviewAutomationStatus>("navigate", resolved, input.timeoutMs),
+        ),
+      ),
+    preview_resize: (input) =>
+      invokeTargeted<PreviewAutomationResizeResult>("resize", input, input.timeoutMs),
+    preview_set_appearance: (input) =>
+      invokeTargeted<PreviewAutomationSetColorSchemeResult>("setColorScheme", input),
+    preview_snapshot: (input) => {
+      // Output selection and saving are MCP-only; the browser still produces a complete snapshot.
+      const { includeImage: _includeImage, save: _save, ...operationInput } = input ?? {};
+      return invokeTargeted<PreviewAutomationSnapshot>("snapshot", operationInput);
+    },
+    preview_click: (input) => invokeTargeted<object>("click", input, input.timeoutMs),
+    preview_type: (input) => invokeTargeted<object>("type", input, input.timeoutMs),
+    preview_press: (input) => invokeTargeted<object>("press", input),
+    preview_scroll: (input) => invokeTargeted<object>("scroll", input),
+    preview_evaluate: ({ tabId, ...input }) =>
+      invoke<unknown>("evaluate", input, undefined, tabId).pipe(
+        Effect.map(({ result, toolIcon }) => ({
+          value: result ?? null,
+          ...(toolIcon ? { toolIcon } : {}),
+        })),
+      ),
+    preview_wait_for: (input) => invokeTargeted<object>("waitFor", input, input.timeoutMs),
+    preview_recording_start: (input) =>
+      invokeTargeted<PreviewAutomationRecordingStatus>("recordingStart", input ?? {}),
+    preview_recording_stop: (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.requireMcpCapability("preview");
+        const { tabId, ...operationInput } = input;
+        const response = yield* invoke<unknown>(
+          "recordingStop",
+          { ...operationInput, transferToEnvironment: true },
+          PREVIEW_RECORDING_STOP_TIMEOUT_MS,
+          tabId,
+        );
+        const artifact = yield* claimPreviewRecording(scope.threadId, response.result);
+        return { ...artifact, ...(response.toolIcon ? { toolIcon: response.toolIcon } : {}) };
+      }),
+  }) satisfies Parameters<typeof PreviewToolkit.toLayer>[0];
+
+const handlers = Effect.map(Effect.service(TrellisPreview.TrellisPreview), makeHandlers);
+
+export const PreviewStandardToolkitHandlersLive = PreviewStandardToolkit.toLayer(
+  Effect.map(handlers, ({ preview_snapshot: _snapshot, ...standardHandlers }) => standardHandlers),
+);
+
+export const PreviewSnapshotToolkitHandlersLive = PreviewSnapshotToolkit.toLayer(
+  Effect.map(handlers, ({ preview_snapshot }) => ({ preview_snapshot })),
+);
