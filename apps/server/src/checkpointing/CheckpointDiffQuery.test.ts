@@ -1,4 +1,10 @@
-import { CheckpointRef, ProjectId, ThreadId, TurnId } from "@t3tools/contracts";
+import {
+  CheckpointRef,
+  ProjectId,
+  ThreadId,
+  TurnId,
+  VcsProcessTimeoutError,
+} from "@t3tools/contracts";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -471,6 +477,95 @@ describe("CheckpointDiffQuery.layer", () => {
       expect(error.message).toBe(
         "Checkpoint invariant violation in CheckpointDiffQuery.getTurnDiff: Thread 'thread-missing' not found.",
       );
+    }),
+  );
+});
+
+describe("Trellis-only turns", () => {
+  const threadId = ThreadId.make("thread-trellis");
+  const checkpoint = (turnCount: number, ref: string) => ({
+    turnId: TurnId.make(`turn-${turnCount}`),
+    checkpointTurnCount: turnCount,
+    checkpointRef: CheckpointRef.make(ref),
+    status: "ready" as const,
+    files: [],
+    assistantMessageId: null,
+    completedAt: "2026-01-01T00:00:00.000Z",
+  });
+  const mixed = [
+    checkpoint(1, "trellis:snap-1"),
+    checkpoint(2, "trellis:snap-2"),
+    checkpoint(3, "refs/t3/checkpoints/x/turn/3"),
+    checkpoint(4, "refs/t3/checkpoints/x/turn/4"),
+  ];
+
+  it("diffs from the first git checkpoint when the git baseline is missing", () => {
+    expect(CheckpointDiffQuery.gitDiffBaseAfterTrellisTurns(mixed, 4)).toBe(
+      "refs/t3/checkpoints/x/turn/3",
+    );
+    // The first git checkpoint itself has nothing earlier to diff against.
+    expect(CheckpointDiffQuery.gitDiffBaseAfterTrellisTurns(mixed, 3)).toBeNull();
+    // Threads without Trellis-only turns keep the usual error.
+    expect(CheckpointDiffQuery.gitDiffBaseAfterTrellisTurns(mixed.slice(2), 4)).toBeUndefined();
+  });
+
+  it.effect("serves a full-thread diff of a mixed history from its first git checkpoint", () =>
+    Effect.gen(function* () {
+      const froms: Array<string> = [];
+      const layer = CheckpointDiffQuery.layer.pipe(
+        Layer.provide(
+          Layer.mock(CheckpointStore.CheckpointStore)({
+            diffCheckpoints: ({ fromCheckpointRef, cwd }) =>
+              Effect.suspend(() => {
+                froms.push(fromCheckpointRef);
+                return fromCheckpointRef === checkpointRefForThreadTurn(threadId, 0)
+                  ? Effect.fail(
+                      new VcsProcessTimeoutError({
+                        operation: "test.diff",
+                        command: "git",
+                        cwd,
+                        timeoutMs: 1,
+                      }),
+                    )
+                  : Effect.succeed("patch");
+              }),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
+            getFullThreadDiffContext: () =>
+              Effect.succeed(
+                Option.some({
+                  threadId,
+                  projectId: ProjectId.make("p"),
+                  workspaceRoot: "/trellis/workspaces/ws/project/idea",
+                  worktreePath: null,
+                  latestCheckpointTurnCount: 4,
+                  toCheckpointRef: CheckpointRef.make("refs/t3/checkpoints/x/turn/4"),
+                }),
+              ),
+            getThreadCheckpointContext: () =>
+              Effect.succeed(
+                Option.some({
+                  threadId,
+                  projectId: ProjectId.make("p"),
+                  workspaceRoot: "/trellis/workspaces/ws/project/idea",
+                  worktreePath: null,
+                  checkpoints: mixed,
+                }),
+              ),
+          }),
+        ),
+      );
+      const result = yield* Effect.gen(function* () {
+        const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+        return yield* query.getFullThreadDiff({ threadId, toTurnCount: 4 });
+      }).pipe(Effect.provide(layer));
+      expect(result.diff).toBe("patch");
+      expect(froms).toEqual([
+        checkpointRefForThreadTurn(threadId, 0),
+        "refs/t3/checkpoints/x/turn/3",
+      ]);
     }),
   );
 });

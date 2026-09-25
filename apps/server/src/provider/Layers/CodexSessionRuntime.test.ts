@@ -18,6 +18,7 @@ import {
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
+  sideChatDeveloperInstructions,
   readCodexThread,
   rollbackCodexThread,
   toMcpElicitationResponse,
@@ -915,6 +916,17 @@ describe("isRecoverableThreadResumeError", () => {
         }),
       ),
       false,
+    );
+  });
+});
+
+describe("sideChatDeveloperInstructions", () => {
+  it("keeps the session's own instructions, such as the Trellis primer", () => {
+    const combined = sideChatDeveloperInstructions("Configured.", "Trellis primer.");
+    NodeAssert.ok(combined.startsWith("Configured.\n\nTrellis primer.\n\n"));
+    NodeAssert.equal(
+      sideChatDeveloperInstructions(undefined, undefined),
+      sideChatDeveloperInstructions("", " "),
     );
   });
 });

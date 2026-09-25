@@ -10,7 +10,11 @@ import {
   TRELLIS_WORKTREE_REFUSAL,
   type Trellis,
 } from "./Trellis.ts";
-import { selectRollbackSnapshot, trellisRestoreScope } from "./TrellisCheckpoints.ts";
+import {
+  selectRollbackSnapshot,
+  sessionsInScope,
+  trellisRestoreScope,
+} from "./TrellisCheckpoints.ts";
 import { decideTrellisLaunch, rewriteLoopbackUrl } from "./TrellisProviderSession.ts";
 import { mainCheckoutFromGitFile, trellisTerminalSpawnInput } from "./TrellisPtyAdapter.ts";
 
@@ -237,10 +241,20 @@ describe("trellisRestoreScope", () => {
 describe("mainCheckoutFromGitFile", () => {
   it("finds the main checkout of a git worktree", () => {
     expect(
-      mainCheckoutFromGitFile("gitdir: /trellis/workspaces/ws-1/project/.git/worktrees/feature\n"),
+      mainCheckoutFromGitFile(
+        "gitdir: /trellis/workspaces/ws-1/project/.git/worktrees/feature\n",
+        "/home/me/.t3/worktrees/feature",
+      ),
     ).toBe("/trellis/workspaces/ws-1/project");
-    expect(mainCheckoutFromGitFile("gitdir: /repo/.git/modules/sub\n")).toBeNull();
-    expect(mainCheckoutFromGitFile("")).toBeNull();
+    // `worktree.useRelativePaths` writes a path relative to the worktree.
+    expect(
+      mainCheckoutFromGitFile(
+        "gitdir: ../../../../trellis/workspaces/ws-1/project/.git/worktrees/feature\n",
+        "/home/me/wt/feature",
+      ),
+    ).toBe("/trellis/workspaces/ws-1/project");
+    expect(mainCheckoutFromGitFile("gitdir: /repo/.git/modules/sub\n", "/repo/sub")).toBeNull();
+    expect(mainCheckoutFromGitFile("", "/x")).toBeNull();
   });
 });
 
@@ -260,6 +274,28 @@ describe("refuseWorktreeIn", () => {
       expect(refused).toBe(TRELLIS_WORKTREE_REFUSAL);
       yield* refuseWorktreeIn(trellis, "/home/me/code", (detail) => detail);
       yield* refuseWorktreeIn(Option.none(), "/trellis/workspaces/ws-1/project", (d) => d);
+    }),
+  );
+});
+
+describe("sessionsInScope", () => {
+  effectIt.effect("canonicalizes session cwds before comparing them with the scope", () =>
+    Effect.gen(function* () {
+      const scope = "/private/trellis/workspaces/ws-1/project";
+      const canonical = (path: string) =>
+        Effect.succeed(path.startsWith("/trellis/") ? `/private${path}` : path);
+      const ids = yield* sessionsInScope(
+        scope,
+        [
+          { threadId: "linked", status: "ready", cwd: "/trellis/workspaces/ws-1/project/sub" },
+          { threadId: "direct", status: "running", cwd: `${scope}` },
+          { threadId: "closed", status: "closed", cwd: scope },
+          { threadId: "elsewhere", status: "ready", cwd: "/home/me/code" },
+          { threadId: "no-cwd", status: "ready" },
+        ],
+        canonical,
+      );
+      expect(ids).toEqual(["linked", "direct"]);
     }),
   );
 });

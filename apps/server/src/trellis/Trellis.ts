@@ -17,6 +17,7 @@ import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 
 import { TrellisError } from "@t3tools/contracts";
+import { isTrellisManagedPath as isSharedTrellisManagedPath } from "@t3tools/shared/trellis";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
@@ -105,17 +106,7 @@ export interface TrellisEnv {
 }
 
 /** True when `cwd` is inside a Trellis project directory (`<root>/workspaces/<ws>/project`). */
-export function isTrellisManagedPath(root: string, cwd: string): boolean {
-  const relative = NodePath.posix.relative(
-    NodePath.posix.join(root, "workspaces"),
-    NodePath.posix.normalize(cwd),
-  );
-  if (relative === "" || relative.startsWith("..") || NodePath.posix.isAbsolute(relative)) {
-    return false;
-  }
-  const [workspace, project] = relative.split("/");
-  return workspace !== undefined && workspace !== "" && project === "project";
-}
+export const isTrellisManagedPath = isSharedTrellisManagedPath;
 
 /** `<root>` for a socket at the conventional `<root>/state/api.sock`, else null. */
 export function rootFromSocketPath(socketPath: string): string | null {
@@ -159,14 +150,15 @@ export class Trellis extends Context.Service<
     }) => Effect.Effect<TrellisProjectView, TrellisError>;
     /**
      * Sets the name and/or description. `user` (the default) pins them as a
-     * user edit; `generated` applies only while the name is still `default`
-     * or `generated`. Returns the fields Trellis kept instead.
+     * user edit. `generated` and `refined` apply only while the name is still
+     * `default` or `generated`; a `refined` name is final for generation.
+     * Returns the fields Trellis kept instead.
      */
     readonly describe: (input: {
       readonly target: string;
       readonly name?: string | undefined;
       readonly description?: string | undefined;
-      readonly source?: "user" | "generated";
+      readonly source?: "user" | "generated" | "refined";
     }) => Effect.Effect<{ readonly ignored: ReadonlyArray<string> }, TrellisError>;
     readonly find: (
       query: string,

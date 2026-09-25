@@ -5,9 +5,11 @@
  * After the first user message of a thread in a Trellis project path, the
  * text-generation model configured for thread titles proposes a short name
  * and a one-line description; once the thread has completed its third turn,
- * they are regenerated from the conversation so far. Both are sent to Trellis
- * as `generated`, which never overrides a name given by the user, an agent
- * or the git repository. Failures are logged and never affect the turn.
+ * they are regenerated from the conversation so far. The first is sent to
+ * Trellis as `generated`, the refinement as `refined`, which is final for
+ * the item: no later thread renames it. Neither overrides a name given by
+ * the user, an agent or the git repository. Failures are logged and never
+ * affect the turn.
  *
  * @module trellis/TrellisNaming
  */
@@ -40,7 +42,8 @@ export type NamingStage = "initial" | "refine";
  * Whether a Trellis name in `nameSource` may be generated at `stage`. The
  * first message names only a placeholder, so a second thread in the same
  * project does not rename it; the refinement may also improve an earlier
- * generated name. Names from the user, an agent or the repository are kept.
+ * generated name, once per item. Names from the user, an agent or the
+ * repository, and refined names, are kept.
  */
 export function mayGenerateName(stage: NamingStage, nameSource: string | undefined): boolean {
   return stage === "initial"
@@ -71,9 +74,10 @@ const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery;
   const serverSettings = yield* ServerSettingsService;
-  // Threads already refined by this process; the Trellis name source guards
-  // against repeats across restarts.
-  const refined = new Set<ThreadId>();
+  // Threads with a refinement queued or running, so repeated ready events do
+  // not duplicate the work. Whether an item is refined at all is Trellis's
+  // `name_source`.
+  const refining = new Set<ThreadId>();
 
   const cwdOf = Effect.fn("TrellisNaming.cwdOf")(function* (thread: {
     readonly projectId: ProjectId;
@@ -124,7 +128,7 @@ const make = Effect.gen(function* () {
       target: item.path,
       name: generated.name,
       ...(generated.description.length > 0 ? { description: generated.description } : {}),
-      source: "generated",
+      source: request.stage === "refine" ? "refined" : "generated",
     });
     yield* Effect.logInfo("Trellis project named from its thread", {
       threadId: request.threadId,
@@ -138,6 +142,11 @@ const make = Effect.gen(function* () {
 
   const worker = yield* makeDrainableWorker((request: NamingRequest) =>
     nameFromThread(request).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (request.stage === "refine") refining.delete(request.threadId);
+        }),
+      ),
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
           ? Effect.interrupt
@@ -150,16 +159,17 @@ const make = Effect.gen(function* () {
     ),
   );
 
-  // Refine once, when the thread's third turn has completed.
+  // Refine when a thread has completed its third turn or more; the item's
+  // name source makes it happen once per item.
   const maybeRefine = Effect.fn("TrellisNaming.maybeRefine")(function* (threadId: ThreadId) {
-    if (refined.has(threadId) || (yield* trellis.current) === null) return;
+    if (refining.has(threadId) || (yield* trellis.current) === null) return;
     const thread = yield* snapshots.getThreadShellById(threadId);
     if (Option.isNone(thread) || thread.value.latestTurn?.state !== "completed") return;
     const detail = yield* snapshots.getThreadDetailById(threadId, { activityKinds: [] });
     if (Option.isNone(detail)) return;
     const turns = detail.value.messages.filter((message) => message.role === "user").length;
     if (turns < TRELLIS_NAME_REFINE_TURN) return;
-    refined.add(threadId);
+    refining.add(threadId);
     yield* worker.enqueue({ threadId, stage: "refine" });
   });
 

@@ -76,6 +76,34 @@ function buildTurnDiffResult(
   };
 }
 
+/**
+ * The git checkpoint to diff from when a thread's turn-0 git baseline is
+ * missing because its earliest turns were recorded only as Trellis snapshots
+ * (the folder was not a git repository yet): the earliest git checkpoint
+ * before `toTurnCount`. Null when there is none, so no git diff exists yet.
+ * Undefined when the thread has no Trellis-only turns and the usual error
+ * applies.
+ */
+export function gitDiffBaseAfterTrellisTurns(
+  checkpoints: ReadonlyArray<{
+    readonly checkpointTurnCount: number;
+    readonly checkpointRef: string;
+  }>,
+  toTurnCount: number,
+): CheckpointRef | null | undefined {
+  if (!checkpoints.some((checkpoint) => isTrellisCheckpointRef(checkpoint.checkpointRef))) {
+    return undefined;
+  }
+  const base = checkpoints
+    .filter(
+      (checkpoint) =>
+        checkpoint.checkpointTurnCount < toTurnCount &&
+        !isTrellisCheckpointRef(checkpoint.checkpointRef),
+    )
+    .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)[0];
+  return base === undefined ? null : (base.checkpointRef as CheckpointRef);
+}
+
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
@@ -166,19 +194,33 @@ export const make = Effect.gen(function* () {
         });
       }
 
+      const diffFrom = (from: CheckpointRef) =>
+        checkpointStore.diffCheckpoints({
+          cwd: workspaceCwd,
+          fromCheckpointRef: from,
+          toCheckpointRef,
+          fallbackFromToHead: false,
+          ignoreWhitespace,
+        });
       // Turns recorded only as Trellis snapshots have no git diff.
       const diff =
         isTrellisCheckpointRef(fromCheckpointRef) || isTrellisCheckpointRef(toCheckpointRef)
           ? ""
-          : yield* checkpointStore
-              .diffCheckpoints({
-                cwd: workspaceCwd,
-                fromCheckpointRef,
-                toCheckpointRef,
-                fallbackFromToHead: false,
-                ignoreWhitespace,
-              })
-              .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"));
+          : yield* diffFrom(fromCheckpointRef).pipe(
+              Effect.catch((error) => {
+                if (input.fromTurnCount !== 0) return Effect.fail(error);
+                const base = gitDiffBaseAfterTrellisTurns(
+                  threadContext.value.checkpoints,
+                  input.toTurnCount,
+                );
+                return base === undefined
+                  ? Effect.fail(error)
+                  : base === null
+                    ? Effect.succeed("")
+                    : diffFrom(base);
+              }),
+              Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"),
+            );
 
       const turnDiff = buildTurnDiffResult(input, diff);
       if (!isTurnDiffResult(turnDiff)) {
@@ -260,17 +302,37 @@ export const make = Effect.gen(function* () {
       });
     }
 
-    const diff = isTrellisCheckpointRef(threadContext.value.toCheckpointRef)
+    const toCheckpointRef = threadContext.value.toCheckpointRef as CheckpointRef;
+    const diffFrom = (from: CheckpointRef) =>
+      checkpointStore.diffCheckpoints({
+        cwd: workspaceCwd,
+        fromCheckpointRef: from,
+        toCheckpointRef,
+        fallbackFromToHead: false,
+        ignoreWhitespace,
+      });
+    // A thread whose early turns were Trellis-only has no git turn-0
+    // baseline; diff from its first git checkpoint instead.
+    const diff = isTrellisCheckpointRef(toCheckpointRef)
       ? ""
-      : yield* checkpointStore
-          .diffCheckpoints({
-            cwd: workspaceCwd,
-            fromCheckpointRef: checkpointRefForThreadTurn(input.threadId, 0),
-            toCheckpointRef: threadContext.value.toCheckpointRef as CheckpointRef,
-            fallbackFromToHead: false,
-            ignoreWhitespace,
-          })
-          .pipe(Effect.withSpan("checkpoint.fullThread.diffCheckpoints"));
+      : yield* diffFrom(checkpointRefForThreadTurn(input.threadId, 0)).pipe(
+          Effect.catch((error) =>
+            projectionSnapshotQuery.getThreadCheckpointContext(input.threadId).pipe(
+              Effect.orElseSucceed(() => Option.none()),
+              Effect.flatMap((context) => {
+                const base = Option.isSome(context)
+                  ? gitDiffBaseAfterTrellisTurns(context.value.checkpoints, input.toTurnCount)
+                  : undefined;
+                return base === undefined
+                  ? Effect.fail(error)
+                  : base === null
+                    ? Effect.succeed("")
+                    : diffFrom(base);
+              }),
+            ),
+          ),
+          Effect.withSpan("checkpoint.fullThread.diffCheckpoints"),
+        );
 
     const turnDiff = buildTurnDiffResult(
       {

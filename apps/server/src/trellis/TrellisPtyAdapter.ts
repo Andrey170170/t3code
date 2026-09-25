@@ -43,10 +43,15 @@ export function trellisTerminalSpawnInput(
   };
 }
 
-/** The main checkout named by a worktree's `.git` file (`gitdir: <main>/.git/worktrees/<n>`). */
-export function mainCheckoutFromGitFile(contents: string): string | null {
-  const gitdir = /^gitdir:\s*(.+)$/m.exec(contents)?.[1]?.trim();
-  if (!gitdir) return null;
+/**
+ * The main checkout named by a worktree's `.git` file (`gitdir:
+ * <main>/.git/worktrees/<n>`). A relative `gitdir` (`worktree.useRelativePaths`)
+ * is resolved against `gitFileDir`, the directory holding the `.git` file.
+ */
+export function mainCheckoutFromGitFile(contents: string, gitFileDir: string): string | null {
+  const raw = /^gitdir:\s*(.+)$/m.exec(contents)?.[1]?.trim();
+  if (!raw) return null;
+  const gitdir = NodePath.posix.resolve(gitFileDir, raw);
   const marker = `${NodePath.posix.sep}.git${NodePath.posix.sep}worktrees${NodePath.posix.sep}`;
   const index = gitdir.lastIndexOf(marker);
   return index > 0 ? gitdir.slice(0, index) : null;
@@ -72,7 +77,7 @@ export const layer = Layer.effect(
           const contents = yield* fileSystem
             .readFileString(gitPath)
             .pipe(Effect.orElseSucceed(() => ""));
-          return mainCheckoutFromGitFile(contents);
+          return mainCheckoutFromGitFile(contents, dir);
         }
         const parent = NodePath.posix.dirname(dir);
         if (parent === dir) return null;

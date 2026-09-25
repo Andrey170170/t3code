@@ -45,9 +45,9 @@ import * as Trellis from "../../trellis/Trellis.ts";
 import {
   BASELINE_TURN,
   isTrellisCheckpointRef,
-  pathsOverlap,
   TRELLIS_CHECKPOINT_REF_PREFIX,
   selectRollbackSnapshot,
+  sessionsInScope,
   trellisRestoreScope,
 } from "../../trellis/TrellisCheckpoints.ts";
 
@@ -1006,18 +1006,19 @@ const make = Effect.gen(function* () {
       });
       if (selection._tag === "Missing") return yield* fail(selection.detail);
       if (scope.restartsWorkspace) {
-        for (const session of yield* providerService.listSessions()) {
-          if (
-            session.status === "closed" ||
-            session.cwd === undefined ||
-            !pathsOverlap(canonicalScope, session.cwd)
-          ) {
-            continue;
-          }
-          yield* providerService.stopSession({ threadId: session.threadId }).pipe(
+        // Canonical paths, as `isScopeUnshared` compares: a symlinked root
+        // must not leave a provider running through the restart.
+        const threadIds = yield* sessionsInScope(
+          canonicalScope,
+          yield* providerService.listSessions(),
+          (path) => fileSystem.realPath(path).pipe(Effect.orElseSucceed(() => path)),
+        );
+        for (const threadId of threadIds) {
+          const sessionThreadId = ThreadId.make(threadId);
+          yield* providerService.stopSession({ threadId: sessionThreadId }).pipe(
             Effect.catch((error) =>
               Effect.logWarning("failed to stop provider session before Trellis rollback", {
-                threadId: session.threadId,
+                threadId: sessionThreadId,
                 detail: error.message,
               }),
             ),

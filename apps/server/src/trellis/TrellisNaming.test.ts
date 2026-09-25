@@ -157,7 +157,7 @@ describe("mayGenerateName", () => {
     expect(TrellisNaming.mayGenerateName("initial", "generated")).toBe(false);
     expect(TrellisNaming.mayGenerateName("refine", "generated")).toBe(true);
     expect(TrellisNaming.mayGenerateName("refine", "default")).toBe(true);
-    for (const source of ["user", "agent", "derived", undefined]) {
+    for (const source of ["user", "agent", "derived", "refined", undefined]) {
       expect(TrellisNaming.mayGenerateName("initial", source)).toBe(false);
       expect(TrellisNaming.mayGenerateName("refine", source)).toBe(false);
     }
@@ -182,9 +182,9 @@ describe("TrellisNaming", () => {
     }),
   );
 
-  it.effect("keeps names chosen by the user, an agent or the repository", () =>
+  it.effect("keeps names chosen by the user, an agent, the repository or a refinement", () =>
     Effect.gen(function* () {
-      for (const nameSource of ["user", "agent", "derived"]) {
+      for (const nameSource of ["user", "agent", "derived", "refined"]) {
         const harness = makeHarness({ nameSource, messages: threeTurns });
         yield* run(harness, [userMessageSent, sessionReady]);
         expect(harness.generated).toEqual([]);
@@ -209,14 +209,14 @@ describe("TrellisNaming", () => {
     }),
   );
 
-  it.effect("refines once from the conversation after the third turn", () =>
+  it.effect("refines from the conversation after the third turn, as a final name", () =>
     Effect.gen(function* () {
       const harness = makeHarness({ nameSource: "generated", messages: threeTurns });
       yield* run(harness, [sessionReady, sessionReady]);
       expect(harness.generated).toHaveLength(1);
       expect(harness.generated[0]?.previousName).toBe("Idea");
       expect(harness.generated[0]?.message).toContain("and wind");
-      expect(harness.described[0]?.source).toBe("generated");
+      expect(harness.described[0]?.source).toBe("refined");
     }),
   );
 

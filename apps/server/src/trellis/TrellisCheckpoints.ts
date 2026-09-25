@@ -11,6 +11,8 @@
  */
 import * as NodePath from "node:path";
 
+import * as Effect from "effect/Effect";
+
 import type { TrellisResolved, TrellisSnapshot } from "./Trellis.ts";
 
 /** The `turn` tag of the snapshot taken before a thread's first turn. */
@@ -97,3 +99,25 @@ export function pathsOverlap(left: string, right: string): boolean {
   };
   return within(left, right) || within(right, left);
 }
+
+/**
+ * Threads whose open provider session works inside or above `scope` (a
+ * canonical path). Session cwds are canonicalized first, so a symlinked path
+ * to the same workspace still counts.
+ */
+export const sessionsInScope = <E, R>(
+  scope: string,
+  sessions: ReadonlyArray<{
+    readonly threadId: string;
+    readonly status: string;
+    readonly cwd?: string | undefined;
+  }>,
+  canonicalize: (path: string) => Effect.Effect<string, E, R>,
+): Effect.Effect<ReadonlyArray<string>, E, R> =>
+  Effect.forEach(sessions, (session) =>
+    session.status === "closed" || session.cwd === undefined
+      ? Effect.succeed(null)
+      : canonicalize(session.cwd).pipe(
+          Effect.map((cwd) => (pathsOverlap(scope, cwd) ? session.threadId : null)),
+        ),
+  ).pipe(Effect.map((ids) => ids.filter((id): id is string => id !== null)));

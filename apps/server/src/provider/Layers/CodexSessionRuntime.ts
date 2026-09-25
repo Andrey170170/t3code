@@ -1359,6 +1359,16 @@ export const rollbackCodexThread = Effect.fn("rollbackCodexThread")(function* (
   return { threadId, turns: snapshot.turns.slice(0, retainedCount) };
 });
 
+/** Developer instructions of a side-chat fork: configured, session, then side-chat rules. */
+export function sideChatDeveloperInstructions(
+  configured: string | undefined,
+  session: string | undefined,
+): string {
+  return [configured, session?.trim(), SIDE_DEVELOPER_INSTRUCTIONS]
+    .filter((part): part is string => part !== undefined && part.length > 0)
+    .join("\n\n");
+}
+
 export const makeCodexSessionRuntime = (
   options: CodexSessionRuntimeOptions,
 ): Effect.Effect<
@@ -2712,9 +2722,12 @@ export const makeCodexSessionRuntime = (
           // Paginated ephemeral forks inherit context without returning turn history.
           excludeTurns: true,
           ...(parentSession.model ? { model: parentSession.model } : {}),
-          developerInstructions: existingInstructions
-            ? `${existingInstructions}\n\n${SIDE_DEVELOPER_INSTRUCTIONS}`
-            : SIDE_DEVELOPER_INSTRUCTIONS,
+          // Fork instructions replace the thread's, so carry the session's
+          // own (e.g. the Trellis workspace primer) as well.
+          developerInstructions: sideChatDeveloperInstructions(
+            existingInstructions,
+            options.developerInstructions,
+          ),
           ...(parentTurnSettings.effort
             ? { config: { model_reasoning_effort: parentTurnSettings.effort } }
             : {}),
