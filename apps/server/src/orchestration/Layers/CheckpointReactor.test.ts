@@ -94,8 +94,8 @@ function createProviderServiceHarness(
 ) {
   const now = "2026-01-01T00:00:00.000Z";
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
-  const rollbackConversation = vi.fn(
-    (_input: { readonly threadId: ThreadId; readonly numTurns: number }) => Effect.void,
+  const rollbackConversation = vi.fn<ProviderServiceShape["rollbackConversation"]>(
+    () => Effect.void,
   );
   const assertConversationRollbackSupported = vi.fn<
     ProviderServiceShape["assertConversationRollbackSupported"]
@@ -202,6 +202,7 @@ function createTrellisHarness(input: {
           path: input.cwd,
           deleted_at: null,
           graduated_to: null,
+          updated_at: 0,
           workspaces: [],
         },
       }),
@@ -2501,6 +2502,38 @@ describe("CheckpointReactor", () => {
             kind: "checkpoint.revert.failed",
             payload: expect.objectContaining({
               detail: expect.stringContaining("Another thread uses this Trellis idea"),
+            }),
+          }),
+        ]),
+      );
+    });
+
+    it("names the undo snapshot when rewinding the conversation fails after a restore", async () => {
+      const harness = await createHarness({
+        trellisWorkspaceKind: "scratch",
+        initializeGit: false,
+        seedFilesystemCheckpoints: false,
+        threadWorktreePath: null,
+      });
+      harness.provider.rollbackConversation.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderValidationError({
+            operation: "ProviderService.rollbackConversation",
+            issue: "provider went away",
+          }),
+        ),
+      );
+
+      await runTrellisTurn(harness);
+      await requestRevertToStart(harness);
+      expect(harness.trellis?.rollbacks).toEqual([{ target: harness.cwd, snapshot: "snap-1" }]);
+      const thread = (await harness.readModel()).threads[0];
+      expect(thread?.activities).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "checkpoint.revert.failed",
+            payload: expect.objectContaining({
+              detail: expect.stringContaining("snap-undo"),
             }),
           }),
         ]),

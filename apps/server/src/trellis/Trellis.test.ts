@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { isTrellisManagedPath } from "./Trellis.ts";
+import { it as effectIt } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+
+import {
+  isTrellisManagedPath,
+  refuseWorktreeIn,
+  TRELLIS_WORKTREE_REFUSAL,
+  type Trellis,
+} from "./Trellis.ts";
 import { selectRollbackSnapshot, trellisRestoreScope } from "./TrellisCheckpoints.ts";
 import { decideTrellisLaunch, rewriteLoopbackUrl } from "./TrellisProviderSession.ts";
-import { trellisTerminalSpawnInput } from "./TrellisPtyAdapter.ts";
+import { mainCheckoutFromGitFile, trellisTerminalSpawnInput } from "./TrellisPtyAdapter.ts";
 
 const env = { root: "/trellis", bin: "/opt/trellis", shimDir: "/t3/trellis-shims" };
 const idea = "/trellis/workspaces/ws-scratch/project/idea-1";
@@ -52,6 +61,28 @@ describe("decideTrellisLaunch", () => {
       cwd: idea,
     });
     expect(decision.kind === "unsupported" && decision.message).toContain("Trellis is not running");
+  });
+
+  it("refuses a Trellis project's thread whose cwd is outside the workspace", () => {
+    const decision = decideTrellisLaunch({
+      env,
+      expectedRoot: env.root,
+      driverKind: "codex",
+      cwd: "/home/me/.t3/worktrees/repo/branch",
+      projectRoot: "/trellis/workspaces/ws-1/project",
+    });
+    expect(decision.kind === "unsupported" && decision.message).toContain(
+      "outside the Trellis workspace",
+    );
+    expect(
+      decideTrellisLaunch({
+        env,
+        expectedRoot: env.root,
+        driverKind: "codex",
+        cwd: "/home/me/.t3/worktrees/repo/branch",
+        projectRoot: "/home/me/code/repo",
+      }),
+    ).toEqual({ kind: "host" });
   });
 
   it("runs Codex and Claude through the shims inside a Trellis project path", () => {
@@ -187,6 +218,7 @@ describe("trellisRestoreScope", () => {
     path: `/trellis/workspaces/ws-1/project${kind === "idea" ? "/idea-1" : ""}`,
     deleted_at: null,
     graduated_to: null,
+    updated_at: 0,
     workspaces: [],
   });
 
@@ -200,4 +232,34 @@ describe("trellisRestoreScope", () => {
     // A scratch path outside any idea would roll back every idea.
     expect(trellisRestoreScope({ workspace: workspace("scratch"), project: null })).toBeNull();
   });
+});
+
+describe("mainCheckoutFromGitFile", () => {
+  it("finds the main checkout of a git worktree", () => {
+    expect(
+      mainCheckoutFromGitFile("gitdir: /trellis/workspaces/ws-1/project/.git/worktrees/feature\n"),
+    ).toBe("/trellis/workspaces/ws-1/project");
+    expect(mainCheckoutFromGitFile("gitdir: /repo/.git/modules/sub\n")).toBeNull();
+    expect(mainCheckoutFromGitFile("")).toBeNull();
+  });
+});
+
+describe("refuseWorktreeIn", () => {
+  // Only `expectedRoot` is read.
+  const trellis = Option.some({
+    expectedRoot: Effect.succeed("/trellis"),
+  } as unknown as Trellis["Service"]);
+
+  effectIt.effect("refuses git worktrees of Trellis project paths only", () =>
+    Effect.gen(function* () {
+      const refused = yield* refuseWorktreeIn(
+        trellis,
+        "/trellis/workspaces/ws-1/project",
+        (detail) => detail,
+      ).pipe(Effect.flip);
+      expect(refused).toBe(TRELLIS_WORKTREE_REFUSAL);
+      yield* refuseWorktreeIn(trellis, "/home/me/code", (detail) => detail);
+      yield* refuseWorktreeIn(Option.none(), "/trellis/workspaces/ws-1/project", (d) => d);
+    }),
+  );
 });

@@ -956,7 +956,7 @@ const make = Effect.gen(function* () {
   // Rolls a Trellis project path back to the snapshot for checkpoint
   // `turnCount`. An idea restores only its folder; a dedicated workspace
   // restarts its container, so provider sessions inside it are stopped first
-  // and resume on the next turn. Returns false after recording a failure.
+  // and resume on the next turn. Returns null after recording a failure.
   const restoreTrellisSnapshot = Effect.fn("restoreTrellisSnapshot")(function* (input: {
     readonly thread: {
       readonly id: ThreadId;
@@ -977,7 +977,7 @@ const make = Effect.gen(function* () {
         createdAt: input.createdAt,
       }).pipe(
         Effect.catch(() => Effect.void),
-        Effect.as(false),
+        Effect.as(null),
       );
     if (Option.isNone(trellis)) return yield* fail("Trellis is unavailable.");
     const client = trellis.value;
@@ -1035,7 +1035,7 @@ const make = Effect.gen(function* () {
         undoSnapshot,
       });
       yield* refreshWorkspaceEntries(input.cwd);
-      return true;
+      return { undoSnapshot };
     }).pipe(
       Effect.catchTag("TrellisError", (error) => fail(`Trellis rollback failed: ${error.message}`)),
     );
@@ -1097,15 +1097,16 @@ const make = Effect.gen(function* () {
 
     yield* providerService.assertConversationRollbackSupported(event.payload.threadId);
 
+    let trellisRestore: { readonly undoSnapshot: string | null } | null = null;
     if (event.payload.restoreFiles !== false && trellisCwd !== undefined) {
       // Trellis owns the files of its project paths: never git-restore them.
-      const restored = yield* restoreTrellisSnapshot({
+      trellisRestore = yield* restoreTrellisSnapshot({
         thread,
         turnCount: event.payload.turnCount,
         cwd: trellisCwd,
         createdAt: now,
       });
-      if (!restored) return;
+      if (trellisRestore === null) return;
     } else if (event.payload.restoreFiles !== false) {
       if (!checkpointCwd) {
         yield* appendRevertFailureActivity({
@@ -1167,10 +1168,33 @@ const make = Effect.gen(function* () {
 
     const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
-      yield* providerService.rollbackConversation({
-        threadId: event.payload.threadId,
-        numTurns: rolledBackTurns,
-      });
+      const rewound = yield* providerService
+        .rollbackConversation({
+          threadId: event.payload.threadId,
+          numTurns: rolledBackTurns,
+        })
+        .pipe(
+          Effect.as(true),
+          Effect.catch((error) => {
+            // Files already moved back: tell the user how to undo that.
+            if (trellisRestore === null) return Effect.fail(error);
+            const undo = trellisRestore.undoSnapshot;
+            return appendRevertFailureActivity({
+              threadId: event.payload.threadId,
+              turnCount: event.payload.turnCount,
+              detail: `Trellis restored the files, but rewinding the conversation failed: ${error.message}${
+                undo === null
+                  ? ""
+                  : ` To undo the file restore, roll back to Trellis snapshot ${undo} (\`trellis rollback --target ${trellisCwd} ${undo}\`).`
+              }`,
+              createdAt: now,
+            }).pipe(
+              Effect.catch(() => Effect.void),
+              Effect.as(false),
+            );
+          }),
+        );
+      if (!rewound) return;
     }
 
     const staleCheckpointRefs: Array<CheckpointRef> = [];

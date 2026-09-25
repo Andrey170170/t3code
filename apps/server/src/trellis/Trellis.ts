@@ -23,9 +23,11 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import { ServerConfig } from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -48,6 +50,7 @@ export const TrellisProjectView = Schema.Struct({
   description: Schema.String,
   workspace_id: Schema.String,
   path: Schema.String,
+  updated_at: Schema.Finite,
   deleted_at: Schema.NullOr(Schema.Finite),
   graduated_to: Schema.NullOr(Schema.String),
   workspaces: Schema.Array(TrellisWorkspaceView),
@@ -304,6 +307,9 @@ export const make = Effect.gen(function* () {
     ),
   );
 
+  // Serialized so concurrent refreshes never run `trellis shims` twice or
+  // let a slower refresh overwrite a newer result.
+  const refreshLock = yield* Semaphore.make(1);
   const refresh = Effect.gen(function* () {
     const status = yield* call(TrellisStatusView, "GET", "/v1/status", { timeoutMs: 3_000 }).pipe(
       Effect.option,
@@ -333,7 +339,7 @@ export const make = Effect.gen(function* () {
     yield* Effect.logInfo("Trellis is available", { root: next.root, shimDir: next.shimDir });
     yield* Ref.set(state, next);
     return next;
-  });
+  }).pipe(refreshLock.withPermits(1));
 
   yield* refresh;
 
@@ -373,12 +379,15 @@ export const make = Effect.gen(function* () {
     createSnapshot: ({ target, thread, turn }) =>
       call(TrellisSnapshot, "POST", "/v1/snapshots", {
         body: { target, kind: "turn", thread, turn },
-        timeoutMs: 120_000,
+        // Btrfs snapshots take milliseconds; these run on the shared
+        // checkpoint worker, so a hung Trellis must not stall other threads.
+        timeoutMs: 15_000,
       }),
     rollback: ({ target, snapshot }) =>
       call(TrellisRollbackView, "POST", "/v1/rollback", {
         body: { target, snapshot },
-        timeoutMs: 10 * 60_000,
+        // Includes a container restart for dedicated workspaces.
+        timeoutMs: 60_000,
       }).pipe(
         Effect.map((view) => {
           const undo = view.undo_snapshot;
@@ -412,3 +421,23 @@ export const isTrellisPath = Effect.fn("Trellis.isTrellisPath")(function* (
   const root = yield* trellis.expectedRoot;
   return root !== null && isTrellisManagedPath(root, cwd);
 });
+
+export const TRELLIS_WORKTREE_REFUSAL =
+  "Git worktrees are not supported in Trellis projects: they would live outside the workspace and run on the host. Use `trellis fork` for parallel work instead.";
+
+/**
+ * Fails with `TRELLIS_WORKTREE_REFUSAL` when `cwd` is a Trellis project path.
+ * `trellis` is the optional service captured when the caller was built.
+ */
+export const refuseWorktreeIn = <E>(
+  trellis: Option.Option<Trellis["Service"]>,
+  cwd: string,
+  makeError: (detail: string) => E,
+): Effect.Effect<void, E> =>
+  Option.isNone(trellis)
+    ? Effect.void
+    : isTrellisPath(trellis.value, cwd).pipe(
+        Effect.flatMap((managed) =>
+          managed ? Effect.fail(makeError(TRELLIS_WORKTREE_REFUSAL)) : Effect.void,
+        ),
+      );

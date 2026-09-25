@@ -25,7 +25,9 @@ const workspace = (id: string, name = "main"): TrellisWorkspaceView => ({
   path: `${ROOT}/workspaces/${id}/project`,
   deleted_at: null,
 });
-const noDeletedWorkspaces: ReadonlySet<string> = new Set();
+const noDeletedWorkspaces: ReadonlyMap<string, number> = new Map();
+// Before the retirement times (100 s) used below.
+const EARLY = "1970-01-01T00:00:10.000Z";
 
 const idea = (
   id: string,
@@ -38,6 +40,7 @@ const idea = (
   description: "",
   workspace_id: "ws-scratch",
   path: `${SCRATCH}/${id}`,
+  updated_at: 0,
   deleted_at: null,
   graduated_to: null,
   workspaces: [workspace("ws-scratch", "scratch")],
@@ -56,6 +59,7 @@ const dedicated = (
   description: "",
   workspace_id: workspaces[0]?.id ?? "ws-gone",
   path: workspaces[0]?.path ?? `${ROOT}/workspaces/ws-gone/project`,
+  updated_at: 0,
   deleted_at: null,
   graduated_to: null,
   workspaces,
@@ -78,7 +82,7 @@ describe("planCatalogSync", () => {
       ],
       projects: [],
       threads: [],
-      deletedWorkspaceIds: noDeletedWorkspaces,
+      deletedWorkspaces: noDeletedWorkspaces,
     });
     expect(actions).toEqual([
       { type: "create", workspaceRoot: `${SCRATCH}/idea-a`, title: "Sketch" },
@@ -104,7 +108,7 @@ describe("planCatalogSync", () => {
         project("p-b2", `${ROOT}/workspaces/ws-b2/project`, "Engine · experiment"),
       ],
       threads: [],
-      deletedWorkspaceIds: noDeletedWorkspaces,
+      deletedWorkspaces: noDeletedWorkspaces,
     });
     expect(actions).toEqual([
       { type: "rename", projectId: ProjectId.make("p-b"), title: "Engine" },
@@ -116,7 +120,7 @@ describe("planCatalogSync", () => {
       root: ROOT,
       items: [
         idea("idea-trashed", "Trashed", { deleted_at: 100 }),
-        idea("idea-graduated", "Graduated", { graduated_to: "prj-new" }),
+        idea("idea-graduated", "Graduated", { graduated_to: "prj-new", updated_at: 100 }),
         dedicated("prj-new", "Graduated", [workspace("ws-new")]),
       ],
       projects: [
@@ -125,10 +129,20 @@ describe("planCatalogSync", () => {
         project("p-new", `${ROOT}/workspaces/ws-new/project`, "Graduated"),
       ],
       threads: [
-        { id: ThreadId.make("t-1"), projectId: ProjectId.make("p-trashed"), archived: false },
-        { id: ThreadId.make("t-2"), projectId: ProjectId.make("p-trashed"), archived: true },
+        {
+          id: ThreadId.make("t-1"),
+          projectId: ProjectId.make("p-trashed"),
+          archived: false,
+          updatedAt: EARLY,
+        },
+        {
+          id: ThreadId.make("t-2"),
+          projectId: ProjectId.make("p-trashed"),
+          archived: true,
+          updatedAt: EARLY,
+        },
       ],
-      deletedWorkspaceIds: noDeletedWorkspaces,
+      deletedWorkspaces: noDeletedWorkspaces,
     });
     expect(actions).toEqual([
       {
@@ -154,13 +168,18 @@ describe("planCatalogSync", () => {
         project("p-b", `${ROOT}/workspaces/ws-b/project`, "Engine"),
         project("p-fork", `${ROOT}/workspaces/ws-fork/project`, "Engine · fork"),
       ],
-      deletedWorkspaceIds: new Set(["ws-fork"]),
+      deletedWorkspaces: new Map([["ws-fork", 100]]),
     };
     expect(
       TrellisCatalog.planCatalogSync({
         ...input,
         threads: [
-          { id: ThreadId.make("t-1"), projectId: ProjectId.make("p-fork"), archived: false },
+          {
+            id: ThreadId.make("t-1"),
+            projectId: ProjectId.make("p-fork"),
+            archived: false,
+            updatedAt: EARLY,
+          },
         ],
       }),
     ).toEqual([
@@ -176,8 +195,67 @@ describe("planCatalogSync", () => {
       TrellisCatalog.planCatalogSync({
         ...input,
         threads: [
-          { id: ThreadId.make("t-1"), projectId: ProjectId.make("p-fork"), archived: true },
+          {
+            id: ThreadId.make("t-1"),
+            projectId: ProjectId.make("p-fork"),
+            archived: true,
+            updatedAt: EARLY,
+          },
         ],
+      }),
+    ).toEqual([]);
+  });
+
+  it("does not re-archive a thread unarchived or used after the item was trashed", () => {
+    const actions = TrellisCatalog.planCatalogSync({
+      root: ROOT,
+      items: [idea("idea-trashed", "Trashed", { deleted_at: 100 })],
+      projects: [project("p-trashed", `${SCRATCH}/idea-trashed`)],
+      threads: [
+        {
+          id: ThreadId.make("t-old"),
+          projectId: ProjectId.make("p-trashed"),
+          archived: false,
+          updatedAt: EARLY,
+        },
+        {
+          id: ThreadId.make("t-unarchived"),
+          projectId: ProjectId.make("p-trashed"),
+          archived: false,
+          updatedAt: "1970-01-01T00:05:00.000Z",
+        },
+      ],
+      deletedWorkspaces: noDeletedWorkspaces,
+    });
+    expect(actions).toEqual([
+      {
+        type: "retire",
+        projectId: ProjectId.make("p-trashed"),
+        archiveThreadIds: [ThreadId.make("t-old")],
+        deleteProject: false,
+      },
+    ]);
+    // Once the old thread is archived, the unarchived one is left alone.
+    expect(
+      TrellisCatalog.planCatalogSync({
+        root: ROOT,
+        items: [idea("idea-trashed", "Trashed", { deleted_at: 100 })],
+        projects: [project("p-trashed", `${SCRATCH}/idea-trashed`)],
+        threads: [
+          {
+            id: ThreadId.make("t-old"),
+            projectId: ProjectId.make("p-trashed"),
+            archived: true,
+            updatedAt: EARLY,
+          },
+          {
+            id: ThreadId.make("t-unarchived"),
+            projectId: ProjectId.make("p-trashed"),
+            archived: false,
+            updatedAt: "1970-01-01T00:05:00.000Z",
+          },
+        ],
+        deletedWorkspaces: noDeletedWorkspaces,
       }),
     ).toEqual([]);
   });
@@ -193,7 +271,7 @@ describe("planCatalogSync", () => {
       TrellisCatalog.planCatalogSync({
         ...input,
         threads: [],
-        deletedWorkspaceIds: noDeletedWorkspaces,
+        deletedWorkspaces: noDeletedWorkspaces,
       }),
     ).toEqual([]);
   });
@@ -205,7 +283,7 @@ describe("planCatalogSync", () => {
         items: [idea("idea-trashed", "Trashed", { deleted_at: 100 })],
         projects: [project("p-scratch", SCRATCH)],
         threads: [],
-        deletedWorkspaceIds: noDeletedWorkspaces,
+        deletedWorkspaces: noDeletedWorkspaces,
       }),
     ).toEqual([]);
   });
@@ -220,7 +298,7 @@ describe("planCatalogSync", () => {
         project("p-rootfs", `${ROOT}/workspaces/ws-x/rootfs`),
       ],
       threads: [],
-      deletedWorkspaceIds: noDeletedWorkspaces,
+      deletedWorkspaces: noDeletedWorkspaces,
     });
     expect(actions).toEqual([]);
   });

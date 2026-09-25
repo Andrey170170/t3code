@@ -54,6 +54,8 @@ export interface CatalogThread {
   readonly id: ThreadId;
   readonly projectId: ProjectId;
   readonly archived: boolean;
+  /** ISO time of the last change, including an unarchive. */
+  readonly updatedAt: string;
 }
 
 export type CatalogSyncAction =
@@ -148,8 +150,11 @@ export function planCatalogSync(input: {
   readonly items: ReadonlyArray<TrellisProjectView>;
   readonly projects: ReadonlyArray<CatalogProject>;
   readonly threads: ReadonlyArray<CatalogThread>;
-  /** Workspaces Trellis reports as deleted; see `unlistedWorkspaceIds`. */
-  readonly deletedWorkspaceIds: ReadonlySet<string>;
+  /**
+   * Workspaces Trellis reports as deleted, with their deletion time in Unix
+   * seconds; see `unlistedWorkspaceIds`.
+   */
+  readonly deletedWorkspaces: ReadonlyMap<string, number>;
 }): ReadonlyArray<CatalogSyncAction> {
   const actions: Array<CatalogSyncAction> = [];
   const projectsByRoot = new Map<string, CatalogProject>();
@@ -171,19 +176,24 @@ export function planCatalogSync(input: {
 
   // Retire only on a positive signal: the path of a trashed or graduated
   // item, or the root of a workspace Trellis reports as deleted (a trashed
-  // fork). Absence from the listing is never enough.
-  const retiredRoots = new Set<string>();
+  // fork). Absence from the listing is never enough. The value is when it
+  // happened, in Unix seconds (graduation records it as the update time).
+  const retiredAt = new Map<string, number>();
   for (const item of input.items) {
-    if (!isLive(item)) retiredRoots.add(normalizeRoot(item.path));
+    if (!isLive(item)) retiredAt.set(normalizeRoot(item.path), item.deleted_at ?? item.updated_at);
   }
   for (const [root, project] of projectsByRoot) {
     if (desiredRoots.has(root) || !isTrellisManagedPath(input.root, root)) continue;
     const workspaceId = workspaceIdOfRoot(input.root, root);
-    const deletedWorkspace = workspaceId !== null && input.deletedWorkspaceIds.has(workspaceId);
-    if (!retiredRoots.has(root) && !deletedWorkspace) continue;
+    const at =
+      retiredAt.get(root) ??
+      (workspaceId === null ? undefined : input.deletedWorkspaces.get(workspaceId));
+    if (at === undefined) continue;
     const threads = input.threads.filter((thread) => thread.projectId === project.id);
+    // Only threads untouched since the retirement: one the user unarchived
+    // (or kept working in) afterwards stays where it is.
     const archiveThreadIds = threads
-      .filter((thread) => !thread.archived)
+      .filter((thread) => !thread.archived && Date.parse(thread.updatedAt) < at * 1000)
       .map((thread) => thread.id);
     if (archiveThreadIds.length === 0 && threads.length > 0) continue;
     actions.push({
@@ -243,11 +253,13 @@ const make = Effect.gen(function* () {
         id: thread.id,
         projectId: thread.projectId,
         archived: thread.archivedAt !== null,
+        updatedAt: thread.updatedAt,
       })),
       ...archived.threads.map((thread) => ({
         id: thread.id,
         projectId: thread.projectId,
         archived: true,
+        updatedAt: thread.updatedAt,
       })),
     ];
     return { projects: active.projects, threads };
@@ -312,19 +324,20 @@ const make = Effect.gen(function* () {
     const ids = new Map<string, ProjectId>();
     for (const project of t3.projects) ids.set(normalizeRoot(project.workspaceRoot), project.id);
     const unlisted = unlistedWorkspaceIds({ root: env.root, items, projects: t3.projects });
-    const deletedWorkspaceIds = new Set(
-      unlisted.length === 0
-        ? []
-        : (yield* trellis.listWorkspaces({ all: true }))
-            .filter((workspace) => workspace.deleted_at !== null && unlisted.includes(workspace.id))
-            .map((workspace) => workspace.id),
-    );
+    const deletedWorkspaces = new Map<string, number>();
+    if (unlisted.length > 0) {
+      for (const workspace of yield* trellis.listWorkspaces({ all: true })) {
+        if (workspace.deleted_at !== null && unlisted.includes(workspace.id)) {
+          deletedWorkspaces.set(workspace.id, workspace.deleted_at);
+        }
+      }
+    }
     const actions = planCatalogSync({
       root: env.root,
       items,
       projects: t3.projects,
       threads: t3.threads,
-      deletedWorkspaceIds,
+      deletedWorkspaces,
     });
     let failed = false;
     for (const action of actions) {

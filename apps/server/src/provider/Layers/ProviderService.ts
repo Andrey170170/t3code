@@ -980,8 +980,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   // A session whose cwd is a Trellis project path runs inside the workspace.
   // Fails before any credential is issued when the provider cannot run there.
+  // The thread's project folder, when the read model is available.
+  const projectRootOf = (threadId: ThreadId) =>
+    Option.isNone(projectionQuery)
+      ? Effect.succeed(undefined)
+      : Effect.gen(function* () {
+          const thread = yield* projectionQuery.value.getThreadShellById(threadId);
+          if (Option.isNone(thread)) return undefined;
+          const project = yield* projectionQuery.value.getProjectShellById(thread.value.projectId);
+          return Option.isSome(project) ? project.value.workspaceRoot : undefined;
+        }).pipe(Effect.orElseSucceed(() => undefined));
+
   const decideTrellisLaunch = Effect.fn("ProviderService.decideTrellisLaunch")(function* (input: {
     readonly operation: string;
+    readonly threadId: ThreadId;
     readonly driverKind: string;
     readonly cwd: string | undefined;
   }) {
@@ -991,11 +1003,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const env =
       (yield* client.current) ??
       ((yield* Trellis.isTrellisPath(client, input.cwd)) ? yield* client.refresh : null);
+    const expectedRoot = yield* client.expectedRoot;
     const decision = TrellisProviderSession.decideTrellisLaunch({
       env,
-      expectedRoot: yield* client.expectedRoot,
+      expectedRoot,
       driverKind: input.driverKind,
       cwd: input.cwd,
+      projectRoot: expectedRoot === null ? undefined : yield* projectRootOf(input.threadId),
     });
     if (decision.kind === "unsupported") {
       return yield* toValidationError(input.operation, decision.message);
@@ -1344,6 +1358,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
       const trellisLaunch = yield* decideTrellisLaunch({
         operation: input.operation,
+        threadId: input.binding.threadId,
         driverKind: adapter.provider,
         cwd: persistedCwd,
       });
@@ -1581,6 +1596,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* clearTurnAnalyticsSession(resolvedInstanceId, threadId);
         const trellisLaunch = yield* decideTrellisLaunch({
           operation: "ProviderService.startSession",
+          threadId,
           driverKind: resolvedProvider,
           cwd: effectiveCwd,
         });

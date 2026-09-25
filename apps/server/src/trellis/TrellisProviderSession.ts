@@ -32,20 +32,32 @@ export type TrellisLaunchDecision =
 // Driver kinds that have a Trellis shim.
 const SUPPORTED_DRIVERS: ReadonlySet<string> = new Set(["codex", "claudeAgent"]);
 
+/** Refusal for work in a Trellis project whose folder is outside the workspace. */
+export const TRELLIS_OUTSIDE_WORKSPACE_MESSAGE =
+  "This thread belongs to a Trellis project but its folder is outside the Trellis workspace (for example a git worktree), so it would run on the host. Start a thread in the project folder instead; use `trellis fork` for parallel work.";
+
 /**
  * Where a provider session for `cwd` must run. `expectedRoot` keeps Trellis
  * project paths off the host while Trellis is unreachable (`env` null).
+ * `projectRoot` is the thread's project folder: a thread of a Trellis project
+ * whose cwd lies elsewhere is refused rather than run on the host.
  */
 export function decideTrellisLaunch(input: {
   readonly env: TrellisEnv | null;
   readonly expectedRoot: string | null;
   readonly driverKind: string;
   readonly cwd: string | undefined;
+  readonly projectRoot?: string | undefined;
 }): TrellisLaunchDecision {
   const { env, cwd } = input;
   const root = env?.root ?? input.expectedRoot;
-  if (root === null || cwd === undefined || !isTrellisManagedPath(root, cwd)) {
+  if (root === null || cwd === undefined) {
     return { kind: "host" };
+  }
+  if (!isTrellisManagedPath(root, cwd)) {
+    return input.projectRoot !== undefined && isTrellisManagedPath(root, input.projectRoot)
+      ? { kind: "unsupported", message: TRELLIS_OUTSIDE_WORKSPACE_MESSAGE }
+      : { kind: "host" };
   }
   if (env === null) {
     return {
