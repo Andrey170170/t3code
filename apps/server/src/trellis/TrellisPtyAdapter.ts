@@ -16,13 +16,20 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 
 import * as PtyAdapter from "../terminal/PtyAdapter.ts";
-import { isTrellisManagedPath, Trellis } from "./Trellis.ts";
+import { isTrellisManagedPath, Trellis, TRELLIS_DISABLED_MESSAGE } from "./Trellis.ts";
 import { TRELLIS_OUTSIDE_WORKSPACE_MESSAGE } from "./TrellisProviderSession.ts";
 
 /** A terminal refused because it would run a Trellis project on the host. */
 export class TrellisTerminalRefusedError extends PtyAdapter.PtySpawnError {
   override get message(): string {
     return TRELLIS_OUTSIDE_WORKSPACE_MESSAGE;
+  }
+}
+
+/** A terminal in a Trellis project while the integration is off. */
+export class TrellisTerminalDisabledError extends PtyAdapter.PtySpawnError {
+  override get message(): string {
+    return TRELLIS_DISABLED_MESSAGE;
   }
 }
 
@@ -96,6 +103,12 @@ export const layer = Layer.effect(
               shell: input.shell,
             });
           }
+        }
+        if (root !== null && isTrellisManagedPath(root, input.cwd) && !(yield* trellis.enabled)) {
+          return yield* new TrellisTerminalDisabledError({
+            adapter: "trellis",
+            shell: input.shell,
+          });
         }
         return yield* host.spawn(trellisTerminalSpawnInput({ root, bin: trellis.bin }, input));
       }),

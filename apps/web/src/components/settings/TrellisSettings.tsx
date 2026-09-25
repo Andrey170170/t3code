@@ -254,7 +254,7 @@ function TrellisTrashSection(props: {
           }
           description={
             trashQuery.error ??
-            "Deleting a Trellis project or idea moves it here. Ideas are removed after 30 days; projects stay until you empty the trash."
+            "Deleting a Trellis project or idea in T3 moves it here, where you can restore it."
           }
         />
       ) : (

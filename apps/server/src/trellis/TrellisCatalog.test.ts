@@ -386,7 +386,7 @@ describe("splitFindHits", () => {
 });
 
 describe("trashItems", () => {
-  it("lists ideas with their expiry, keeps projects until emptied and folds forks of trashed projects", () => {
+  it("folds forks trashed with their project and lists earlier-trashed forks", () => {
     const items = TrellisCatalog.trashItems({
       projects: [
         { id: "idea-a", kind: "idea", name: "Sketch", deleted_at: 1_000 },
@@ -394,13 +394,15 @@ describe("trashItems", () => {
       ],
       workspaces: [
         { id: "ws-a", kind: "dedicated", name: "main", project_id: "prj-a", deleted_at: 2_000 },
+        { id: "ws-old", kind: "dedicated", name: "old", project_id: "prj-a", deleted_at: 1_500 },
         { id: "ws-c", kind: "dedicated", name: "try", project_id: "prj-live", deleted_at: 3_000 },
       ],
-      purge_after_days: 30,
+      idea_expiry_days: 30,
     });
     expect(items).toEqual([
       { kind: "workspace", id: "ws-c", name: "try", deletedAt: 3_000, expiresAt: null },
       { kind: "project", id: "prj-a", name: "App", deletedAt: 2_000, expiresAt: null },
+      { kind: "workspace", id: "ws-old", name: "old", deletedAt: 1_500, expiresAt: null },
       {
         kind: "idea",
         id: "idea-a",
@@ -408,6 +410,33 @@ describe("trashItems", () => {
         deletedAt: 1_000,
         expiresAt: 1_000 + 30 * 86_400,
       },
+    ]);
+  });
+
+  it("expires every kind after the purge period on Trellis versions without per-item expiry", () => {
+    const items = TrellisCatalog.trashItems({
+      projects: [{ id: "prj-a", kind: "project", name: "App", deleted_at: 2_000 }],
+      workspaces: [],
+      purge_after_days: 30,
+    });
+    expect(items.map((item) => item.expiresAt)).toEqual([2_000 + 30 * 86_400]);
+  });
+});
+
+describe("trashItems with per-item expiry", () => {
+  it("uses the expiry Trellis reports for each item", () => {
+    expect(
+      TrellisCatalog.trashItems({
+        projects: [
+          { id: "idea-a", kind: "idea", name: "Sketch", deleted_at: 1_000, expires_at: 5_000 },
+          { id: "prj-a", kind: "project", name: "App", deleted_at: 2_000, expires_at: null },
+        ],
+        workspaces: [],
+        idea_expiry_days: 30,
+      }).map((item) => [item.id, item.expiresAt]),
+    ).toEqual([
+      ["prj-a", null],
+      ["idea-a", 5_000],
     ]);
   });
 });

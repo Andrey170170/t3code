@@ -48,8 +48,8 @@ export function trellisTrashConfirmation(input: {
     input.count === 1
       ? `Move ${input.kind} "${input.label}" to the Trellis trash?`
       : `Move ${input.count} Trellis projects to the Trellis trash?`,
-    "Its files and history go to the trash; its conversations are archived, not deleted.",
-    "Restore it from Settings → Trellis. Ideas are removed for good after 30 days; projects stay until you empty the trash.",
+    "Its files and history go to the trash, together with any forks; its conversations are archived, not deleted.",
+    "Restore it from Settings → Trellis, which also shows when it is removed for good.",
   ];
 }
 

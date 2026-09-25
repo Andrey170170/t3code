@@ -16,11 +16,15 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { releaseProjectDraftUploads } from "../../lib/composerDraftUploads";
-import { TrellisStatusProbe, useTrellisStatusFor, useTrellisTrash } from "../../hooks/useTrellis";
+import {
+  TRELLIS_GONE_CONFIRMATION,
+  useTrellisStatusFor,
+  useTrellisTrash,
+} from "../../hooks/useTrellis";
 import { isTrellisIdeaPath, trellisRemovalOf, trellisTrashConfirmation } from "../../lib/trellis";
 import { readLocalApi } from "../../localApi";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
-import { readTrellisStatus } from "../../state/trellis";
+import { loadTrellisStatus } from "../../state/trellis";
 import {
   type SidebarProjectGroupMember,
   type SidebarProjectSnapshot,
@@ -312,11 +316,17 @@ function ProjectDetail({
 
       // Trellis-managed projects go to the Trellis trash instead: deleting only
       // T3's entry would not last, since the catalog sync recreates it.
+      const environmentIds = [...new Set(members.map((member) => member.environmentId))];
+      const statuses = new Map(
+        await Promise.all(
+          environmentIds.map(
+            async (environmentId) =>
+              [environmentId, await loadTrellisStatus(appAtomRegistry, environmentId)] as const,
+          ),
+        ),
+      );
       const removalOf = (member: SidebarProjectGroupMember) =>
-        trellisRemovalOf(
-          member.workspaceRoot,
-          readTrellisStatus(appAtomRegistry, member.environmentId),
-        );
+        trellisRemovalOf(member.workspaceRoot, statuses.get(member.environmentId) ?? null);
       const trashed = members.filter((member) => removalOf(member) === "trash");
       const deleted = members.filter((member) => removalOf(member) !== "trash");
       const offline = deleted.filter((member) => removalOf(member) === "offline");
@@ -333,7 +343,7 @@ function ProjectDetail({
       const trellisRoot =
         firstTrashed === undefined
           ? null
-          : (readTrellisStatus(appAtomRegistry, firstTrashed.environmentId)?.root ?? null);
+          : (statuses.get(firstTrashed.environmentId)?.root ?? null);
       const deleteLines =
         deleted.length === 0
           ? []
@@ -399,7 +409,15 @@ function ProjectDetail({
         draftStore.clearProjectDraftThreadId(projectRef);
       };
       for (const member of trashed) {
-        if (!(await trashTrellisProject(member.environmentId, member.id, member.title))) return;
+        const outcome = await trashTrellisProject(member.environmentId, member.id, member.title);
+        if (outcome === "failed") return;
+        if (outcome === "gone") {
+          // Already out of Trellis (e.g. in its trash): only T3's entry is left.
+          if (!(await api.dialogs.confirm(TRELLIS_GONE_CONFIRMATION, { variant: "destructive" })))
+            return;
+          deleted.push(member);
+          continue;
+        }
         clearProjectDrafts(member);
       }
       for (const member of deleted) {
@@ -470,11 +488,6 @@ function ProjectDetail({
   return (
     <>
       <SettingsPageContainer className="gap-6">
-        {[...new Set(group.memberProjects.map((member) => member.environmentId))].map(
-          (environmentId) => (
-            <TrellisStatusProbe key={environmentId} environmentId={environmentId} />
-          ),
-        )}
         <Alert variant="info">
           <InfoIcon aria-hidden />
           <AlertDescription>

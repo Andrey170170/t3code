@@ -74,3 +74,33 @@ export function readTrellisStatus(
     AsyncResult.value(registry.get(trellisEnvironment.status({ environmentId, input: {} }))),
   );
 }
+
+/**
+ * The Trellis status of an environment for an event handler, loading it when
+ * no component holds it yet. Null when it does not arrive within `timeoutMs`.
+ */
+export function loadTrellisStatus(
+  registry: AtomRegistry.AtomRegistry,
+  environmentId: EnvironmentId,
+  timeoutMs = 5_000,
+): Promise<TrellisStatus | null> {
+  const atom = trellisEnvironment.status({ environmentId, input: {} });
+  const settled = (result: AsyncResult.AsyncResult<TrellisStatus, unknown>) =>
+    result._tag === "Success" || (result._tag === "Failure" && !result.waiting);
+  return new Promise((resolve) => {
+    let unsubscribe = () => {};
+    const finish = (status: TrellisStatus | null) => {
+      clearTimeout(timer);
+      unsubscribe();
+      resolve(status);
+    };
+    const timer = setTimeout(() => finish(readTrellisStatus(registry, environmentId)), timeoutMs);
+    unsubscribe = registry.subscribe(
+      atom,
+      (result) => {
+        if (settled(result)) finish(Option.getOrNull(AsyncResult.value(result)));
+      },
+      { immediate: true },
+    );
+  });
+}

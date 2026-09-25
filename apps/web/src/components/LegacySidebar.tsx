@@ -115,7 +115,7 @@ import { ensureLocalApi, readLocalApi } from "../localApi";
 import { useTrellisTrash } from "../hooks/useTrellis";
 import { isTrellisIdeaPath, trellisRemovalOf, trellisTrashConfirmation } from "../lib/trellis";
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { readTrellisStatus } from "../state/trellis";
+import { loadTrellisStatus } from "../state/trellis";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
@@ -1559,7 +1559,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
       // A Trellis-managed project goes to the Trellis trash; deleting only
       // T3's entry would not last, since the catalog sync recreates it.
-      const trellisStatus = readTrellisStatus(appAtomRegistry, member.environmentId);
+      const trellisStatus = await loadTrellisStatus(appAtomRegistry, member.environmentId);
       if (trellisRemovalOf(member.workspaceRoot, trellisStatus) === "trash") {
         const confirmed = await api.dialogs.confirm(
           trellisTrashConfirmation({
@@ -1573,14 +1573,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           { variant: "destructive" },
         );
         if (!confirmed) return;
-        if (await trashTrellisProject(member.environmentId, member.id, member.title)) {
+        const outcome = await trashTrellisProject(member.environmentId, member.id, member.title);
+        if (outcome === "trashed") {
           const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
           const draftStore = useComposerDraftStore.getState();
           const projectDraftThread = draftStore.getDraftThreadByProjectRef(memberProjectRef);
           if (projectDraftThread) draftStore.clearDraftThread(projectDraftThread.draftId);
           draftStore.clearProjectDraftThreadId(memberProjectRef);
         }
-        return;
+        if (outcome !== "gone") return;
+        // Already out of Trellis: fall through to removing T3's entry.
       }
 
       const memberProjectRef = scopeProjectRef(member.environmentId, member.id);

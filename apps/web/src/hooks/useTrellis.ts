@@ -200,12 +200,17 @@ export function useTrellisCreate() {
 /**
  * Moves the Trellis item behind a T3 project to the Trellis trash and reports
  * the outcome as a toast. The catalog sync then archives the project's
- * conversations. Resolves to whether it was trashed.
+ * conversations. `gone` means no live Trellis item is behind the project (it
+ * is already in the trash), so only T3's own entry can be removed.
  */
 export function useTrellisTrash() {
   const run = useAtomCommand(trellisEnvironment.trashProject, { reportFailure: false });
   return useCallback(
-    async (environmentId: EnvironmentId, projectId: ProjectId, title: string) => {
+    async (
+      environmentId: EnvironmentId,
+      projectId: ProjectId,
+      title: string,
+    ): Promise<"trashed" | "gone" | "failed"> => {
       const result = await run({ environmentId, input: { projectId } });
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
@@ -220,8 +225,9 @@ export function useTrellisTrash() {
             }),
           );
         }
-        return false;
+        return "failed";
       }
+      if (result.value.trashed === null) return "gone";
       toastManager.add(
         stackedThreadToast({
           type: "success",
@@ -229,17 +235,15 @@ export function useTrellisTrash() {
           description: "Restore it from Settings → Trellis.",
         }),
       );
-      return true;
+      return "trashed";
     },
     [run],
   );
 }
 
-/** Keeps an environment's Trellis status loaded so event handlers can read it. */
-export function TrellisStatusProbe(props: { readonly environmentId: EnvironmentId }): null {
-  useTrellisStatusFor(props.environmentId);
-  return null;
-}
+/** Confirmation for removing a T3 project whose Trellis item is already gone. */
+export const TRELLIS_GONE_CONFIRMATION =
+  "This project is no longer live in Trellis (it may already be in the Trellis trash). Remove it from T3 and delete its conversations? This cannot be undone.";
 
 /**
  * Debounced Trellis search. Each query is its own cached atom, so a slow

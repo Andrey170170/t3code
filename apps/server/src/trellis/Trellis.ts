@@ -108,6 +108,8 @@ export type TrellisTrashEntryView = typeof TrellisTrashEntryView.Type;
 export const TrellisTrashView = Schema.Struct({
   projects: Schema.Array(TrellisTrashEntryView),
   workspaces: Schema.Array(TrellisTrashEntryView),
+  /** How long ideas stay in the trash; older Trellis versions sent `purge_after_days`. */
+  idea_expiry_days: Schema.optional(Schema.Finite),
   purge_after_days: Schema.optional(Schema.Finite),
 });
 export type TrellisTrashView = typeof TrellisTrashView.Type;
@@ -319,6 +321,11 @@ export const make = Effect.gen(function* () {
     Config.withDefault(DEFAULT_TRELLIS_SOCKET),
   );
   const bin = yield* Config.String("TRELLIS_BIN").pipe(Config.withDefault("trellis"));
+  // The `trellis` CLI's own root override, which shims and terminals inherit.
+  const envRoot = yield* Config.String("TRELLIS_ROOT").pipe(
+    Config.option,
+    Effect.map((value) => Option.getOrNull(value)),
+  );
   const shimDir = NodePath.join(serverConfig.stateDir, "trellis-shims");
   // The last root Trellis reported, kept so its paths stay recognizable while
   // the integration is off or Trellis is down, including after a restart.
@@ -451,7 +458,7 @@ export const make = Effect.gen(function* () {
   }).pipe(refreshLock.withPermits(1));
 
   const expectedRoot = Ref.get(lastRoot).pipe(
-    Effect.map((root) => root ?? rootFromSocketPath(socketPath)),
+    Effect.map((root) => root ?? envRoot ?? rootFromSocketPath(socketPath)),
   );
 
   const connection = Effect.gen(function* () {

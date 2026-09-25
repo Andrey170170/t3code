@@ -329,6 +329,9 @@ const make = Effect.gen(function* () {
         Effect.retry({
           schedule: Schedule.exponential("250 millis"),
           times: TRELLIS_SNAPSHOT_RETRIES,
+          // A hung Trellis already cost a full timeout; retrying it would
+          // stall the shared checkpoint worker.
+          while: (error) => !error.message.includes("timed out"),
         }),
         Effect.catch((error) =>
           Effect.logWarning("Trellis turn snapshot failed", {

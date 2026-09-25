@@ -1799,8 +1799,14 @@ const makeWsRpcLayer = (
         Effect.gen(function* () {
           const createThread = command.bootstrap?.createThread;
           if (createThread === undefined || !isTrellisLandingPad(createThread.projectId)) {
-            return command;
+            return { command, discardIdea: Effect.void };
           }
+          // A retried send whose thread already exists must not create a
+          // second idea; the thread create then fails as for any retry.
+          const existing = yield* projectionSnapshotQuery
+            .getThreadShellById(command.threadId)
+            .pipe(Effect.orElseSucceed(() => Option.none()));
+          if (Option.isSome(existing)) return { command, discardIdea: Effect.void };
           const idea = yield* trellisCatalog.newIdea({}).pipe(
             Effect.mapError(
               (error) =>
@@ -1814,16 +1820,27 @@ const makeWsRpcLayer = (
             projectId: idea.projectId,
             workspaceRoot: idea.workspaceRoot,
           });
+          // If the send fails before the thread exists, the idea is empty:
+          // trash it so an abandoned send leaves nothing behind.
+          const discardIdea = projectionSnapshotQuery.getThreadShellById(command.threadId).pipe(
+            Effect.flatMap((thread) =>
+              Option.isSome(thread) ? Effect.void : trellisCatalog.trashProject(idea.projectId),
+            ),
+            Effect.ignoreCause({ log: true }),
+          );
           return {
-            ...command,
-            bootstrap: {
-              createThread: {
-                ...createThread,
-                projectId: idea.projectId,
-                branch: null,
-                worktreePath: null,
+            command: {
+              ...command,
+              bootstrap: {
+                createThread: {
+                  ...createThread,
+                  projectId: idea.projectId,
+                  branch: null,
+                  worktreePath: null,
+                },
               },
             },
+            discardIdea,
           };
         });
 
@@ -1832,7 +1849,11 @@ const makeWsRpcLayer = (
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
         const dispatchEffect =
           normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
-            ? promoteIdeaDraft(normalizedCommand).pipe(Effect.flatMap(dispatchBootstrapTurnStart))
+            ? promoteIdeaDraft(normalizedCommand).pipe(
+                Effect.flatMap(({ command, discardIdea }) =>
+                  dispatchBootstrapTurnStart(command).pipe(Effect.tapError(() => discardIdea)),
+                ),
+              )
             : dispatchFromClient(normalizedCommand).pipe(
                 Effect.tap(({ sequence }) =>
                   // Returning from thread.create is the handoff point at which

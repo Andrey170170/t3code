@@ -52,9 +52,13 @@ export const TrellisTrashProjectInput = Schema.Struct({
 });
 export type TrellisTrashProjectInput = typeof TrellisTrashProjectInput.Type;
 
-/** `workspace` when the T3 project was one fork of a Trellis project. */
+/**
+ * `workspace` when the T3 project was one fork of a Trellis project. Null when
+ * no live Trellis item is behind it (for example it is already in the trash),
+ * so only T3's own entry can be removed.
+ */
 export const TrellisTrashProjectResult = Schema.Struct({
-  trashed: Schema.Literals(["project", "workspace"]),
+  trashed: Schema.NullOr(Schema.Literals(["project", "workspace"])),
   name: Schema.String,
 });
 export type TrellisTrashProjectResult = typeof TrellisTrashProjectResult.Type;
