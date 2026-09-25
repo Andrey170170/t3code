@@ -25,11 +25,13 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildProjectNamePrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   sanitizeCommitSubject,
   sanitizePrTitle,
+  sanitizeOneLine,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
 
@@ -405,10 +407,24 @@ export const makeAntigravityTextGeneration = Effect.fn("makeAntigravityTextGener
       };
     });
 
+  const generateProjectName: TextGeneration.TextGeneration["Service"]["generateProjectName"] =
+    Effect.fn("AntigravityTextGeneration.generateProjectName")(function* (input) {
+      const generated = yield* runAntigravityJson({
+        operation: "generateProjectName",
+        ...buildProjectNamePrompt({ message: input.message, previousName: input.previousName }),
+        modelSelection: input.modelSelection,
+      });
+      return {
+        name: sanitizeOneLine(generated.name, 40),
+        description: sanitizeOneLine(generated.description, 160),
+      };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateProjectName,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

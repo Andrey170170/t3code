@@ -127,3 +127,16 @@ export function normalizeCliError(
     cause: error,
   });
 }
+
+/** One line, no wrapping quotes, collapsed whitespace, at most `maxChars`. */
+export function sanitizeOneLine(raw: string, maxChars: number): string {
+  const normalized = (raw.trim().split(/\r?\n/g)[0] ?? "")
+    .trim()
+    .replace(/^['"`]+|['"`]+$/g, "")
+    .replace(/[.。]+$/g, "")
+    .trim()
+    .replace(/\s+/g, " ");
+  return normalized.length <= maxChars
+    ? normalized
+    : `${normalized.slice(0, maxChars - 3).trimEnd()}...`;
+}

@@ -75,6 +75,22 @@ export interface ThreadTitleGenerationResult {
   needsRefinement?: boolean | undefined;
 }
 
+export interface ProjectNameGenerationInput {
+  cwd: string;
+  /** The first user message, or the thread contents for a refinement. */
+  message: string;
+  /** Present when refining a name generated earlier. */
+  previousName?: string | undefined;
+  /** What model and provider to use for generation. */
+  modelSelection: ModelSelection;
+}
+
+export interface ProjectNameGenerationResult {
+  /** Empty when the model returned nothing usable. */
+  name: string;
+  description: string;
+}
+
 /**
  * TextGeneration - Service tag for commit and change request text generation.
  */
@@ -106,6 +122,11 @@ export class TextGeneration extends Context.Service<
     readonly generateThreadTitle: (
       input: ThreadTitleGenerationInput,
     ) => Effect.Effect<ThreadTitleGenerationResult, TextGenerationError>;
+
+    /** Generate a short project name and description (used to name Trellis items). */
+    readonly generateProjectName: (
+      input: ProjectNameGenerationInput,
+    ) => Effect.Effect<ProjectNameGenerationResult, TextGenerationError>;
   }
 >()("t3/textGeneration/TextGeneration") {}
 
@@ -113,7 +134,8 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle";
+  | "generateThreadTitle"
+  | "generateProjectName";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -165,6 +187,10 @@ export const make = Effect.gen(function* () {
             return yield* textGeneration.generateThreadTitle({ ...input, linkedContext });
           }),
         ),
+      ),
+    generateProjectName: (input) =>
+      resolveInstance(registry, "generateProjectName", input.modelSelection.instanceId).pipe(
+        Effect.flatMap((textGeneration) => textGeneration.generateProjectName(input)),
       ),
   });
 });
