@@ -112,7 +112,9 @@ describe("Trellis client", () => {
         "GET /v1/projects?light=true&all=true",
         "POST /v1/describe",
       ]);
-      expect(harness.requests[2]?.body).toBe('{"target":"/x","name":"Name","pin":true}');
+      expect(harness.requests[2]?.body).toBe(
+        '{"target":"/x","name":"Name","source":"user","pin":true}',
+      );
     }),
   );
 });

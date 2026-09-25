@@ -47,6 +47,12 @@ export const TrellisProjectView = Schema.Struct({
   id: Schema.String,
   kind: Schema.String,
   name: Schema.String,
+  /**
+   * Who named it: `default` (placeholder), `derived` (e.g. the git repo),
+   * `generated` (a client's naming model), `agent` or `user`. Absent from
+   * Trellis versions that predate it.
+   */
+  name_source: Schema.optional(Schema.String),
   description: Schema.String,
   workspace_id: Schema.String,
   path: Schema.String,
@@ -82,6 +88,11 @@ export type TrellisResolved = typeof TrellisResolved.Type;
 
 const TrellisStatusView = Schema.Struct({ root: Schema.String });
 const TrellisRollbackView = Schema.Struct({ undo_snapshot: Schema.optional(Schema.Unknown) });
+const TrellisDescribeView = Schema.Struct({
+  ignored: Schema.optional(Schema.Array(Schema.String)),
+  // Older Trellis versions.
+  ignored_pinned: Schema.optional(Schema.Array(Schema.String)),
+});
 const TrellisPrimerView = Schema.Struct({ primer: Schema.String });
 const TrellisErrorBody = Schema.Struct({ error: Schema.String });
 
@@ -145,11 +156,17 @@ export class Trellis extends Context.Service<
       readonly gitUrl?: string | undefined;
       readonly base?: string | undefined;
     }) => Effect.Effect<TrellisProjectView, TrellisError>;
-    /** Sets and pins the name, as a user edit. */
+    /**
+     * Sets the name and/or description. `user` (the default) pins them as a
+     * user edit; `generated` applies only while the name is still `default`
+     * or `generated`. Returns the fields Trellis kept instead.
+     */
     readonly describe: (input: {
       readonly target: string;
-      readonly name: string;
-    }) => Effect.Effect<void, TrellisError>;
+      readonly name?: string | undefined;
+      readonly description?: string | undefined;
+      readonly source?: "user" | "generated";
+    }) => Effect.Effect<{ readonly ignored: ReadonlyArray<string> }, TrellisError>;
     readonly find: (
       query: string,
     ) => Effect.Effect<ReadonlyArray<TrellisFindHitView>, TrellisError>;
@@ -368,10 +385,16 @@ export const make = Effect.gen(function* () {
         // Creation may clone a repository.
         timeoutMs: 15 * 60_000,
       }),
-    describe: ({ target, name }) =>
-      call(Schema.Unknown, "POST", "/v1/describe", { body: { target, name, pin: true } }).pipe(
-        Effect.asVoid,
-      ),
+    describe: ({ target, name, description, source = "user" }) =>
+      call(TrellisDescribeView, "POST", "/v1/describe", {
+        body: {
+          target,
+          ...(name === undefined ? {} : { name }),
+          ...(description === undefined ? {} : { description }),
+          source,
+          ...(source === "user" ? { pin: true } : {}),
+        },
+      }).pipe(Effect.map((view) => ({ ignored: view.ignored ?? view.ignored_pinned ?? [] }))),
     find: (text) => call(Schema.Array(TrellisFindHitView), "GET", `/v1/find?${query({ q: text })}`),
     resolve: (target) => call(TrellisResolved, "GET", `/v1/resolve?${query({ target })}`),
     listSnapshots: (target) =>

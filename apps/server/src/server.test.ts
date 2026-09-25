@@ -129,6 +129,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import { ThreadDeletionReactor } from "./orchestration/Services/ThreadDeletionReactor.ts";
 import * as PullRequestSyncReactor from "./orchestration/PullRequestSyncReactor.ts";
 import * as TrellisCatalog from "./trellis/TrellisCatalog.ts";
+import * as TrellisNaming from "./trellis/TrellisNaming.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStoreLive } from "./persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEventStore.ts";
@@ -1005,6 +1006,7 @@ const buildAppUnderTest = (options?: {
             requestSync: () => Effect.void,
           }),
           TrellisCatalog.layerDisabled,
+          TrellisNaming.layerDisabled,
         ),
       ),
       Layer.provide(
