@@ -232,7 +232,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           upsert: (binding) => Effect.sync(() => void bindings.push(binding)),
           getProvider: () => Effect.die("unused"),
           recordImportedTranscript: () => Effect.void,
-          getBinding: () => Effect.succeed(Option.none()),
+          getBinding: () => Effect.succeedNone,
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.succeed([]),
         });
@@ -506,7 +506,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           upsert: () => Effect.die("must not replace an active binding"),
           getProvider: () => Effect.die("unused"),
           recordImportedTranscript: () => Effect.void,
-          getBinding: () => Effect.succeed(Option.some(runningBinding)),
+          getBinding: () => Effect.succeedSome(runningBinding),
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.succeed([]),
         });
@@ -561,7 +561,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           upsert: () => Effect.die("must not bind malformed or wrong-project sessions"),
           getProvider: () => Effect.die("unused"),
           recordImportedTranscript: () => Effect.die("unused"),
-          getBinding: () => Effect.succeed(Option.none()),
+          getBinding: () => Effect.succeedNone,
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.succeed([]),
         });

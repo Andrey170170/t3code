@@ -52,7 +52,7 @@ for (const baseline of ["fresh", "fork-54", "upstream-53"] as const) {
           : yield* sql`
               SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
             `;
-      const executed = yield* runMigrations();
+      const executed = yield* runMigrations({ toMigrationInclusive: 55 });
       assert.equal(executed.at(-1)?.[0], 55);
       if (baseline !== "fresh") {
         const expected =
@@ -64,7 +64,7 @@ for (const baseline of ["fresh", "fork-54", "upstream-53"] as const) {
             : ([[55, "ReconcilePullRequestFilesViewed"]] as const);
         assert.deepStrictEqual(executed, expected);
       }
-      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 55 }), []);
       const historyAfter = yield* sql`
         SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
       `;

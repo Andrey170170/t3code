@@ -244,6 +244,7 @@ describe("KeybindingsSettings.logic", () => {
         "rightPanel.toggleMaximized",
         "sideChat.open",
         "thread.stop",
+        "usage.open",
         "script.setup-db.run",
       ]),
     );

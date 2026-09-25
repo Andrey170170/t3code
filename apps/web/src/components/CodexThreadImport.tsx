@@ -807,14 +807,16 @@ export function CodexThreadImportDialog({
               </Button>
             ) : null}
             {!results && cwd ? projectIcon(currentProject?.cwd ?? cwd, projectTitle) : null}
-            <DialogTitle className="min-w-0 flex-1 truncate text-lg">
-              {results
-                ? importing
-                  ? `Importing ${completed} of ${results.length}…`
-                  : `Imported ${succeeded} of ${results.length}`
-                : cwd
-                  ? projectTitle
-                  : "Import conversations"}
+            <DialogTitle className="min-w-0 flex-1">
+              <span className="block truncate">
+                {results
+                  ? importing
+                    ? `Importing ${completed} of ${results.length}…`
+                    : `Imported ${succeeded} of ${results.length}`
+                  : cwd
+                    ? projectTitle
+                    : "Import conversations"}
+              </span>
             </DialogTitle>
             {results ? (
               <>
@@ -865,290 +867,294 @@ export function CodexThreadImportDialog({
           </DialogDescription>
         </DialogHeader>
         {catalogControls}
-        <DialogPanel className="space-y-3" scrollFade={false}>
-          {results ? (
-            <div className="divide-y divide-border/50">
-              {results.map((item) => (
-                <div key={item.key} className="flex items-center gap-3 py-3">
-                  {item.status === "importing" ? (
-                    <Spinner className="size-4" />
-                  ) : item.status === "success" ? (
-                    <CircleCheckIcon className="size-4 text-success" />
-                  ) : item.status === "failed" ? (
-                    <CircleAlertIcon className="size-4 text-destructive" />
-                  ) : (
-                    <CircleDashedIcon className="size-4 text-muted-foreground" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm">{threadTitle(item.thread)}</p>
-                    <p className="truncate font-mono text-[11px] text-muted-foreground">
-                      {codexImportProjectCwd(item.thread)}
-                    </p>
-                    <WorktreeBadge thread={item.thread} />
-                    {item.error ? (
-                      <p className="mt-1 text-xs text-destructive">{item.error}</p>
-                    ) : null}
+        <DialogPanel scrollFade={false}>
+          <div className="flex flex-col gap-3">
+            {results ? (
+              <div className="divide-y divide-border/50">
+                {results.map((item) => (
+                  <div key={item.key} className="flex items-center gap-3 py-3">
+                    {item.status === "importing" ? (
+                      <Spinner className="size-4" />
+                    ) : item.status === "success" ? (
+                      <CircleCheckIcon className="size-4 text-success" />
+                    ) : item.status === "failed" ? (
+                      <CircleAlertIcon className="size-4 text-destructive" />
+                    ) : (
+                      <CircleDashedIcon className="size-4 text-muted-foreground" />
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm">{threadTitle(item.thread)}</p>
+                      <p className="truncate font-mono text-2xs text-muted-foreground">
+                        {codexImportProjectCwd(item.thread)}
+                      </p>
+                      <WorktreeBadge thread={item.thread} />
+                      {item.error ? (
+                        <p className="mt-1 text-xs text-destructive">{item.error}</p>
+                      ) : null}
+                    </div>
+                    {item.threadId && item.status === "success" ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          onOpenChange(false);
+                          void navigate({
+                            to: "/$environmentId/$threadId",
+                            params: buildThreadRouteParams(
+                              scopeThreadRef(environmentId, item.threadId!),
+                            ),
+                          });
+                        }}
+                      >
+                        Open
+                      </Button>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">
+                        {item.status === "pending"
+                          ? "Waiting"
+                          : item.status === "importing"
+                            ? "Importing"
+                            : "Failed"}
+                      </span>
+                    )}
                   </div>
-                  {item.threadId && item.status === "success" ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        onOpenChange(false);
-                        void navigate({
-                          to: "/$environmentId/$threadId",
-                          params: buildThreadRouteParams(
-                            scopeThreadRef(environmentId, item.threadId!),
-                          ),
-                        });
-                      }}
-                    >
-                      Open
-                    </Button>
-                  ) : (
-                    <span className="text-xs text-muted-foreground">
-                      {item.status === "pending"
-                        ? "Waiting"
-                        : item.status === "importing"
-                          ? "Importing"
-                          : "Failed"}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </div>
-          ) : providers.length === 0 ? (
-            <Empty>
-              <EmptyMedia variant="icon">
-                <FolderOpenIcon />
-              </EmptyMedia>
-              <EmptyTitle>Enable a Codex provider</EmptyTitle>
-              <EmptyDescription>
-                Connect a Codex provider to browse its conversations.
-              </EmptyDescription>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  onOpenChange(false);
-                  void navigate({ to: "/settings" });
-                }}
-              >
-                Open settings
-              </Button>
-            </Empty>
-          ) : (
-            <>
-              {[...missingProjectCounts].map(([projectCwd, count]) => (
-                <RemovedWorktreeAlert
-                  key={projectCwd}
-                  projectCwd={projectCwd}
-                  project={catalogProjects.get(projectCwd)}
-                  selectedCount={count}
-                  selectedCwd={checkoutChoices.get(projectCwd)}
-                  onSelect={(value) =>
-                    setCheckoutChoices((previous) => {
-                      const next = new Map(previous);
-                      if (value) next.set(projectCwd, value);
-                      else next.delete(projectCwd);
-                      return next;
-                    })
-                  }
-                />
-              ))}
-              {unresolvedCheckoutCount > 0 ? (
-                <p role="status" className="text-xs text-warning">
-                  Choose a checkout above for {unresolvedCheckoutCount} selected conversations to
-                  enable Import.
-                </p>
-              ) : null}
-              {error ? (
-                <Alert variant="error">
-                  <CircleAlertIcon />
-                  <AlertTitle>Could not finish this request</AlertTitle>
-                  <AlertDescription>{error}</AlertDescription>
-                  <AlertAction>
-                    <Button variant="ghost" size="sm" onClick={() => void load()}>
-                      Retry
-                    </Button>
-                  </AlertAction>
-                </Alert>
-              ) : null}
-              {searchScope === "messages" && data.messageSearchSupported === false ? (
-                <Alert variant="info">
-                  <AlertDescription>
-                    Full message search is unavailable for this provider. Choose Titles to search
-                    conversation metadata.
-                  </AlertDescription>
-                </Alert>
-              ) : null}
-              {!loading && !data.catalogComplete && data.totalCount > 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  The catalog is incomplete. Counts show a lower bound; select individual
-                  conversations or refresh.
-                </p>
-              ) : null}
-              {loading && data.threads.length === 0 ? (
-                <div className="space-y-2">
-                  {[0, 1, 2].map((key) => (
-                    <Skeleton key={key} className="h-9 w-full" />
-                  ))}
-                </div>
-              ) : rowCount === 0 && !error ? (
-                <Empty>
-                  <EmptyMedia variant="icon">
-                    <FolderOpenIcon />
-                  </EmptyMedia>
-                  <EmptyTitle>No conversations found</EmptyTitle>
-                  <EmptyDescription>
-                    {hideImported
-                      ? "No new conversations or updates match these filters. Turn off Hide already imported to see previous imports."
-                      : search || archived || origin
-                        ? "No conversations match these filters. Try another search or clear a filter."
-                        : "There are no saved Codex conversations in this location."}
-                  </EmptyDescription>
-                </Empty>
-              ) : (
-                <div
-                  ref={rowsRef}
-                  role="group"
-                  aria-label={cwd === null ? "Projects" : "Conversations"}
-                  className="space-y-0.5"
-                  tabIndex={0}
+                ))}
+              </div>
+            ) : providers.length === 0 ? (
+              <Empty>
+                <EmptyMedia variant="icon">
+                  <FolderOpenIcon />
+                </EmptyMedia>
+                <EmptyTitle>Enable a Codex provider</EmptyTitle>
+                <EmptyDescription>
+                  Connect a Codex provider to browse its conversations.
+                </EmptyDescription>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    onOpenChange(false);
+                    void navigate({ to: "/settings" });
+                  }}
                 >
-                  {cwd === null
-                    ? visibleProjects.map((project, index) => {
-                        const state = projectSelection(project);
-                        return (
-                          <div
-                            key={project.cwd}
+                  Open settings
+                </Button>
+              </Empty>
+            ) : (
+              <>
+                {[...missingProjectCounts].map(([projectCwd, count]) => (
+                  <RemovedWorktreeAlert
+                    key={projectCwd}
+                    projectCwd={projectCwd}
+                    project={catalogProjects.get(projectCwd)}
+                    selectedCount={count}
+                    selectedCwd={checkoutChoices.get(projectCwd)}
+                    onSelect={(value) =>
+                      setCheckoutChoices((previous) => {
+                        const next = new Map(previous);
+                        if (value) next.set(projectCwd, value);
+                        else next.delete(projectCwd);
+                        return next;
+                      })
+                    }
+                  />
+                ))}
+                {unresolvedCheckoutCount > 0 ? (
+                  <p role="status" className="text-xs text-warning">
+                    Choose a checkout above for {unresolvedCheckoutCount} selected conversations to
+                    enable Import.
+                  </p>
+                ) : null}
+                {error ? (
+                  <Alert variant="error">
+                    <CircleAlertIcon />
+                    <AlertTitle>Could not finish this request</AlertTitle>
+                    <AlertDescription>{error}</AlertDescription>
+                    <AlertAction>
+                      <Button variant="ghost" size="sm" onClick={() => void load()}>
+                        Retry
+                      </Button>
+                    </AlertAction>
+                  </Alert>
+                ) : null}
+                {searchScope === "messages" && data.messageSearchSupported === false ? (
+                  <Alert variant="info">
+                    <AlertDescription>
+                      Full message search is unavailable for this provider. Choose Titles to search
+                      conversation metadata.
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
+                {!loading && !data.catalogComplete && data.totalCount > 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    The catalog is incomplete. Counts show a lower bound; select individual
+                    conversations or refresh.
+                  </p>
+                ) : null}
+                {loading && data.threads.length === 0 ? (
+                  <div className="space-y-2">
+                    {[0, 1, 2].map((key) => (
+                      <Skeleton key={key} className="h-9 w-full" />
+                    ))}
+                  </div>
+                ) : rowCount === 0 && !error ? (
+                  <Empty>
+                    <EmptyMedia variant="icon">
+                      <FolderOpenIcon />
+                    </EmptyMedia>
+                    <EmptyTitle>No conversations found</EmptyTitle>
+                    <EmptyDescription>
+                      {hideImported
+                        ? "No new conversations or updates match these filters. Turn off Hide already imported to see previous imports."
+                        : search || archived || origin
+                          ? "No conversations match these filters. Try another search or clear a filter."
+                          : "There are no saved Codex conversations in this location."}
+                    </EmptyDescription>
+                  </Empty>
+                ) : (
+                  <div
+                    ref={rowsRef}
+                    role="group"
+                    aria-label={cwd === null ? "Projects" : "Conversations"}
+                    className="space-y-0.5"
+                    tabIndex={0}
+                  >
+                    {cwd === null
+                      ? visibleProjects.map((project, index) => {
+                          const state = projectSelection(project);
+                          return (
+                            <div
+                              key={project.cwd}
+                              className={cn(
+                                "flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-muted/40",
+                                highlight === index && "bg-accent/50",
+                              )}
+                              onFocus={() => setHighlight(index)}
+                            >
+                              <Checkbox
+                                aria-label={`Select ${project.title}`}
+                                checked={state.checked}
+                                indeterminate={state.indeterminate}
+                                disabled={
+                                  locked || !project.importableCount || !data.catalogComplete
+                                }
+                                onCheckedChange={() => void toggleProject(project)}
+                              />
+                              <button
+                                type="button"
+                                className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+                                onClick={() => openProject(project.cwd)}
+                              >
+                                {projectIcon(project.cwd, project.title)}
+                                <span className="min-w-0 flex-1">
+                                  <span className="block truncate text-sm font-medium">
+                                    {project.title}
+                                  </span>
+                                  <span className="block truncate font-mono text-2xs text-muted-foreground">
+                                    {project.cwd || "Unknown folder"}
+                                  </span>
+                                </span>
+                                <span className="flex items-center gap-2 text-xs text-muted-foreground">
+                                  {ORIGINS.filter((value) => project[`${value}Count`] > 0).map(
+                                    (value) => (
+                                      <OriginIcon key={value} origin={value} />
+                                    ),
+                                  )}
+                                  <span
+                                    className="min-w-8 text-right tabular-nums"
+                                    aria-label="Top-level conversations"
+                                  >
+                                    {project.totalCount}
+                                    {data.catalogComplete ? "" : "+"}
+                                  </span>
+                                  <ChevronRightIcon className="size-3.5" />
+                                </span>
+                              </button>
+                            </div>
+                          );
+                        })
+                      : visibleThreads.map((thread, index) => (
+                          <label
+                            key={thread.sourceIdentity}
                             className={cn(
-                              "flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-muted/40",
+                              "flex min-h-9 cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-muted/40 [content-visibility:auto] has-disabled:cursor-default",
                               highlight === index && "bg-accent/50",
                             )}
                             onFocus={() => setHighlight(index)}
                           >
                             <Checkbox
-                              aria-label={`Select ${project.title}`}
-                              checked={state.checked}
-                              indeterminate={state.indeterminate}
-                              disabled={locked || !project.importableCount || !data.catalogComplete}
-                              onCheckedChange={() => void toggleProject(project)}
+                              aria-label={`Select ${threadTitle(thread)}`}
+                              checked={
+                                providerInstanceId
+                                  ? selection.has(codexImportKey(providerInstanceId, thread))
+                                  : false
+                              }
+                              disabled={
+                                !canImportCodexConversation(thread) ||
+                                selectingProject !== null ||
+                                pendingSearch
+                              }
+                              onCheckedChange={() => toggleThread(thread)}
                             />
-                            <button
-                              type="button"
-                              className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
-                              onClick={() => openProject(project.cwd)}
-                            >
-                              {projectIcon(project.cwd, project.title)}
-                              <span className="min-w-0 flex-1">
-                                <span className="block truncate text-sm font-medium">
-                                  {project.title}
-                                </span>
-                                <span className="block truncate font-mono text-[11px] text-muted-foreground">
-                                  {project.cwd || "Unknown folder"}
-                                </span>
-                              </span>
-                              <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                                {ORIGINS.filter((value) => project[`${value}Count`] > 0).map(
-                                  (value) => (
-                                    <OriginIcon key={value} origin={value} />
-                                  ),
-                                )}
-                                <span
-                                  className="min-w-8 text-right tabular-nums"
-                                  aria-label="Top-level conversations"
-                                >
-                                  {project.totalCount}
-                                  {data.catalogComplete ? "" : "+"}
-                                </span>
-                                <ChevronRightIcon className="size-3.5" />
-                              </span>
-                            </button>
-                          </div>
-                        );
-                      })
-                    : visibleThreads.map((thread, index) => (
-                        <label
-                          key={thread.sourceIdentity}
-                          className={cn(
-                            "flex min-h-9 cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-muted/40 [content-visibility:auto] has-disabled:cursor-default",
-                            highlight === index && "bg-accent/50",
-                          )}
-                          onFocus={() => setHighlight(index)}
-                        >
-                          <Checkbox
-                            aria-label={`Select ${threadTitle(thread)}`}
-                            checked={
-                              providerInstanceId
-                                ? selection.has(codexImportKey(providerInstanceId, thread))
-                                : false
-                            }
-                            disabled={
-                              !canImportCodexConversation(thread) ||
-                              selectingProject !== null ||
-                              pendingSearch
-                            }
-                            onCheckedChange={() => toggleThread(thread)}
-                          />
-                          <OriginIcon origin={thread.origin} />
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              {thread.archived ? (
-                                <ArchiveIcon className="size-3 shrink-0 text-muted-foreground" />
+                            <OriginIcon origin={thread.origin} />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                {thread.archived ? (
+                                  <ArchiveIcon className="size-3 shrink-0 text-muted-foreground" />
+                                ) : null}
+                                <span className="truncate text-sm">{threadTitle(thread)}</span>
+                              </div>
+                              <WorktreeBadge thread={thread} />
+                              {thread.matchPreview ? (
+                                <p className="truncate text-xs text-muted-foreground">
+                                  {thread.matchPreview}
+                                </p>
                               ) : null}
-                              <span className="truncate text-sm">{threadTitle(thread)}</span>
                             </div>
-                            <WorktreeBadge thread={thread} />
-                            {thread.matchPreview ? (
-                              <p className="truncate text-xs text-muted-foreground">
-                                {thread.matchPreview}
-                              </p>
-                            ) : null}
-                          </div>
-                          <span className="flex shrink-0 items-center gap-1.5">
-                            {thread.updateAvailable ? (
-                              <Badge size="sm" variant="info">
-                                Update available
-                              </Badge>
-                            ) : thread.existingThreadId ? (
-                              <Badge size="sm" variant="outline">
-                                Imported
-                              </Badge>
-                            ) : null}
-                            {thread.childCount > 0 ? (
-                              <Tooltip>
-                                <TooltipTrigger render={<span />}>
-                                  <Badge size="sm" variant="secondary">
-                                    {thread.childCount} subagents
-                                  </Badge>
-                                </TooltipTrigger>
-                                <TooltipPopup>
-                                  Subagent conversations stay attached to this parent.
-                                </TooltipPopup>
-                              </Tooltip>
-                            ) : null}
-                            <span className="w-14 text-right text-[11px] text-muted-foreground">
-                              {formatRelativeTimeLabel(thread.updatedAt)}
+                            <span className="flex shrink-0 items-center gap-1.5">
+                              {thread.updateAvailable ? (
+                                <Badge size="sm" variant="info">
+                                  Update available
+                                </Badge>
+                              ) : thread.existingThreadId ? (
+                                <Badge size="sm" variant="outline">
+                                  Imported
+                                </Badge>
+                              ) : null}
+                              {thread.childCount > 0 ? (
+                                <Tooltip>
+                                  <TooltipTrigger render={<span />}>
+                                    <Badge size="sm" variant="secondary">
+                                      {thread.childCount} subagents
+                                    </Badge>
+                                  </TooltipTrigger>
+                                  <TooltipPopup>
+                                    Subagent conversations stay attached to this parent.
+                                  </TooltipPopup>
+                                </Tooltip>
+                              ) : null}
+                              <span className="w-14 text-right text-2xs text-muted-foreground">
+                                {formatRelativeTimeLabel(thread.updatedAt)}
+                              </span>
                             </span>
-                          </span>
-                        </label>
-                      ))}
-                </div>
-              )}
-              {cwd !== null && data.nextCursor ? (
-                <div ref={sentinelRef} className="flex justify-center py-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={loading || pendingSearch}
-                    onClick={() => void load(data.nextCursor!)}
-                  >
-                    {loading ? <Spinner className="size-3.5" /> : null}Load older
-                  </Button>
-                </div>
-              ) : null}
-            </>
-          )}
+                          </label>
+                        ))}
+                  </div>
+                )}
+                {cwd !== null && data.nextCursor ? (
+                  <div ref={sentinelRef} className="flex justify-center py-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={loading || pendingSearch}
+                      onClick={() => void load(data.nextCursor!)}
+                    >
+                      {loading ? <Spinner className="size-3.5" /> : null}Load older
+                    </Button>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
         </DialogPanel>
         <DialogFooter variant="bare" className="items-center sm:justify-between">
           <span role="status" className="text-xs text-muted-foreground">
@@ -1221,7 +1227,7 @@ function RemovedWorktreeAlert({
                 <SelectItem key={checkout.cwd} value={checkout.cwd}>
                   <span className="min-w-0">
                     <span className="block truncate">{checkoutLabel(checkout)}</span>
-                    <span className="block truncate font-mono text-[11px] text-muted-foreground">
+                    <span className="block truncate font-mono text-2xs text-muted-foreground">
                       {checkout.cwd}
                     </span>
                   </span>
@@ -1249,7 +1255,7 @@ function WorktreeBadge({ thread }: { thread: CodexImportCandidate }) {
         <Badge
           size="sm"
           variant={thread.worktreeMissing ? "outline" : "secondary"}
-          className="max-w-full gap-1 text-muted-foreground"
+          className="max-w-full"
         >
           <GitBranchIcon className="size-3 shrink-0" />
           <span className="truncate font-mono">

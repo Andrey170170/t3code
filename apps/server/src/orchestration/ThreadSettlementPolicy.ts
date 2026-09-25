@@ -118,6 +118,7 @@ export function resolveAutoSettlementAt(input: {
 export function isAutoSettlementCandidate(thread: OrchestrationThreadShell, now: string): boolean {
   if (thread.archivedAt !== null || thread.settledOverride !== null || thread.pinnedAt != null)
     return false;
+  if (thread.autoSettleDisabledAt != null) return false;
   if (thread.hasPendingApprovals || thread.hasPendingUserInput) return false;
   if (thread.session?.status === "starting" || thread.session?.status === "running") return false;
   if (thread.backgroundLiveness != null) return false;

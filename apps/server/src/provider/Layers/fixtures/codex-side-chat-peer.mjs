@@ -13,6 +13,7 @@ const thread = (id) => ({
   modelProvider: "openai",
   preview: "",
   sessionId: id,
+  projectId: null,
   source: "appServer",
   status: { type: "idle" },
   turns: [
@@ -36,6 +37,18 @@ const opened = (id) => ({
 let pendingTurn;
 let turnCount = 0;
 let boundary = false;
+const compact = (threadId, turnId) => {
+  notify("item/completed", {
+    completedAtMs: 2,
+    threadId,
+    turnId,
+    item: { type: "contextCompaction", id: `compact-${threadId}` },
+  });
+  notify("turn/completed", {
+    threadId,
+    turn: { id: turnId, status: "completed", items: [] },
+  });
+};
 for await (const line of NodeReadline.createInterface({ input: process.stdin })) {
   const message = JSON.parse(line);
   if (!message.method) {
@@ -92,13 +105,28 @@ for await (const line of NodeReadline.createInterface({ input: process.stdin }))
         write({ id: message.id, error: { code: -32603, message: "Injection failed" } });
       else respond({});
       break;
+    case "config/mcpServer/reload":
+      respond({});
+      break;
+    case "thread/compact/start":
+      respond({});
+      compact(message.params.threadId, "parent-turn");
+      break;
     case "turn/start": {
+      if (message.params.threadId === "parent") {
+        const turn = { id: "parent-turn", status: "inProgress", items: [] };
+        respond({ turn });
+        notify("turn/started", { threadId: "parent", turn });
+        break;
+      }
       if (!boundary) throw new Error("Side input must follow the injected boundary");
       pendingTurn = ++turnCount === 1 ? "side-turn" : `side-turn-${turnCount}`;
       const turn = { id: pendingTurn, status: "inProgress", items: [] };
       respond({ turn });
       notify("turn/started", { threadId: "side", turn });
-      if (message.params.input[0]?.text !== "hold") {
+      if (message.params.input[0]?.text === "compact") {
+        compact("side", pendingTurn);
+      } else if (message.params.input[0]?.text !== "hold") {
         write({
           id: "side-approval",
           method: "item/commandExecution/requestApproval",

@@ -148,6 +148,7 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   "square.and.arrow.down": IconDownload,
   circle: IconCircle,
   clock: IconClock,
+  timer: IconClock,
   ticket: IconTicket,
   cloud: IconCloud,
   cube: IconBox,

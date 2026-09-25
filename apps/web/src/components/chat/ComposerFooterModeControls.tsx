@@ -5,7 +5,6 @@ import { BotIcon, PencilRulerIcon } from "lucide-react";
 import { runtimeModeConfig, runtimeModeOptions } from "./runtimeModeConfig";
 import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { cn } from "~/lib/utils";
 import {
   ComposerControl,
   ComposerControlIcon,
@@ -25,8 +24,8 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
   onRuntimeModeChange: (mode: RuntimeMode) => void;
 }) {
   const sideChatPortalProps = useSideChatPortalProps();
-  const composerFloatingLayerProps = useComposerMenuProps();
   const size = props.size ?? "sm";
+  const composerFloatingLayerProps = useComposerMenuProps();
   const [open, setOpen] = useComposerMenuState(props.hidden);
   const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
   const RuntimeModeIcon = runtimeModeOption.icon;
@@ -43,14 +42,8 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
           render={
             <ComposerControl
               size={size}
-              className={cn(
-                "shrink-0 whitespace-nowrap",
-                props.interactionMode === "plan"
-                  ? "bg-accent text-accent-foreground hover:bg-accent/80"
-                  : size === "xs"
-                    ? undefined
-                    : "text-secondary-label hover:text-foreground",
-              )}
+              className="shrink-0 whitespace-nowrap"
+              aria-pressed={props.interactionMode === "plan"}
               type="button"
               onClick={props.onToggleInteractionMode}
               aria-label={interactionModeTooltip}
@@ -95,7 +88,6 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
               <ComposerSelectControl
                 data-composer-shortcut="composer.mode"
                 size={size}
-                className={size === "xs" ? undefined : "font-medium"}
                 aria-label="Runtime mode"
               />
             }
@@ -112,7 +104,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
               const option = runtimeModeConfig[mode];
               const OptionIcon = option.icon;
               return (
-                <SelectItem key={mode} value={mode} hideIndicator className="min-w-64 py-2">
+                <SelectItem key={mode} value={mode} hideIndicator className="min-w-64">
                   <div className="flex min-w-0 items-center gap-3">
                     <div className="grid min-w-0 flex-1 gap-0.5">
                       <span className="inline-flex items-center gap-1.5 font-medium text-foreground">

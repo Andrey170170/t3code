@@ -30,6 +30,7 @@ const makeRuntime = (failInject = false) =>
       binaryPath,
       cwd: dir,
       runtimeMode: "approval-required",
+      developerInstructions: "Trellis workspace primer.",
       appServerArgs: ["-c", 'mcp_servers.t3-code.url="http://localhost/mcp"'],
       mcpCapabilities: new Set(["pull-requests", "device"]),
       environment: {
@@ -130,14 +131,73 @@ it.layer(NodeServices.layer)("native Codex side conversations", (it) => {
           ["turn/interrupt", "thread/unsubscribe"],
         );
         const turn = requests.find((request) => request.method === "turn/start")!;
-        const collaborationMode = turn.params.collaborationMode as {
-          settings: { developer_instructions: string };
-        };
-        assert.include(collaborationMode.settings.developer_instructions, "device_list");
-        assert.notInclude(collaborationMode.settings.developer_instructions, "preview_status");
+        assert.match(String(fork.params.developerInstructions), /Trellis workspace primer/);
+        const context = turn.params.additionalContext as Record<string, { value: string }>;
+        assert.include(context.t3_code_tools!.value, "device_list");
+        assert.notInclude(context.t3_code_tools!.value, "preview_status");
         assert.equal(turn.params.effort, "low");
         assert.deepEqual(turn.params.sandboxPolicy, { type: "dangerFullAccess" });
       }),
+  );
+
+  it.effect("restores each thread's own context after root and side compaction", () =>
+    Effect.gen(function* () {
+      const { runtime, readRequests } = yield* makeRuntime();
+      const rootCompleted = yield* Deferred.make<void>();
+      const sideCompleted = yield* Deferred.make<void>();
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) =>
+          event.method === "turn/completed"
+            ? Deferred.succeed(rootCompleted, undefined)
+            : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+      yield* runtime.sideChatEvents.pipe(
+        Stream.runForEach(({ event }) =>
+          event.method === "turn/completed"
+            ? Deferred.succeed(sideCompleted, undefined)
+            : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+      yield* runtime.sendTurn({
+        input: "hold",
+        model: "gpt-5.3-codex",
+        effort: "high",
+        interactionMode: "default",
+      });
+      const side = yield* runtime.openSideChat;
+      yield* runtime.sendSideChat(side.id, {
+        input: "compact",
+        model: "gpt-5.4",
+        effort: "low",
+        interactionMode: "plan",
+      });
+      yield* Deferred.await(sideCompleted);
+      yield* runtime.compactThread;
+      yield* Deferred.await(rootCompleted);
+      const requests = yield* readRequests;
+      for (const threadId of ["parent", side.id]) {
+        const start = requests.find(
+          (entry) => entry.method === "turn/start" && entry.params.threadId === threadId,
+        )!;
+        const context = start.params.additionalContext as Record<string, { value: string }>;
+        const restored = requests.findLast(
+          (entry) => entry.method === "thread/inject_items" && entry.params.threadId === threadId,
+        )!;
+        assert.deepEqual(
+          restored.params.items,
+          Object.entries(context).map(([key, entry]) => ({
+            type: "message",
+            role: "developer",
+            content: [{ type: "input_text", text: `<${key}>${entry.value}</${key}>` }],
+          })),
+        );
+      }
+      const starts = requests.filter((entry) => entry.method === "turn/start");
+      assert.notDeepEqual(starts[0]!.params.additionalContext, starts[1]!.params.additionalContext);
+    }),
   );
 
   it.effect("closes a side chat while its approval is pending", () =>

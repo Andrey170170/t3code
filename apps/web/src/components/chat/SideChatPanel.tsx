@@ -140,7 +140,7 @@ export function SideChatPanel(props: SideChatPanelProps) {
             <TooltipPopup>Context from {props.parentTitle}</TooltipPopup>
           </Tooltip>
           <Tooltip>
-            <TooltipTrigger render={<span className="text-[10px] text-muted-foreground" />}>
+            <TooltipTrigger render={<span className="text-3xs text-muted-foreground" />}>
               Temporary
             </TooltipTrigger>
             <TooltipPopup className="max-w-64">
@@ -581,7 +581,7 @@ function SideChatConversation({
           <Tooltip>
             <TooltipTrigger
               render={
-                <div className="mt-2 flex min-w-0 items-center gap-1.5 px-2 text-[10px] text-muted-foreground" />
+                <div className="mt-2 flex min-w-0 items-center gap-1.5 px-2 text-3xs text-muted-foreground" />
               }
             >
               <GitBranchIcon className="size-3 shrink-0" />

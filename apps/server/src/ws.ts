@@ -110,6 +110,8 @@ import {
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ModelManifest from "./provider/ModelManifest.ts";
+import * as ProviderMaintenance from "./provider/providerMaintenance.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDirectory.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
@@ -567,6 +569,8 @@ const makeWsRpcLayer = (
         yield* Effect.context<Effect.Services<ReturnType<typeof remoteSshDeviceHosts>>>();
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const modelManifest = yield* ModelManifest.ModelManifest;
+      const providerVersionCache = yield* ProviderMaintenance.ProviderVersionCache;
       const providerService = yield* ProviderService.ProviderService;
       const sideChats = Effect.fromNullishOr(providerService.sideChats).pipe(
         Effect.mapError(
@@ -866,27 +870,23 @@ const makeWsRpcLayer = (
           case "project.meta-updated":
             return projectUpsertOrRemove(ProjectId.make(event.aggregateId), event.sequence);
           case "project.deleted":
-            return Effect.succeed(
-              Option.some({
-                kind: "project-removed" as const,
-                sequence: event.sequence,
-                projectId: ProjectId.make(event.aggregateId),
-              }),
-            );
+            return Effect.succeedSome({
+              kind: "project-removed" as const,
+              sequence: event.sequence,
+              projectId: ProjectId.make(event.aggregateId),
+            });
           case "thread.deleted":
           case "thread.archived":
-            return Effect.succeed(
-              Option.some({
-                kind: "thread-removed" as const,
-                sequence: event.sequence,
-                threadId: ThreadId.make(event.aggregateId),
-              }),
-            );
+            return Effect.succeedSome({
+              kind: "thread-removed" as const,
+              sequence: event.sequence,
+              threadId: ThreadId.make(event.aggregateId),
+            });
           case "thread.unarchived":
             return threadUpsertOrRemove(ThreadId.make(event.aggregateId), event.sequence);
           default:
             if (event.aggregateKind !== "thread") {
-              return Effect.succeed(Option.none());
+              return Effect.succeedNone;
             }
             return threadUpsertOrRemove(ThreadId.make(event.aggregateId), event.sequence);
         }
@@ -904,7 +904,7 @@ const makeWsRpcLayer = (
       ): Effect.Effect<Option.Option<A>, never, never> =>
         read.pipe(
           Effect.retry({ times: 1 }),
-          Effect.map(Option.some),
+          Effect.asSome,
           Effect.tapError((error) =>
             Effect.logWarning("orchestration shell projection refetch failed", {
               aggregateKind,
@@ -2377,6 +2377,28 @@ const makeWsRpcLayer = (
           observeRpcEffect(
             WS_METHODS.serverRefreshProviders,
             Effect.gen(function* () {
+              // Only explicit catalog refreshes bypass T3's caches. Workspace
+              // discovery and background status checks retain their timers.
+              if (input.refreshModels) {
+                yield* modelManifest.forceRefresh;
+                const instances = yield* providerInstances.listInstances;
+                yield* Effect.forEach(
+                  instances.filter(
+                    (instance) =>
+                      input.instanceId === undefined || input.instanceId === instance.instanceId,
+                  ),
+                  (instance) =>
+                    Effect.gen(function* () {
+                      yield* instance.invalidateCaches ?? Effect.void;
+                      const maintenance = yield* instance.snapshot.resolveMaintenance({
+                        fresh: true,
+                      });
+                      if (maintenance.packageName)
+                        providerVersionCache.delete(maintenance.packageName);
+                    }),
+                  { concurrency: "unbounded", discard: true },
+                );
+              }
               // An untargeted refresh is "re-read everything's status", which
               // includes quota from configured usage-limit sources. Awaited,
               // not forked: the RPC scope closes on return and would
@@ -2486,6 +2508,15 @@ const makeWsRpcLayer = (
             WS_METHODS.providerAuthStart,
             providerAuth.start(input, currentSessionId),
             { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.providerAuthRespond]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.providerAuthRespond,
+            providerAuth.respond(input, currentSessionId),
+            {
+              "rpc.aggregate": "provider",
+              instanceId: input.instanceId,
+            },
           ),
         [WS_METHODS.providerAuthComplete]: (input) =>
           observeRpcEffect(
