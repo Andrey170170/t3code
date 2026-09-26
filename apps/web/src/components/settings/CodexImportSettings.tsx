@@ -27,6 +27,21 @@ export function CodexImportSettings() {
         label: environment.label,
       }));
 
+  // Per-machine labels are long, so several of them go under the description
+  // instead of squeezing it in the row's control column.
+  const buttons =
+    targets.length > 0 ? (
+      targets.map(({ key, label, ...target }) => (
+        <CodexThreadImportButton
+          key={key}
+          {...target}
+          label={targets.length > 1 ? `Import from ${label}` : "Import conversations"}
+        />
+      ))
+    ) : (
+      <CodexThreadImportButton environmentId={null} />
+    );
+
   return (
     <SettingsSection id="import-conversations" title="Conversations">
       <SettingsRow
@@ -36,22 +51,12 @@ export function CodexImportSettings() {
             ? "Choose existing Codex conversations to import into this project."
             : "Choose existing Codex conversations from any project on a connected machine."
         }
-        control={
-          <div className="flex flex-wrap gap-2">
-            {targets.length > 0 ? (
-              targets.map(({ key, label, ...target }) => (
-                <CodexThreadImportButton
-                  key={key}
-                  {...target}
-                  label={targets.length > 1 ? `Import from ${label}` : "Import conversations"}
-                />
-              ))
-            ) : (
-              <CodexThreadImportButton environmentId={null} />
-            )}
-          </div>
-        }
-      />
+        control={targets.length > 1 ? undefined : buttons}
+      >
+        {targets.length > 1 ? (
+          <div className="mt-3 flex flex-wrap gap-2 pb-2">{buttons}</div>
+        ) : null}
+      </SettingsRow>
     </SettingsSection>
   );
 }
