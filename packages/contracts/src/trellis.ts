@@ -35,6 +35,11 @@ export const TrellisStatus = Schema.Struct({
   available: Schema.Boolean,
   /** Where Trellis project paths live; also reported while disabled or unavailable when known. */
   root: Schema.optionalKey(Schema.String),
+  /**
+   * Every root Trellis project paths may live under, including earlier roots,
+   * so clients recognize those projects while Trellis is off or down.
+   */
+  knownRoots: Schema.optionalKey(Schema.Array(Schema.String)),
   /** The API socket the server uses or would use. */
   socketPath: Schema.optionalKey(Schema.String),
   /**

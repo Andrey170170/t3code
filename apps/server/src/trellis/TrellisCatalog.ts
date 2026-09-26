@@ -980,6 +980,7 @@ const make = Effect.gen(function* () {
         state: connection.state,
         available: connection.state === "ready",
         ...(connection.root === null ? {} : { root: connection.root }),
+        knownRoots: yield* trellis.expectedRoots,
         socketPath: connection.socketPath,
         ...(yield* Ref.get(lastApplied).pipe(
           Effect.map((applied) =>

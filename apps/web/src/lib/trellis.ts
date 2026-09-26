@@ -22,10 +22,19 @@ export function isTrellisWorkspaceRoot(
  */
 export function trellisRemovalOf(
   workspaceRoot: string,
-  status: { readonly available: boolean; readonly root?: string | null | undefined } | null,
+  status: {
+    readonly available: boolean;
+    readonly root?: string | null | undefined;
+    readonly knownRoots?: ReadonlyArray<string> | undefined;
+  } | null,
 ): "trash" | "offline" | "none" {
-  if (!isTrellisWorkspaceRoot(workspaceRoot, status?.root)) return "none";
-  return status?.available === true ? "trash" : "offline";
+  if (status?.available === true) {
+    return isTrellisWorkspaceRoot(workspaceRoot, status.root) ? "trash" : "none";
+  }
+  // Off or down, any root this environment has used counts: the project may
+  // belong to an earlier root than the one reported.
+  const roots = [status?.root, ...(status?.knownRoots ?? [])];
+  return roots.some((root) => isTrellisWorkspaceRoot(workspaceRoot, root)) ? "offline" : "none";
 }
 
 /** Whether a Trellis project path is an idea folder in scratch rather than a workspace root. */

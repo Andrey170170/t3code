@@ -45,6 +45,13 @@ describe("trellisRemovalOf", () => {
 
   it("keeps recognizing Trellis projects while Trellis is off or down", () => {
     expect(trellisRemovalOf(idea, { available: false, root: "/srv/trellis" })).toBe("offline");
+    expect(
+      trellisRemovalOf(idea, {
+        available: false,
+        root: "/srv/trellis-dev",
+        knownRoots: ["/srv/trellis", "/srv/trellis-dev"],
+      }),
+    ).toBe("offline");
   });
 
   it("leaves ordinary projects and unknown statuses alone", () => {
