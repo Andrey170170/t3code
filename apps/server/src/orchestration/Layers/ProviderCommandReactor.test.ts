@@ -3825,6 +3825,50 @@ describe("ProviderCommandReactor", () => {
       }),
   );
 
+  effectIt.effect("stops the session of a thread archived before the stop", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness());
+      const threadId = ThreadId.make("thread-1");
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-before-archive"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      // Archiving dispatches the stop only after the archive lands.
+      yield* harness.engine.dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("cmd-archive-before-stop"),
+        threadId,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-stop-after-archive"),
+        threadId,
+        createdAt: now,
+      });
+      yield* Effect.promise(() => harness.drain());
+
+      expect(harness.stopSession).toHaveBeenCalledWith({ threadId });
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.archivedAt).not.toBeNull();
+      expect(thread?.session?.status).toBe("stopped");
+    }),
+  );
+
   effectIt.effect("stops a starting session without a bound turn when interrupt fails", () =>
     Effect.gen(function* () {
       const harness = yield* Effect.promise(() =>
