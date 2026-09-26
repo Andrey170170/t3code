@@ -312,6 +312,17 @@ const decodeJson = <S extends Schema.Top>(schema: S, text: string) =>
 
 const query = (params: Record<string, string>) => new URLSearchParams(params).toString();
 
+/**
+ * The roots listed in the `trellis-root` state file, one per line. Keeps
+ * absolute paths only, and never `/` itself, which would claim every host path.
+ */
+export function parseKnownRoots(text: string): ReadonlyArray<string> {
+  return text
+    .split("\n")
+    .map((line) => line.trim().replace(/\/+$/, ""))
+    .filter((line) => line.startsWith("/"));
+}
+
 export const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -333,12 +344,7 @@ export const make = Effect.gen(function* () {
   const rootFile = NodePath.join(serverConfig.stateDir, "trellis-root");
   const state = yield* Ref.make<TrellisEnv | null>(null);
   const persistedRoots = yield* fileSystem.readFileString(rootFile).pipe(
-    Effect.map((text) =>
-      text
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.startsWith("/")),
-    ),
+    Effect.map(parseKnownRoots),
     Effect.orElseSucceed((): ReadonlyArray<string> => []),
   );
   const knownRoots = yield* Ref.make<ReadonlyArray<string>>(persistedRoots);

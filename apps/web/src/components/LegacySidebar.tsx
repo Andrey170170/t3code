@@ -107,7 +107,8 @@ import {
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { useShortcutModifierState } from "../shortcutModifierState";
 import { ensureLocalApi, readLocalApi } from "../localApi";
-import { useTrellisTrash, useSidebarProjects } from "../hooks/useTrellis";
+import { useSidebarProjects } from "../hooks/useSidebarProjects";
+import { useTrellisTrash } from "../hooks/useTrellis";
 import { trellisItemKind, trellisRemovalOf, trellisTrashConfirmation } from "../lib/trellis";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { loadTrellisStatus } from "../state/trellis";

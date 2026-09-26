@@ -9,6 +9,7 @@ import {
   refuseWorktreeIn,
   makeTestTrellis,
   TRELLIS_WORKTREE_REFUSAL,
+  parseKnownRoots,
 } from "./Trellis.ts";
 import {
   selectRollbackSnapshot,
@@ -20,6 +21,15 @@ import { mainCheckoutFromGitFile, trellisTerminalSpawnInput } from "./TrellisPty
 
 const env = { root: "/trellis", bin: "/opt/trellis", shimDir: "/t3/trellis-shims" };
 const idea = "/trellis/workspaces/ws-scratch/project/idea-1";
+
+describe("parseKnownRoots", () => {
+  it("keeps absolute roots and drops `/`, which would claim every host path", () => {
+    expect(parseKnownRoots("/trellis\n/\n//\nrelative\n /trellis/dev/ \n\n")).toEqual([
+      "/trellis",
+      "/trellis/dev",
+    ]);
+  });
+});
 
 describe("isTrellisManagedPath", () => {
   it("accepts project directories and paths below them only", () => {

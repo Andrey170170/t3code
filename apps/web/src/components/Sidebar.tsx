@@ -121,7 +121,8 @@ import {
 } from "../threadSelectionStore";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
-import { useTrellisCreate, useTrellisEnvironment, useSidebarProjects } from "../hooks/useTrellis";
+import { useSidebarProjects } from "../hooks/useSidebarProjects";
+import { useTrellisCreate, useTrellisEnvironment } from "../hooks/useTrellis";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { useClientSettings } from "../hooks/useSettings";
