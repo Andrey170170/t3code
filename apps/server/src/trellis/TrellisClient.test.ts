@@ -104,14 +104,16 @@ describe("Trellis client", () => {
           refreshed,
           error,
           connection: yield* trellis.connection,
-          expectedRoot: yield* trellis.expectedRoot,
+          expectedRoots: yield* trellis.expectedRoots,
         };
       }).pipe(Effect.provide(layer));
       expect(result.refreshed).toBeNull();
       expect(result.error.message).toContain("turned off");
       expect(result.connection.state).toBe("disabled");
       // Trellis paths stay recognizable without asking Trellis.
-      expect(result.expectedRoot).toBe(NodePath.dirname(NodePath.dirname(harness.socketPath)));
+      expect(result.expectedRoots).toContain(
+        NodePath.dirname(NodePath.dirname(harness.socketPath)),
+      );
       expect(harness.requests).toEqual([]);
     }),
   );

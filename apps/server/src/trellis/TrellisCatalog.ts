@@ -363,6 +363,42 @@ export function trashItems(view: TrellisTrashView): ReadonlyArray<TrellisTrashIt
   return items.toSorted((left, right) => right.deletedAt - left.deletedAt);
 }
 
+/**
+ * T3 project roots whose Trellis item is gone (trashed or graduated), from a
+ * listing with `all`: every path of a non-live item, trashed forks of live
+ * items, and workspaces Trellis reports as deleted. Clients hide such
+ * projects once nothing in them is active.
+ */
+export function retiredRoots(
+  items: ReadonlyArray<TrellisProjectView>,
+  deletedWorkspaceRoots: ReadonlyArray<string>,
+): ReadonlyArray<string> {
+  const live = new Set(
+    desiredProjects(
+      items.map((item) => ({
+        ...item,
+        workspaces: item.workspaces.filter((workspace) => workspace.deleted_at === null),
+      })),
+    ).map((entry) => entry.workspaceRoot),
+  );
+  const roots = new Set<string>();
+  for (const item of items) {
+    if (!isLive(item)) {
+      roots.add(normalizeRoot(item.path));
+      // An idea's workspace is the shared scratch, which stays.
+      if (item.kind !== "idea") {
+        for (const workspace of item.workspaces) roots.add(normalizeRoot(workspace.path));
+      }
+    } else {
+      for (const workspace of item.workspaces) {
+        if (workspace.deleted_at !== null) roots.add(normalizeRoot(workspace.path));
+      }
+    }
+  }
+  for (const root of deletedWorkspaceRoots) roots.add(normalizeRoot(root));
+  return [...roots].filter((root) => !live.has(root)).toSorted();
+}
+
 export class TrellisCatalog extends Context.Service<
   TrellisCatalog,
   {
@@ -374,6 +410,17 @@ export class TrellisCatalog extends Context.Service<
     readonly newIdea: (input: {
       readonly name?: string | undefined;
     }) => Effect.Effect<TrellisCreateResult, TrellisError>;
+    /**
+     * Creates the idea for a new-idea draft's first send. `trellisId` lets
+     * the caller discard it if the send fails; an idea whose T3 project never
+     * appears is discarded here.
+     */
+    readonly createIdeaForDraft: Effect.Effect<
+      TrellisCreateResult & { readonly trellisId: string },
+      TrellisError
+    >;
+    /** Trashes an idea that never got a thread. Never fails. */
+    readonly discardIdea: (trellisId: string) => Effect.Effect<void>;
     /** Ensures the landing pad project that new-idea drafts belong to. Creates no idea. */
     readonly prepareIdeaDraft: Effect.Effect<TrellisIdeaDraftTarget, TrellisError>;
     /** Moves the Trellis item behind a T3 project to the trash; the sync then retires it. */
@@ -438,8 +485,58 @@ const make = Effect.gen(function* () {
     readonly fingerprint: string;
     readonly items: ReadonlyArray<TrellisProjectView>;
     readonly ids: ReadonlyMap<string, ProjectId>;
+    readonly retiredRoots: ReadonlyArray<string>;
   } | null>(null);
   const dirty = yield* Ref.make(true);
+
+  // Archives the active threads of the T3 projects rooted at `roots` and
+  // stops their provider sessions, as a client archive does.
+  const archiveThreadsIn = (roots: ReadonlyArray<string>) =>
+    Effect.gen(function* () {
+      const wanted = new Set(roots.map(normalizeRoot));
+      const shell = yield* snapshots.getShellSnapshot();
+      const projectIds = new Set(
+        shell.projects
+          .filter((project) => wanted.has(normalizeRoot(project.workspaceRoot)))
+          .map((project) => project.id),
+      );
+      for (const thread of shell.threads) {
+        if (!projectIds.has(thread.projectId) || thread.archivedAt !== null) continue;
+        const hasSession = thread.session !== null && thread.session.status !== "stopped";
+        yield* engine
+          .dispatch({
+            type: "thread.archive",
+            commandId: yield* commandId("trash-archive"),
+            threadId: thread.id,
+          })
+          .pipe(
+            Effect.andThen(
+              hasSession
+                ? Effect.gen(function* () {
+                    yield* engine.dispatch({
+                      type: "thread.session.stop",
+                      commandId: yield* commandId("trash-stop"),
+                      threadId: thread.id,
+                      createdAt: DateTime.formatIso(yield* DateTime.now),
+                    });
+                  })
+                : Effect.void,
+            ),
+            Effect.catch((error) =>
+              Effect.logWarning("could not archive a trashed Trellis thread", {
+                threadId: thread.id,
+                detail: error.message,
+              }),
+            ),
+          );
+      }
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("could not archive the threads of a trashed Trellis item", {
+          detail: error.message,
+        }),
+      ),
+    );
 
   const commandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(
@@ -558,7 +655,17 @@ const make = Effect.gen(function* () {
     // A failed action (for example a projection lagging behind a dispatch)
     // is retried on the next poll.
     if (failed) yield* Ref.set(dirty, true);
-    yield* Ref.set(lastApplied, { fingerprint, items, ids });
+    yield* Ref.set(lastApplied, {
+      fingerprint,
+      items,
+      ids,
+      retiredRoots: retiredRoots(
+        items,
+        [...deletedWorkspaces.keys()].map((id) =>
+          NodePath.posix.join(env.root, "workspaces", id, "project"),
+        ),
+      ),
+    });
     return ids as ReadonlyMap<string, ProjectId>;
   });
 
@@ -759,7 +866,9 @@ const make = Effect.gen(function* () {
           )
         : item === undefined || item.kind === "idea" || item.workspaces.length === 0
           ? [project.workspaceRoot]
-          : item.workspaces.map((workspace) => workspace.path);
+          : item.workspaces
+              .filter((workspace) => workspace.deleted_at === null)
+              .map((workspace) => workspace.path);
     const busy = yield* activeThreadTitlesIn(scopes);
     if (busy.length > 0) {
       return yield* new TrellisError({
@@ -768,6 +877,10 @@ const make = Effect.gen(function* () {
     }
     if (target.kind === "project") yield* trellis.trashProject(target.id);
     else yield* trellis.trashWorkspace(target.id);
+    // Archive the conversations here rather than through the sync's time
+    // heuristic: a session ending as the workspace stops bumps a thread past
+    // the deletion time, which would leave it active.
+    yield* archiveThreadsIn(scopes);
     yield* syncNow;
     return { trashed: target.kind, name: target.name } satisfies TrellisTrashProjectResult;
   });
@@ -782,19 +895,27 @@ const make = Effect.gen(function* () {
         [...trash.projects, ...trash.workspaces].find((entry) => entry.id === input.id)
           ?.deleted_at ?? null;
       let root: string;
-      // Every T3 project the restore brings back: a project restores its forks too.
+      // Every T3 project the restore brings back. A project restores the
+      // workspaces of its deletion; a fork whose project is trashed brings
+      // the project back first. Workspaces still trashed stay archived.
       let roots: ReadonlyArray<string>;
+      const liveRoots = (item: TrellisProjectView) =>
+        item.kind === "idea" || item.workspaces.length === 0
+          ? [item.path]
+          : item.workspaces
+              .filter((workspace) => workspace.deleted_at === null)
+              .map((workspace) => workspace.path);
       if (input.kind === "workspace") {
         yield* trellis.restoreWorkspace(input.id);
         root = NodePath.posix.join(env.root, "workspaces", input.id, "project");
-        roots = [root];
+        const owner = (yield* trellis.listProjects({ all: false })).find((item) =>
+          item.workspaces.some((workspace) => workspace.id === input.id),
+        );
+        roots = owner === undefined ? [root] : liveRoots(owner);
       } else {
         const restored = yield* trellis.restoreProject(input.id);
         root = restored.path;
-        roots =
-          restored.kind === "idea" || restored.workspaces.length === 0
-            ? [root]
-            : restored.workspaces.map((workspace) => workspace.path);
+        roots = liveRoots(restored);
       }
       const ids = yield* syncNow;
       const projectId = ids.get(normalizeRoot(root)) ?? null;
@@ -832,6 +953,20 @@ const make = Effect.gen(function* () {
     },
   );
 
+  // Moves an idea that never got a thread back out of the catalog.
+  const discardIdea = (trellisId: string) =>
+    trellis.trashProject(trellisId).pipe(
+      Effect.andThen(syncNow),
+      Effect.tap(() => Effect.logInfo("discarded an unused Trellis idea", { trellisId })),
+      Effect.catch((error) =>
+        Effect.logWarning("could not discard an unused Trellis idea", {
+          trellisId,
+          detail: error.message,
+        }),
+      ),
+      Effect.asVoid,
+    );
+
   return TrellisCatalog.of({
     start,
     syncNow,
@@ -846,9 +981,31 @@ const make = Effect.gen(function* () {
         available: connection.state === "ready",
         ...(connection.root === null ? {} : { root: connection.root }),
         socketPath: connection.socketPath,
+        ...(yield* Ref.get(lastApplied).pipe(
+          Effect.map((applied) =>
+            connection.state !== "ready" || applied === null
+              ? { retiredRoots: [], forkRoots: [] }
+              : {
+                  retiredRoots: applied.retiredRoots,
+                  forkRoots: desiredProjects(applied.items)
+                    .filter((entry) => !entry.primary)
+                    .map((entry) => entry.workspaceRoot),
+                },
+          ),
+        )),
       } satisfies TrellisStatus;
     }),
     newIdea: (input) => trellis.createIdea(input).pipe(Effect.flatMap(created)),
+    createIdeaForDraft: trellis.createIdea({}).pipe(
+      Effect.flatMap((item) =>
+        created(item).pipe(
+          Effect.map((result) => ({ ...result, trellisId: item.id })),
+          // Without a T3 project the idea is unreachable: take it back.
+          Effect.tapError(() => discardIdea(item.id)),
+        ),
+      ),
+    ),
+    discardIdea,
     newProject: (input) => trellis.createProject(input).pipe(Effect.flatMap(created)),
     prepareIdeaDraft,
     trashProject,
@@ -872,6 +1029,8 @@ export const layerDisabled = Layer.succeed(
     status: Effect.succeed({ state: "disabled", available: false }),
     newIdea: unavailable,
     newProject: unavailable,
+    createIdeaForDraft: unavailable(),
+    discardIdea: () => Effect.void,
     prepareIdeaDraft: unavailable(),
     trashProject: unavailable,
     listTrash: unavailable(),

@@ -1003,14 +1003,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const env =
       (yield* client.current) ??
       ((yield* Trellis.isTrellisPath(client, input.cwd)) ? yield* client.refresh : null);
-    const expectedRoot = yield* client.expectedRoot;
+    const expectedRoots = yield* client.expectedRoots;
     const decision = TrellisProviderSession.decideTrellisLaunch({
       env,
       enabled: yield* client.enabled,
-      expectedRoot,
+      expectedRoots,
       driverKind: input.driverKind,
       cwd: input.cwd,
-      projectRoot: expectedRoot === null ? undefined : yield* projectRootOf(input.threadId),
+      projectRoot:
+        expectedRoots.length === 0 && env === null
+          ? undefined
+          : yield* projectRootOf(input.threadId),
     });
     if (decision.kind === "unsupported") {
       return yield* toValidationError(input.operation, decision.message);

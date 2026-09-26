@@ -70,7 +70,6 @@ import {
   RpcClientId,
   EnvironmentAuthorizationError,
   ThreadId,
-  isTrellisLandingPad,
   type TerminalAttachStreamEvent,
   type TerminalError,
   type TerminalEvent,
@@ -148,6 +147,10 @@ import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import { CodexThreadClient } from "./project/CodexThreadClient.ts";
 import * as TrellisCatalog from "./trellis/TrellisCatalog.ts";
+import {
+  dispatchWithIdeaPromotion,
+  type IdeaPromotionDeps,
+} from "./trellis/TrellisIdeaPromotion.ts";
 import * as TrellisPreview from "./trellis/TrellisPreview.ts";
 import { CodexThreadImport } from "./project/CodexThreadImport.ts";
 import { importRecentAgentThreads } from "./project/AgentSessionImporter.ts";
@@ -1790,70 +1793,27 @@ const makeWsRpcLayer = (
           return yield* runBootstrap;
         });
 
-      // A new-idea draft belongs to the hidden landing pad project. Its first
-      // send creates the Trellis idea, and the thread is created in the idea's
-      // project instead, in the project folder (Trellis refuses worktrees).
-      const promoteIdeaDraft = (
-        command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
-      ) =>
-        Effect.gen(function* () {
-          const createThread = command.bootstrap?.createThread;
-          if (createThread === undefined || !isTrellisLandingPad(createThread.projectId)) {
-            return { command, discardIdea: Effect.void };
-          }
-          // A retried send whose thread already exists must not create a
-          // second idea; the thread create then fails as for any retry.
-          const existing = yield* projectionSnapshotQuery
-            .getThreadShellById(command.threadId)
-            .pipe(Effect.orElseSucceed(() => Option.none()));
-          if (Option.isSome(existing)) return { command, discardIdea: Effect.void };
-          const idea = yield* trellisCatalog.newIdea({}).pipe(
-            Effect.mapError(
-              (error) =>
-                new OrchestrationDispatchCommandError({
-                  message: `Could not create the Trellis idea: ${error.message}`,
-                }),
-            ),
-          );
-          yield* Effect.logInfo("Trellis idea created from a new-idea draft", {
-            threadId: command.threadId,
-            projectId: idea.projectId,
-            workspaceRoot: idea.workspaceRoot,
-          });
-          // If the send fails before the thread exists, the idea is empty:
-          // trash it so an abandoned send leaves nothing behind.
-          const discardIdea = projectionSnapshotQuery.getThreadShellById(command.threadId).pipe(
-            Effect.flatMap((thread) =>
-              Option.isSome(thread) ? Effect.void : trellisCatalog.trashProject(idea.projectId),
-            ),
-            Effect.ignoreCause({ log: true }),
-          );
-          return {
-            command: {
-              ...command,
-              bootstrap: {
-                createThread: {
-                  ...createThread,
-                  projectId: idea.projectId,
-                  branch: null,
-                  worktreePath: null,
-                },
-              },
-            },
-            discardIdea,
-          };
-        });
+      const ideaPromotion: IdeaPromotionDeps<OrchestrationDispatchCommandError> = {
+        createIdea: trellisCatalog.createIdeaForDraft,
+        discardIdea: trellisCatalog.discardIdea,
+        threadProjectId: (threadId) =>
+          projectionSnapshotQuery.getThreadShellById(threadId).pipe(
+            Effect.map((thread) => (Option.isSome(thread) ? thread.value.projectId : null)),
+            Effect.orElseSucceed(() => null),
+          ),
+        dispatch: dispatchBootstrapTurnStart,
+        ideaError: (error) =>
+          new OrchestrationDispatchCommandError({
+            message: `Could not create the Trellis idea: ${error.message}`,
+          }),
+      };
 
       const dispatchNormalizedCommand = (
         normalizedCommand: OrchestrationCommand,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> => {
         const dispatchEffect =
           normalizedCommand.type === "thread.turn.start" && normalizedCommand.bootstrap
-            ? promoteIdeaDraft(normalizedCommand).pipe(
-                Effect.flatMap(({ command, discardIdea }) =>
-                  dispatchBootstrapTurnStart(command).pipe(Effect.tapError(() => discardIdea)),
-                ),
-              )
+            ? dispatchWithIdeaPromotion(normalizedCommand, ideaPromotion)
             : dispatchFromClient(normalizedCommand).pipe(
                 Effect.tap(({ sequence }) =>
                   // Returning from thread.create is the handoff point at which

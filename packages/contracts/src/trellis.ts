@@ -37,6 +37,13 @@ export const TrellisStatus = Schema.Struct({
   root: Schema.optionalKey(Schema.String),
   /** The API socket the server uses or would use. */
   socketPath: Schema.optionalKey(Schema.String),
+  /**
+   * Roots of T3 projects whose Trellis item is in the trash or graduated.
+   * Clients hide such a project once it has no active thread or draft.
+   */
+  retiredRoots: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** Roots of live forks (non-primary workspaces), which are trashed on their own. */
+  forkRoots: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type TrellisStatus = typeof TrellisStatus.Type;
 

@@ -695,6 +695,8 @@ const make = Effect.gen(function* () {
       readonly worktreePath: string | null;
       readonly checkpoints: ReadonlyArray<{ readonly checkpointTurnCount: number }>;
     };
+    /** Whether T3 already recorded an earlier turn of the thread. */
+    readonly turnsRan?: boolean;
     readonly createdAt: string;
   }) {
     const { thread } = input;
@@ -712,7 +714,12 @@ const make = Effect.gen(function* () {
     const trellisCwd = yield* trellisCwdOf(workspaceCwd);
     // Fast (a Btrfs snapshot), so it goes before the git capture.
     if (trellisCwd !== undefined) {
-      yield* ensureTrellisBaseline(thread.id, trellisCwd, currentTurnCount > 0);
+      // A previous turn or checkpoint means the workspace already changed.
+      yield* ensureTrellisBaseline(
+        thread.id,
+        trellisCwd,
+        input.turnsRan === true || currentTurnCount > 0,
+      );
     }
 
     const captureGitBaseline = Effect.gen(function* () {
@@ -916,7 +923,13 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* ensurePreTurnBaselines({ thread, createdAt: event.occurredAt });
+    // Before the turn starts, `latestTurn` is a previous turn. (Once a turn
+    // started it is the current one, so the turn.started path omits it.)
+    yield* ensurePreTurnBaselines({
+      thread,
+      turnsRan: thread.latestTurn !== null,
+      createdAt: event.occurredAt,
+    });
   });
 
   // Checkpoints contain the whole checkout, so restoring a shared cwd can erase a sibling's work.

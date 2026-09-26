@@ -11514,16 +11514,17 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
   it.effect("creates the Trellis idea on a new-idea draft's first send and starts there", () =>
     Effect.gen(function* () {
       const dispatchedCommands: Array<OrchestrationCommand> = [];
-      const newIdea = vi.fn(() =>
+      const createIdeaForDraft = vi.fn(() =>
         Effect.succeed({
           projectId: ProjectId.make("project-idea-1"),
           workspaceRoot: "/trellis/workspaces/ws-scratch/project/idea-1",
           name: "Idea",
+          trellisId: "idea-1",
         }),
       );
       yield* buildAppUnderTest({
         layers: {
-          trellisCatalog: { newIdea },
+          trellisCatalog: { createIdeaForDraft: Effect.suspend(createIdeaForDraft) },
           orchestrationEngine: {
             dispatch: (command) =>
               Effect.sync(() => {
@@ -11569,7 +11570,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
 
-      assert.equal(newIdea.mock.calls.length, 1);
+      assert.equal(createIdeaForDraft.mock.calls.length, 1);
       const create = dispatchedCommands.find((command) => command.type === "thread.create");
       assert.deepInclude(create, {
         projectId: ProjectId.make("project-idea-1"),

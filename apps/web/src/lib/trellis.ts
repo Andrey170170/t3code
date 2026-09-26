@@ -38,17 +38,44 @@ export function isTrellisIdeaPath(workspaceRoot: string, trellisRoot: string): b
   return relative.length > 3;
 }
 
+/**
+ * Whether the sidebar hides a project: its Trellis item is in the trash (its
+ * root is retired), and nothing in it is still active. Restoring the item
+ * makes it live again, so it reappears.
+ */
+export function isHiddenRetiredProject(
+  project: { readonly workspaceRoot: string },
+  retiredRoots: ReadonlySet<string> | undefined,
+  hasActiveThread: boolean,
+  hasDraft: boolean,
+): boolean {
+  if (retiredRoots === undefined || hasActiveThread || hasDraft) return false;
+  return retiredRoots.has(project.workspaceRoot.replace(/(.)\/+$/, "$1"));
+}
+
+/** What kind of Trellis item a T3 project stands for, from its root and the status. */
+export function trellisItemKind(
+  workspaceRoot: string,
+  status: { readonly root?: string | null | undefined; readonly forkRoots?: ReadonlyArray<string> },
+): "idea" | "fork" | "project" {
+  if (status.root && isTrellisIdeaPath(workspaceRoot, status.root)) return "idea";
+  const root = workspaceRoot.replace(/(.)\/+$/, "$1");
+  return status.forkRoots?.includes(root) ? "fork" : "project";
+}
+
 /** Confirmation lines for moving Trellis-managed projects to the trash. */
 export function trellisTrashConfirmation(input: {
   readonly label: string;
-  readonly kind: "idea" | "project";
+  readonly kind: "idea" | "fork" | "project";
   readonly count: number;
 }): ReadonlyArray<string> {
   return [
     input.count === 1
       ? `Move ${input.kind} "${input.label}" to the Trellis trash?`
       : `Move ${input.count} Trellis projects to the Trellis trash?`,
-    "Its files and history go to the trash, together with any forks; its conversations are archived, not deleted.",
+    input.kind === "project"
+      ? "Its files and history go to the trash, together with its forks; its conversations are archived, not deleted."
+      : "Its files and history go to the trash; its conversations are archived, not deleted.",
     "Restore it from Settings → Trellis, which also shows when it is removed for good.",
   ];
 }

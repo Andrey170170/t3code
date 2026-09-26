@@ -185,7 +185,7 @@ function createTrellisHarness(input: {
     ...Trellis.makeTestTrellis({ env }),
     current: Effect.succeed(env),
     refresh: Effect.succeed(env),
-    expectedRoot: Effect.succeed(input.root),
+    expectedRoots: Effect.succeed([input.root]),
     bin: "trellis",
     listWorkspaces: unused,
     listProjects: unused,

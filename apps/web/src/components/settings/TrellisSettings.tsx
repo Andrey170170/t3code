@@ -10,7 +10,8 @@ import { useTrellisStatusFor } from "../../hooks/useTrellis";
 import { readLocalApi } from "../../localApi";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
-import { trellisEnvironment } from "../../state/trellis";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { refreshTrellisStatus, trellisEnvironment } from "../../state/trellis";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
@@ -30,7 +31,7 @@ const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 const formatDay = (unixSeconds: number) => dateFormat.format(new Date(unixSeconds * 1000));
 
 /** When a trashed item goes away for good, in words. */
-export function trashExpiryText(item: Pick<TrellisTrashItem, "expiresAt">): string {
+function trashExpiryText(item: Pick<TrellisTrashItem, "expiresAt">): string {
   return item.expiresAt === null
     ? "Kept until you empty the trash"
     : `Removed for good on ${formatDay(item.expiresAt)}`;
@@ -188,6 +189,7 @@ function TrellisTrashSection(props: {
         return;
       }
       toastManager.add({ type: "success", title: `Restored ${item.name}` });
+      refreshTrellisStatus(appAtomRegistry, environmentId);
     } finally {
       setPending(null);
       trashQuery.refresh();

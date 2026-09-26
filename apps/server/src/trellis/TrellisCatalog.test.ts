@@ -4,6 +4,7 @@ import {
   TRELLIS_LANDING_PAD_PROJECT_ID,
   type OrchestrationCommand,
   type OrchestrationShellSnapshot,
+  type ProviderSession,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -13,6 +14,8 @@ import { it as effectIt } from "@effect/vitest";
 import { describe, expect, it } from "vite-plus/test";
 
 import { ServerConfig } from "../config.ts";
+import { OrchestrationCommandInvariantError } from "../orchestration/Errors.ts";
+import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -441,6 +444,31 @@ describe("trashItems with per-item expiry", () => {
   });
 });
 
+describe("retiredRoots", () => {
+  it("lists roots of trashed items and forks, never the scratch or live roots", () => {
+    const roots = TrellisCatalog.retiredRoots(
+      [
+        idea("idea-gone", "Old", { deleted_at: 100 }),
+        idea("idea-live", "Live"),
+        dedicated("prj-gone", "Gone", [workspace("ws-g")], { deleted_at: 100 }),
+        dedicated("prj-live", "App", [
+          workspace("ws-a"),
+          { ...workspace("ws-b", "try"), deleted_at: 100 },
+        ]),
+      ],
+      [`${ROOT}/workspaces/ws-old/project`],
+    );
+    expect(roots).toEqual(
+      [
+        `${SCRATCH}/idea-gone`,
+        `${ROOT}/workspaces/ws-g/project`,
+        `${ROOT}/workspaces/ws-b/project`,
+        `${ROOT}/workspaces/ws-old/project`,
+      ].toSorted(),
+    );
+  });
+});
+
 describe("TrellisCatalog service", () => {
   const emptyShell: OrchestrationShellSnapshot = {
     snapshotSequence: 0,
@@ -449,10 +477,22 @@ describe("TrellisCatalog service", () => {
     updatedAt: "2026-01-01T00:00:00.000Z",
   };
 
-  function makeHarness(options: { readonly shell?: OrchestrationShellSnapshot } = {}) {
+  function makeHarness(
+    options: {
+      readonly shell?: OrchestrationShellSnapshot;
+      readonly archived?: OrchestrationShellSnapshot;
+      readonly sessions?: ReadonlyArray<ProviderSession>;
+      readonly trellis?: Partial<Trellis["Service"]>;
+      /** Rejects repeated creates of a project id, like the decider. */
+      readonly strictCreates?: boolean;
+      /** Fails every project create, as a broken read model would. */
+      readonly rejectProjectCreates?: boolean;
+    } = {},
+  ) {
     const items: Array<TrellisProjectView> = [];
     const dispatched: Array<OrchestrationCommand> = [];
     const trashed: Array<string> = [];
+    const createdIds = new Set<string>();
     const env = { root: ROOT, bin: "trellis", shimDir: "/shims" };
     const unused = () => Effect.die(new Error("unused"));
     const layer = TrellisCatalog.layer.pipe(
@@ -461,7 +501,7 @@ describe("TrellisCatalog service", () => {
           ...makeTestTrellis({ env }),
           current: Effect.succeed(env),
           refresh: Effect.succeed(env),
-          expectedRoot: Effect.succeed(ROOT),
+          expectedRoots: Effect.succeed([ROOT]),
           bin: "trellis",
           listWorkspaces: unused,
           listProjects: () => Effect.sync(() => [...items]),
@@ -482,21 +522,46 @@ describe("TrellisCatalog service", () => {
           rollback: unused,
           preview: unused,
           primer: unused,
+          ...options.trellis,
         }),
       ),
       Layer.provide(
         Layer.mock(OrchestrationEngineService)({
           dispatch: (command) =>
-            Effect.sync(() => {
+            Effect.suspend(() => {
+              if (command.type === "project.create" && options.rejectProjectCreates) {
+                return Effect.fail(
+                  new OrchestrationCommandInvariantError({
+                    commandType: command.type,
+                    detail: "rejected",
+                  }),
+                );
+              }
+              if (command.type === "project.create" && options.strictCreates) {
+                if (createdIds.has(command.projectId)) {
+                  return Effect.fail(
+                    new OrchestrationCommandInvariantError({
+                      commandType: command.type,
+                      detail: `Project '${command.projectId}' already exists and cannot be created twice.`,
+                    }),
+                  );
+                }
+                createdIds.add(command.projectId);
+              }
               dispatched.push(command);
-              return { sequence: dispatched.length };
+              return Effect.succeed({ sequence: dispatched.length });
             }),
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ProviderService)({
+          listSessions: () => Effect.succeed(options.sessions ?? []),
         }),
       ),
       Layer.provide(
         Layer.mock(ProjectionSnapshotQuery)({
           getShellSnapshot: () => Effect.succeed(options.shell ?? emptyShell),
-          getArchivedShellSnapshot: () => Effect.succeed(emptyShell),
+          getArchivedShellSnapshot: () => Effect.succeed(options.archived ?? emptyShell),
           getProjectShellById: (id) =>
             Effect.succeed(
               Option.fromNullishOr(
@@ -594,6 +659,183 @@ describe("TrellisCatalog service", () => {
       }).pipe(Effect.provide(harness.layer));
       expect(result).toEqual({ trashed: "workspace", name: "App · experiment" });
       expect(harness.trashed).toEqual(["workspace:ws-b"]);
+    }),
+  );
+
+  const shellProject = (id: string, workspaceRoot: string) =>
+    ({
+      id: ProjectId.make(id),
+      title: id,
+      workspaceRoot,
+    }) as unknown as OrchestrationShellSnapshot["projects"][number];
+  const shellThread = (
+    id: string,
+    projectId: string,
+    overrides: {
+      archivedAt?: string | null;
+      updatedAt?: string;
+      session?: { status: string } | null;
+    } = {},
+  ) =>
+    ({
+      id: ThreadId.make(id),
+      projectId: ProjectId.make(projectId),
+      title: id,
+      session: overrides.session ?? null,
+      archivedAt: overrides.archivedAt ?? null,
+      updatedAt: overrides.updatedAt ?? "2026-01-01T00:00:00.000Z",
+    }) as unknown as OrchestrationShellSnapshot["threads"][number];
+  const session = (threadId: string, cwd: string, status: ProviderSession["status"]) =>
+    ({
+      provider: "codex",
+      status,
+      runtimeMode: "full-access",
+      threadId: ThreadId.make(threadId),
+      cwd,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    }) as unknown as ProviderSession;
+  const run = <A, E>(
+    harness: ReturnType<typeof makeHarness>,
+    body: (catalog: TrellisCatalog.TrellisCatalog["Service"]) => Effect.Effect<A, E>,
+  ) =>
+    Effect.gen(function* () {
+      return yield* body(yield* TrellisCatalog.TrellisCatalog);
+    }).pipe(Effect.provide(harness.layer));
+
+  effectIt.effect("refuses to trash an item while an agent is working in it", () =>
+    Effect.gen(function* () {
+      const root = `${SCRATCH}/idea-a`;
+      const harness = makeHarness({
+        shell: {
+          ...emptyShell,
+          projects: [shellProject("p-idea", root)],
+          threads: [shellThread("t-busy", "p-idea")],
+        },
+        sessions: [session("t-busy", `${root}/src`, "running")],
+      });
+      harness.items.push(idea("idea-a", "Sketch"));
+      const error = yield* run(harness, (catalog) =>
+        catalog.trashProject(ProjectId.make("p-idea")),
+      ).pipe(Effect.flip);
+      expect(error.message).toContain('"t-busy" is still working in Sketch');
+      expect(harness.trashed).toEqual([]);
+    }),
+  );
+
+  effectIt.effect("archives every conversation of the trashed item and stops its session", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({
+        shell: {
+          ...emptyShell,
+          projects: [
+            shellProject("p-main", `${ROOT}/workspaces/ws-a/project`),
+            shellProject("p-fork", `${ROOT}/workspaces/ws-b/project`),
+            shellProject("p-other", "/home/me/code"),
+          ],
+          threads: [
+            // An idle session ending as the workspace stops bumps this one
+            // past the deletion time, which the sync's heuristic would skip.
+            shellThread("t-main", "p-main", {
+              updatedAt: "2099-01-01T00:00:00.000Z",
+              session: { status: "ready" },
+            }),
+            shellThread("t-fork", "p-fork"),
+            shellThread("t-done", "p-main", { archivedAt: "2026-01-01T00:00:00.000Z" }),
+            shellThread("t-other", "p-other"),
+          ],
+        },
+        // Idle sessions do not block.
+        sessions: [session("t-main", `${ROOT}/workspaces/ws-a/project`, "ready")],
+      });
+      harness.items.push(
+        dedicated("prj-a", "App", [workspace("ws-a"), workspace("ws-b", "experiment")]),
+      );
+      const result = yield* run(harness, (catalog) =>
+        catalog.trashProject(ProjectId.make("p-main")),
+      );
+      expect(result).toEqual({ trashed: "project", name: "App" });
+      expect(harness.trashed).toEqual(["project:prj-a"]);
+      expect(
+        harness.dispatched.flatMap((command) =>
+          command.type === "thread.archive" ? [command.threadId] : [],
+        ),
+      ).toEqual(["t-main", "t-fork"]);
+      // Its idle session is stopped with it; threads without one are left alone.
+      expect(
+        harness.dispatched.flatMap((command) =>
+          command.type === "thread.session.stop" ? [command.threadId] : [],
+        ),
+      ).toEqual(["t-main"]);
+    }),
+  );
+
+  effectIt.effect("restore unarchives the conversations archived since the deletion", () =>
+    Effect.gen(function* () {
+      const mainRoot = `${ROOT}/workspaces/ws-a/project`;
+      const restored = dedicated("prj-a", "App", [workspace("ws-a")]);
+      const harness = makeHarness({
+        shell: { ...emptyShell, projects: [shellProject("p-main", mainRoot)] },
+        archived: {
+          ...emptyShell,
+          threads: [
+            shellThread("t-trashed", "p-main", { archivedAt: "2026-01-02T00:00:10.000Z" }),
+            shellThread("t-earlier", "p-main", { archivedAt: "2026-01-01T00:00:00.000Z" }),
+          ],
+        },
+        trellis: {
+          listTrash: Effect.succeed({
+            projects: [
+              {
+                id: "prj-a",
+                kind: "project",
+                name: "App",
+                deleted_at: Date.parse("2026-01-02T00:00:00Z") / 1000,
+              },
+            ],
+            workspaces: [],
+          }),
+          restoreProject: () =>
+            Effect.sync(() => {
+              harness.items.push(restored);
+              return restored;
+            }),
+        },
+      });
+      const result = yield* run(harness, (catalog) =>
+        catalog.restore({ kind: "project", id: "prj-a" }),
+      );
+      expect(result.projectId).toBe(ProjectId.make("p-main"));
+      expect(
+        harness.dispatched.flatMap((command) =>
+          command.type === "thread.unarchive" ? [command.threadId] : [],
+        ),
+      ).toEqual(["t-trashed"]);
+    }),
+  );
+
+  effectIt.effect("prepares the landing pad idempotently, also while the projection lags", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({ strictCreates: true });
+      const targets = yield* run(harness, (catalog) =>
+        Effect.all([catalog.prepareIdeaDraft, catalog.prepareIdeaDraft], {
+          concurrency: "unbounded",
+        }),
+      );
+      expect(targets[0]).toEqual(targets[1]);
+      expect(
+        harness.dispatched.filter((command) => command.type === "project.create"),
+      ).toHaveLength(1);
+      expect(harness.items).toEqual([]);
+    }),
+  );
+
+  effectIt.effect("discards a draft's idea whose T3 project never appears", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({ rejectProjectCreates: true });
+      const error = yield* run(harness, (catalog) => catalog.createIdeaForDraft).pipe(Effect.flip);
+      expect(error.message).toContain("not available yet");
+      expect(harness.trashed).toEqual(["project:idea-1"]);
     }),
   );
 });

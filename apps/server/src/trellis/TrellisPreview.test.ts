@@ -60,7 +60,7 @@ describe("TrellisPreview service", () => {
           ...makeTestTrellis({ env }),
           current: Effect.succeed(env),
           refresh: Effect.succeed(env),
-          expectedRoot: Effect.succeed(ROOT),
+          expectedRoots: Effect.succeed([ROOT]),
           bin: "trellis",
           listWorkspaces: unused,
           listProjects: unused,

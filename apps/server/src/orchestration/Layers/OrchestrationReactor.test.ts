@@ -127,6 +127,8 @@ describe("OrchestrationReactor", () => {
             status: Effect.succeed({ state: "disabled" as const, available: false }),
             newIdea: () => Effect.die("unused"),
             newProject: () => Effect.die("unused"),
+            createIdeaForDraft: Effect.die("unused"),
+            discardIdea: () => Effect.void,
             prepareIdeaDraft: Effect.die("unused"),
             trashProject: () => Effect.die("unused"),
             listTrash: Effect.die("unused"),

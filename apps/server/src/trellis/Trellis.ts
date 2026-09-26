@@ -7,7 +7,7 @@
  * off until the `trellis.enabled` server setting turns it on; while it is off
  * nothing talks to the socket. When it is off or Trellis is unreachable,
  * `current` is null and every Trellis-aware seam in T3 behaves as without
- * Trellis, except that Trellis project paths (see `expectedRoot`) are never
+ * Trellis, except that Trellis project paths (see `expectedRoots`) are never
  * treated as ordinary host folders.
  *
  * Project files live at `<root>/workspaces/<ws>/project[/<idea>]`, and the same
@@ -171,12 +171,12 @@ export class Trellis extends Context.Service<
     /** Disabled, unavailable or ready, from the setting and the last refresh. */
     readonly connection: Effect.Effect<TrellisConnection>;
     /**
-     * Where Trellis project paths live even while Trellis is off or
-     * unreachable: the last root Trellis reported (persisted across restarts),
-     * else the root implied by the socket path. Work in those paths must fail
-     * rather than silently run on the host.
+     * Every place Trellis project paths may live, also while Trellis is off or
+     * unreachable: the live root, every root Trellis ever reported (persisted
+     * across restarts), `TRELLIS_ROOT`, and the root implied by the socket
+     * path. Work in those paths must fail rather than silently run on the host.
      */
-    readonly expectedRoot: Effect.Effect<string | null>;
+    readonly expectedRoots: Effect.Effect<ReadonlyArray<string>>;
     /** The `trellis` binary, for `trellis exec`. */
     readonly bin: string;
     /** `all` includes trashed workspaces; this listing queries container state. */
@@ -327,16 +327,21 @@ export const make = Effect.gen(function* () {
     Effect.map((value) => Option.getOrNull(value)),
   );
   const shimDir = NodePath.join(serverConfig.stateDir, "trellis-shims");
-  // The last root Trellis reported, kept so its paths stay recognizable while
-  // the integration is off or Trellis is down, including after a restart.
+  // Every root Trellis reported, one per line, kept so their paths stay
+  // recognizable while the integration is off or Trellis is down, including
+  // after a restart or a root change.
   const rootFile = NodePath.join(serverConfig.stateDir, "trellis-root");
   const state = yield* Ref.make<TrellisEnv | null>(null);
-  const persistedRoot = yield* fileSystem.readFileString(rootFile).pipe(
-    Effect.map((text) => text.trim()),
-    Effect.map((text) => (text.startsWith("/") ? text : null)),
-    Effect.orElseSucceed(() => null),
+  const persistedRoots = yield* fileSystem.readFileString(rootFile).pipe(
+    Effect.map((text) =>
+      text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith("/")),
+    ),
+    Effect.orElseSucceed((): ReadonlyArray<string> => []),
   );
-  const lastRoot = yield* Ref.make<string | null>(persistedRoot);
+  const knownRoots = yield* Ref.make<ReadonlyArray<string>>(persistedRoots);
   let lastShimAttemptMs = 0;
 
   const enabled = serverSettings.getSettings.pipe(
@@ -437,10 +442,12 @@ export const make = Effect.gen(function* () {
       return previous;
     }
     lastShimAttemptMs = now;
-    if ((yield* Ref.get(lastRoot)) !== status.value.root) {
-      yield* Ref.set(lastRoot, status.value.root);
+    const known = yield* Ref.get(knownRoots);
+    if (!known.includes(status.value.root)) {
+      const next = [...known, status.value.root];
+      yield* Ref.set(knownRoots, next);
       yield* fileSystem
-        .writeFileString(rootFile, `${status.value.root}\n`)
+        .writeFileString(rootFile, `${next.join("\n")}\n`)
         .pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("could not persist the Trellis root", { rootFile, cause }),
@@ -457,16 +464,21 @@ export const make = Effect.gen(function* () {
     return next;
   }).pipe(refreshLock.withPermits(1));
 
-  const expectedRoot = Ref.get(lastRoot).pipe(
-    Effect.map((root) => root ?? envRoot ?? rootFromSocketPath(socketPath)),
-  );
+  const socketRoot = rootFromSocketPath(socketPath);
+  const expectedRoots = Effect.gen(function* () {
+    const live = (yield* Ref.get(state))?.root ?? null;
+    const roots = [live, ...(yield* Ref.get(knownRoots)), envRoot, socketRoot].filter(
+      (root): root is string => root !== null,
+    );
+    return [...new Set(roots)];
+  });
 
   const connection = Effect.gen(function* () {
     const on = yield* enabled;
     const env = on ? yield* Ref.get(state) : null;
     return {
       state: !on ? "disabled" : env === null ? "unavailable" : "ready",
-      root: env?.root ?? (yield* expectedRoot),
+      root: env?.root ?? (yield* Ref.get(knownRoots)).at(-1) ?? envRoot ?? socketRoot,
       socketPath,
     } satisfies TrellisConnection;
   });
@@ -479,7 +491,7 @@ export const make = Effect.gen(function* () {
     refresh,
     enabled,
     connection,
-    expectedRoot,
+    expectedRoots,
     bin,
     listWorkspaces: ({ all }) =>
       call(Schema.Array(TrellisWorkspaceView), "GET", `/v1/workspaces${all ? "?all=true" : ""}`),
@@ -582,9 +594,13 @@ export const isTrellisPath = Effect.fn("Trellis.isTrellisPath")(function* (
   cwd: string | undefined,
 ) {
   if (cwd === undefined) return false;
-  const root = yield* trellis.expectedRoot;
-  return root !== null && isTrellisManagedPath(root, cwd);
+  return trellisRootOf(yield* trellis.expectedRoots, cwd) !== null;
 });
+
+/** The root among `roots` that manages `path`, or null for an ordinary host path. */
+export function trellisRootOf(roots: ReadonlyArray<string>, path: string): string | null {
+  return roots.find((root) => isTrellisManagedPath(root, path)) ?? null;
+}
 
 export const TRELLIS_WORKTREE_REFUSAL =
   "Git worktrees are not supported in Trellis projects: they would live outside the workspace and run on the host. Use `trellis fork` for parallel work instead.";
@@ -624,7 +640,7 @@ export function makeTestTrellis(
       root: env?.root ?? null,
       socketPath: DEFAULT_TRELLIS_SOCKET,
     }),
-    expectedRoot: Effect.succeed(env?.root ?? null),
+    expectedRoots: Effect.succeed(env === null ? [] : [env.root]),
     bin: env?.bin ?? "trellis",
     listWorkspaces: unused,
     listProjects: unused,

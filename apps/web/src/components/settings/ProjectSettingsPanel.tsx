@@ -21,7 +21,7 @@ import {
   useTrellisStatusFor,
   useTrellisTrash,
 } from "../../hooks/useTrellis";
-import { isTrellisIdeaPath, trellisRemovalOf, trellisTrashConfirmation } from "../../lib/trellis";
+import { trellisItemKind, trellisRemovalOf, trellisTrashConfirmation } from "../../lib/trellis";
 import { readLocalApi } from "../../localApi";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { loadTrellisStatus } from "../../state/trellis";
@@ -327,9 +327,19 @@ function ProjectDetail({
       );
       const removalOf = (member: SidebarProjectGroupMember) =>
         trellisRemovalOf(member.workspaceRoot, statuses.get(member.environmentId) ?? null);
+      // Removing only T3's entry would delete the conversations for good,
+      // and the project would come back once Trellis syncs again.
+      if (members.some((member) => removalOf(member) === "offline")) {
+        toastManager.add({
+          type: "warning",
+          title: "Trellis is not available",
+          description:
+            "Turn on or start Trellis (Settings → Trellis) to move this project to the Trellis trash.",
+        });
+        return;
+      }
       const trashed = members.filter((member) => removalOf(member) === "trash");
       const deleted = members.filter((member) => removalOf(member) !== "trash");
-      const offline = deleted.filter((member) => removalOf(member) === "offline");
 
       const memberKeys = new Set(deleted.map(memberKey));
       const projectThreads = threads.filter((thread) =>
@@ -340,10 +350,6 @@ function ProjectDetail({
       const singleMember = members.length === 1 ? members[0]! : null;
       const targetLabel = singleMember?.title ?? group.displayName;
       const firstTrashed = trashed[0];
-      const trellisRoot =
-        firstTrashed === undefined
-          ? null
-          : (statuses.get(firstTrashed.environmentId)?.root ?? null);
       const deleteLines =
         deleted.length === 0
           ? []
@@ -368,11 +374,6 @@ function ProjectDetail({
                     "This permanently clears conversation history for those threads and any archived threads.",
                   ]
                 : ["This permanently clears any archived conversation history."]),
-              ...(offline.length > 0
-                ? [
-                    "Trellis is not available, so its projects stay in Trellis and reappear here when Trellis syncs again.",
-                  ]
-                : []),
               isWholeGroup && !hasOtherMembers
                 ? "This removes only the project entries, not the files on disk."
                 : "Other entries in this grouped project are unaffected.",
@@ -384,11 +385,10 @@ function ProjectDetail({
             ...(trashed.length > 0
               ? trellisTrashConfirmation({
                   label: trashed.length === 1 ? firstTrashed!.title : group.displayName,
-                  kind:
-                    trellisRoot !== null &&
-                    isTrellisIdeaPath(firstTrashed!.workspaceRoot, trellisRoot)
-                      ? "idea"
-                      : "project",
+                  kind: trellisItemKind(
+                    firstTrashed!.workspaceRoot,
+                    statuses.get(firstTrashed!.environmentId) ?? {},
+                  ),
                   count: trashed.length,
                 })
               : []),

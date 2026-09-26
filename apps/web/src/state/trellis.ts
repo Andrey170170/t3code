@@ -66,7 +66,7 @@ export const trellisEnvironment = {
 };
 
 /** The last Trellis status of an environment, for event handlers; null while unknown. */
-export function readTrellisStatus(
+function readTrellisStatus(
   registry: AtomRegistry.AtomRegistry,
   environmentId: EnvironmentId,
 ): TrellisStatus | null {
@@ -76,8 +76,9 @@ export function readTrellisStatus(
 }
 
 /**
- * The Trellis status of an environment for an event handler, loading it when
- * no component holds it yet. Null when it does not arrive within `timeoutMs`.
+ * A fresh Trellis status of an environment for an event handler: refetched,
+ * since the cached one can be minutes old. Falls back to the cached one when
+ * no answer arrives within `timeoutMs`.
  */
 export function loadTrellisStatus(
   registry: AtomRegistry.AtomRegistry,
@@ -85,8 +86,6 @@ export function loadTrellisStatus(
   timeoutMs = 5_000,
 ): Promise<TrellisStatus | null> {
   const atom = trellisEnvironment.status({ environmentId, input: {} });
-  const settled = (result: AsyncResult.AsyncResult<TrellisStatus, unknown>) =>
-    result._tag === "Success" || (result._tag === "Failure" && !result.waiting);
   return new Promise((resolve) => {
     let unsubscribe = () => {};
     const finish = (status: TrellisStatus | null) => {
@@ -95,12 +94,18 @@ export function loadTrellisStatus(
       resolve(status);
     };
     const timer = setTimeout(() => finish(readTrellisStatus(registry, environmentId)), timeoutMs);
-    unsubscribe = registry.subscribe(
-      atom,
-      (result) => {
-        if (settled(result)) finish(Option.getOrNull(AsyncResult.value(result)));
-      },
-      { immediate: true },
-    );
+    unsubscribe = registry.subscribe(atom, (result) => {
+      if (result.waiting) return;
+      finish(Option.getOrNull(AsyncResult.value(result)));
+    });
+    registry.refresh(atom);
   });
+}
+
+/** Refetches an environment's Trellis status, e.g. after a trash or restore. */
+export function refreshTrellisStatus(
+  registry: AtomRegistry.AtomRegistry,
+  environmentId: EnvironmentId,
+): void {
+  registry.refresh(trellisEnvironment.status({ environmentId, input: {} }));
 }
