@@ -8,9 +8,11 @@
  * at turn start and only logs failures. Both go through this one service,
  * which is serialized and remembers settled threads.
  *
- * A thread whose turns already ran without a baseline (it predates Trellis
- * snapshots, or Trellis was off) never gets one later: a snapshot of the
- * modified workspace would be a false "start". Such threads never block.
+ * A thread whose turns already ran never gets a baseline later: a snapshot
+ * of the modified workspace would be a false "start". Callers say whether
+ * turns ran from T3's own history (`turnsRan`), because Trellis may have
+ * thinned a thread's turn snapshots. Baselines are pinned so thinning keeps
+ * them. Threads without one never block.
  *
  * @module trellis/TrellisBaseline
  */
@@ -34,6 +36,7 @@ export class TrellisBaseline extends Context.Service<
     readonly ensure: (
       threadId: ThreadId,
       cwd: string | undefined,
+      options?: { readonly turnsRan?: boolean },
     ) => Effect.Effect<void, TrellisError>;
   }
 >()("t3/trellis/TrellisBaseline") {}
@@ -44,16 +47,35 @@ const make = Effect.gen(function* () {
   // Threads with a baseline, or whose turns ran without one.
   const settled = new Set<ThreadId>();
 
-  const ensure: TrellisBaseline["Service"]["ensure"] = (threadId, cwd) =>
+  // Pinning is best effort: an unpinned baseline still works until thinned.
+  const pin = (snapshotId: string) =>
+    trellis.pinSnapshot(snapshotId).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("could not pin a Trellis baseline snapshot", {
+          snapshotId,
+          detail: error.message,
+        }),
+      ),
+    );
+
+  const ensure: TrellisBaseline["Service"]["ensure"] = (threadId, cwd, options) =>
     Effect.gen(function* () {
       if (cwd === undefined || settled.has(threadId)) return;
       if (!(yield* isTrellisPath(trellis, cwd))) return;
       const ofThread = (yield* trellis.listSnapshots(cwd)).filter(
         (entry) => entry.thread === threadId,
       );
-      // Any snapshot of this thread means a baseline exists or turns ran.
-      if (ofThread.length === 0) {
-        yield* trellis.createSnapshot({ target: cwd, thread: threadId, turn: BASELINE_TURN });
+      const baseline = ofThread.find((entry) => entry.turn === BASELINE_TURN);
+      if (baseline !== undefined) {
+        // Baselines taken before pinning existed.
+        if (baseline.pinned === false) yield* pin(baseline.id);
+      } else if (ofThread.length === 0 && options?.turnsRan !== true) {
+        const created = yield* trellis.createSnapshot({
+          target: cwd,
+          thread: threadId,
+          turn: BASELINE_TURN,
+        });
+        yield* pin(created.id);
       }
       settled.add(threadId);
     }).pipe(lock.withPermits(1));

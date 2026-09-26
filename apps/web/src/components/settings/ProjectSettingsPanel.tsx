@@ -16,7 +16,15 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { releaseProjectDraftUploads } from "../../lib/composerDraftUploads";
+import {
+  TRELLIS_GONE_CONFIRMATION,
+  useTrellisStatusFor,
+  useTrellisTrash,
+} from "../../hooks/useTrellis";
+import { trellisItemKind, trellisRemovalOf, trellisTrashConfirmation } from "../../lib/trellis";
 import { readLocalApi } from "../../localApi";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { loadTrellisStatus } from "../../state/trellis";
 import {
   type SidebarProjectGroupMember,
   type SidebarProjectSnapshot,
@@ -296,12 +304,46 @@ function ProjectDetail({
 
   const hasMultipleCheckouts = group.memberProjects.length > 1;
 
+  const trashTrellisProject = useTrellisTrash();
+  const representativeTrellis = useTrellisStatusFor(representative.environmentId);
+  const trellisRemoval =
+    group.memberProjects.length === 1
+      ? trellisRemovalOf(representative.workspaceRoot, representativeTrellis)
+      : "none";
+  const trellisManaged = trellisRemoval !== "none";
   const removeMembers = useCallback(
     async (members: ReadonlyArray<SidebarProjectGroupMember>) => {
       const api = readLocalApi();
       if (!api) return;
 
-      const memberKeys = new Set(members.map(memberKey));
+      // Trellis-managed projects go to the Trellis trash instead: deleting only
+      // T3's entry would not last, since the catalog sync recreates it.
+      const environmentIds = [...new Set(members.map((member) => member.environmentId))];
+      const statuses = new Map(
+        await Promise.all(
+          environmentIds.map(
+            async (environmentId) =>
+              [environmentId, await loadTrellisStatus(appAtomRegistry, environmentId)] as const,
+          ),
+        ),
+      );
+      const removalOf = (member: SidebarProjectGroupMember) =>
+        trellisRemovalOf(member.workspaceRoot, statuses.get(member.environmentId) ?? null);
+      // Removing only T3's entry would delete the conversations for good,
+      // and the project would come back once Trellis syncs again.
+      if (members.some((member) => removalOf(member) === "offline")) {
+        toastManager.add({
+          type: "warning",
+          title: "Trellis is not available",
+          description:
+            "Turn on or start Trellis (Settings → Trellis) to move this project to the Trellis trash.",
+        });
+        return;
+      }
+      const trashed = members.filter((member) => removalOf(member) === "trash");
+      const deleted = members.filter((member) => removalOf(member) !== "trash");
+
+      const memberKeys = new Set(deleted.map(memberKey));
       const projectThreads = threads.filter((thread) =>
         memberKeys.has(`${thread.environmentId}:${thread.projectId}`),
       );
@@ -309,29 +351,50 @@ function ProjectDetail({
       const targetKind = hasOtherMembers || !isWholeGroup ? "checkout" : "project";
       const singleMember = members.length === 1 ? members[0]! : null;
       const targetLabel = singleMember?.title ?? group.displayName;
+      const firstTrashed = trashed[0];
+      const deleteLines =
+        deleted.length === 0
+          ? []
+          : [
+              trashed.length > 0
+                ? `Also remove ${deleted.length} other entr${deleted.length === 1 ? "y" : "ies"} from T3 and delete ${projectThreads.length} thread${projectThreads.length === 1 ? "" : "s"}?`
+                : projectThreads.length > 0
+                  ? `Remove ${targetKind} "${targetLabel}" and delete its ${projectThreads.length} thread${projectThreads.length === 1 ? "" : "s"}?`
+                  : `Remove ${targetKind} "${targetLabel}"?`,
+              ...(singleMember && trashed.length === 0
+                ? [
+                    `Path: ${singleMember.workspaceRoot}`,
+                    ...(singleMember.environmentLabel
+                      ? [`Environment: ${singleMember.environmentLabel}`]
+                      : []),
+                  ]
+                : trashed.length === 0
+                  ? [`This removes ${members.length} grouped project entries.`]
+                  : []),
+              ...(projectThreads.length > 0
+                ? [
+                    "This permanently clears conversation history for those threads and any archived threads.",
+                  ]
+                : ["This permanently clears any archived conversation history."]),
+              isWholeGroup && !hasOtherMembers
+                ? "This removes only the project entries, not the files on disk."
+                : "Other entries in this grouped project are unaffected.",
+              "This action cannot be undone.",
+            ];
       const confirmed = await settlePromise(() =>
         api.dialogs.confirm(
           [
-            projectThreads.length > 0
-              ? `Remove ${targetKind} "${targetLabel}" and delete its ${projectThreads.length} thread${projectThreads.length === 1 ? "" : "s"}?`
-              : `Remove ${targetKind} "${targetLabel}"?`,
-            ...(singleMember
-              ? [
-                  `Path: ${singleMember.workspaceRoot}`,
-                  ...(singleMember.environmentLabel
-                    ? [`Environment: ${singleMember.environmentLabel}`]
-                    : []),
-                ]
-              : [`This removes ${members.length} grouped project entries.`]),
-            ...(projectThreads.length > 0
-              ? [
-                  "This permanently clears conversation history for those threads and any archived threads.",
-                ]
-              : ["This permanently clears any archived conversation history."]),
-            isWholeGroup && !hasOtherMembers
-              ? "This removes only the project entries, not the files on disk."
-              : "Other entries in this grouped project are unaffected.",
-            "This action cannot be undone.",
+            ...(trashed.length > 0
+              ? trellisTrashConfirmation({
+                  label: trashed.length === 1 ? firstTrashed!.title : group.displayName,
+                  kind: trellisItemKind(
+                    firstTrashed!.workspaceRoot,
+                    statuses.get(firstTrashed!.environmentId) ?? {},
+                  ),
+                  count: trashed.length,
+                })
+              : []),
+            ...deleteLines,
           ].join("\n"),
           { variant: "destructive" },
         ),
@@ -339,7 +402,27 @@ function ProjectDetail({
       if (confirmed._tag === "Failure" || !confirmed.value) return;
 
       const draftStore = useComposerDraftStore.getState();
-      for (const member of members) {
+      const clearProjectDrafts = (member: SidebarProjectGroupMember) => {
+        const projectRef = scopeProjectRef(member.environmentId, member.id);
+        const projectDraftThread = draftStore.getDraftThreadByProjectRef(projectRef);
+        if (projectDraftThread) {
+          draftStore.clearDraftThread(projectDraftThread.draftId);
+        }
+        draftStore.clearProjectDraftThreadId(projectRef);
+      };
+      for (const member of trashed) {
+        const outcome = await trashTrellisProject(member.environmentId, member.id, member.title);
+        if (outcome === "failed") return;
+        if (outcome === "gone") {
+          // Already out of Trellis (e.g. in its trash): only T3's entry is left.
+          if (!(await api.dialogs.confirm(TRELLIS_GONE_CONFIRMATION, { variant: "destructive" })))
+            return;
+          deleted.push(member);
+          continue;
+        }
+        clearProjectDrafts(member);
+      }
+      for (const member of deleted) {
         const memberThreads = projectThreads.filter(
           (thread) =>
             thread.environmentId === member.environmentId && thread.projectId === member.id,
@@ -363,11 +446,7 @@ function ProjectDetail({
           projectRef,
           memberThreads.map((thread) => scopeThreadRef(thread.environmentId, thread.id)),
         );
-        const projectDraftThread = draftStore.getDraftThreadByProjectRef(projectRef);
-        if (projectDraftThread) {
-          draftStore.clearDraftThread(projectDraftThread.draftId);
-        }
-        draftStore.clearProjectDraftThreadId(projectRef);
+        clearProjectDrafts(member);
       }
 
       if (isWholeGroup && !hasOtherMembers) {
@@ -382,6 +461,7 @@ function ProjectDetail({
       navigate,
       reportFailure,
       threads,
+      trashTrellisProject,
     ],
   );
 
@@ -497,31 +577,40 @@ function ProjectDetail({
         <SettingsSection title="Danger">
           <SettingsRow
             title={
-              hasOtherMembers
-                ? "Remove checkout"
-                : group.memberProjects.length > 1
-                  ? "Remove this project everywhere"
-                  : "Remove project"
+              trellisManaged
+                ? "Move to the Trellis trash"
+                : hasOtherMembers
+                  ? "Remove checkout"
+                  : group.memberProjects.length > 1
+                    ? "Remove this project everywhere"
+                    : "Remove project"
             }
             description={
-              hasOtherMembers
-                ? "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched."
-                : group.memberProjects.length > 1
-                  ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
-                  : "Deletes the project entry and its threads. Files on disk are not touched."
+              trellisRemoval === "offline"
+                ? "Trellis is off or not running. Turn it on or start it (Settings → Trellis) to move this project to the Trellis trash."
+                : trellisManaged
+                  ? "Moves its files and history to the Trellis trash and archives its conversations. Restore it from Settings → Trellis."
+                  : hasOtherMembers
+                    ? "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched."
+                    : group.memberProjects.length > 1
+                      ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
+                      : "Deletes the project entry and its threads. Files on disk are not touched."
             }
             control={
               <Button
                 size="sm"
                 variant="destructive-outline"
+                disabled={trellisRemoval === "offline"}
                 onClick={() => void removeMembers(group.memberProjects)}
               >
                 <Trash2Icon />
-                {hasOtherMembers
-                  ? "Remove checkout"
-                  : group.memberProjects.length > 1
-                    ? "Remove all entries"
-                    : "Remove project"}
+                {trellisManaged
+                  ? "Move to trash"
+                  : hasOtherMembers
+                    ? "Remove checkout"
+                    : group.memberProjects.length > 1
+                      ? "Remove all entries"
+                      : "Remove project"}
               </Button>
             }
           />

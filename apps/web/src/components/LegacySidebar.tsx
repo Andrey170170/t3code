@@ -84,12 +84,7 @@ import { isTerminalFocused } from "../lib/terminalFocus";
 import { isMacPlatform } from "../lib/utils";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
-import {
-  readThreadShell,
-  useProjects,
-  useThreadShells,
-  useThreadShellsForProjectRefs,
-} from "../state/entities";
+import { readThreadShell, useThreadShells, useThreadShellsForProjectRefs } from "../state/entities";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useThreadDiscoveredPorts } from "../portDiscoveryState";
@@ -112,6 +107,11 @@ import {
 import { isModelPickerOpen } from "../modelPickerVisibility";
 import { useShortcutModifierState } from "../shortcutModifierState";
 import { ensureLocalApi, readLocalApi } from "../localApi";
+import { useSidebarProjects } from "../hooks/useSidebarProjects";
+import { useTrellisTrash } from "../hooks/useTrellis";
+import { trellisItemKind, trellisRemovalOf, trellisTrashConfirmation } from "../lib/trellis";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { loadTrellisStatus } from "../state/trellis";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
@@ -1545,11 +1545,51 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [deleteProject, sidebarThreads],
   );
 
+  const trashTrellisProject = useTrellisTrash();
   const handleRemoveProject = useCallback(
     async (member: SidebarProjectGroupMember) => {
       const api = readLocalApi();
       if (!api) {
         return;
+      }
+
+      // A Trellis-managed project goes to the Trellis trash; deleting only
+      // T3's entry would not last, since the catalog sync recreates it.
+      const trellisStatus = await loadTrellisStatus(appAtomRegistry, member.environmentId);
+      const trellisRemoval = trellisRemovalOf(member.workspaceRoot, trellisStatus);
+      if (trellisRemoval === "offline") {
+        // A plain removal would delete the conversations for good, and the
+        // project would come back once Trellis syncs again.
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Trellis is not available",
+            description:
+              "Turn on or start Trellis (Settings → Trellis) to move this project to the Trellis trash.",
+          }),
+        );
+        return;
+      }
+      if (trellisRemoval === "trash") {
+        const confirmed = await api.dialogs.confirm(
+          trellisTrashConfirmation({
+            label: member.title,
+            kind: trellisItemKind(member.workspaceRoot, trellisStatus ?? {}),
+            count: 1,
+          }).join("\n"),
+          { variant: "destructive" },
+        );
+        if (!confirmed) return;
+        const outcome = await trashTrellisProject(member.environmentId, member.id, member.title);
+        if (outcome === "trashed") {
+          const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
+          const draftStore = useComposerDraftStore.getState();
+          const projectDraftThread = draftStore.getDraftThreadByProjectRef(memberProjectRef);
+          if (projectDraftThread) draftStore.clearDraftThread(projectDraftThread.draftId);
+          draftStore.clearProjectDraftThreadId(memberProjectRef);
+        }
+        if (outcome !== "gone") return;
+        // Already out of Trellis: fall through to removing T3's entry.
       }
 
       const memberProjectRef = scopeProjectRef(member.environmentId, member.id);
@@ -1673,7 +1713,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         );
       }
     },
-    [memberThreadCountByPhysicalKey, removeProject],
+    [memberThreadCountByPhysicalKey, removeProject, trashTrellisProject],
   );
 
   const handleProjectButtonContextMenu = useCallback(
@@ -3125,7 +3165,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 });
 
 export default function LegacySidebar() {
-  const projects = useProjects();
+  const projects = useSidebarProjects();
   const sidebarThreads = useThreadShells();
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const projectOrder = useUiStateStore((store) => store.projectOrder);

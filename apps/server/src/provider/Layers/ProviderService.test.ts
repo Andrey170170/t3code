@@ -5253,9 +5253,10 @@ describe("Trellis project paths", () => {
   const env = { root: trellisRoot, bin: "trellis", shimDir: "/trellis-shims" };
   const unused = () => Effect.die(new Error("unused"));
   const trellisLayer = Layer.succeed(Trellis.Trellis, {
+    ...Trellis.makeTestTrellis({ env }),
     current: Effect.succeed(env),
     refresh: Effect.succeed(env),
-    expectedRoot: Effect.succeed(trellisRoot),
+    expectedRoots: Effect.succeed([trellisRoot]),
     bin: "trellis",
     listWorkspaces: unused,
     listProjects: unused,

@@ -9,7 +9,7 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
-import { Trellis, type TrellisProjectView } from "./Trellis.ts";
+import { Trellis, type TrellisProjectView, makeTestTrellis } from "./Trellis.ts";
 import { TrellisCatalog } from "./TrellisCatalog.ts";
 import * as TrellisNaming from "./TrellisNaming.ts";
 
@@ -55,9 +55,10 @@ function makeHarness(input: {
   const layer = TrellisNaming.layer.pipe(
     Layer.provide(
       Layer.succeed(Trellis, {
+        ...makeTestTrellis({ env }),
         current: Effect.succeed(env),
         refresh: Effect.succeed(env),
-        expectedRoot: Effect.succeed(ROOT),
+        expectedRoots: Effect.succeed([ROOT]),
         bin: "trellis",
         listWorkspaces: unused,
         listProjects: unused,

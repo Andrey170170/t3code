@@ -17,14 +17,21 @@ import {
 } from "./codexThreads.ts";
 import {
   TrellisCreateResult,
+  TrellisEmptyTrashResult,
   TrellisError,
   TrellisFindInput,
   TrellisFindResult,
+  TrellisIdeaDraftTarget,
   TrellisNewIdeaInput,
   TrellisNewProjectInput,
   TrellisResolvePreviewUrlInput,
   TrellisResolvePreviewUrlResult,
+  TrellisRestoreInput,
+  TrellisRestoreResult,
   TrellisStatus,
+  TrellisTrashList,
+  TrellisTrashProjectInput,
+  TrellisTrashProjectResult,
 } from "./trellis.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
@@ -334,6 +341,11 @@ export const WS_METHODS = {
   // Trellis workspace service methods
   trellisGetStatus: "trellis.getStatus",
   trellisNewIdea: "trellis.newIdea",
+  trellisPrepareIdeaDraft: "trellis.prepareIdeaDraft",
+  trellisTrashProject: "trellis.trashProject",
+  trellisListTrash: "trellis.listTrash",
+  trellisRestore: "trellis.restore",
+  trellisEmptyTrash: "trellis.emptyTrash",
   trellisNewProject: "trellis.newProject",
   trellisFind: "trellis.find",
   trellisResolvePreviewUrl: "trellis.resolvePreviewUrl",
@@ -1070,6 +1082,31 @@ const WsTrellisNewIdeaRpc = Rpc.make(WS_METHODS.trellisNewIdea, {
   success: TrellisCreateResult,
   error: Schema.Union([TrellisError, EnvironmentAuthorizationError]),
 });
+const WsTrellisPrepareIdeaDraftRpc = Rpc.make(WS_METHODS.trellisPrepareIdeaDraft, {
+  payload: Schema.Struct({}),
+  success: TrellisIdeaDraftTarget,
+  error: Schema.Union([TrellisError, EnvironmentAuthorizationError]),
+});
+const WsTrellisTrashProjectRpc = Rpc.make(WS_METHODS.trellisTrashProject, {
+  payload: TrellisTrashProjectInput,
+  success: TrellisTrashProjectResult,
+  error: Schema.Union([TrellisError, EnvironmentAuthorizationError]),
+});
+const WsTrellisListTrashRpc = Rpc.make(WS_METHODS.trellisListTrash, {
+  payload: Schema.Struct({}),
+  success: TrellisTrashList,
+  error: Schema.Union([TrellisError, EnvironmentAuthorizationError]),
+});
+const WsTrellisRestoreRpc = Rpc.make(WS_METHODS.trellisRestore, {
+  payload: TrellisRestoreInput,
+  success: TrellisRestoreResult,
+  error: Schema.Union([TrellisError, EnvironmentAuthorizationError]),
+});
+const WsTrellisEmptyTrashRpc = Rpc.make(WS_METHODS.trellisEmptyTrash, {
+  payload: Schema.Struct({}),
+  success: TrellisEmptyTrashResult,
+  error: Schema.Union([TrellisError, EnvironmentAuthorizationError]),
+});
 const WsTrellisNewProjectRpc = Rpc.make(WS_METHODS.trellisNewProject, {
   payload: TrellisNewProjectInput,
   success: TrellisCreateResult,
@@ -1603,6 +1640,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsCodexThreadsImportRpc,
   WsTrellisGetStatusRpc,
   WsTrellisNewIdeaRpc,
+  WsTrellisPrepareIdeaDraftRpc,
+  WsTrellisTrashProjectRpc,
+  WsTrellisListTrashRpc,
+  WsTrellisRestoreRpc,
+  WsTrellisEmptyTrashRpc,
   WsTrellisNewProjectRpc,
   WsTrellisFindRpc,
   WsTrellisResolvePreviewUrlRpc,

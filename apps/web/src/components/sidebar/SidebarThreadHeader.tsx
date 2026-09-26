@@ -33,9 +33,13 @@ export interface SidebarThreadHeaderProps {
   /** The project scope combobox, rendered as the first icon of the group. */
   projectScope: ReactNode;
   onNewProject: () => void;
-  /** Present only while the environment runs Trellis; creates an idea and opens a thread in it. */
+  /**
+   * Present only while an environment runs Trellis; opens a draft that
+   * becomes a Trellis idea on its first message.
+   */
   onNewIdea?: (() => void) | undefined;
-  newIdeaPending?: boolean;
+  /** Names the environment the idea goes to when several are connected. */
+  newIdeaEnvironmentLabel?: string | null | undefined;
   newIdeaShortcutLabel?: string | null | undefined;
   /** Receives the click so Shift+click can skip the project picker. */
   onNewThread: (event: ReactMouseEvent) => void;
@@ -60,7 +64,7 @@ export function SidebarThreadHeader({
   projectScope,
   onNewProject,
   onNewIdea,
-  newIdeaPending = false,
+  newIdeaEnvironmentLabel,
   newIdeaShortcutLabel,
   onNewThread,
   newThreadDisabled,
@@ -143,8 +147,7 @@ export function SidebarThreadHeader({
         {onNewIdea ? (
           <SidebarHeaderIconButton
             label="New idea"
-            tooltip={newIdeaShortcutLabel ? `New idea (${newIdeaShortcutLabel})` : "New idea"}
-            disabled={newIdeaPending}
+            tooltip={`New idea${newIdeaEnvironmentLabel ? ` on ${newIdeaEnvironmentLabel}` : ""}${newIdeaShortcutLabel ? ` (${newIdeaShortcutLabel})` : ""}`}
             onClick={onNewIdea}
           >
             <LightbulbIcon />

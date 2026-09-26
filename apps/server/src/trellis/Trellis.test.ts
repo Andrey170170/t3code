@@ -7,8 +7,9 @@ import * as Option from "effect/Option";
 import {
   isTrellisManagedPath,
   refuseWorktreeIn,
+  makeTestTrellis,
   TRELLIS_WORKTREE_REFUSAL,
-  type Trellis,
+  parseKnownRoots,
 } from "./Trellis.ts";
 import {
   selectRollbackSnapshot,
@@ -20,6 +21,15 @@ import { mainCheckoutFromGitFile, trellisTerminalSpawnInput } from "./TrellisPty
 
 const env = { root: "/trellis", bin: "/opt/trellis", shimDir: "/t3/trellis-shims" };
 const idea = "/trellis/workspaces/ws-scratch/project/idea-1";
+
+describe("parseKnownRoots", () => {
+  it("keeps absolute roots and drops `/`, which would claim every host path", () => {
+    expect(parseKnownRoots("/trellis\n/\n//\nrelative\n /trellis/dev/ \n\n")).toEqual([
+      "/trellis",
+      "/trellis/dev",
+    ]);
+  });
+});
 
 describe("isTrellisManagedPath", () => {
   it("accepts project directories and paths below them only", () => {
@@ -35,14 +45,21 @@ describe("isTrellisManagedPath", () => {
 describe("decideTrellisLaunch", () => {
   it("keeps sessions on the host when Trellis is disabled or the cwd is elsewhere", () => {
     expect(
-      decideTrellisLaunch({ env: null, expectedRoot: null, driverKind: "cursor", cwd: idea }),
+      decideTrellisLaunch({
+        env: null,
+        enabled: true,
+        expectedRoots: [],
+        driverKind: "cursor",
+        cwd: idea,
+      }),
     ).toEqual({
       kind: "host",
     });
     expect(
       decideTrellisLaunch({
         env,
-        expectedRoot: env.root,
+        enabled: true,
+        expectedRoots: [env.root],
         driverKind: "cursor",
         cwd: "/home/me/code",
       }),
@@ -51,7 +68,13 @@ describe("decideTrellisLaunch", () => {
     });
     // Probes run without a project cwd.
     expect(
-      decideTrellisLaunch({ env, expectedRoot: env.root, driverKind: "codex", cwd: undefined }),
+      decideTrellisLaunch({
+        env,
+        enabled: true,
+        expectedRoots: [env.root],
+        driverKind: "codex",
+        cwd: undefined,
+      }),
     ).toEqual({
       kind: "host",
     });
@@ -60,17 +83,52 @@ describe("decideTrellisLaunch", () => {
   it("refuses a Trellis project path while Trellis is unreachable", () => {
     const decision = decideTrellisLaunch({
       env: null,
-      expectedRoot: "/trellis",
+      enabled: true,
+      expectedRoots: ["/trellis"],
       driverKind: "codex",
       cwd: idea,
     });
     expect(decision.kind === "unsupported" && decision.message).toContain("Trellis is not running");
   });
 
+  it("refuses Trellis project paths while the integration is off, under any known root", () => {
+    for (const expectedRoots of [["/trellis"], ["/old-root", "/trellis"]]) {
+      const decision = decideTrellisLaunch({
+        env: null,
+        enabled: false,
+        expectedRoots,
+        driverKind: "codex",
+        cwd: idea,
+      });
+      expect(decision.kind === "unsupported" && decision.message).toContain("turned off");
+    }
+    // A worktree of a Trellis project stays off the host too.
+    expect(
+      decideTrellisLaunch({
+        env: null,
+        enabled: false,
+        expectedRoots: ["/old-root", "/trellis"],
+        driverKind: "codex",
+        cwd: "/home/me/.t3/worktrees/x",
+        projectRoot: "/trellis/workspaces/ws-1/project",
+      }).kind,
+    ).toBe("unsupported");
+    expect(
+      decideTrellisLaunch({
+        env: null,
+        enabled: false,
+        expectedRoots: ["/trellis"],
+        driverKind: "codex",
+        cwd: "/home/me/code",
+      }),
+    ).toEqual({ kind: "host" });
+  });
+
   it("refuses a Trellis project's thread whose cwd is outside the workspace", () => {
     const decision = decideTrellisLaunch({
       env,
-      expectedRoot: env.root,
+      enabled: true,
+      expectedRoots: [env.root],
       driverKind: "codex",
       cwd: "/home/me/.t3/worktrees/repo/branch",
       projectRoot: "/trellis/workspaces/ws-1/project",
@@ -81,7 +139,8 @@ describe("decideTrellisLaunch", () => {
     expect(
       decideTrellisLaunch({
         env,
-        expectedRoot: env.root,
+        enabled: true,
+        expectedRoots: [env.root],
         driverKind: "codex",
         cwd: "/home/me/.t3/worktrees/repo/branch",
         projectRoot: "/home/me/code/repo",
@@ -91,7 +150,15 @@ describe("decideTrellisLaunch", () => {
 
   it("runs Codex and Claude through the shims inside a Trellis project path", () => {
     for (const driverKind of ["codex", "claudeAgent"]) {
-      expect(decideTrellisLaunch({ env, expectedRoot: env.root, driverKind, cwd: idea })).toEqual({
+      expect(
+        decideTrellisLaunch({
+          env,
+          enabled: true,
+          expectedRoots: [env.root],
+          driverKind,
+          cwd: idea,
+        }),
+      ).toEqual({
         kind: "workspace",
         shimDir: env.shimDir,
       });
@@ -100,7 +167,13 @@ describe("decideTrellisLaunch", () => {
 
   it("refuses other providers and missing shims inside a Trellis project path", () => {
     for (const driverKind of ["cursor", "grok", "opencode", "antigravity"]) {
-      const decision = decideTrellisLaunch({ env, expectedRoot: env.root, driverKind, cwd: idea });
+      const decision = decideTrellisLaunch({
+        env,
+        enabled: true,
+        expectedRoots: [env.root],
+        driverKind,
+        cwd: idea,
+      });
       expect(decision.kind).toBe("unsupported");
       expect(decision.kind === "unsupported" && decision.message).toContain(
         "not supported inside Trellis workspaces yet",
@@ -109,7 +182,8 @@ describe("decideTrellisLaunch", () => {
     expect(
       decideTrellisLaunch({
         env: { ...env, shimDir: null },
-        expectedRoot: env.root,
+        enabled: true,
+        expectedRoots: [env.root],
         driverKind: "codex",
         cwd: idea,
       }).kind,
@@ -259,10 +333,7 @@ describe("mainCheckoutFromGitFile", () => {
 });
 
 describe("refuseWorktreeIn", () => {
-  // Only `expectedRoot` is read.
-  const trellis = Option.some({
-    expectedRoot: Effect.succeed("/trellis"),
-  } as unknown as Trellis["Service"]);
+  const trellis = Option.some(makeTestTrellis({ expectedRoots: Effect.succeed(["/trellis"]) }));
 
   effectIt.effect("refuses git worktrees of Trellis project paths only", () =>
     Effect.gen(function* () {

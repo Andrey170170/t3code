@@ -526,9 +526,12 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const resolveThreadShell = Effect.fnUntraced(function* (threadId: ThreadId) {
+  const resolveThreadShell = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+    options?: { readonly includeArchived?: boolean },
+  ) {
     return yield* projectionSnapshotQuery
-      .getThreadShellById(threadId)
+      .getThreadShellById(threadId, options)
       .pipe(Effect.map(Option.getOrUndefined));
   });
 
@@ -1511,6 +1514,12 @@ const make = Effect.gen(function* () {
         .ensure(
           thread.id,
           resolveThreadWorkspaceCwd({ thread, projects: project ? [project] : [] }),
+          // A previous turn or checkpoint means the workspace already changed.
+          {
+            turnsRan:
+              thread.latestTurn !== null ||
+              ((yield* resolveThreadDetail(thread.id))?.checkpoints.length ?? 0) > 0,
+          },
         )
         .pipe(Effect.result);
       if (baseline._tag === "Failure") {
@@ -1739,7 +1748,8 @@ const make = Effect.gen(function* () {
   const processSessionStopRequested = Effect.fn("processSessionStopRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.session-stop-requested" }>,
   ) {
-    const thread = yield* resolveThreadShell(event.payload.threadId);
+    // Archiving a thread requests this stop right after it lands.
+    const thread = yield* resolveThreadShell(event.payload.threadId, { includeArchived: true });
     if (!thread) {
       return;
     }

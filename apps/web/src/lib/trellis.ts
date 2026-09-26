@@ -15,6 +15,81 @@ export function isTrellisWorkspaceRoot(
 }
 
 /**
+ * What deleting a T3 project does to its Trellis item: `trash` moves it to
+ * the Trellis trash (the project is Trellis-managed and Trellis is ready),
+ * `offline` means it is Trellis-managed but Trellis cannot be reached, so
+ * only T3's entry could be removed, and `none` is an ordinary project.
+ */
+export function trellisRemovalOf(
+  workspaceRoot: string,
+  status: {
+    readonly available: boolean;
+    readonly root?: string | null | undefined;
+    readonly knownRoots?: ReadonlyArray<string> | undefined;
+  } | null,
+): "trash" | "offline" | "none" {
+  if (status?.available === true) {
+    return isTrellisWorkspaceRoot(workspaceRoot, status.root) ? "trash" : "none";
+  }
+  // Off or down, any root this environment has used counts: the project may
+  // belong to an earlier root than the one reported.
+  const roots = [status?.root, ...(status?.knownRoots ?? [])];
+  return roots.some((root) => isTrellisWorkspaceRoot(workspaceRoot, root)) ? "offline" : "none";
+}
+
+/** Whether a Trellis project path is an idea folder in scratch rather than a workspace root. */
+export function isTrellisIdeaPath(workspaceRoot: string, trellisRoot: string): boolean {
+  const relative = workspaceRoot
+    .slice(trellisRoot.replace(/\/+$/, "").length)
+    .split("/")
+    .filter((segment) => segment.length > 0);
+  // workspaces/<ws>/project/<idea>
+  return relative.length > 3;
+}
+
+/**
+ * Whether the sidebar hides a project: its Trellis item is in the trash (its
+ * root is retired), and nothing in it is still active. Restoring the item
+ * makes it live again, so it reappears.
+ */
+export function isHiddenRetiredProject(
+  project: { readonly workspaceRoot: string },
+  retiredRoots: ReadonlySet<string> | undefined,
+  hasActiveThread: boolean,
+  hasDraft: boolean,
+): boolean {
+  if (retiredRoots === undefined || hasActiveThread || hasDraft) return false;
+  return retiredRoots.has(project.workspaceRoot.replace(/(.)\/+$/, "$1"));
+}
+
+/** What kind of Trellis item a T3 project stands for, from its root and the status. */
+export function trellisItemKind(
+  workspaceRoot: string,
+  status: { readonly root?: string | null | undefined; readonly forkRoots?: ReadonlyArray<string> },
+): "idea" | "fork" | "project" {
+  if (status.root && isTrellisIdeaPath(workspaceRoot, status.root)) return "idea";
+  const root = workspaceRoot.replace(/(.)\/+$/, "$1");
+  return status.forkRoots?.includes(root) ? "fork" : "project";
+}
+
+/** Confirmation lines for moving Trellis-managed projects to the trash. */
+export function trellisTrashConfirmation(input: {
+  readonly label: string;
+  readonly kind: "idea" | "fork" | "project";
+  readonly count: number;
+}): ReadonlyArray<string> {
+  return [
+    input.count === 1
+      ? `Move ${input.kind} "${input.label}" to the Trellis trash?`
+      : `Move ${input.count} Trellis projects to the Trellis trash?`,
+    input.kind === "project"
+      ? "Its files and history go to the trash, together with its forks; its conversations are archived, not deleted."
+      : "Its files and history go to the trash; its conversations are archived, not deleted.",
+    "Restore it from Settings → Trellis, which also shows when it is removed for good.",
+  ];
+}
+
+/**
  * The environment Trellis entry points target: the active thread's or
  * project's environment when it runs Trellis, otherwise the primary one when
  * it does. Null hides the entry points.

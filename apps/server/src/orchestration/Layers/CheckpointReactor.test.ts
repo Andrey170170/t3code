@@ -93,6 +93,8 @@ function createProviderServiceHarness(
   hasSession = true,
   sessionCwd = cwd,
   providerName: ProviderSession["provider"] = ProviderDriverKind.make("codex"),
+  // Sessions of other threads, as the provider service would list them.
+  otherSessions: ReadonlyArray<ProviderSession> = [],
 ) {
   const now = "2026-01-01T00:00:00.000Z";
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
@@ -117,9 +119,10 @@ function createProviderServiceHarness(
             cwd: sessionCwd,
             createdAt: now,
             updatedAt: now,
-          },
-        ] satisfies ReadonlyArray<ProviderSession>)
-      : Effect.succeed([] as ReadonlyArray<ProviderSession>);
+          } satisfies ProviderSession,
+          ...otherSessions,
+        ])
+      : Effect.succeed(otherSessions);
   const service: ProviderServiceShape = {
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
@@ -169,17 +172,20 @@ function createTrellisHarness(input: {
   readonly cwd: string;
   readonly workspaceKind: "scratch" | "dedicated";
   readonly baselineFailures?: number;
+  readonly turnSnapshotFailures?: number;
 }) {
   let baselineFailures = input.baselineFailures ?? 0;
+  let turnSnapshotFailures = input.turnSnapshotFailures ?? 0;
   const snapshots: Array<Trellis.TrellisSnapshot> = [];
   const rollbacks: Array<{ readonly target: string; readonly snapshot: string }> = [];
   const env = { root: input.root, bin: "trellis", shimDir: "/trellis-shims" };
   const workspacePath = NodePath.join(input.root, "workspaces", "ws-1", "project");
   const unused = () => Effect.die(new Error("Unused Trellis call in test"));
   const service: Trellis.Trellis["Service"] = {
+    ...Trellis.makeTestTrellis({ env }),
     current: Effect.succeed(env),
     refresh: Effect.succeed(env),
-    expectedRoot: Effect.succeed(input.root),
+    expectedRoots: Effect.succeed([input.root]),
     bin: "trellis",
     listWorkspaces: unused,
     listProjects: unused,
@@ -212,22 +218,25 @@ function createTrellisHarness(input: {
         },
       }),
     listSnapshots: () => Effect.sync(() => [...snapshots]),
+    // Lazy, like the real client, so a retry makes a new attempt.
     createSnapshot: ({ thread, turn }) =>
-      turn === "baseline" && baselineFailures-- > 0
-        ? Effect.fail(new TrellisError({ message: "Trellis is restarting" }))
-        : Effect.sync(() => {
-            const snapshot = {
-              id: `snap-${snapshots.length + 1}`,
-              workspace_id: "ws-1",
-              seq: snapshots.length + 1,
-              kind: "turn",
-              thread,
-              turn,
-              created_at: 0,
-            };
-            snapshots.push(snapshot);
-            return snapshot;
-          }),
+      Effect.suspend(() =>
+        (turn === "baseline" ? baselineFailures-- > 0 : turnSnapshotFailures-- > 0)
+          ? Effect.fail(new TrellisError({ message: "Trellis is restarting" }))
+          : Effect.sync(() => {
+              const snapshot = {
+                id: `snap-${snapshots.length + 1}`,
+                workspace_id: "ws-1",
+                seq: snapshots.length + 1,
+                kind: "turn",
+                thread,
+                turn,
+                created_at: 0,
+              };
+              snapshots.push(snapshot);
+              return snapshot;
+            }),
+      ),
     rollback: (entry) =>
       Effect.sync(() => {
         rollbacks.push(entry);
@@ -394,6 +403,8 @@ describe("CheckpointReactor", () => {
     readonly pullRequestRefresh?: Effect.Effect<void>;
     readonly trellisWorkspaceKind?: "scratch" | "dedicated";
     readonly trellisBaselineFailures?: number;
+    readonly trellisTurnSnapshotFailures?: number;
+    readonly otherProviderSessions?: (cwd: string) => ReadonlyArray<ProviderSession>;
   }) {
     const trellisRoot =
       options?.trellisWorkspaceKind === undefined
@@ -418,12 +429,14 @@ describe("CheckpointReactor", () => {
             cwd,
             workspaceKind: options.trellisWorkspaceKind,
             baselineFailures: options.trellisBaselineFailures ?? 0,
+            turnSnapshotFailures: options.trellisTurnSnapshotFailures ?? 0,
           });
     const provider = createProviderServiceHarness(
       cwd,
       options?.hasSession ?? true,
       options?.providerSessionCwd ?? cwd,
       options?.providerName ?? ProviderDriverKind.make("codex"),
+      options?.otherProviderSessions?.(cwd) ?? [],
     );
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
@@ -2493,13 +2506,49 @@ describe("CheckpointReactor", () => {
       );
     });
 
-    it("refuses to restore an idea another thread uses", async () => {
+    it("restores an idea that an idle thread also uses", async () => {
       const harness = await createHarness({
         trellisWorkspaceKind: "scratch",
         initializeGit: false,
         seedFilesystemCheckpoints: false,
         threadWorktreePath: null,
         secondThreadSharingWorktree: true,
+        otherProviderSessions: (cwd) => [
+          {
+            provider: ProviderDriverKind.make("codex"),
+            status: "ready",
+            runtimeMode: "full-access",
+            threadId: ThreadId.make("thread-2"),
+            cwd,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+      });
+
+      await runTrellisTurn(harness);
+      await requestRevertToStart(harness);
+      expect(harness.trellis?.rollbacks).toEqual([{ target: harness.cwd, snapshot: "snap-1" }]);
+    });
+
+    it("refuses to restore an idea while another thread is working in it", async () => {
+      const harness = await createHarness({
+        trellisWorkspaceKind: "scratch",
+        initializeGit: false,
+        seedFilesystemCheckpoints: false,
+        threadWorktreePath: null,
+        secondThreadSharingWorktree: true,
+        otherProviderSessions: (cwd) => [
+          {
+            provider: ProviderDriverKind.make("codex"),
+            status: "running",
+            runtimeMode: "full-access",
+            threadId: ThreadId.make("thread-2"),
+            cwd,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
       });
 
       await runTrellisTurn(harness);
@@ -2514,7 +2563,42 @@ describe("CheckpointReactor", () => {
           expect.objectContaining({
             kind: "checkpoint.revert.failed",
             payload: expect.objectContaining({
-              detail: expect.stringContaining("Another thread uses this Trellis idea"),
+              detail: expect.stringContaining('"Thread 2" is working in this Trellis idea'),
+            }),
+          }),
+        ]),
+      );
+    });
+
+    it("retries a failed turn snapshot and reports one that keeps failing", async () => {
+      const retried = await createHarness({
+        trellisWorkspaceKind: "scratch",
+        threadWorktreePath: null,
+        trellisTurnSnapshotFailures: 1,
+      });
+      await runTrellisTurn(retried);
+      await retried.drain();
+      expect(retried.trellis?.snapshots.map((entry) => entry.turn)).toEqual([
+        "baseline",
+        "turn-trellis-1",
+      ]);
+
+      const failed = await createHarness({
+        trellisWorkspaceKind: "scratch",
+        threadWorktreePath: null,
+        trellisTurnSnapshotFailures: 3,
+      });
+      await runTrellisTurn(failed);
+      await failed.drain();
+      const thread = (await failed.readModel()).threads[0];
+      // The git checkpoint is ready, but the missing snapshot is visible.
+      expect(thread?.checkpoints.map((entry) => entry.status)).toEqual(["ready"]);
+      expect(thread?.activities).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "checkpoint.capture.failed",
+            payload: expect.objectContaining({
+              detail: expect.stringContaining("Trellis could not snapshot the workspace"),
             }),
           }),
         ]),

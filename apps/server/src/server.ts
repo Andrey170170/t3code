@@ -528,8 +528,8 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
-  // Optional local workspace service; disabled when its socket is absent.
-  Layer.provideMerge(Trellis.layer),
+  // Optional local workspace service; off until enabled in server settings.
+  Layer.provideMerge(Trellis.layer.pipe(Layer.provide(ServerSettingsLayerLive))),
   // Both read a user-owned file out of the state directory and stream changes
   // to clients; neither depends on the other.
   Layer.provideMerge(

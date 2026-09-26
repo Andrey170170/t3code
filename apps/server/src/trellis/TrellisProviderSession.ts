@@ -15,7 +15,7 @@ import * as NodePath from "node:path";
 
 import type { ThreadId } from "@t3tools/contracts";
 
-import { isTrellisManagedPath, type TrellisEnv } from "./Trellis.ts";
+import { TRELLIS_DISABLED_MESSAGE, type TrellisEnv, trellisRootOf } from "./Trellis.ts";
 
 export interface TrellisProviderSessionConfig {
   /** Directory holding the `codex` and `claude` shims. */
@@ -37,27 +37,33 @@ export const TRELLIS_OUTSIDE_WORKSPACE_MESSAGE =
   "This thread belongs to a Trellis project but its folder is outside the Trellis workspace (for example a git worktree), so it would run on the host. Start a thread in the project folder instead; use `trellis fork` for parallel work.";
 
 /**
- * Where a provider session for `cwd` must run. `expectedRoot` keeps Trellis
- * project paths off the host while Trellis is unreachable (`env` null).
- * `projectRoot` is the thread's project folder: a thread of a Trellis project
- * whose cwd lies elsewhere is refused rather than run on the host.
+ * Where a provider session for `cwd` must run. `expectedRoots` keeps Trellis
+ * project paths off the host while Trellis is off (`enabled` false) or
+ * unreachable (`env` null). `projectRoot` is the thread's project folder: a
+ * thread of a Trellis project whose cwd lies elsewhere is refused rather than
+ * run on the host.
  */
 export function decideTrellisLaunch(input: {
   readonly env: TrellisEnv | null;
-  readonly expectedRoot: string | null;
+  /** The integration setting; required so a caller cannot fail open. */
+  readonly enabled: boolean;
+  readonly expectedRoots: ReadonlyArray<string>;
   readonly driverKind: string;
   readonly cwd: string | undefined;
   readonly projectRoot?: string | undefined;
 }): TrellisLaunchDecision {
   const { env, cwd } = input;
-  const root = env?.root ?? input.expectedRoot;
-  if (root === null || cwd === undefined) {
+  const roots = env === null ? input.expectedRoots : [env.root, ...input.expectedRoots];
+  if (cwd === undefined) {
     return { kind: "host" };
   }
-  if (!isTrellisManagedPath(root, cwd)) {
-    return input.projectRoot !== undefined && isTrellisManagedPath(root, input.projectRoot)
+  if (trellisRootOf(roots, cwd) === null) {
+    return input.projectRoot !== undefined && trellisRootOf(roots, input.projectRoot) !== null
       ? { kind: "unsupported", message: TRELLIS_OUTSIDE_WORKSPACE_MESSAGE }
       : { kind: "host" };
+  }
+  if (!input.enabled) {
+    return { kind: "unsupported", message: TRELLIS_DISABLED_MESSAGE };
   }
   if (env === null) {
     return {

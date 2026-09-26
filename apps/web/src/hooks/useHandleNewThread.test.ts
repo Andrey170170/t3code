@@ -166,9 +166,9 @@ vi.mock("../state/entities", () => ({
     },
   ],
   readThreadShell: () => null,
-  useProjects: () => [],
   useThread: () => null,
 }));
+vi.mock("./useSidebarProjects", () => ({ useSidebarProjects: () => [] }));
 vi.mock("../state/server", () => ({
   environmentServerConfigsAtom: {},
   primaryServerSettingsAtom: "primary-settings",

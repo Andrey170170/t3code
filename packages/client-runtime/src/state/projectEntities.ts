@@ -1,9 +1,10 @@
-import type {
-  EnvironmentId,
-  OrchestrationProjectShell,
-  OrchestrationShellSnapshot,
-  ProjectId,
-  ScopedProjectRef,
+import {
+  type EnvironmentId,
+  isTrellisLandingPad,
+  type OrchestrationProjectShell,
+  type OrchestrationShellSnapshot,
+  type ProjectId,
+  type ScopedProjectRef,
 } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
@@ -38,13 +39,14 @@ export function createEnvironmentProjectAtoms(input: {
     }).pipe(Atom.withLabel(`environment-project-index:${environmentId}`)),
   );
 
+  // Listed projects. The Trellis landing pad only holds new-idea drafts, so it
+  // is never listed, but it still resolves by id (`projectAtom`).
   const environmentProjectRefsAtom = Atom.family((environmentId: EnvironmentId) => {
     let previous: ReadonlyArray<ScopedProjectRef> = [];
     return Atom.make((get) => {
-      const next = get(environmentProjectsAtom(environmentId)).map((project) => ({
-        environmentId,
-        projectId: project.id,
-      }));
+      const next = get(environmentProjectsAtom(environmentId)).flatMap((project) =>
+        isTrellisLandingPad(project.id) ? [] : [{ environmentId, projectId: project.id }],
+      );
       if (projectRefsEqual(previous, next)) {
         return previous;
       }

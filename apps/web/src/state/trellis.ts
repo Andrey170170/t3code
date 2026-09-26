@@ -2,8 +2,9 @@ import {
   createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
 } from "@t3tools/client-runtime/state/runtime";
-import { type EnvironmentId, WS_METHODS } from "@t3tools/contracts";
-import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
+import { type EnvironmentId, type TrellisStatus, WS_METHODS } from "@t3tools/contracts";
+import * as Option from "effect/Option";
+import { AsyncResult, type AtomRegistry } from "effect/unstable/reactivity";
 
 import { connectionAtomRuntime } from "../connection/runtime";
 
@@ -28,13 +29,35 @@ export const trellisEnvironment = {
     staleTimeMs: 5_000,
     idleTtlMs: 60_000,
   }),
+  trash: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:trash",
+    tag: WS_METHODS.trellisListTrash,
+    staleTimeMs: 5_000,
+    idleTtlMs: 60_000,
+  }),
   newIdea: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:new-idea",
     tag: WS_METHODS.trellisNewIdea,
   }),
+  prepareIdeaDraft: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:prepare-idea-draft",
+    tag: WS_METHODS.trellisPrepareIdeaDraft,
+  }),
   newProject: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:new-project",
     tag: WS_METHODS.trellisNewProject,
+  }),
+  trashProject: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:trash-project",
+    tag: WS_METHODS.trellisTrashProject,
+  }),
+  restore: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:restore",
+    tag: WS_METHODS.trellisRestore,
+  }),
+  emptyTrash: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:empty-trash",
+    tag: WS_METHODS.trellisEmptyTrash,
   }),
   resolvePreviewUrl: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:resolve-preview-url",
@@ -42,30 +65,47 @@ export const trellisEnvironment = {
   }),
 };
 
-/** Environments with a new-idea request in flight, shared by every entry point. */
-export const trellisIdeaPendingAtom = Atom.make<ReadonlyArray<EnvironmentId>>([]).pipe(
-  Atom.keepAlive,
-  Atom.withLabel("trellis:idea-pending"),
-);
-
-/**
- * Runs `create` unless an idea is already being created in the environment,
- * so a repeated shortcut or a second entry point creates one idea. Returns
- * whether `create` ran.
- */
-export async function runExclusiveTrellisIdea(
+/** The last Trellis status of an environment, for event handlers; null while unknown. */
+function readTrellisStatus(
   registry: AtomRegistry.AtomRegistry,
   environmentId: EnvironmentId,
-  create: () => Promise<void>,
-): Promise<boolean> {
-  if (registry.get(trellisIdeaPendingAtom).includes(environmentId)) return false;
-  registry.update(trellisIdeaPendingAtom, (pending) => [...pending, environmentId]);
-  try {
-    await create();
-    return true;
-  } finally {
-    registry.update(trellisIdeaPendingAtom, (pending) =>
-      pending.filter((pendingId) => pendingId !== environmentId),
-    );
-  }
+): TrellisStatus | null {
+  return Option.getOrNull(
+    AsyncResult.value(registry.get(trellisEnvironment.status({ environmentId, input: {} }))),
+  );
+}
+
+/**
+ * A fresh Trellis status of an environment for an event handler: refetched,
+ * since the cached one can be minutes old. Falls back to the cached one when
+ * no answer arrives within `timeoutMs`.
+ */
+export function loadTrellisStatus(
+  registry: AtomRegistry.AtomRegistry,
+  environmentId: EnvironmentId,
+  timeoutMs = 5_000,
+): Promise<TrellisStatus | null> {
+  const atom = trellisEnvironment.status({ environmentId, input: {} });
+  return new Promise((resolve) => {
+    let unsubscribe = () => {};
+    const finish = (status: TrellisStatus | null) => {
+      clearTimeout(timer);
+      unsubscribe();
+      resolve(status);
+    };
+    const timer = setTimeout(() => finish(readTrellisStatus(registry, environmentId)), timeoutMs);
+    unsubscribe = registry.subscribe(atom, (result) => {
+      if (result.waiting) return;
+      finish(Option.getOrNull(AsyncResult.value(result)));
+    });
+    registry.refresh(atom);
+  });
+}
+
+/** Refetches an environment's Trellis status, e.g. after a trash or restore. */
+export function refreshTrellisStatus(
+  registry: AtomRegistry.AtomRegistry,
+  environmentId: EnvironmentId,
+): void {
+  registry.refresh(trellisEnvironment.status({ environmentId, input: {} }));
 }

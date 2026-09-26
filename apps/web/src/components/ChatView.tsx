@@ -1,6 +1,6 @@
 import { useLoadBalancedEnvironment } from "../hooks/useLoadBalancedEnvironment";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
-import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import { isTrellisLandingPad, type UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import {
   collectProviderUsageLimits,
   hasProviderUsageLimits,
@@ -3681,12 +3681,15 @@ export default function ChatView(props: ChatViewProps) {
     panelAnimationDurationMs,
   );
 
-  const gitCwd = activeProject
-    ? projectScriptCwd({
-        project: { cwd: activeProject.workspaceRoot },
-        worktreePath: activeThread?.worktreePath ?? null,
-      })
-    : null;
+  // A new-idea draft has no repository until its idea exists: no git chrome.
+  const isIdeaDraft = activeProject !== null && isTrellisLandingPad(activeProject.id);
+  const gitCwd =
+    activeProject && !isIdeaDraft
+      ? projectScriptCwd({
+          project: { cwd: activeProject.workspaceRoot },
+          worktreePath: activeThread?.worktreePath ?? null,
+        })
+      : null;
   const gitStatusCwd = activeThread?.worktreePath ?? gitCwd;
   const gitStatusQuery = useEnvironmentQuery(
     gitStatusCwd === null
@@ -3793,7 +3796,8 @@ export default function ChatView(props: ChatViewProps) {
       rememberCheckoutIsRepo(environmentId, gitStatusCwd, liveIsGitRepo);
     }
   }, [environmentId, gitStatusCwd, liveIsGitRepo]);
-  const isGitRepo = liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true;
+  const isGitRepo =
+    !isIdeaDraft && (liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true);
   // Keep a hidden, off-flow strip mounted for existing threads so the composer
   // can measure whether its relocated controls fit. The visible chrome remains
   // content-driven: Git/environment context or controls that actually fit.
@@ -5971,10 +5975,13 @@ export default function ChatView(props: ChatViewProps) {
 
   const activeWorktreePath = activeThread?.worktreePath ?? null;
   const trellisRoot = useTrellisRoot(environmentId);
-  // Trellis restores files from its own snapshots; the server refuses when
-  // another thread shares the idea folder or workspace.
+  // Trellis restores files from its own snapshots; the server refuses while
+  // another thread is working in the idea folder or workspace. A new-idea
+  // draft (the landing pad) becomes a Trellis idea on its first send.
   const activeIsTrellisProject =
-    activeProject !== null && isTrellisWorkspaceRoot(activeProject.workspaceRoot, trellisRoot);
+    activeProject !== null &&
+    (isTrellisLandingPad(activeProject.id) ||
+      isTrellisWorkspaceRoot(activeProject.workspaceRoot, trellisRoot));
   const canRevertFiles = activeWorktreePath !== null || activeIsTrellisProject;
   const derivedEnvMode: DraftThreadEnvMode = resolveEffectiveEnvMode({
     activeWorktreePath,

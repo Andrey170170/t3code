@@ -20,7 +20,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { isTrellisManagedPath, Trellis } from "./Trellis.ts";
+import { Trellis, trellisRootOf } from "./Trellis.ts";
 
 /** The port of a loopback `http(s)` URL, or null for any other URL. */
 export function loopbackPort(url: string): number | null {
@@ -77,15 +77,15 @@ const make = Effect.gen(function* () {
 
   // The Trellis folder of the thread (worktree first), or null.
   const trellisCwdOf = Effect.fn("TrellisPreview.trellisCwdOf")(function* (threadId: ThreadId) {
-    const root = yield* trellis.expectedRoot;
-    if (root === null) return null;
+    const roots = yield* trellis.expectedRoots;
+    if (roots.length === 0) return null;
     // A read failure must not fall back to the host's localhost.
     const thread = yield* snapshots
       .getThreadShellById(threadId)
       .pipe(Effect.mapError(() => readFailure("the thread")));
     if (Option.isNone(thread)) return null;
     const cwd = thread.value.worktreePath ?? (yield* projectRoot(thread.value.projectId));
-    return cwd !== null && isTrellisManagedPath(root, cwd) ? cwd : null;
+    return cwd !== null && trellisRootOf(roots, cwd) !== null ? cwd : null;
   });
 
   const projectRoot = (projectId: ProjectId) =>

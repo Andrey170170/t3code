@@ -16,13 +16,25 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 
 import * as PtyAdapter from "../terminal/PtyAdapter.ts";
-import { isTrellisManagedPath, Trellis } from "./Trellis.ts";
+import {
+  isTrellisManagedPath,
+  Trellis,
+  TRELLIS_DISABLED_MESSAGE,
+  trellisRootOf,
+} from "./Trellis.ts";
 import { TRELLIS_OUTSIDE_WORKSPACE_MESSAGE } from "./TrellisProviderSession.ts";
 
 /** A terminal refused because it would run a Trellis project on the host. */
 export class TrellisTerminalRefusedError extends PtyAdapter.PtySpawnError {
   override get message(): string {
     return TRELLIS_OUTSIDE_WORKSPACE_MESSAGE;
+  }
+}
+
+/** A terminal in a Trellis project while the integration is off. */
+export class TrellisTerminalDisabledError extends PtyAdapter.PtySpawnError {
+  override get message(): string {
+    return TRELLIS_DISABLED_MESSAGE;
   }
 }
 
@@ -87,15 +99,22 @@ export const layer = Layer.effect(
 
     return PtyAdapter.PtyAdapter.of({
       spawn: Effect.fn("TrellisPtyAdapter.spawn")(function* (input) {
-        const root = yield* trellis.expectedRoot;
-        if (root !== null && !isTrellisManagedPath(root, input.cwd)) {
+        const roots = yield* trellis.expectedRoots;
+        const root = trellisRootOf(roots, input.cwd);
+        if (root === null) {
           const main = yield* worktreeMainCheckout(input.cwd);
-          if (main !== null && isTrellisManagedPath(root, main)) {
+          if (main !== null && trellisRootOf(roots, main) !== null) {
             return yield* new TrellisTerminalRefusedError({
               adapter: "trellis",
               shell: input.shell,
             });
           }
+        }
+        if (root !== null && !(yield* trellis.enabled)) {
+          return yield* new TrellisTerminalDisabledError({
+            adapter: "trellis",
+            shell: input.shell,
+          });
         }
         return yield* host.spawn(trellisTerminalSpawnInput({ root, bin: trellis.bin }, input));
       }),
