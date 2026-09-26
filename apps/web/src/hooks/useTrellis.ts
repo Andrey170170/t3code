@@ -38,7 +38,11 @@ interface TrellisEnvironment {
   readonly state: TrellisState;
   readonly available: boolean;
   readonly root: string | null;
+  /** Every root its Trellis projects may live under, including earlier ones. */
+  readonly knownRoots: ReadonlyArray<string>;
 }
+
+const NO_ROOTS: ReadonlyArray<string> = [];
 
 /** Trellis status of one environment; null while unknown or without an environment. */
 export function useTrellisStatusFor(
@@ -51,9 +55,10 @@ export function useTrellisStatusFor(
   // Servers that predate the setting report only `available`.
   const state = status?.state ?? (available ? "ready" : "unavailable");
   const root = status?.root ?? null;
+  const knownRoots = status?.knownRoots ?? NO_ROOTS;
   return useMemo(
-    () => (environmentId === null ? null : { environmentId, state, available, root }),
-    [available, environmentId, root, state],
+    () => (environmentId === null ? null : { environmentId, state, available, root, knownRoots }),
+    [available, environmentId, knownRoots, root, state],
   );
 }
 

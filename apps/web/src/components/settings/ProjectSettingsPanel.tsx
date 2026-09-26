@@ -306,9 +306,11 @@ function ProjectDetail({
 
   const trashTrellisProject = useTrellisTrash();
   const representativeTrellis = useTrellisStatusFor(representative.environmentId);
-  const trellisManaged =
-    group.memberProjects.length === 1 &&
-    trellisRemovalOf(representative.workspaceRoot, representativeTrellis) === "trash";
+  const trellisRemoval =
+    group.memberProjects.length === 1
+      ? trellisRemovalOf(representative.workspaceRoot, representativeTrellis)
+      : "none";
+  const trellisManaged = trellisRemoval !== "none";
   const removeMembers = useCallback(
     async (members: ReadonlyArray<SidebarProjectGroupMember>) => {
       const api = readLocalApi();
@@ -584,18 +586,21 @@ function ProjectDetail({
                     : "Remove project"
             }
             description={
-              trellisManaged
-                ? "Moves its files and history to the Trellis trash and archives its conversations. Restore it from Settings → Trellis."
-                : hasOtherMembers
-                  ? "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched."
-                  : group.memberProjects.length > 1
-                    ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
-                    : "Deletes the project entry and its threads. Files on disk are not touched."
+              trellisRemoval === "offline"
+                ? "Trellis is off or not running. Turn it on or start it (Settings → Trellis) to move this project to the Trellis trash."
+                : trellisManaged
+                  ? "Moves its files and history to the Trellis trash and archives its conversations. Restore it from Settings → Trellis."
+                  : hasOtherMembers
+                    ? "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched."
+                    : group.memberProjects.length > 1
+                      ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
+                      : "Deletes the project entry and its threads. Files on disk are not touched."
             }
             control={
               <Button
                 size="sm"
                 variant="destructive-outline"
+                disabled={trellisRemoval === "offline"}
                 onClick={() => void removeMembers(group.memberProjects)}
               >
                 <Trash2Icon />
