@@ -14,8 +14,8 @@
  * #3650, #4662): reusable identity vs one-shot activations, idle as a real
  * nonterminal state, provider-specific usage merges, first-write terminal
  * timestamps, reactivation clearing terminal detail, and order-robust
- * folding (completion can create an agent; a late start only fills
- * metadata).
+ * folding (completion can create an agent; a late start from the same
+ * launch only fills metadata).
  */
 import type { OrchestrationThreadActivity } from "@t3tools/contracts";
 
@@ -465,6 +465,7 @@ export function foldSubagentActivities(
   options?: { readonly sessionLive?: boolean },
 ): ReadonlyArray<RuntimeSubagent> {
   const agents = new Map<string, MutableAgent>();
+  const launches = new Map<string, { toolUseId: string; at: string }>();
 
   for (const activity of activities) {
     if (typeof activity.payload !== "object" || activity.payload === null) {
@@ -472,6 +473,24 @@ export function foldSubagentActivities(
     }
     const payload = activity.payload as Record<string, unknown>;
     const at = activity.createdAt;
+    const taskId = asString(payload.taskId);
+    const toolUseId = asString(payload.toolUseId);
+    const previousLaunch = taskId ? launches.get(taskId) : undefined;
+    // Claude resumes the same taskId through a new Agent tool call. Remember
+    // linkage from every task row so retention of the original start is optional.
+    const newLaunch =
+      toolUseId !== undefined &&
+      previousLaunch !== undefined &&
+      toolUseId !== previousLaunch.toolUseId &&
+      at > previousLaunch.at;
+    if (
+      activity.kind.startsWith("task.") &&
+      taskId &&
+      toolUseId &&
+      (!previousLaunch || at >= previousLaunch.at)
+    ) {
+      launches.set(taskId, { toolUseId, at });
+    }
 
     switch (activity.kind) {
       case "task.started": {
@@ -483,18 +502,16 @@ export function foldSubagentActivities(
         if (isBackgroundTaskActivity(payload)) break;
         const agent = getOrCreate(agents, taskId, payload, at);
         fillMetadata(agent, payload);
-        // Order-robustness: a start row arriving after a terminal state is a
-        // late/out-of-order delivery and only fills metadata — it must not
-        // reopen the run. Reactivation comes exclusively from explicit
-        // status transitions (task.updated / progress status). Guard on the
-        // status itself, not activationCount: a task first seen via a
-        // terminal task.updated has zero activations but is still settled
-        // (review finding: a late start reopened a failed child).
+        // A late start from the same launch only fills metadata. A newer
+        // Agent tool call is an explicit reactivation, even after failure.
         if (agent.activationCount === 0 && !isTerminalSubagentStatus(agent.status)) {
           agent.activationCount = 1;
           agent.startedAt = agent.startedAt ?? at;
           agent.status = "running";
-        } else if (agent.status === "idle") {
+        } else if (
+          agent.status === "idle" ||
+          (newLaunch && agent.completedAt !== null && at > agent.completedAt)
+        ) {
           applyStatus(agent, "running", at);
         }
         const detail = asString(payload.detail);

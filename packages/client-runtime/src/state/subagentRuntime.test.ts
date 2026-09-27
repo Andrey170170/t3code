@@ -713,6 +713,76 @@ describe("terminal robustness", () => {
     expect(agents[0]!.title).toBe("Late");
   });
 
+  it.each([false, true])(
+    "resumes a failed Claude agent with a new launch (start retained: %s)",
+    (retainStart) => {
+      const identity = { taskId: "resumed", taskType: "local_agent", toolUseId: "old-launch" };
+      const rows = [
+        ...(retainStart ? [activity("task.started", identity, "2026-08-01T10:00:00.000Z")] : []),
+        activity(
+          "task.updated",
+          { ...identity, status: "failed", error: "Usage limit" },
+          "2026-08-01T10:01:00.000Z",
+        ),
+        activity(
+          "task.completed",
+          { ...identity, status: "failed", summary: "Usage limit" },
+          "2026-08-01T10:01:01.000Z",
+        ),
+        activity(
+          "task.started",
+          { ...identity, toolUseId: "new-launch" },
+          "2026-08-01T15:00:00.000Z",
+        ),
+      ];
+      const agents = fold(rows);
+      expect(agents).toHaveLength(1);
+      expect(agents[0]).toMatchObject({
+        status: "running",
+        activationCount: 2,
+        error: null,
+        result: null,
+        completedAt: null,
+        startedAt: "2026-08-01T15:00:00.000Z",
+      });
+      expect(deriveAgentPanelModel({ agents }).liveCount).toBe(1);
+      const progressed = fold([
+        ...rows,
+        activity(
+          "task.started",
+          { ...identity, toolUseId: "new-launch" },
+          "2026-08-01T15:00:00.000Z",
+        ),
+        activity(
+          "task.progress",
+          { ...identity, toolUseId: "new-launch", summary: "Working again" },
+          "2026-08-01T15:01:00.000Z",
+        ),
+      ]);
+      expect(progressed[0]).toMatchObject({ status: "running", activationCount: 2 });
+    },
+  );
+
+  it.each([
+    { toolUseId: "old-launch", at: "2026-08-01T15:00:00.000Z" },
+    { toolUseId: "earlier-launch", at: "2026-08-01T09:00:00.000Z" },
+    { toolUseId: undefined, at: "2026-08-01T15:00:00.000Z" },
+  ])(
+    "does not reactivate a failed agent for a stale or unidentified start: %j",
+    ({ toolUseId, at }) => {
+      const agents = fold([
+        activity(
+          "task.updated",
+          { taskId: "failed", taskType: "local_agent", toolUseId: "old-launch", status: "failed" },
+          "2026-08-01T10:00:00.000Z",
+        ),
+        activity("task.started", { taskId: "failed", taskType: "local_agent", toolUseId }, at),
+      ]);
+      expect(agents[0]).toMatchObject({ status: "failed", activationCount: 1 });
+      expect(deriveAgentPanelModel({ agents }).liveCount).toBe(0);
+    },
+  );
+
   it("a completion after a terminal task.updated still enriches result and usage", () => {
     // Claude commonly emits terminal task.updated before task.completed;
     // the completion carries the summary and final usage the update lacked.
