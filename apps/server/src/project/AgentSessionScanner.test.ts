@@ -9,6 +9,7 @@ import {
   type ServerSettings as ContractServerSettings,
 } from "@t3tools/contracts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -823,6 +824,60 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           claudeWorkspace,
         ]);
       }),
+    );
+
+    it.effect.each(["cli", "managed"] as const)(
+      "scans the %s home consistently with its runtime when CODEX_HOME is set",
+      (setupMode) =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fs = yield* FileSystem.FileSystem;
+          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+          const codexHomePath = yield* makeTempDir("t3code-codex-native-home-");
+          const environmentHome = yield* makeTempDir("t3code-codex-env-home-");
+          const nativeWorkspace = yield* makeTempDir("t3code-workspace-native-");
+          const environmentWorkspace = yield* makeTempDir("t3code-workspace-env-");
+          for (const [home, workspace] of [
+            [codexHomePath, nativeWorkspace],
+            [environmentHome, environmentWorkspace],
+          ] as const) {
+            yield* writeTranscript({
+              filePath: path.join(home, "sessions", "2026", "01", "01", "rollout-session.jsonl"),
+              contents: codexRolloutLine(workspace),
+              mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+            });
+          }
+          // Redirect reads of the default native home into the fixture, keeping live history out of the scan.
+          const nativeHome = path.join(NodeOS.homedir(), ".codex");
+          const fixturePath = (target: string) =>
+            target === nativeHome || target.startsWith(nativeHome + path.sep)
+              ? codexHomePath + target.slice(nativeHome.length)
+              : target;
+          const fixtureFs = FileSystem.FileSystem.of({
+            ...fs,
+            readDirectory: (target) => fs.readDirectory(fixturePath(target)),
+            stat: (target) => fs.stat(fixturePath(target)),
+            open: (target, options) => fs.open(fixturePath(target), options),
+            realPath: (target) => fs.realPath(fixturePath(target)),
+          });
+          const result = yield* runScan({
+            claudeHomePath,
+            codexHomePath,
+            providerInstances: {
+              [ProviderInstanceId.make("codex")]: {
+                driver: ProviderDriverKind.make("codex"),
+                environment: [{ name: "CODEX_HOME", value: environmentHome, sensitive: false }],
+                config: { setupMode: setupMode === "cli" ? "existing" : "managed" },
+              },
+            },
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fixtureFs),
+            Effect.provideService(HostProcessEnvironment, { CODEX_HOME: environmentHome }),
+          );
+          expect(result.candidates.map((candidate) => candidate.path)).toEqual([
+            setupMode === "managed" ? nativeWorkspace : environmentWorkspace,
+          ]);
+        }),
     );
 
     it.effect("ignores invalid provider instances while scanning the remaining providers", () =>

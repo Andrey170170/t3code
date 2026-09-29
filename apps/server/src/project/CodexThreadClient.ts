@@ -9,11 +9,15 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { expandHomePath } from "../pathExpansion.ts";
+import { ServerConfig } from "../config.ts";
+import { CodexInstallation } from "../provider/CodexInstallation.ts";
+import { resolveManagedCodexHomeLayout } from "../provider/CodexManagedHome.ts";
 import {
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
@@ -50,6 +54,8 @@ export const makeCodexThreadClient = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const serverConfig = yield* Effect.serviceOption(ServerConfig);
+  const installation = yield* Effect.serviceOption(CodexInstallation);
   const resolve = Effect.fn("CodexThreadClient.resolve")(function* (id: ProviderInstanceId) {
     const settings = yield* settingsService.getSettings;
     const instance = deriveProviderInstanceConfigMap(settings)[id];
@@ -57,7 +63,20 @@ export const makeCodexThreadClient = Effect.gen(function* () {
       return yield* new CodexThreadError({ message: `Codex provider '${id}' is not configured.` });
     }
     const config = yield* decodeCodexSettings(instance.config ?? {});
-    const environment = mergeProviderInstanceEnvironment(instance.environment);
+    const environment = { ...mergeProviderInstanceEnvironment(instance.environment) };
+    if (config.setupMode === "managed") {
+      if (Option.isNone(serverConfig)) {
+        return yield* new CodexThreadError({ message: "Managed Codex runtime is unavailable." });
+      }
+      const layout = yield* resolveManagedCodexHomeLayout(
+        serverConfig.value.stateDir,
+        id,
+        config,
+      ).pipe(Effect.provideService(Path.Path, path));
+      // Local history needs the managed executable and home, without an OAuth token.
+      environment.CODEX_HOME = layout.effectiveHomePath ?? layout.sharedHomePath;
+      return { instance, config, environment, layout };
+    }
     // Auth overlays share history with their source home. Without an overlay,
     // an environment override is also the home actually used by the driver.
     const layout = yield* resolveCodexHomeLayout({
@@ -95,14 +114,29 @@ export const makeCodexThreadClient = Effect.gen(function* () {
         if (!resolveProviderInstanceEnabled(instance)) {
           return yield* new CodexThreadError({ message: `Codex provider '${id}' is disabled.` });
         }
+        let binaryPath = expandHomePath(config.binaryPath);
+        let homePath = layout.effectiveHomePath;
+        if (config.setupMode === "managed") {
+          if (Option.isNone(installation)) {
+            return yield* new CodexThreadError({
+              message: "Managed Codex installation is unavailable.",
+            });
+          }
+          const executable = yield* installation.value.acquire().pipe(Effect.mapError(clientError));
+          binaryPath = executable.executablePath;
+          homePath = layout.effectiveHomePath ?? layout.sharedHomePath;
+          yield* fileSystem
+            .makeDirectory(homePath, { recursive: true })
+            .pipe(Effect.mapError(clientError));
+        }
         yield* materializeCodexShadowHome(layout).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
           Effect.mapError(clientError),
         );
         const { client } = yield* withCodexAppServerClient({
-          binaryPath: expandHomePath(config.binaryPath),
-          homePath: layout.effectiveHomePath,
+          binaryPath,
+          homePath,
           launchArgs: resolveCodexLaunchArgs(config.launchArgs, environment),
           cwd: process.cwd(),
           environment,

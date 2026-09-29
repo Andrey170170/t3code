@@ -10,6 +10,7 @@
  * @module ProviderServiceLive
  */
 import {
+  CodexSettings,
   EventId,
   MessageId,
   ModelSelection,
@@ -87,6 +88,7 @@ import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as Trellis from "../../trellis/Trellis.ts";
+import { deriveProviderInstanceConfigMap } from "./ProviderInstanceRegistryHydration.ts";
 import * as TrellisProviderSession from "../../trellis/TrellisProviderSession.ts";
 const isModelSelection = Schema.is(ModelSelection);
 const encodePromptJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -265,6 +267,7 @@ interface TurnAnalyticsMetadata {
   readonly provider: ProviderDriverKind;
   readonly startedAtMs: number;
   readonly mixedModels: boolean;
+  readonly subscriptionSharing?: boolean;
   readonly model?: string;
   readonly effort?: string;
   readonly interactionMode?: string;
@@ -546,6 +549,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
     return {
       ...input.completion.terminalProperties,
+      ...(metadata?.subscriptionSharing ? { subscriptionSharing: true } : {}),
       ...(metadata?.model ? { model: metadata.model } : {}),
       ...(metadata?.effort ? { effort: metadata.effort } : {}),
       ...(metadata?.interactionMode ? { interactionMode: metadata.interactionMode } : {}),
@@ -591,6 +595,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     readonly runtimeMode: string | undefined;
   }) {
     const startedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
+    const settings = yield* serverSettings.getSettings.pipe(Effect.option);
+    const instance = Option.isSome(settings)
+      ? settings.value.providerInstances[input.providerInstanceId]
+      : undefined;
+    const subscriptionSharing =
+      input.provider === "codex" &&
+      (instance
+        ? instance.driver === "codex" &&
+          typeof instance.config === "object" &&
+          instance.config !== null &&
+          "setupMode" in instance.config &&
+          instance.config.setupMode === "managed"
+        : input.providerInstanceId === "codex" &&
+          Option.isSome(settings) &&
+          settings.value.providers.codex.setupMode === "managed");
     turnAnalyticsRequestId += 1;
     const requestId = turnAnalyticsRequestId;
     const effort = turnEffort(input.modelSelection);
@@ -603,6 +622,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       };
       const metadata: TurnAnalyticsMetadata = {
         provider: input.provider,
+        ...(subscriptionSharing ? { subscriptionSharing: true } : {}),
         startedAtMs,
         mixedModels: false,
         requestId,
@@ -999,10 +1019,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           return Option.isSome(project) ? project.value.workspaceRoot : undefined;
         }).pipe(Effect.orElseSucceed(() => undefined));
 
+  const decodeTrellisCodexSettings = Schema.decodeUnknownOption(CodexSettings);
+
   const decideTrellisLaunch = Effect.fn("ProviderService.decideTrellisLaunch")(function* (input: {
     readonly operation: string;
     readonly threadId: ThreadId;
     readonly driverKind: string;
+    readonly instanceId: ProviderInstanceId;
     readonly cwd: string | undefined;
   }) {
     if (Option.isNone(trellis)) return { kind: "host" } as const;
@@ -1025,6 +1048,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
     if (decision.kind === "unsupported") {
       return yield* toValidationError(input.operation, decision.message);
+    }
+    if (decision.kind === "workspace" && input.driverKind === "codex") {
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError((error) => toValidationError(input.operation, error.message, error)),
+      );
+      const instance = deriveProviderInstanceConfigMap(settings)[input.instanceId];
+      const config = decodeTrellisCodexSettings(instance?.config ?? {});
+      // Managed homes and installations are outside the current Trellis mounts.
+      if (Option.isSome(config) && config.value.setupMode === "managed")
+        return yield* toValidationError(
+          input.operation,
+          "Managed ChatGPT connections are not supported inside Trellis workspaces yet. Use a Codex CLI login for this project.",
+        );
     }
     return decision;
   });
@@ -1372,6 +1408,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         operation: input.operation,
         threadId: input.binding.threadId,
         driverKind: adapter.provider,
+        instanceId: bindingInstanceId,
         cwd: persistedCwd,
       });
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
@@ -1610,6 +1647,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           operation: "ProviderService.startSession",
           threadId,
           driverKind: resolvedProvider,
+          instanceId: resolvedInstanceId,
           cwd: effectiveCwd,
         });
         yield* prepareMcpSession(threadId, resolvedInstanceId);
@@ -1842,6 +1880,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       yield* McpSessionRegistry.touchActiveMcpThread(input.threadId);
       const analyticsModelSelection =
         input.modelSelection?.instanceId === routed.instanceId ? input.modelSelection : undefined;
+      let subscriptionSharing = false;
       const turn = yield* Effect.acquireUseRelease(
         beginTurnAnalytics({
           providerInstanceId: routed.instanceId,
@@ -1853,7 +1892,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }),
         (turnMetadata) =>
           Effect.gen(function* () {
-            const turn = yield* routed.adapter.sendTurn(input);
+            subscriptionSharing = turnMetadata.subscriptionSharing === true;
+            yield* analytics.record("provider.turn.attempted", {
+              provider: routed.adapter.provider,
+              ...(turnMetadata.subscriptionSharing ? { subscriptionSharing: true } : {}),
+              model: input.modelSelection?.model,
+              runtimeMode: routed.runtimeMode,
+            });
+            const turn = yield* routed.adapter.sendTurn(input).pipe(
+              Effect.tapError((error) =>
+                analytics.record("provider.turn.rejected", {
+                  provider: routed.adapter.provider,
+                  ...(turnMetadata.subscriptionSharing ? { subscriptionSharing: true } : {}),
+                  errorType: error._tag,
+                }),
+              ),
+            );
             yield* associateTurnAnalytics({
               providerInstanceId: routed.instanceId,
               threadId: input.threadId,
@@ -1887,6 +1941,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
       yield* analytics.record("provider.turn.sent", {
         provider: routed.adapter.provider,
+        ...(subscriptionSharing ? { subscriptionSharing: true } : {}),
         model: input.modelSelection?.model,
         interactionMode: input.interactionMode,
         // Session-start events alone skew runtime mode toward users who toggle

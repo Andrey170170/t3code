@@ -1202,6 +1202,7 @@ export const make = Effect.gen(function* () {
           const config = decodeCodexSettings(instance.config ?? {});
           if (Option.isNone(config)) continue;
           const codexSettings =
+            config.value.setupMode !== "managed" &&
             config.value.homePath.trim().length === 0 &&
             config.value.shadowHomePath.trim().length === 0 &&
             environmentHome?.trim()

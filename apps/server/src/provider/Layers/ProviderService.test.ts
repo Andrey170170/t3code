@@ -421,6 +421,7 @@ function makeProviderServiceLayer(
     readonly directory?: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
     readonly supportsConversationRollback?: boolean;
     readonly analyticsLayer?: Layer.Layer<AnalyticsService.AnalyticsService>;
+    readonly settingsLayer?: typeof defaultServerSettingsLayer;
     readonly registry?: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"];
   } = {},
 ) {
@@ -453,7 +454,7 @@ function makeProviderServiceLayer(
         Layer.provide(NodeServices.layer),
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
-        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(input.settingsLayer ?? defaultServerSettingsLayer),
         Layer.provide(serverConfigTestLayer),
         Layer.provideMerge(input.analyticsLayer ?? AnalyticsService.layerTest),
         Layer.provide(
@@ -5396,24 +5397,33 @@ describe("Trellis project paths", () => {
     primer: () => Effect.succeed("You are inside Trellis idea idea-1."),
   });
 
-  const startIn = (driver: ProviderDriverKind, threadId: ThreadId, cwd: string) =>
+  const startIn = (
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    cwd: string,
+    options: { managed?: boolean; recover?: boolean } = {},
+  ) =>
     Effect.gen(function* () {
       const adapter = makeFakeCodexAdapter(driver);
+      let credentialsIssued = 0;
       const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
         Layer.provide(SqlitePersistenceMemory),
       );
       const providerLayer = makeProviderServiceLive({
         issueMcpCredential: (request) =>
-          Effect.succeed({
-            config: {
-              environmentId: "env-1" as never,
-              threadId: request.threadId,
-              providerSessionId: "session-1",
-              providerInstanceId: request.providerInstanceId,
-              endpoint: "http://127.0.0.1:3773/mcp",
-              authorizationHeader: "Bearer token",
-              capabilities: request.capabilities,
-            },
+          Effect.sync(() => {
+            credentialsIssued++;
+            return {
+              config: {
+                environmentId: "env-1" as never,
+                threadId: request.threadId,
+                providerSessionId: "session-1",
+                providerInstanceId: request.providerInstanceId,
+                endpoint: "http://127.0.0.1:3773/mcp",
+                authorizationHeader: "Bearer token",
+                capabilities: request.capabilities,
+              },
+            };
           }),
       }).pipe(
         Layer.provide(
@@ -5422,9 +5432,22 @@ describe("Trellis project paths", () => {
             makeAdapterRegistryMock({ [driver]: adapter.adapter }),
           ),
         ),
-        Layer.provide(ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer))),
+        Layer.provideMerge(
+          ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer)),
+        ),
         Layer.provide(trellisLayer),
-        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(
+          options.managed
+            ? ServerSettings.ServerSettingsService.layerTest({
+                providerInstances: {
+                  [ProviderInstanceId.make("codex")]: {
+                    driver: CODEX_DRIVER,
+                    config: { setupMode: "managed" },
+                  },
+                },
+              })
+            : defaultServerSettingsLayer,
+        ),
         Layer.provide(serverConfigTestLayer),
         Layer.provide(AnalyticsService.layerTest),
         Layer.provide(
@@ -5438,16 +5461,33 @@ describe("Trellis project paths", () => {
       // Read the per-thread launch state before the layer's shutdown clears it.
       return yield* Effect.gen(function* () {
         const provider = yield* ProviderService.ProviderService;
-        const exit = yield* provider
-          .startSession(threadId, {
-            provider: driver,
-            providerInstanceId: ProviderInstanceId.make(driver),
-            threadId,
-            cwd,
-            runtimeMode: "full-access",
-          })
-          .pipe(Effect.exit);
+        const start = provider.startSession(threadId, {
+          provider: driver,
+          providerInstanceId: ProviderInstanceId.make(driver),
+          threadId,
+          cwd,
+          runtimeMode: "full-access",
+        });
+        const operation = Effect.gen(function* () {
+          if (options.recover) {
+            const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+            yield* directory.upsert({
+              threadId,
+              provider: driver,
+              providerInstanceId: ProviderInstanceId.make(driver),
+              status: "stopped",
+              runtimeMode: "full-access",
+              resumeCursor: { threadId: "native-managed-trellis" },
+              runtimePayload: { cwd },
+            });
+            yield* provider.sendTurn({ threadId, input: "resume" });
+          } else {
+            yield* start;
+          }
+        });
+        const exit = yield* operation.pipe(Effect.exit);
         return {
+          credentialsIssued,
           exit,
           adapter,
           trellisSession: TrellisProviderSession.readTrellisProviderSession(threadId),
@@ -5469,6 +5509,28 @@ describe("Trellis project paths", () => {
       assert.equal(result.mcpEndpoint, "http://host.containers.internal:3773/mcp");
     }),
   );
+
+  for (const recover of [false, true]) {
+    it.effect(
+      `refuses managed Codex ${recover ? "recovery" : "startup"} before issuing a Trellis credential`,
+      () =>
+        Effect.gen(function* () {
+          const threadId = asThreadId(`thread-managed-trellis-${recover}`);
+          const result = yield* startIn(CODEX_DRIVER, threadId, ideaCwd, {
+            managed: true,
+            recover,
+          });
+          assert.equal(Exit.isFailure(result.exit), true);
+          assert.include(
+            Cause.pretty(Exit.isFailure(result.exit) ? result.exit.cause : Cause.empty),
+            "Use a Codex CLI login for this project",
+          );
+          assert.equal(result.credentialsIssued, 0);
+          assert.equal(result.adapter.startSession.mock.calls.length, 0);
+          assert.equal(result.trellisSession, undefined);
+        }),
+    );
+  }
 
   it.effect("refuses providers without a Trellis shim instead of running them on the host", () =>
     Effect.gen(function* () {
@@ -5492,6 +5554,92 @@ describe("Trellis project paths", () => {
       assert.equal(Exit.isSuccess(result.exit), true);
       assert.equal(result.trellisSession, undefined);
       assert.equal(result.mcpEndpoint, "http://127.0.0.1:3773/mcp");
+    }),
+  );
+});
+
+const chatGptAnalytics = makeRecordingAnalytics();
+const chatGptAdapter = makeFakeCodexAdapter();
+const chatGptTelemetry = makeProviderServiceLayer({
+  analyticsLayer: chatGptAnalytics.layer,
+  settingsLayer: ServerSettings.ServerSettingsService.layerTest({
+    providerInstances: {
+      [secondaryCodexInstanceId]: { driver: CODEX_DRIVER, config: { setupMode: "managed" } },
+    },
+  }),
+  registry: makeStaticInstanceRegistry([[secondaryCodexInstanceId, chatGptAdapter.adapter]]),
+});
+chatGptTelemetry.layer("ChatGPT connector turn analytics", (it) => {
+  it.effect("tags attempts, sends, and one terminal outcome without recording the prompt", () =>
+    Effect.gen(function* () {
+      chatGptAnalytics.reset();
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("chatgpt-analytics-success");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: secondaryCodexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* provider.sendTurn({ threadId, input: "private test prompt" });
+      const drain = yield* Stream.take(provider.streamEvents, 2).pipe(
+        Stream.runDrain,
+        Effect.forkChild,
+      );
+      yield* Effect.yieldNow;
+      const completion: LegacyProviderRuntimeEvent = {
+        type: "turn.completed",
+        eventId: asEventId("chatgpt-completed"),
+        provider: CODEX_DRIVER,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        threadId,
+        turnId: turn.turnId,
+        payload: { state: "completed" },
+      };
+      chatGptAdapter.emit(completion);
+      chatGptAdapter.emit({ ...completion, eventId: asEventId("chatgpt-completed-duplicate") });
+      yield* Fiber.join(drain);
+      for (const event of [
+        "provider.turn.attempted",
+        "provider.turn.sent",
+        "provider.turn.completed",
+      ]) {
+        const events = chatGptAnalytics.eventsByName(event);
+        assert.equal(events.length, 1);
+        assert.equal(events[0]?.properties?.subscriptionSharing, true);
+        assert.notProperty(events[0]?.properties ?? {}, "input");
+        assert.notProperty(events[0]?.properties ?? {}, "threadId");
+        assert.notProperty(events[0]?.properties ?? {}, "providerInstanceId");
+      }
+    }),
+  );
+  it.effect("records rejected sends as failures without an accepted-turn event", () =>
+    Effect.gen(function* () {
+      chatGptAnalytics.reset();
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("chatgpt-analytics-rejection");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: secondaryCodexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      chatGptAdapter.sendTurn.mockImplementationOnce(() =>
+        Effect.fail(new ProviderAdapterSessionNotFoundError({ provider: CODEX_DRIVER, threadId })),
+      );
+      const result = yield* provider
+        .sendTurn({ threadId, input: "private rejected prompt" })
+        .pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      assert.equal(chatGptAnalytics.eventsByName("provider.turn.attempted").length, 1);
+      assert.equal(chatGptAnalytics.eventsByName("provider.turn.sent").length, 0);
+      const rejected = chatGptAnalytics.eventsByName("provider.turn.rejected");
+      assert.equal(rejected.length, 1);
+      assert.deepStrictEqual(rejected[0]?.properties, {
+        provider: CODEX_DRIVER,
+        subscriptionSharing: true,
+        errorType: "ProviderAdapterSessionNotFoundError",
+      });
     }),
   );
 });
