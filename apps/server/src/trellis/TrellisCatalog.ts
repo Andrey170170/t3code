@@ -440,8 +440,25 @@ export class TrellisCatalog extends Context.Service<
       readonly base?: string | undefined;
     }) => Effect.Effect<TrellisCreateResult, TrellisError>;
     readonly find: (query: string) => Effect.Effect<TrellisFindResult, TrellisError>;
+    /**
+     * Refuses removing only T3's entry for a live Trellis project (its
+     * conversations would be deleted and the sync would bring the project
+     * back), and any Trellis project while Trellis is unreachable.
+     */
+    readonly checkProjectDelete: (projectId: ProjectId) => Effect.Effect<void, TrellisError>;
   }
 >()("t3/trellis/TrellisCatalog") {}
+
+/**
+ * `TrellisCatalog.checkProjectDelete` for the project delete entry points
+ * (RPC, HTTP, MCP); a no-op where the catalog is not wired.
+ */
+export const refuseTrellisProjectDelete = (projectId: ProjectId) =>
+  Effect.serviceOption(TrellisCatalog).pipe(
+    Effect.flatMap((catalog) =>
+      Option.isNone(catalog) ? Effect.void : catalog.value.checkProjectDelete(projectId),
+    ),
+  );
 
 const isTrellisError = Schema.is(TrellisError);
 
@@ -798,9 +815,17 @@ const make = Effect.gen(function* () {
         .map((project) => project.id),
     );
     const active = yield* orchestrator.getShellSnapshot({ location: "active" });
-    return active.threads
-      .filter((thread) => projectIds.has(thread.projectId) && thread.activeRunId !== null)
-      .map((thread) => thread.title);
+    return (
+      active.threads
+        // `activityRunStatus` also covers a run waiting on its checkpoint
+        // capture, which still reads the workspace.
+        .filter(
+          (thread) =>
+            projectIds.has(thread.projectId) &&
+            (thread.activeRunId !== null || thread.activityRunStatus != null),
+        )
+        .map((thread) => thread.title)
+    );
   });
 
   // Archives the active threads of the T3 projects rooted at `roots`. Archiving
@@ -972,8 +997,36 @@ const make = Effect.gen(function* () {
       Effect.asVoid,
     );
 
+  const checkProjectDelete = Effect.fn("TrellisCatalog.checkProjectDelete")(function* (
+    projectId: ProjectId,
+  ) {
+    const row = yield* projectStore.get(projectId).pipe(Effect.orElseSucceed(() => Option.none()));
+    if (Option.isNone(row)) return;
+    const root = normalizeRoot(row.value.workspaceRoot);
+    const roots = yield* trellis.expectedRoots;
+    if (!roots.some((trellisRoot) => isTrellisManagedPath(trellisRoot, root))) return;
+    const env = yield* trellis.refresh;
+    if (env === null) {
+      return yield* new TrellisError({
+        message: `"${row.value.title}" is a Trellis project, and Trellis is off or not running. Turn it on or start it (Settings → Trellis), then move the project to the Trellis trash.`,
+      });
+    }
+    if (!isTrellisManagedPath(env.root, root)) {
+      return yield* new TrellisError({
+        message: `"${row.value.title}" belongs to an earlier Trellis root than the running one (${env.root}), so it cannot go to the Trellis trash; removing only its T3 entry would delete its conversations.`,
+      });
+    }
+    const items = yield* trellis.listProjects({ all: false });
+    if (trashTargetOf(items, root) !== null) {
+      return yield* new TrellisError({
+        message: `"${row.value.title}" is a Trellis project: move it to the Trellis trash instead (project settings → Move to trash), which archives its conversations and can be restored. Removing only its T3 entry would delete them, and the project would come back.`,
+      });
+    }
+  });
+
   return TrellisCatalog.of({
     start,
+    checkProjectDelete,
     syncNow,
     status: Effect.gen(function* () {
       let connection = yield* trellis.connection;

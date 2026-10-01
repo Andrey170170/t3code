@@ -61,6 +61,16 @@ describe("trellisRemovalOf", () => {
     ).toBe("offline");
   });
 
+  it("does not take a project of an earlier root for an ordinary one once Trellis moved", () => {
+    expect(
+      trellisRemovalOf(idea, {
+        state: "ready",
+        root: "/srv/trellis-dev",
+        knownRoots: ["/srv/trellis", "/srv/trellis-dev"],
+      }),
+    ).toBe("offline");
+  });
+
   it("leaves ordinary projects and unknown statuses alone", () => {
     expect(trellisRemovalOf("/home/me/code", { state: "ready", root: "/srv/trellis" })).toBe(
       "none",

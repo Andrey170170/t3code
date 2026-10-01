@@ -67,6 +67,7 @@ const FakeCatalog = Layer.effect(
       emptyTrash: Effect.die("unused"),
       newProject: unused,
       find: unused,
+      checkProjectDelete: unused,
     });
   }),
 );

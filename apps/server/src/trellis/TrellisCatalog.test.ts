@@ -786,6 +786,12 @@ describe("TrellisCatalog service", () => {
         state.items = state.items.filter((item) => item.id !== "idea-c");
         yield* catalog.syncNow;
         assert.include((yield* catalog.status).retiredRoots ?? [], `${SCRATCH}/idea-c`);
+
+        // Only T3's entry of a live Trellis project cannot be deleted; that of
+        // a project whose item is gone can.
+        const refused = yield* catalog.checkProjectDelete(b!.projectId).pipe(Effect.flip);
+        assert.include(refused.message, "move it to the Trellis trash");
+        yield* catalog.checkProjectDelete(c.projectId);
       }),
     );
 

@@ -33,11 +33,11 @@ export function trellisRemovalOf(
     readonly knownRoots?: ReadonlyArray<string> | undefined;
   } | null,
 ): "trash" | "offline" | "none" {
-  if (status?.state === "ready") {
-    return isTrellisWorkspaceRoot(workspaceRoot, status.root) ? "trash" : "none";
+  if (status?.state === "ready" && isTrellisWorkspaceRoot(workspaceRoot, status.root)) {
+    return "trash";
   }
-  // Off or down, any root this environment has used counts: the project may
-  // belong to an earlier root than the one reported.
+  // Any root this environment has used counts: the project may belong to an
+  // earlier root than the one reported, which the live Trellis cannot trash.
   const roots = [status?.root, ...(status?.knownRoots ?? [])];
   return roots.some((root) => isTrellisWorkspaceRoot(workspaceRoot, root)) ? "offline" : "none";
 }

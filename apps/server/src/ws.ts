@@ -3076,17 +3076,32 @@ const makeWsRpcLayer = (
         [WS_METHODS.projectsMutate]: (mutation) =>
           observeRpcEffect(
             WS_METHODS.projectsMutate,
-            startup.enqueueCommand(mutateProject(mutation)).pipe(
+            (mutation.type === "project.delete"
+              ? trellisCatalog.checkProjectDelete(mutation.projectId)
+              : Effect.void
+            ).pipe(
               Effect.mapError(
                 (cause) =>
                   new ProjectMutationError({
                     commandId: mutation.commandId,
-                    message:
-                      cause._tag === "ProjectNotEmptyError"
-                        ? cause.message
-                        : "Failed to mutate project.",
+                    message: cause.message,
                     cause,
                   }),
+              ),
+              Effect.andThen(
+                startup.enqueueCommand(mutateProject(mutation)).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProjectMutationError({
+                        commandId: mutation.commandId,
+                        message:
+                          cause._tag === "ProjectNotEmptyError"
+                            ? cause.message
+                            : "Failed to mutate project.",
+                        cause,
+                      }),
+                  ),
+                ),
               ),
             ),
             { "rpc.aggregate": "orchestration" },

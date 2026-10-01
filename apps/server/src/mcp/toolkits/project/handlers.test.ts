@@ -16,6 +16,8 @@ import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerConfig from "../../../config.ts";
 import * as Project from "../../../project/ProjectService.ts";
+import { TrellisCatalog } from "../../../trellis/TrellisCatalog.ts";
+import { TrellisError } from "@t3tools/contracts";
 import { McpInvocationContext } from "../../McpInvocationContext.ts";
 import { ProjectHandlersLive } from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
@@ -78,5 +80,59 @@ it.effect("attributes a launched thread's first message to the calling thread", 
       .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
     expect(result.at(-1)?.result).toMatchObject({ projectId, modelSelection });
     expect(launchedSender).toBe(sourceThreadId);
+  }),
+);
+
+it.effect("refuses deleting a live Trellis project's entry", () =>
+  Effect.gen(function* () {
+    const sourceThreadId = ThreadId.make("source-thread");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const caller = {
+      id: sourceThreadId,
+      projectId: ProjectId.make("project"),
+      providerInstanceId,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      archivedAt: null,
+      deletedAt: null,
+    } as OrchestrationV2ThreadShell;
+    let deleted = false;
+    const dependencies = Layer.mergeAll(
+      NodeCrypto.layer,
+      Layer.succeed(McpInvocationContext, {
+        environmentId: EnvironmentId.make("environment"),
+        threadId: sourceThreadId,
+        providerSessionId: "session",
+        providerInstanceId,
+        issuedAt: 0,
+        capabilities: new Set(["orchestration" as const]),
+      }),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: () => Effect.succeed(caller),
+      }),
+      Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+      Layer.mock(Project.ProjectService)({
+        delete: () => Effect.sync(() => void (deleted = true)).pipe(Effect.as({} as never)),
+      }),
+      Layer.mock(TrellisCatalog)({
+        checkProjectDelete: () =>
+          Effect.fail(new TrellisError({ message: "Move it to the Trellis trash." })),
+      }),
+      NodeServices.layer,
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-trellis-delete-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      ),
+    );
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(ProjectHandlersLive.pipe(Layer.provide(dependencies))),
+    );
+    const result = yield* toolkit
+      .handle("t3_project_delete", { projectId: ProjectId.make("trellis-project") })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    expect(result.at(-1)).toMatchObject({
+      isFailure: true,
+      result: { message: "Move it to the Trellis trash." },
+    });
+    expect(deleted).toBe(false);
   }),
 );
