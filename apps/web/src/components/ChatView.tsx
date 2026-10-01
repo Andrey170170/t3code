@@ -64,6 +64,7 @@ import {
   type ServerProvider,
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
+  type OrchestrationV2AcknowledgedWork,
   type ThreadId,
   type ThreadLinkedPullRequest,
   type RunId,
@@ -516,8 +517,8 @@ import {
   shouldRefocusComposerOnWindowFocus,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
-import { useTrellisRestoreCheck, useTrellisRoot } from "~/hooks/useTrellis";
-import { isTrellisWorkspaceRoot } from "~/lib/trellis";
+import { useTrellisKnownRoots, useTrellisRestoreCheck, useTrellisRoot } from "~/hooks/useTrellis";
+import { isTrellisWorkspaceRoot, isUnderTrellisRoots } from "~/lib/trellis";
 import { useComposerHandleContext } from "../composerHandleContext";
 import {
   awaitAttachmentUploads,
@@ -4066,10 +4067,9 @@ export default function ChatView(props: ChatViewProps) {
   }, [environmentId, gitStatusCwd, liveIsGitRepo]);
   const isGitRepo = liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true;
   // Trellis checkpoints are snapshots, so turn diffs need no git there.
-  const checkoutTrellisRoot = useTrellisRoot(activeThread?.environmentId ?? null);
+  const checkoutTrellisRoots = useTrellisKnownRoots(activeThread?.environmentId ?? null);
   const hasTurnDiffs =
-    isGitRepo ||
-    (gitStatusCwd !== null && isTrellisWorkspaceRoot(gitStatusCwd, checkoutTrellisRoot));
+    isGitRepo || (gitStatusCwd !== null && isUnderTrellisRoots(gitStatusCwd, checkoutTrellisRoots));
   const genericDiffTurn = isGitRepo ? null : (turnDiffSummaries.at(-1)?.runId ?? null);
   useLayoutEffect(() => {
     genericDiffTurnRef.current = genericDiffTurn;
@@ -7723,7 +7723,7 @@ export default function ChatView(props: ChatViewProps) {
         setPendingRevert({ turnCount, messageId, routeThreadKey });
         return;
       }
-      let acknowledgeThreads: ReadonlyArray<ThreadId> = [];
+      let acknowledgeWork: ReadonlyArray<OrchestrationV2AcknowledgedWork> = [];
       if (restoreFiles) {
         try {
           const acknowledged = await checkTrellisRestore(
@@ -7732,7 +7732,7 @@ export default function ChatView(props: ChatViewProps) {
             (message) => localApi.dialogs.confirm(message),
           );
           if (acknowledged === null) return;
-          acknowledgeThreads = acknowledged;
+          acknowledgeWork = acknowledged;
         } catch (error) {
           setThreadError(
             activeThread.id,
@@ -7777,7 +7777,7 @@ export default function ChatView(props: ChatViewProps) {
               threadId: activeThread.id,
               turnCount,
               restoreFiles,
-              ...(acknowledgeThreads.length === 0 ? {} : { acknowledgeThreads }),
+              ...(acknowledgeWork.length === 0 ? {} : { acknowledgeWork }),
             },
           });
           if (result._tag === "Failure") throw squashAtomCommandFailure(result);
@@ -7873,7 +7873,7 @@ export default function ChatView(props: ChatViewProps) {
               "Roll back this thread to the selected checkpoint?\nThis action cannot be undone.",
             );
       if (!confirmed) return;
-      let acknowledgeThreads: ReadonlyArray<ThreadId> = [];
+      let acknowledgeWork: ReadonlyArray<OrchestrationV2AcknowledgedWork> = [];
       try {
         const acknowledged = await checkTrellisRestore(
           environmentId,
@@ -7882,7 +7882,7 @@ export default function ChatView(props: ChatViewProps) {
             localApi == null ? window.confirm(message) : localApi.dialogs.confirm(message),
         );
         if (acknowledged === null) return;
-        acknowledgeThreads = acknowledged;
+        acknowledgeWork = acknowledged;
       } catch (error) {
         setThreadError(
           activeThread.id,
@@ -7901,7 +7901,7 @@ export default function ChatView(props: ChatViewProps) {
           threadId: activeThread.id,
           checkpointId: input.checkpointId,
           scopeId: input.scopeId,
-          ...(acknowledgeThreads.length === 0 ? {} : { acknowledgeThreads }),
+          ...(acknowledgeWork.length === 0 ? {} : { acknowledgeWork }),
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {

@@ -56,6 +56,13 @@ import {
 } from "./Trellis.ts";
 import { restoreScopeOf } from "./TrellisRestore.ts";
 
+/** A restore watermark for a prior rollback activity without an undo snapshot. */
+const UNKNOWN_WATERMARK = "?";
+
+/** A word for a POSIX shell, quoted when it needs to be. */
+const shellQuote = (word: string) =>
+  /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'"'"'`)}'`;
+
 /** Patches larger than this are not shown (as for v0's Trellis-only turns). */
 const MAX_DIFF_BYTES = 5 * 1024 * 1024;
 
@@ -159,12 +166,19 @@ export const layer: Layer.Layer<
         retired_snapshot_ids TEXT NOT NULL DEFAULT '[]'
       )
     `.pipe(Effect.orDie);
-    // Baseline captures not yet mapped, recorded before the snapshot is
-    // taken. Trellis creates snapshots unpinned, so a crash before the pin
-    // leaves one thinning could remove; the reconcile finds it by its tag
-    // and pins it (or releases it with its thread). The mapping in
-    // `trellis_checkpoint_refs` owns the pin once it exists.
+    // Captures not yet mapped, recorded before the snapshot is taken. It is
+    // pinned until mapped; where Trellis creates it unpinned, a crash before
+    // the pin leaves one thinning could remove, so the reconcile finds it by
+    // its tag and pins it (or releases it with its thread).
     yield* sql`DROP TABLE IF EXISTS trellis_pending_pins`.pipe(Effect.orDie);
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS trellis_capture_intents (
+        ref TEXT PRIMARY KEY,
+        target TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+      )
+    `.pipe(Effect.orDie);
+    // Baseline-only intents from before every capture recorded one.
     yield* sql`
       CREATE TABLE IF NOT EXISTS trellis_baseline_intents (
         ref TEXT PRIMARY KEY,
@@ -172,6 +186,10 @@ export const layer: Layer.Layer<
         recorded_at TEXT NOT NULL
       )
     `.pipe(Effect.orDie);
+    yield* sql`
+      INSERT OR IGNORE INTO trellis_capture_intents SELECT * FROM trellis_baseline_intents
+    `.pipe(Effect.orDie);
+    yield* sql`DROP TABLE trellis_baseline_intents`.pipe(Effect.orDie);
     // One row per requested restore: its intent, then its undo snapshot
     // ('' when Trellis named none) once the rollback answered.
     yield* sql`
@@ -459,25 +477,21 @@ export const layer: Layer.Layer<
             ),
           ),
         );
-        if (isBaselineRef(ref)) {
-          const recordedAt = DateTime.formatIso(yield* DateTime.now);
-          yield* sql`
-            INSERT OR IGNORE INTO trellis_baseline_intents (ref, target, recorded_at)
-            VALUES (${ref}, ${cwd}, ${recordedAt})
-          `.pipe(Effect.mapError(backendError("capture")));
-        }
+        // Every capture is pinned until its mapping exists, so thinning can
+        // never remove a snapshot an interrupted capture will adopt.
+        const recordedAt = DateTime.formatIso(yield* DateTime.now);
+        yield* sql`
+          INSERT OR IGNORE INTO trellis_capture_intents (ref, target, recorded_at)
+          VALUES (${ref}, ${cwd}, ${recordedAt})
+        `.pipe(Effect.mapError(backendError("capture")));
         const snapshot: TrellisSnapshot =
           tagged ??
           (yield* trellis
             // Pinned as created where Trellis supports it; older versions
             // create it unpinned and the pin below follows.
-            .createSnapshot({
-              target: cwd,
-              turn: ref,
-              ...(isBaselineRef(ref) ? { pinned: true } : {}),
-            })
+            .createSnapshot({ target: cwd, turn: ref, pinned: true })
             .pipe(Effect.mapError(backendError("capture"))));
-        if (isBaselineRef(ref) && snapshot.pinned !== true) {
+        if (snapshot.pinned !== true) {
           yield* trellis
             .setSnapshotPinned(snapshot.id, true)
             .pipe(Effect.mapError(backendError("capture")));
@@ -496,10 +510,21 @@ export const layer: Layer.Layer<
             snapshot_id = excluded.snapshot_id,
             captured_at = excluded.captured_at
         `.pipe(Effect.mapError(backendError("capture")));
-        // The mapping owns the baseline's pin from here.
-        yield* sql`DELETE FROM trellis_baseline_intents WHERE ref = ${ref}`.pipe(
+        // The mapping owns the snapshot from here: a baseline stays pinned
+        // for its thread, a turn snapshot is left to retention.
+        yield* sql`DELETE FROM trellis_capture_intents WHERE ref = ${ref}`.pipe(
           Effect.mapError(backendError("capture")),
         );
+        if (!isBaselineRef(ref)) {
+          yield* trellis.setSnapshotPinned(snapshot.id, false).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("could not unpin a captured Trellis turn snapshot", {
+                snapshotId: snapshot.id,
+                detail: error.message,
+              }),
+            ),
+          );
+        }
       });
 
     // A rollback snapshots the files first, so repeating one after it took
@@ -528,11 +553,19 @@ export const layer: Layer.Layer<
           // Newest first: only the rollbacks after the request's watermark
           // can be its own (restores of one scope run one at a time).
           const activities = yield* listRollbacks;
+          // '' when no rollback came before; UNKNOWN_WATERMARK when the one
+          // before had no identity, so no activity can be told apart as ours.
           const watermark =
-            prior.watermark_undo === null
+            prior.watermark_undo === null || prior.watermark_undo === ""
               ? -1
               : activities.findIndex((activity) => undoOf(activity) === prior.watermark_undo);
-          const done = (watermark < 0 ? activities : activities.slice(0, watermark)).find(
+          const candidates =
+            prior.watermark_undo === UNKNOWN_WATERMARK
+              ? []
+              : watermark < 0
+                ? activities
+                : activities.slice(0, watermark);
+          const done = candidates.find(
             (activity) =>
               Predicate.hasProperty(activity.data, "snapshot") &&
               activity.data.snapshot === snapshotId,
@@ -545,7 +578,7 @@ export const layer: Layer.Layer<
         }
         const startedAt = Math.floor((yield* Clock.currentTimeMillis) / 1000);
         const before = (yield* listRollbacks)[0];
-        const watermarkUndo = before === undefined ? null : undoOf(before);
+        const watermarkUndo = before === undefined ? "" : (undoOf(before) ?? UNKNOWN_WATERMARK);
         yield* sql`
           INSERT OR REPLACE INTO trellis_restores
             (request_id, snapshot_id, started_at, undo_snapshot, watermark_undo)
@@ -698,7 +731,7 @@ export const layer: Layer.Layer<
           WHERE captured_at < ${DateTime.formatIso(input.readAt)}
         `.pipe(Effect.mapError(backendError("reconcile")));
         const intents = yield* sql<{ readonly ref: string; readonly target: string }>`
-          SELECT ref, target FROM trellis_baseline_intents
+          SELECT ref, target FROM trellis_capture_intents
           WHERE recorded_at < ${DateTime.formatIso(input.readAt)}
         `.pipe(Effect.mapError(backendError("reconcile")));
         for (const intent of intents) {
@@ -718,7 +751,7 @@ export const layer: Layer.Layer<
             }
             if (!alive) {
               if (tagged?.pinned === true) yield* unpin(intent.target, tagged.id);
-              yield* sql`DELETE FROM trellis_baseline_intents WHERE ref = ${intent.ref}`.pipe(
+              yield* sql`DELETE FROM trellis_capture_intents WHERE ref = ${intent.ref}`.pipe(
                 Effect.mapError(backendError("reconcile")),
               );
             }
@@ -815,7 +848,7 @@ export const layer: Layer.Layer<
                       notice:
                         undoSnapshot === null
                           ? `Restored the files from Trellis snapshot ${snapshotId}.`
-                          : `Restored the files from Trellis snapshot ${snapshotId}. To undo, run \`trellis rollback --target ${input.cwd} ${undoSnapshot}\`.`,
+                          : `Restored the files from Trellis snapshot ${snapshotId}. To undo, run \`trellis rollback --target ${shellQuote(input.cwd)} ${shellQuote(undoSnapshot)}\`.`,
                     };
                   })
                 : base.restoreCheckpoint(input),

@@ -1,6 +1,7 @@
 import {
   CheckpointId,
   CheckpointScopeId,
+  type OrchestrationV2AcknowledgedWork,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2TurnItem,
@@ -15,9 +16,13 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
-import { CheckpointSnapshotUnavailableError } from "../checkpointing/Errors.ts";
+import {
+  CheckpointBackendError,
+  CheckpointSnapshotUnavailableError,
+} from "../checkpointing/Errors.ts";
 
 import {
   CheckpointRestoreRule,
@@ -35,6 +40,8 @@ import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
 
 export const ROLLBACK_FAILED_MESSAGE =
   "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
+
+const ROLLBACK_SUPERSEDED_MESSAGE = "A newer revert of this thread replaced this one.";
 
 export const CHECKPOINT_EXPIRED_MESSAGE =
   "This checkpoint's saved files are no longer available, so it can no longer be restored.";
@@ -74,9 +81,6 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
 }
 
 const isCheckpointRollbackExecutionError = Schema.is(CheckpointRollbackExecutionError);
-
-export const ROLLBACK_IN_FLIGHT_MESSAGE =
-  "This thread is still being reverted. Try again once the current revert finishes.";
 
 /**
  * Whether the thread's latest rollback may still run: accepted, neither
@@ -127,6 +131,23 @@ export function rollbackFailureMessage(cause: Cause.Cause<unknown>): string {
   return ROLLBACK_FAILED_MESSAGE;
 }
 
+const isCheckpointBackendError = Schema.is(CheckpointBackendError);
+
+/**
+ * The checkpoint store's own reason, when the failure came from a store
+ * that reports one (Trellis unreachable or too old), for the client.
+ */
+function storeFailureDetail(cause: unknown): { readonly detail?: string } {
+  let current: unknown = cause;
+  for (let depth = 0; depth < 4 && current !== undefined && current !== null; depth++) {
+    if (isCheckpointBackendError(current)) {
+      return { detail: `Restoring the files failed: ${current.detail}` };
+    }
+    current = Predicate.hasProperty(current, "cause") ? current.cause : undefined;
+  }
+  return {};
+}
+
 const isWithin = (parent: string, child: string) => {
   const base = parent.replace(/\/+$/, "");
   return child === base || child.startsWith(`${base}/`);
@@ -139,7 +160,7 @@ export interface CheckpointRollbackServiceV2Shape {
     readonly checkpointId: CheckpointId;
     readonly scopeId: CheckpointScopeId;
     readonly restoreFiles?: boolean;
-    readonly acknowledgeThreads?: ReadonlyArray<ThreadId>;
+    readonly acknowledgeWork?: ReadonlyArray<OrchestrationV2AcknowledgedWork>;
     /** The rollback command, the same on every retry of its effect. */
     readonly requestId?: string;
   }) => Effect.Effect<void, CheckpointRollbackExecutionError>;
@@ -200,7 +221,7 @@ export const layer: Layer.Layer<
       readonly checkpointId: CheckpointId;
       readonly scopeId: CheckpointScopeId;
       readonly restoreFiles?: boolean;
-      readonly acknowledgeThreads?: ReadonlyArray<ThreadId>;
+      readonly acknowledgeWork?: ReadonlyArray<OrchestrationV2AcknowledgedWork>;
       readonly requestId?: string;
     }) {
       const projection = yield* projections.getThreadRecords(input.threadId, [
@@ -236,6 +257,21 @@ export const layer: Layer.Layer<
           ...(checkpoint?.status === "missing" ? { detail: CHECKPOINT_EXPIRED_MESSAGE } : {}),
         });
       }
+      // A newer rollback replaced this one while it waited to retry; running
+      // it now would restore its older checkpoint over the newer one.
+      if (
+        input.requestId !== undefined &&
+        projection.thread.rollbackRequestId !== undefined &&
+        projection.thread.rollbackRequestId !== input.requestId
+      ) {
+        return yield* new CheckpointRollbackExecutionError({
+          reason: "rollback-target-invalid",
+          threadId: input.threadId,
+          providerThreadId: input.providerThreadId,
+          checkpointId: input.checkpointId,
+          detail: ROLLBACK_SUPERSEDED_MESSAGE,
+        });
+      }
       if (
         providerThread.id !== projection.thread.activeProviderThreadId ||
         providerThread.providerInstanceId !== projection.thread.modelSelection.instanceId
@@ -258,7 +294,7 @@ export const layer: Layer.Layer<
             thread: projection.thread,
             scope,
             checkpoint,
-            acknowledgeThreads: input.acknowledgeThreads ?? [],
+            acknowledgeWork: input.acknowledgeWork ?? [],
           },
           { fileSystem, projections },
         );
@@ -568,6 +604,7 @@ export const layer: Layer.Layer<
                   providerThreadId: input.providerThreadId,
                   checkpointId: input.checkpointId,
                   cause,
+                  ...storeFailureDetail(cause),
                 }),
           ),
         ),
