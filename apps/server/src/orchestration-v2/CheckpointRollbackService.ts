@@ -22,6 +22,7 @@ import { IdAllocatorV2 } from "./IdAllocator.ts";
 import { ProjectionStoreV2 } from "./ProjectionStore.ts";
 import type { ProviderAdapterV2RollbackTarget } from "./ProviderAdapter.ts";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
+import { RestoreLease } from "./RestoreLease.ts";
 import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
 
 export const ROLLBACK_FAILED_MESSAGE =
@@ -96,6 +97,7 @@ export const layer: Layer.Layer<
     const sessions = yield* ProviderSessionManagerV2;
     const runtimePolicy = yield* RuntimePolicyV2;
     const fileSystem = yield* FileSystem.FileSystem;
+    const restoreLease = yield* RestoreLease;
 
     const execute = Effect.fn("orchestrationV2.checkpointRollback.execute")(function* (input: {
       readonly threadId: ThreadId;
@@ -148,6 +150,9 @@ export const layer: Layer.Layer<
         });
       }
 
+      // Held through the provider rewind and the file restore; released when
+      // `execute` ends.
+      yield* restoreLease.acquire(scope);
       if (
         input.restoreFiles !== false &&
         !(yield* isCheckpointRestoreIsolated(projection.thread, scope, { fileSystem, projections }))
@@ -334,6 +339,7 @@ export const layer: Layer.Layer<
     return CheckpointRollbackServiceV2.of({
       execute: (input) =>
         execute(input).pipe(
+          Effect.scoped,
           Effect.mapError((cause) =>
             isCheckpointRollbackExecutionError(cause)
               ? cause
