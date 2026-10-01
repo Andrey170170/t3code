@@ -10,9 +10,12 @@
  * server HMR) pass through. Threads outside Trellis are unchanged, and a
  * failed mapping is an error rather than a silent fall back to the host.
  *
- * A URL is mapped exactly once: an address Trellis already published for
- * the thread's own workspace, and
- * T3's own signed asset URLs (local file previews), load as given.
+ * A URL is mapped exactly once, at the first entry point. Later hops pass
+ * `alreadyResolved`, which is honoured only for an address Trellis lists as
+ * published for the thread's own workspace, so the flag cannot reach other
+ * host ports. Port numbers alone are never taken as proof: a workspace's own
+ * port may equal a host port Trellis published. T3's own signed asset URLs
+ * (local file previews) also load as given.
  *
  * Hooks: the `preview.open`/`preview.navigate` WS handlers, the
  * `trellis.resolvePreviewUrl` RPC (the address bar of an open tab) and the
@@ -66,6 +69,7 @@ export class TrellisPreview extends Context.Service<
     readonly resolveUrl: (
       threadId: ThreadId,
       url: string,
+      options?: { readonly alreadyResolved?: boolean | undefined },
     ) => Effect.Effect<string, PreviewTrellisError>;
     /** A workspace port of `threadId` as a browser URL, or null outside Trellis. */
     readonly resolvePort: (
@@ -88,8 +92,9 @@ const outsideWorkspace = () =>
       "this thread runs outside its Trellis workspace (an external worktree), so its localhost is not the workspace's",
   });
 
-/** Port of a URL, with the scheme's default. */
-const portOf = (url: URL) => Number(url.port || (url.protocol === "https:" ? 443 : 80));
+/** `host:port` of a URL, with the scheme's default port. */
+const hostPortOf = (url: URL) =>
+  `${url.hostname.toLowerCase()}:${url.port || (url.protocol === "https:" ? "443" : "80")}`;
 
 const make = Effect.gen(function* () {
   const trellis = yield* Trellis;
@@ -129,14 +134,14 @@ const make = Effect.gen(function* () {
     return trellisRootOf(roots, cwd) !== null ? cwd : null;
   });
 
-  // Mapped already: an address Trellis published for this workspace's ports.
-  const isPublished = (cwd: string, url: URL) =>
+  // Whether `url` is an address Trellis published for this workspace, the
+  // only kind of URL a client's `alreadyResolved` may vouch for.
+  const isPublishedFor = (cwd: string, url: URL) =>
     trellis.listPreviews(cwd).pipe(
       Effect.map((previews) =>
         previews.some((preview) => {
           try {
-            const published = new URL(preview.url);
-            return isLoopbackHostname(published.hostname) && portOf(published) === portOf(url);
+            return hostPortOf(new URL(preview.url)) === hostPortOf(url);
           } catch {
             return false;
           }
@@ -152,7 +157,7 @@ const make = Effect.gen(function* () {
 
   const resolveUrl: TrellisPreview["Service"]["resolveUrl"] = Effect.fn(
     "TrellisPreview.resolveUrl",
-  )(function* (threadId, url) {
+  )(function* (threadId, url, options) {
     const port = loopbackPort(url);
     if (port === null) return url;
     // T3's own file previews are served by this server, not the workspace.
@@ -161,7 +166,12 @@ const make = Effect.gen(function* () {
     }
     const cwd = yield* trellisCwdOf(threadId);
     if (cwd === null) return url;
-    if (yield* isPublished(cwd, new URL(normalizePreviewUrl(url)))) return url;
+    if (
+      options?.alreadyResolved === true &&
+      (yield* isPublishedFor(cwd, new URL(normalizePreviewUrl(url))))
+    ) {
+      return url;
+    }
     const published = yield* publish(cwd, port);
     return rewriteToPreview(url, published.url);
   });

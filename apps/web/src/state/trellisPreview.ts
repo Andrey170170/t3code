@@ -1,4 +1,5 @@
 import {
+  type AtomCommandResult,
   isAtomCommandInterrupted,
   runAtomCommand,
   squashAtomCommandFailure,
@@ -32,7 +33,6 @@ export type TrellisPreviewStatus =
 
 export type TrellisPreviewResolution =
   | { readonly kind: "mapped"; readonly url: string }
-  | { readonly kind: "unsupported" }
   | { readonly kind: "interrupted" }
   | { readonly kind: "failed"; readonly message: string };
 
@@ -69,8 +69,6 @@ export async function mapTrellisPreviewUrl(
   switch (resolution.kind) {
     case "mapped":
       return { url: resolution.url };
-    case "unsupported":
-      return { url };
     case "interrupted":
       return { error: null };
     case "failed":
@@ -116,6 +114,27 @@ function loadTrellisPreviewStatus(
   });
 }
 
+/**
+ * What a `trellis.resolvePreviewUrl` result means for the preview. Only ever
+ * asked once the environment's status says it runs Trellis, so a missing or
+ * failing method refuses rather than loading the host's port.
+ */
+export function previewResolutionOf(
+  result: AtomCommandResult<{ readonly url: string }, unknown>,
+): TrellisPreviewResolution {
+  if (result._tag === "Success") return { kind: "mapped", url: result.value.url };
+  if (isAtomCommandInterrupted(result)) return { kind: "interrupted" };
+  const error = squashAtomCommandFailure(result);
+  return {
+    kind: "failed",
+    message: isPreviewTrellisError(error)
+      ? error.message
+      : isUnknownMethod(result.cause)
+        ? "This server reports Trellis but cannot map workspace ports. Update T3 Code on it."
+        : "Could not ask the server where this workspace port is. Try again.",
+  };
+}
+
 /** `mapTrellisPreviewUrl` for a thread, through its environment's connection. */
 export function mapThreadPreviewUrl(threadRef: ScopedThreadRef, url: string) {
   return mapTrellisPreviewUrl(url, {
@@ -130,16 +149,7 @@ export function mapThreadPreviewUrl(threadRef: ScopedThreadRef, url: string) {
         },
         { reportFailure: false },
       );
-      if (result._tag === "Success") return { kind: "mapped", url: result.value.url };
-      if (isAtomCommandInterrupted(result)) return { kind: "interrupted" };
-      if (isUnknownMethod(result.cause)) return { kind: "unsupported" };
-      const error = squashAtomCommandFailure(result);
-      return {
-        kind: "failed",
-        message: isPreviewTrellisError(error)
-          ? error.message
-          : "Could not ask the server where this workspace port is. Try again.",
-      };
+      return previewResolutionOf(result);
     },
   });
 }

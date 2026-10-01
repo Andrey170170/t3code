@@ -28,8 +28,6 @@ export const LSOF_LOCAL_HOST_TOKENS: ReadonlySet<string> = new Set([
   "[::1]",
 ]);
 
-const LOOPBACK_PREFIX_PATTERN = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\])(?::|\/|$)/i;
-
 export function isLoopbackHost(host: string): boolean {
   if (LOOPBACK_HOSTS.has(host)) return true;
   if (host === "[::1]") return true;
@@ -123,12 +121,22 @@ function previewUrlProtocol(rawUrl: string): string | undefined {
  * Throws `PreviewUrlNormalizationError` for empty, unparseable, or
  * unsupported-protocol inputs.
  */
+function isBareLoopbackHost(bare: string): boolean {
+  try {
+    return isLoopbackHostname(new URL(`http://${bare}`).hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function normalizePreviewUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
   if (trimmed.length === 0) {
     throw new PreviewUrlNormalizationError({ inputLength: rawUrl.length, reason: "empty" });
   }
-  const useHttp = LOOPBACK_PREFIX_PATTERN.test(trimmed);
+  // A bare host on this machine (any spelling `isLoopbackHostname` accepts)
+  // is a local dev server, which speaks plain HTTP.
+  const useHttp = !trimmed.includes("://") && isBareLoopbackHost(trimmed);
   const candidate = trimmed.includes("://")
     ? trimmed
     : `${useHttp ? "http" : "https"}://${trimmed}`;

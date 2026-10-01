@@ -153,11 +153,13 @@ it.effect("maps workspace previews before the browser loads them", () =>
       yield* call("preview_navigate", { url: "https://example.com/" });
 
       expect(inputs).toMatchObject([
-        { url: "http://preview.test:30008/x" },
+        // A fresh tab opens through preview.open, which must not map it again.
+        { url: "http://preview.test:30008/x", alreadyResolved: true },
         { url: "http://preview.test:38000/" },
         { url: "https://example.com/" },
       ]);
       expect(inputs[1]).not.toHaveProperty("target");
+      expect(inputs[2]).not.toHaveProperty("alreadyResolved");
     }),
   ).pipe(Effect.provide(TrellisTestLayer)),
 );

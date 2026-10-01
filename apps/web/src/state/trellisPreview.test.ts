@@ -1,8 +1,12 @@
 import type { TrellisStatus } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
+import * as Cause from "effect/Cause";
+import { AsyncResult } from "effect/unstable/reactivity";
+
 import {
   mapTrellisPreviewUrl,
+  previewResolutionOf,
   type TrellisPreviewResolution,
   type TrellisPreviewStatus,
 } from "./trellisPreview";
@@ -50,6 +54,19 @@ describe("mapTrellisPreviewUrl", () => {
       { kind: "failed", message: "workspace is not running" },
     );
     expect("error" in value && value.error?.message).toBe("workspace is not running");
+  });
+
+  it("refuses when a Trellis server lacks the mapping method", async () => {
+    const resolution = previewResolutionOf(
+      AsyncResult.failure(Cause.die("Unknown request tag: trellis.resolvePreviewUrl")),
+    );
+    expect(resolution.kind).toBe("failed");
+    const { value } = await map(
+      "http://localhost:8000/",
+      { kind: "known", status: ready },
+      resolution,
+    );
+    expect("error" in value && value.error?.message).toContain("cannot map");
   });
 
   it("loads other URLs and environments without Trellis unchanged", async () => {

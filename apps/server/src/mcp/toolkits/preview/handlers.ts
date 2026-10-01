@@ -200,7 +200,9 @@ const resolveTrellisOpen = Effect.fn("PreviewToolkit.resolveTrellisOpen")(functi
 ) {
   if (input.url === undefined) return input;
   const scope = yield* McpInvocationContext.requireMcpCapability("preview");
-  return { ...input, url: yield* preview.resolveUrl(scope.threadId, input.url) };
+  const url = yield* preview.resolveUrl(scope.threadId, input.url);
+  // A fresh tab opens through preview.open, which must not map it again.
+  return url === input.url ? input : { ...input, url, alreadyResolved: true };
 });
 
 const resolveTrellisNavigate = Effect.fn("PreviewToolkit.resolveTrellisNavigate")(function* (

@@ -142,3 +142,14 @@ describe("isLoopbackHostname", () => {
     }
   });
 });
+
+describe("normalizePreviewUrl for bare loopback hosts", () => {
+  it("gives every loopback spelling plain HTTP", () => {
+    expect(normalizePreviewUrl("127.0.0.2:8000")).toBe("http://127.0.0.2:8000/");
+    expect(normalizePreviewUrl("app.localhost:8000")).toBe("http://app.localhost:8000/");
+    expect(normalizePreviewUrl("127.1:8000")).toBe("http://127.0.0.1:8000/");
+    expect(normalizePreviewUrl("localhost.:8000/x")).toBe("http://localhost.:8000/x");
+    expect(normalizePreviewUrl("[::ffff:127.0.0.1]:8000")).toBe("http://[::ffff:7f00:1]:8000/");
+    expect(normalizePreviewUrl("example.com")).toBe("https://example.com/");
+  });
+});

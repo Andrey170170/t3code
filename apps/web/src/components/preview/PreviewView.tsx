@@ -207,10 +207,11 @@ export function PreviewView({
   );
 
   const navigateToResolvedUrl = useCallback(
-    async (requestedUrl: string) => {
-      // Opens are mapped by the server; an in-place navigation must ask it first.
+    async (requestedUrl: string, options: { readonly alreadyResolved?: boolean } = {}) => {
+      // Opens are mapped by the server; an in-place navigation must ask it
+      // first. A URL mapped by an earlier hop is never mapped again.
       let resolvedUrl = requestedUrl;
-      if (runtimeTabId && previewBridge) {
+      if (runtimeTabId && previewBridge && options.alreadyResolved !== true) {
         const mapped = await mapTrellisUrl(requestedUrl);
         if (mapped === null) return false;
         resolvedUrl = mapped;
@@ -221,7 +222,12 @@ export function PreviewView({
         rememberPreviewUrl(threadRef, resolvedUrl);
         return true;
       }
-      const result = await openPreviewSession({ openPreview: open, threadRef, url: resolvedUrl });
+      const result = await openPreviewSession({
+        openPreview: open,
+        threadRef,
+        url: resolvedUrl,
+        ...(options.alreadyResolved === true ? { alreadyResolved: true } : {}),
+      });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         if (error instanceof BrowserSettingsReadError) {
@@ -263,7 +269,8 @@ export function PreviewView({
           mapped === normalized
             ? resolveDiscoveredServerUrl(threadRef.environmentId, next)
             : mapped;
-        if (await navigateToResolvedUrl(resolved)) {
+        // Mapped here already: the next hops must not map it again.
+        if (await navigateToResolvedUrl(resolved, { alreadyResolved: true })) {
           recordVisitForThread(threadRef, next);
         }
       } catch {

@@ -185,26 +185,41 @@ describe("TrellisPreview service", () => {
     }),
   );
 
-  it.effect("maps once: an address Trellis already published loads as given", () =>
+  it.effect("maps once: only a flagged address published for this workspace loads as given", () =>
     Effect.gen(function* () {
       const published: Array<{ target: string; port: number }> = [];
+      // Workspace port 3000 is published on host port 5000.
       const layer = makeLayer({
         workspaceRoot: IDEA,
         published,
-        previews: { [IDEA]: ["http://127.0.0.1:21001/"], [OTHER]: ["http://127.0.0.1:21002/"] },
+        previews: { [IDEA]: ["http://127.0.0.1:5000/"], [OTHER]: ["http://127.0.0.1:5001/"] },
       });
-      expect(yield* resolve("http://127.0.0.1:21001/x", layer)).toBe("http://127.0.0.1:21001/x");
-      expect(yield* resolve("http://localhost:21001/", layer)).toBe("http://localhost:21001/");
+      const resolveWith = (url: string, alreadyResolved?: boolean) =>
+        Effect.gen(function* () {
+          const preview = yield* TrellisPreview.TrellisPreview;
+          return yield* preview.resolveUrl(threadId, url, { alreadyResolved });
+        }).pipe(Effect.provide(layer));
+
+      // The earlier hop's result, flagged, loads as given.
+      expect(yield* resolveWith("http://127.0.0.1:5000/x", true)).toBe("http://127.0.0.1:5000/x");
       expect(published).toEqual([]);
-      // Another workspace's published port is this workspace's own port 21002.
-      expect(yield* resolve("http://localhost:21002/", layer)).toBe(
+      // Unflagged, `localhost:5000` is the workspace's own port 5000, not the relay for 3000.
+      expect(yield* resolveWith("http://localhost:5000/")).toBe(
         "http://node.tailnet.ts.net:21001/",
       );
-      expect(published).toEqual([{ target: IDEA, port: 21002 }]);
-      // Another port of the workspace is still mapped.
-      expect(yield* resolve("http://localhost:8000/", layer)).toBe(
+      expect(published).toEqual([{ target: IDEA, port: 5000 }]);
+      // The flag vouches only for this workspace's published addresses.
+      expect(yield* resolveWith("http://127.0.0.1:5001/", true)).toBe(
         "http://node.tailnet.ts.net:21001/",
       );
+      expect(yield* resolveWith("http://localhost:5000/", true)).toBe(
+        "http://node.tailnet.ts.net:21001/",
+      );
+      expect(published).toEqual([
+        { target: IDEA, port: 5000 },
+        { target: IDEA, port: 5001 },
+        { target: IDEA, port: 5000 },
+      ]);
     }),
   );
 

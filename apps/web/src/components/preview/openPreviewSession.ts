@@ -28,6 +28,8 @@ interface OpenPreviewSessionInput<E> {
   viewport?: PreviewViewportSetting;
   /** Overrides the configured default profile. */
   profileId?: string;
+  /** `url` is already mapped to a Trellis workspace; the server must not map it again. */
+  alreadyResolved?: boolean;
 }
 
 export async function openPreviewSession<E>(
@@ -48,6 +50,7 @@ export async function openPreviewSession<E>(
       ...(input.url === undefined ? {} : { url: input.url }),
       viewport: input.viewport ?? browserDefaultOpenViewport(defaults),
       profileId: input.profileId ?? browserDefaultOpenProfileId(defaults),
+      ...(input.alreadyResolved === true ? { alreadyResolved: true } : {}),
     },
   });
   if (result._tag === "Failure") {

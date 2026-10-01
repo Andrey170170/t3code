@@ -27,14 +27,15 @@ export async function openDiscoveredPort<E>(input: {
       mapped.error === null ? Cause.interrupt() : Cause.fail(mapped.error),
     );
   }
-  const resolvedUrl =
-    mapped.url === input.port.url
-      ? resolveDiscoveredServerUrl(input.threadRef.environmentId, input.port.url)
-      : mapped.url;
+  const alreadyResolved = mapped.url !== input.port.url;
+  const resolvedUrl = alreadyResolved
+    ? mapped.url
+    : resolveDiscoveredServerUrl(input.threadRef.environmentId, input.port.url);
   const result = await openPreviewSession({
     openPreview: input.openPreview,
     threadRef: input.threadRef,
     url: resolvedUrl,
+    alreadyResolved,
   });
   return mapAtomCommandResult(result, (snapshot) => {
     recordVisitForThread(input.threadRef, input.port.url);

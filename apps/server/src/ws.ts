@@ -3493,20 +3493,26 @@ const makeWsRpcLayer = (
         [WS_METHODS.previewOpen]: (input) =>
           observeRpcEffect(
             WS_METHODS.previewOpen,
-            (input.url === undefined
-              ? Effect.succeed(input)
-              : trellisPreview
-                  .resolveUrl(input.threadId, input.url)
-                  .pipe(Effect.map((url) => ({ ...input, url })))
-            ).pipe(Effect.flatMap(previewManager.open)),
+            Effect.gen(function* () {
+              const { alreadyResolved, ...open } = input;
+              if (open.url === undefined) return yield* previewManager.open(open);
+              const url = yield* trellisPreview.resolveUrl(open.threadId, open.url, {
+                alreadyResolved,
+              });
+              return yield* previewManager.open({ ...open, url });
+            }),
             { "rpc.aggregate": "preview" },
           ),
         [WS_METHODS.previewNavigate]: (input) =>
           observeRpcEffect(
             WS_METHODS.previewNavigate,
-            trellisPreview
-              .resolveUrl(input.threadId, input.url)
-              .pipe(Effect.flatMap((url) => previewManager.navigate({ ...input, url }))),
+            Effect.gen(function* () {
+              const { alreadyResolved, ...navigate } = input;
+              const url = yield* trellisPreview.resolveUrl(navigate.threadId, navigate.url, {
+                alreadyResolved,
+              });
+              return yield* previewManager.navigate({ ...navigate, url });
+            }),
             { "rpc.aggregate": "preview" },
           ),
         [WS_METHODS.previewResize]: (input) =>
