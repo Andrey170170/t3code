@@ -60,7 +60,14 @@ import * as Stream from "effect/Stream";
 import * as ProjectStore from "./ProjectStore.ts";
 import { CheckpointRestoreRule } from "./CheckpointRestoreSafety.ts";
 import { TurnAdmission } from "./TurnAdmission.ts";
-import { CheckpointServiceV2 } from "./CheckpointService.ts";
+import {
+  CheckpointServiceV2,
+  checkpointRunOrdinal,
+  fileRestoreTargetOf,
+  MOVE_BOUNDARY_RESTORE_MESSAGE,
+  scopeAssignmentOf,
+  workspaceAssignmentOf,
+} from "./CheckpointService.ts";
 import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
@@ -1317,15 +1324,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const queuedProviderThread = projection.providerThreads.find(
         (candidate) => candidate.id === providerThreadId,
       );
-      const storedCheckpointScope = projection.checkpointScopes.find(
+      const queuedCheckpointScope = projection.checkpointScopes.find(
         (scope) => scope.id === rootNode?.checkpointScopeId,
       );
+      // A run queued before its thread moved to another project prepares its
+      // scope again, in the new project's directory.
+      const storedCheckpointScope =
+        queuedCheckpointScope !== undefined &&
+        scopeAssignmentOf(queuedCheckpointScope, projection.checkpointScopes) ===
+          workspaceAssignmentOf(projection.thread)
+          ? queuedCheckpointScope
+          : undefined;
       if (
         rootNode === undefined ||
         attempt === undefined ||
         queuedMessage === undefined ||
         queuedProviderThread === undefined ||
-        (rootNode.checkpointScopeId !== null && storedCheckpointScope === undefined)
+        (rootNode.checkpointScopeId !== null && queuedCheckpointScope === undefined)
       ) {
         return yield* new OrchestratorDispatchError({
           commandId: CommandId.make(`command:system:start-queued:${queuedRun.id}`),
@@ -1525,6 +1540,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 providerThreadId: queuedProviderThread.id,
                 cwd: resolvedRuntimePolicy.cwd ?? projection.thread.worktreePath ?? process.cwd(),
                 createdAt: now,
+                workspaceAssignment: workspaceAssignmentOf(projection.thread),
               }),
             ),
             Effect.mapError(
@@ -3218,12 +3234,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   /**
-   * Moves a thread without history to another project. A thread that has run
-   * owns checkpoints resolved against its old directory, and a forked child
-   * whose native fork is still pending would fork from the source transcript
-   * in the wrong place, so both are refused. The worktree binding is cleared
-   * (the new project has its own root) and live sessions are detached, as a
-   * worktree change does; the next turn resolves the new project's policy.
+   * Moves a thread to another project. A thread that has run starts a new
+   * workspace assignment: its later runs checkpoint into a new root scope in
+   * the new directory, while earlier checkpoints keep theirs (their files
+   * cannot be restored across the move; the conversation can be rewound). A
+   * running thread is refused (queued runs prepare their scope when they
+   * start), and so is a forked child whose native fork is still pending,
+   * which would fork from the source transcript in the wrong place. The
+   * worktree binding is cleared (the new project has its own root) and live
+   * sessions are detached, as a worktree change does; the next turn resolves
+   * the new project's policy and resumes the same native session there.
    */
   const dispatchThreadProjectMove = Effect.fn("orchestrationV2.dispatch.threadProjectMove")(
     function* (
@@ -3266,14 +3286,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (Option.isNone(project) || project.value.deletedAt !== null) {
         return yield* reject(`Project ${command.projectId} does not exist.`);
       }
-      if (projection.runs.some((run) => run.status === "queued" || isBlockingRun(run))) {
+      if (projection.runs.some(isBlockingRun)) {
         return yield* reject(
-          "This thread has an active or queued run (thread_busy); wait for it to finish, then move it.",
-        );
-      }
-      if (projection.checkpointScopes.length > 0) {
-        return yield* reject(
-          "This thread has history (thread_has_history), so it cannot move to another project yet.",
+          "This thread has a running turn (thread_busy); wait for it to finish or stop it, then move it.",
         );
       }
       if (pendingForkTransferForThread(projection) !== undefined) {
@@ -3296,6 +3311,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           worktreePath: null,
           branch: null,
           updatedAt: now,
+          ...(projection.checkpointScopes.length === 0
+            ? {}
+            : { workspaceAssignment: workspaceAssignmentOf(thread) + 1 }),
         },
       });
       const detail = "Project changed.";
@@ -4120,6 +4138,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             input.projection.thread.worktreePath ??
             session.providerSession.cwd,
           createdAt: now,
+          workspaceAssignment: workspaceAssignmentOf(input.projection.thread),
         })
         .pipe(
           Effect.mapError(
@@ -4795,6 +4814,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                       projection.thread.worktreePath ??
                       process.cwd(),
                     createdAt: now,
+                    workspaceAssignment: workspaceAssignmentOf(projection.thread),
                   }),
                 ),
                 Effect.mapError(
@@ -5168,6 +5188,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                         projection.thread.worktreePath ??
                         process.cwd(),
                       createdAt: now,
+                      workspaceAssignment: workspaceAssignmentOf(projection.thread),
                     }),
                   ),
                   mapDispatchError(command),
@@ -5867,6 +5888,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             projection.thread.worktreePath ??
             process.cwd(),
           createdAt: now,
+          workspaceAssignment: workspaceAssignmentOf(projection.thread),
         })
         .pipe(
           Effect.mapError(
@@ -7650,6 +7672,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           providerThreadId: state.providerThread.id,
           cwd: resolvedRuntimePolicy.cwd ?? projection.thread.worktreePath ?? process.cwd(),
           createdAt: now,
+          workspaceAssignment: workspaceAssignmentOf(projection.thread),
         })
         .pipe(mapDispatchError(command));
       const emitEvent = emit(events, command);
@@ -8178,40 +8201,62 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       );
 
-      const targetCheckpoint = projection.checkpoints.find(
+      const requestedCheckpoint = projection.checkpoints.find(
         (candidate) => candidate.id === command.checkpointId,
       );
-      if (targetCheckpoint === undefined) {
+      if (requestedCheckpoint === undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: `Checkpoint ${command.checkpointId} was not found.`,
         });
       }
-      if (targetCheckpoint.status !== "ready") {
+      if (requestedCheckpoint.status !== "ready") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
-          cause: `Checkpoint ${command.checkpointId} is ${targetCheckpoint.status} and cannot be restored.`,
+          cause: `Checkpoint ${command.checkpointId} is ${requestedCheckpoint.status} and cannot be restored.`,
         });
       }
-      const targetScope = projection.checkpointScopes.find(
-        (candidate) => candidate.id === targetCheckpoint.scopeId,
+      const requestedScope = projection.checkpointScopes.find(
+        (candidate) => candidate.id === requestedCheckpoint.scopeId,
       );
-      if (targetScope === undefined) {
+      if (requestedScope === undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
-          cause: `Checkpoint scope ${targetCheckpoint.scopeId} was not found.`,
+          cause: `Checkpoint scope ${requestedCheckpoint.scopeId} was not found.`,
         });
       }
-      if (targetScope.id !== command.scopeId) {
+      if (requestedScope.id !== command.scopeId) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
-          cause: `Checkpoint ${command.checkpointId} belongs to scope ${targetScope.id}, not ${command.scopeId}.`,
+          cause: `Checkpoint ${command.checkpointId} belongs to scope ${requestedScope.id}, not ${command.scopeId}.`,
         });
       }
+      // A file restore to a turn from before the thread moved restores the
+      // same state from the current project's checkpoint, when there is one;
+      // otherwise only the conversation can go back that far.
+      const fileTarget =
+        command.restoreFiles === false
+          ? { checkpoint: requestedCheckpoint, scope: requestedScope }
+          : fileRestoreTargetOf({
+              thread: projection.thread,
+              checkpoint: requestedCheckpoint,
+              scope: requestedScope,
+              checkpoints: projection.checkpoints,
+              scopes: projection.checkpointScopes,
+            });
+      if (fileTarget === null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: MOVE_BOUNDARY_RESTORE_MESSAGE,
+        });
+      }
+      const targetCheckpoint = fileTarget.checkpoint;
+      const targetScope = fileTarget.scope;
       if (command.restoreFiles !== false) {
         const refusal = yield* restoreRule
           .check(
@@ -8241,7 +8286,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
       }
 
-      const targetOrdinal = targetCheckpoint.appRunOrdinal ?? 0;
+      const targetOrdinal = checkpointRunOrdinal(targetCheckpoint, targetScope);
       if (targetOrdinal > 0) {
         const targetRun = projection.runs.find((run) => run.ordinal === targetOrdinal);
         const targetProviderTurn =

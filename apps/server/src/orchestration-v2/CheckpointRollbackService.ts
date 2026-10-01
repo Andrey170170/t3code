@@ -28,7 +28,13 @@ import {
   CheckpointRestoreRule,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
-import { CheckpointServiceV2 } from "./CheckpointService.ts";
+import {
+  CheckpointServiceV2,
+  checkpointRunOrdinal,
+  MOVE_BOUNDARY_RESTORE_MESSAGE,
+  scopeAssignmentOf,
+  workspaceAssignmentOf,
+} from "./CheckpointService.ts";
 import type { EffectOutboxV2Shape } from "./EffectOutbox.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import { IdAllocatorV2 } from "./IdAllocator.ts";
@@ -284,10 +290,22 @@ export const layer: Layer.Layer<
         });
       }
 
+      const restoreFiles = input.restoreFiles !== false;
+      const targetAssignment = scopeAssignmentOf(scope, projection.checkpointScopes);
+      // The decider resolved file restores into the thread's current project;
+      // a move accepted since then puts this one across the boundary.
+      if (restoreFiles && targetAssignment !== workspaceAssignmentOf(projection.thread)) {
+        return yield* new CheckpointRollbackExecutionError({
+          reason: "rollback-target-invalid",
+          threadId: input.threadId,
+          providerThreadId: input.providerThreadId,
+          checkpointId: input.checkpointId,
+          detail: MOVE_BOUNDARY_RESTORE_MESSAGE,
+        });
+      }
       // Held through the provider rewind and the file restore; released when
       // `execute` ends.
       yield* restoreLease.acquire(scope);
-      const restoreFiles = input.restoreFiles !== false;
       if (restoreFiles) {
         const refusal = yield* restoreRule.check(
           {
@@ -369,7 +387,7 @@ export const layer: Layer.Layer<
             }),
       });
 
-      const targetOrdinal = checkpoint.appRunOrdinal ?? 0;
+      const targetOrdinal = checkpointRunOrdinal(checkpoint, scope);
       // Stopped and failed runs after the target leave the provider
       // conversation too, so they must not stay visible.
       const runsToRollback = projection.runs.filter(
@@ -503,15 +521,38 @@ export const layer: Layer.Layer<
           ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
         })).notice;
       }
-      const staleCheckpoints = projection.checkpoints.filter(
-        (candidate) =>
-          candidate.scopeId === scope.id &&
-          candidate.appRunOrdinal !== null &&
-          candidate.appRunOrdinal > targetOrdinal &&
-          candidate.status === "ready",
-      );
-      if (staleCheckpoints.length > 0) {
-        yield* checkpoints.deleteStaleRefs({ scope, checkpoints: staleCheckpoints });
+      const staleCheckpoints = projection.checkpoints.filter((candidate) => {
+        if (candidate.status !== "ready") return false;
+        if (candidate.scopeId === scope.id) {
+          return candidate.appRunOrdinal !== null && candidate.appRunOrdinal > targetOrdinal;
+        }
+        // A rewind to before the thread moved also drops what the projects it
+        // moved to captured after the target, their baselines included.
+        const candidateScope = projection.checkpointScopes.find(
+          (other) => other.id === candidate.scopeId,
+        );
+        return (
+          candidateScope?.kind === "root_run" &&
+          scopeAssignmentOf(candidateScope, projection.checkpointScopes) > targetAssignment &&
+          checkpointRunOrdinal(candidate, candidateScope) > targetOrdinal
+        );
+      });
+      for (const staleScope of projection.checkpointScopes) {
+        const stale = staleCheckpoints.filter((candidate) => candidate.scopeId === staleScope.id);
+        if (stale.length === 0) continue;
+        const deleted = checkpoints.deleteStaleRefs({ scope: staleScope, checkpoints: stale });
+        // Refs of a project the thread left are only tidied: its folder may be gone.
+        yield* scopeAssignmentOf(staleScope, projection.checkpointScopes) ===
+        workspaceAssignmentOf(projection.thread)
+          ? deleted
+          : deleted.pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("could not delete the refs of an earlier project's checkpoints", {
+                  scopeId: staleScope.id,
+                  detail: error.message,
+                }),
+              ),
+            );
       }
 
       const events: Array<OrchestrationV2DomainEvent> = [];

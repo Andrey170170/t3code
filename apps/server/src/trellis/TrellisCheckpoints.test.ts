@@ -49,6 +49,7 @@ import {
   CheckpointServiceV2,
   checkpointRefForScopeOrdinal,
   layer as checkpointServiceLayer,
+  rootCheckpointScopeName,
 } from "../orchestration-v2/CheckpointService.ts";
 import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
@@ -393,7 +394,7 @@ it.effect(
       delete fake.hooks.afterCreate;
       const taken = fake.snapshots.find((snapshot) => snapshot.turn === refOf(scope, 1))!;
       yield* pins.reconcile({
-        liveThreadIds: [scope.threadId],
+        liveThreads: [{ id: scope.threadId }],
         readAt: DateTime.makeUnsafe("2999-01-01T00:00:00.000Z"),
       });
       assert.isTrue(taken.pinned);
@@ -495,6 +496,7 @@ const diffLayer = (
             checkpoints: [1, 2].map((ordinal) => ({
               scopeId: scope.id,
               runId: RunId.make(`run-${ordinal}`),
+              ordinalWithinScope: ordinal,
               appRunOrdinal: ordinal,
               status: "ready" as const,
               ref: refOf(scope, ordinal),
@@ -663,10 +665,10 @@ it.effect("a deleted thread's baseline pin and mappings are released, a live one
     const readAt = DateTime.makeUnsafe("2999-01-01T00:00:00.000Z");
 
     // A capture newer than the thread list is left alone.
-    yield* pins.reconcile({ liveThreadIds: [kept.threadId], readAt: DateTime.makeUnsafe(0) });
+    yield* pins.reconcile({ liveThreads: [{ id: kept.threadId }], readAt: DateTime.makeUnsafe(0) });
     assert.isTrue(baselineOf(deleted).pinned);
 
-    yield* pins.reconcile({ liveThreadIds: [kept.threadId], readAt });
+    yield* pins.reconcile({ liveThreads: [{ id: kept.threadId }], readAt });
     assert.isTrue(baselineOf(kept).pinned);
     assert.isFalse(baselineOf(deleted).pinned);
     assert.isTrue(yield* store.hasCheckpointRef({ cwd: idea, checkpointRef: refOf(kept, 1) }));
@@ -675,8 +677,53 @@ it.effect("a deleted thread's baseline pin and mappings are released, a live one
 
     // At startup, a thread deleted meanwhile whose snapshot is already gone.
     fake.remove(baselineOf(kept).id);
-    yield* pins.reconcile({ liveThreadIds: [], readAt });
+    yield* pins.reconcile({ liveThreads: [], readAt });
     assert.isFalse(yield* store.hasCheckpointRef({ cwd: idea, checkpointRef: refOf(kept, 0) }));
+  }).pipe(Effect.provide(storeLayer(fake)));
+});
+
+it.effect("a moved thread's baseline in its new project is kept with the thread", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+  const project = fake.workspacePath("ws-d");
+  return Effect.gen(function* () {
+    const store = yield* CheckpointStore.CheckpointStore;
+    const pins = yield* TrellisCheckpointStore.TrellisCheckpointPins;
+    const scopeIdOf = (assignment: number) =>
+      Effect.flatMap(IdAllocatorV2, (ids) =>
+        ids.allocate.checkpointScope({
+          threadId: ThreadId.make("thread-moved"),
+          name: rootCheckpointScopeName(assignment),
+        }),
+      ).pipe(Effect.provide(idAllocatorLayer));
+    const before = { ...rootScopeOf(idea, "thread-moved"), id: yield* scopeIdOf(0) };
+    const after = { ...rootScopeOf(project, "thread-moved"), id: yield* scopeIdOf(1) };
+    // Two runs in the idea; the thread moved and its third run started in the project.
+    yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(before, 0) });
+    yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(before, 2) });
+    yield* store.captureCheckpoint({
+      cwd: project,
+      checkpointRef: refOf(after, 2),
+      baseline: true,
+    });
+    yield* store.captureCheckpoint({ cwd: project, checkpointRef: refOf(after, 3) });
+    const pinned = (ref: string) =>
+      fake.snapshots.find((snapshot) => snapshot.turn === ref)!.pinned;
+    assert.deepEqual(
+      [refOf(before, 0), refOf(before, 2), refOf(after, 2), refOf(after, 3)].map(pinned),
+      [true, false, true, false],
+    );
+    const readAt = DateTime.makeUnsafe("2999-01-01T00:00:00.000Z");
+    // Known by its assignment, the thread keeps both projects' baselines.
+    yield* pins.reconcile({
+      liveThreads: [{ id: ThreadId.make("thread-moved"), workspaceAssignment: 1 }],
+      readAt,
+    });
+    assert.isTrue(pinned(refOf(before, 0)));
+    assert.isTrue(pinned(refOf(after, 2)));
+    yield* pins.reconcile({ liveThreads: [], readAt });
+    assert.isFalse(pinned(refOf(before, 0)));
+    assert.isFalse(pinned(refOf(after, 2)));
   }).pipe(Effect.provide(storeLayer(fake)));
 });
 
@@ -701,7 +748,7 @@ it.effect("a read pin left by a crash is released, and a read in progress keeps 
       Effect.gen(function* () {
         yield* store.reserve({ cwd: idea, checkpointRef: refOf(scope, 2) });
         assert.isTrue(reading!.pinned);
-        yield* pins.reconcile({ liveThreadIds: [], readAt });
+        yield* pins.reconcile({ liveThreads: [], readAt });
         assert.isFalse(crashed!.pinned);
         assert.isTrue(reading!.pinned);
       }),
@@ -739,7 +786,7 @@ it.effect("a reconcile never releases the pin of a read that is taking it", () =
     // The read recorded its pin and waits on Trellis; a reconcile starts.
     yield* Deferred.await(pinning);
     const reconciling = yield* Effect.forkChild(
-      pins.reconcile({ liveThreadIds: [], readAt: DateTime.makeUnsafe(0) }),
+      pins.reconcile({ liveThreads: [], readAt: DateTime.makeUnsafe(0) }),
     );
     yield* Effect.yieldNow;
     yield* Deferred.succeed(proceed, undefined);
@@ -774,9 +821,9 @@ it.effect("a baseline pinned by a capture that never finished is released with i
     fake.failures.list = 0;
     const readAt = DateTime.makeUnsafe("2999-01-01T00:00:00.000Z");
     // Kept while the thread lives (a later capture adopts it), released after.
-    yield* pins.reconcile({ liveThreadIds: [scope.threadId], readAt });
+    yield* pins.reconcile({ liveThreads: [{ id: scope.threadId }], readAt });
     assert.isTrue(baseline.pinned);
-    yield* pins.reconcile({ liveThreadIds: [], readAt });
+    yield* pins.reconcile({ liveThreads: [], readAt });
     assert.isFalse(baseline.pinned);
   }).pipe(Effect.provide(storeLayer(fake)));
 });
@@ -1621,7 +1668,7 @@ it.effect("a baseline taken but not yet pinned when T3 stopped is pinned on reco
       fake.snapshots.find((snapshot) => snapshot.turn === refOf(scope, 0))!;
     assert.isFalse(baselineOf(kept).pinned);
     yield* pins.reconcile({
-      liveThreadIds: [kept.threadId],
+      liveThreads: [{ id: kept.threadId }],
       readAt: DateTime.makeUnsafe("2999-01-01T00:00:00.000Z"),
     });
     assert.isTrue(baselineOf(kept).pinned);

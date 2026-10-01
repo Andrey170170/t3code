@@ -47,6 +47,7 @@ import * as TrellisPreview from "./trellis/TrellisPreview.ts";
 import * as TrellisPtyAdapter from "./trellis/TrellisPtyAdapter.ts";
 import * as TrellisRestore from "./trellis/TrellisRestore.ts";
 import * as TrellisTurns from "./trellis/TrellisTurns.ts";
+import * as TrellisGraduation from "./trellis/TrellisGraduation.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -484,8 +485,9 @@ const ThreadPullRequestWorkerLive = Layer.effectDiscard(
 ).pipe(Layer.provide(PullRequestServiceLive));
 
 // Trellis catalog sync (one T3 project per Trellis workspace path), its
-// client operations, the lazy creation of new ideas, naming items from their
-// threads and the mapping of workspace previews. Idle while Trellis is off.
+// client operations, the lazy creation of new ideas, graduation, naming items
+// from their threads and the mapping of workspace previews. Idle while
+// Trellis is off.
 const TrellisCatalogLive = Layer.effectDiscard(
   Effect.gen(function* () {
     const catalog = yield* TrellisCatalog.TrellisCatalog;
@@ -496,6 +498,7 @@ const TrellisCatalogLive = Layer.effectDiscard(
 ).pipe(
   Layer.provideMerge(TrellisNaming.layer),
   Layer.provideMerge(TrellisIdeaPromotion.layer),
+  Layer.provideMerge(TrellisGraduation.layer),
   Layer.provideMerge(TrellisCatalog.layer),
   Layer.provideMerge(TrellisPreview.layer),
 );

@@ -87,7 +87,8 @@ import {
   useTrellisFind,
   useTrellisStatusFor,
 } from "../hooks/useTrellis";
-import { trellisFindHitSummary, trellisMoveMenu } from "../lib/trellis";
+import { canGraduateIdea, trellisFindHitSummary, trellisMoveMenu } from "../lib/trellis";
+import { openGraduateIdeaDialog } from "./trellis/GraduateIdeaDialog";
 import { openNewTrellisProjectDialog } from "./trellis/NewTrellisProjectDialog";
 import { useTheme } from "../hooks/useTheme";
 import { useCustomThemes } from "../hooks/useCustomThemes";
@@ -2026,6 +2027,37 @@ function OpenCommandPaletteDialog(props: {
             },
           ],
         });
+      },
+    });
+  }
+
+  const activeThreadProject =
+    activeThread === null
+      ? undefined
+      : pickableProjects.find(
+          (project) =>
+            project.environmentId === activeThread.environmentId &&
+            project.id === activeThread.projectId,
+        );
+  if (
+    activeThread !== null &&
+    activeThreadProject !== undefined &&
+    canGraduateIdea(activeThreadProject.workspaceRoot, activeThreadTrellis)
+  ) {
+    const target = {
+      environmentId: activeThread.environmentId,
+      projectId: activeThreadProject.id,
+      title: activeThreadProject.title,
+    };
+    actionItems.push({
+      kind: "action",
+      value: "action:trellis:graduate",
+      searchTerms: ["graduate", "idea", "trellis", "project", "promote"],
+      title: "Graduate idea...",
+      description: `Turn "${activeThreadProject.title}" into its own Trellis project`,
+      icon: <SproutIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        openGraduateIdeaDialog(target);
       },
     });
   }

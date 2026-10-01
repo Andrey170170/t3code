@@ -147,6 +147,8 @@ const TrellisTurnsView = Schema.Struct({ restarted: Schema.Array(Schema.String) 
 /** An open turn as Trellis records it. */
 export const TrellisOpenTurn = Schema.Struct({
   workspace: Schema.String,
+  /** The idea (or project) the turn's target resolved to; absent from older Trellis versions. */
+  project: Schema.optional(Schema.NullOr(Schema.String)),
   thread: Schema.String,
   turn: Schema.String,
 });
@@ -194,6 +196,44 @@ export type TrellisCheckpointOutcome =
       /** Processes the stop ended, when it ran. */
       readonly stopped: ReadonlyArray<{ readonly pid: number; readonly cmd: string }>;
     };
+
+/** A turn start Trellis refused because the idea graduated (409, `details.graduated_to`). */
+const TrellisGraduatedRefusal = Schema.Struct({
+  error: Schema.String,
+  details: Schema.Struct({
+    graduated_to: Schema.String,
+    restarted: Schema.optional(Schema.Array(Schema.String)),
+  }),
+});
+
+/** A graduation Trellis refused (409, `details.turns`: other threads mid-turn in the idea). */
+const TrellisGraduationRefusal = Schema.Struct({
+  error: Schema.String,
+  details: Schema.optional(
+    Schema.Struct({
+      turns: Schema.optional(
+        Schema.Array(Schema.Struct({ thread: Schema.String, turn: Schema.String })),
+      ),
+    }),
+  ),
+});
+
+/**
+ * What graduating an idea did: the new project, or Trellis's refusal or
+ * failure, with the threads whose open turns refused it.
+ */
+export type TrellisGraduationOutcome =
+  | { readonly ok: true; readonly project: TrellisProjectView }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly turns: ReadonlyArray<{ readonly thread: string; readonly turn: string }>;
+    };
+
+const TrellisBasesView = Schema.Struct({
+  bases: Schema.optional(Schema.Array(Schema.String)),
+  default_base: Schema.optional(Schema.String),
+});
 
 /** Trellis refuses a turn message older than one it applied (409). */
 export const isStaleTurnMessage = (error: TrellisError) =>
@@ -372,7 +412,8 @@ export class Trellis extends Context.Service<
     /**
      * Reports a turn starting or ending in `target` (user socket only). A
      * start waits while the workspace is checkpointing; `restarted` lists the
-     * workspaces a checkpoint stopped and restarted meanwhile.
+     * workspaces a checkpoint stopped and restarted meanwhile. A start in an
+     * idea that graduated is refused, with `graduatedTo` naming its project.
      */
     readonly reportTurn: (input: {
       readonly target: string;
@@ -380,7 +421,10 @@ export class Trellis extends Context.Service<
       readonly turn: string;
       readonly event: "start" | "end";
       readonly seq: number;
-    }) => Effect.Effect<{ readonly restarted: ReadonlyArray<string> }, TrellisError>;
+    }) => Effect.Effect<
+      { readonly restarted: ReadonlyArray<string>; readonly graduatedTo?: string },
+      TrellisError
+    >;
     /** Replaces the whole set of open turns; waits like a start for named workspaces. */
     readonly replaceTurns: (input: {
       readonly open: ReadonlyArray<{
@@ -406,6 +450,24 @@ export class Trellis extends Context.Service<
       readonly thread: string;
       readonly interrupt: boolean;
     }) => Effect.Effect<TrellisCheckpointOutcome, TrellisError>;
+    /**
+     * Graduates an idea into a new dedicated project (user socket). Refused
+     * while threads other than `thread` have open turns in the idea; refusals
+     * and failures are outcomes, only an unreachable Trellis fails.
+     */
+    readonly graduate: (input: {
+      readonly id: string;
+      readonly base?: string | undefined;
+      readonly name?: string | undefined;
+      readonly thread?: string | undefined;
+    }) => Effect.Effect<TrellisGraduationOutcome, TrellisError>;
+    /** A project or idea by id, trashed and graduated ones included. */
+    readonly getProject: (id: string) => Effect.Effect<TrellisProjectView, TrellisError>;
+    /** The bases new projects can start from, and the default. */
+    readonly bases: Effect.Effect<
+      { readonly bases: ReadonlyArray<string>; readonly defaultBase: string | null },
+      TrellisError
+    >;
   }
 >()("t3/trellis/Trellis") {}
 
@@ -879,7 +941,32 @@ const make = Effect.gen(function* () {
     connects: Effect.sync(() => connects),
     reportTurn: (body) =>
       // A start waits while the workspace is checkpointing (Trellis gives up after 15 min).
-      call(TrellisTurnsView, "POST", "/v1/turns", { body, timeoutMs: TURN_WAIT_MS }),
+      request("POST", "/v1/turns", { body, timeoutMs: TURN_WAIT_MS }).pipe(
+        Effect.flatMap((response) =>
+          response.status === 409
+            ? decodeJson(TrellisGraduatedRefusal, response.body, response.status).pipe(
+                Effect.map((refusal) => ({
+                  restarted: refusal.details.restarted ?? [],
+                  graduatedTo: refusal.details.graduated_to,
+                })),
+                // Any other conflict (a stale message) is an error as before.
+                Effect.catch(() =>
+                  decodeJson(TrellisErrorBody, response.body, response.status).pipe(
+                    Effect.mapError(() => trellisStatusError("POST", "/v1/turns", 409)),
+                    Effect.flatMap((body) =>
+                      Effect.fail(new TrellisError({ message: body.error })),
+                    ),
+                  ),
+                ),
+              )
+            : response.status >= 400
+              ? decodeJson(TrellisErrorBody, response.body, response.status).pipe(
+                  Effect.mapError(() => trellisStatusError("POST", "/v1/turns", response.status)),
+                  Effect.flatMap((body) => Effect.fail(new TrellisError({ message: body.error }))),
+                )
+              : decodeJson(TrellisTurnsView, response.body, response.status),
+        ),
+      ),
     replaceTurns: (body) =>
       call(TrellisTurnsView, "PUT", "/v1/turns", { body, timeoutMs: TURN_WAIT_MS }),
     listTurns: (target) =>
@@ -919,6 +1006,37 @@ const make = Effect.gen(function* () {
               ),
         ),
       ),
+    graduate: ({ id, base, name, thread }) =>
+      request("POST", `/v1/projects/${encodeURIComponent(id)}/graduate`, {
+        body: {
+          ...(base === undefined ? {} : { base }),
+          ...(name === undefined ? {} : { name }),
+          ...(thread === undefined ? {} : { thread }),
+        },
+        // Copies the idea's folder into a new workspace and computes its record.
+        timeoutMs: 15 * 60_000,
+      }).pipe(
+        Effect.flatMap((response): Effect.Effect<TrellisGraduationOutcome, TrellisError> =>
+          response.status >= 400
+            ? decodeJson(TrellisGraduationRefusal, response.body, response.status).pipe(
+                Effect.mapError(() =>
+                  trellisStatusError("POST", "/v1/projects/{id}/graduate", response.status),
+                ),
+                Effect.map((body) => ({
+                  ok: false as const,
+                  error: body.error,
+                  turns: body.details?.turns ?? [],
+                })),
+              )
+            : decodeJson(TrellisProjectView, response.body, response.status).pipe(
+                Effect.map((project) => ({ ok: true as const, project })),
+              ),
+        ),
+      ),
+    getProject: (id) => call(TrellisProjectView, "GET", `/v1/projects/${encodeURIComponent(id)}`),
+    bases: call(TrellisBasesView, "GET", "/v1/status").pipe(
+      Effect.map((view) => ({ bases: view.bases ?? [], defaultBase: view.default_base ?? null })),
+    ),
   });
 });
 
@@ -1026,6 +1144,9 @@ export function makeTestTrellis(
     replaceTurns: () => Effect.succeed({ restarted: [] }),
     listTurns: () => Effect.succeed([]),
     checkpoint: unused,
+    graduate: unused,
+    getProject: unused,
+    bases: Effect.die(new Error("unused Trellis operation")),
     ...rest,
   });
 }

@@ -49,7 +49,21 @@ the workspace is stopped), the preview shows an error rather than loading the ho
 ## Moving a thread to another project
 
 **Move to project** in a thread's menu or the command palette moves a thread to another Trellis
-project. Only threads that have not run yet can move; a thread with history stays where it is.
+project. It keeps its conversation and continues in the new project's workspace; the files of its
+earlier turns stay in the old project, so reverting one of those turns can rewind the conversation
+but not restore its files. A thread that is working, or a fork that has not run yet, cannot move.
+
+## Graduating an idea
+
+**Graduate idea** in the command palette, or **Graduate** in an idea's project settings, turns an
+idea into a project with its own Trellis workspace, from a base you pick, starting with a copy of the
+idea's folder. Every active thread of the idea moves there with its conversation and is told where it
+now works. Packages installed while it was an idea do not come along; `trellis changes --graduation`
+in the project lists them. Graduating is refused while a thread of the idea is working; an agent can
+graduate its own idea with the `trellis_graduate` tool, which ends its turn and continues it in the
+new project. An idea graduated with `trellis graduate` on the command line has its threads moved
+into the project within a few seconds, and a message sent to one in the meantime asks you to send it
+again once it has moved.
 
 ## Deleting and restoring
 

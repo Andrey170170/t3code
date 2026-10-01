@@ -10,7 +10,7 @@ import { AsyncResult } from "effect/unstable/reactivity";
 import { type EnvironmentId, type ProjectIconOverride } from "@t3tools/contracts";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import * as Cause from "effect/Cause";
-import { InfoIcon, Trash2Icon } from "lucide-react";
+import { InfoIcon, SproutIcon, Trash2Icon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
@@ -21,7 +21,13 @@ import {
   useTrellisStatusFor,
   useTrellisTrash,
 } from "../../hooks/useTrellis";
-import { trellisItemKind, trellisRemovalOf, trellisTrashConfirmation } from "../../lib/trellis";
+import {
+  canGraduateIdea,
+  trellisItemKind,
+  trellisRemovalOf,
+  trellisTrashConfirmation,
+} from "../../lib/trellis";
+import { openGraduateIdeaDialog } from "../trellis/GraduateIdeaDialog";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { loadTrellisStatus } from "../../state/trellis";
 import {
@@ -572,6 +578,31 @@ function ProjectDetail({
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />
         {hasMultipleCheckouts ? checkoutChoices : null}
+        {group.memberProjects.length === 1 &&
+        canGraduateIdea(representative.workspaceRoot, representativeTrellis) ? (
+          <SettingsSection title="Trellis">
+            <SettingsRow
+              title="Graduate into a project"
+              description="Turns this idea into a project with its own Trellis workspace, from a base you pick. Its threads move there with their conversations."
+              control={
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    openGraduateIdeaDialog({
+                      environmentId: representative.environmentId,
+                      projectId: representative.id,
+                      title: representative.title,
+                    })
+                  }
+                >
+                  <SproutIcon />
+                  Graduate
+                </Button>
+              }
+            />
+          </SettingsSection>
+        ) : null}
         <SettingsSection title="Danger">
           <SettingsRow
             title={

@@ -7,7 +7,9 @@
  * catalog, creates missing T3 projects (matched by `workspaceRoot`, so it never
  * duplicates), renames them to the Trellis name, and retires projects whose
  * Trellis item was trashed or graduated: their conversations are archived
- * (reversibly) and only an empty project is deleted. A user rename in T3 is
+ * (reversibly) and only an empty project is deleted. An idea graduated
+ * elsewhere (`trellis graduate`) is followed instead: its active threads
+ * move into the new project, without a continuation. A user rename in T3 is
  * pushed to Trellis (which pins the name) instead of being overwritten.
  * Nothing runs while the integration is off.
  *
@@ -25,6 +27,7 @@ import {
   type ThreadId,
   TRELLIS_LANDING_PAD_PROJECT_ID,
   TrellisError,
+  type TrellisBasesResult,
   type TrellisCreateResult,
   type TrellisFindHit,
   type TrellisFindResult,
@@ -54,6 +57,7 @@ import * as Stream from "effect/Stream";
 import { pathsOverlap } from "@t3tools/shared/trellis";
 
 import { ServerConfig } from "../config.ts";
+import { fileRestoreTargetOf } from "../orchestration-v2/CheckpointService.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
@@ -106,6 +110,13 @@ export type CatalogSyncAction =
       readonly archiveThreadIds: ReadonlyArray<ThreadId>;
       /** Only a project without any threads is deleted. */
       readonly deleteProject: boolean;
+    }
+  | {
+      /** Moves a graduated idea's active threads into the project it became. */
+      readonly type: "repoint";
+      readonly projectId: ProjectId;
+      readonly toRoot: string;
+      readonly threadIds: ReadonlyArray<ThreadId>;
     };
 
 export interface DesiredProject {
@@ -224,6 +235,15 @@ export function planCatalogSync(input: {
   // fork). Absence from the listing is never enough. The value is when it
   // happened, in Unix seconds (graduation records it as the update time).
   const retiredAt = new Map<string, number>();
+  // Graduated ideas' roots, to the root of the live project each became.
+  const graduatedInto = new Map<string, string>();
+  for (const item of input.items) {
+    if (item.graduated_to === null || item.deleted_at !== null) continue;
+    const target = input.items.find((candidate) => candidate.id === item.graduated_to);
+    if (target !== undefined && isLive(target)) {
+      graduatedInto.set(normalizeRoot(item.path), normalizeRoot(target.path));
+    }
+  }
   for (const item of input.items) {
     if (!isLive(item)) retiredAt.set(normalizeRoot(item.path), item.deleted_at ?? item.updated_at);
     else {
@@ -243,6 +263,18 @@ export function planCatalogSync(input: {
       input.missingRoots?.get(root);
     if (at === undefined) continue;
     const threads = input.threads.filter((thread) => thread.projectId === project.id);
+    const toRoot = graduatedInto.get(root);
+    const active = threads.filter((thread) => !thread.archived);
+    // Followed into the project; retired once only archived threads are left.
+    if (toRoot !== undefined && active.length > 0) {
+      actions.push({
+        type: "repoint",
+        projectId: project.id,
+        toRoot,
+        threadIds: active.map((thread) => thread.id),
+      });
+      continue;
+    }
     // Only threads untouched since the retirement: one the user unarchived
     // (or kept working in) afterwards stays where it is.
     const archiveThreadIds = threads
@@ -499,6 +531,12 @@ export class TrellisCatalog extends Context.Service<
      * back), and any Trellis project while Trellis is unreachable.
      */
     readonly checkProjectDelete: (projectId: ProjectId) => Effect.Effect<void, TrellisError>;
+    /** The bases a new project (or a graduating idea) can start from. */
+    readonly listBases: Effect.Effect<TrellisBasesResult, TrellisError>;
+    /** The T3 project for a Trellis item just created (a graduation's), made now rather than at the next poll. */
+    readonly projectFor: (
+      item: TrellisProjectView,
+    ) => Effect.Effect<TrellisCreateResult, TrellisError>;
   }
 >()("t3/trellis/TrellisCatalog") {}
 
@@ -594,6 +632,31 @@ const make = Effect.gen(function* () {
     return { projects, threads };
   });
 
+  /** Moves a thread out of `from`; already in `to` counts as done. */
+  const moveThread = (threadId: ThreadId, from: ProjectId, to: ProjectId) =>
+    Effect.gen(function* () {
+      const id = yield* commandId("repoint");
+      yield* orchestrator
+        .dispatch({
+          type: "thread.project.move",
+          commandId: id,
+          threadId,
+          projectId: to,
+          expectedProjectId: from,
+        })
+        .pipe(
+          Effect.catch((error) =>
+            orchestrator
+              .getThreadShell(threadId)
+              .pipe(
+                Effect.flatMap((shell) =>
+                  shell?.projectId === to ? Effect.void : Effect.fail(error),
+                ),
+              ),
+          ),
+        );
+    });
+
   const archiveThread = (threadId: ThreadId) =>
     commandId("archive").pipe(
       Effect.flatMap((id) =>
@@ -601,7 +664,10 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const apply = Effect.fn("TrellisCatalog.apply")(function* (action: CatalogSyncAction) {
+  const apply = Effect.fn("TrellisCatalog.apply")(function* (
+    action: CatalogSyncAction,
+    ids: ReadonlyMap<string, ProjectId>,
+  ) {
     switch (action.type) {
       case "create": {
         const projectId = ProjectId.make(yield* crypto.randomUUIDv4);
@@ -629,6 +695,29 @@ const make = Effect.gen(function* () {
           });
         }
         return undefined;
+      case "repoint": {
+        const to = ids.get(action.toRoot);
+        if (to === undefined) {
+          return yield* new TrellisError({ message: `No T3 project for ${action.toRoot} yet.` });
+        }
+        // Each on its own: a thread mid-turn is refused and tried on the next poll.
+        const failed: Array<string> = [];
+        for (const threadId of action.threadIds) {
+          yield* moveThread(threadId, action.projectId, to).pipe(
+            Effect.catch((error) =>
+              Effect.sync(() => void failed.push(`${threadId}: ${errorMessage(error)}`)),
+            ),
+          );
+        }
+        if (failed.length > 0) {
+          return yield* new TrellisError({
+            message: `could not move threads of a graduated idea: ${failed.join("; ")}`,
+          });
+        }
+        // The next pass retires the idea's project, now without active threads.
+        yield* Ref.set(dirty, true);
+        return undefined;
+      }
     }
   });
 
@@ -698,7 +787,7 @@ const make = Effect.gen(function* () {
     });
     let failed = false;
     for (const action of actions) {
-      const created = yield* apply(action).pipe(
+      const created = yield* apply(action, ids).pipe(
         Effect.catch((error) =>
           Effect.logWarning("Trellis catalog sync action failed", {
             action: action.type,
@@ -773,10 +862,19 @@ const make = Effect.gen(function* () {
     if (Option.isNone(checkpointPins) || (yield* trellis.current) === null) return;
     const readAt = yield* DateTime.now;
     const shell = yield* projectionStore.getShellSnapshot();
-    const liveThreadIds = [...shell.threads, ...shell.archivedThreads]
-      .filter((thread) => thread.deletedAt === null)
-      .map((thread) => thread.id);
-    yield* checkpointPins.value.reconcile({ liveThreadIds, readAt });
+    // With each thread's workspace assignment: a thread that moved keeps a
+    // baseline in every project it worked in.
+    const liveThreads = yield* Effect.forEach(
+      [...shell.threads, ...shell.archivedThreads].filter((thread) => thread.deletedAt === null),
+      (thread) =>
+        projectionStore.getThread(thread.id).pipe(
+          Effect.map((record) => ({
+            id: thread.id,
+            workspaceAssignment: record.workspaceAssignment,
+          })),
+        ),
+    );
+    yield* checkpointPins.value.reconcile({ liveThreads, readAt });
   }).pipe(
     Effect.catchCause((cause) =>
       Effect.logWarning("could not read threads to reconcile Trellis pins", { cause }),
@@ -1125,10 +1223,21 @@ const make = Effect.gen(function* () {
               ? candidate.ordinalWithinScope === 0 && candidate.appRunOrdinal === null
               : candidate.appRunOrdinal === input.turnCount,
           );
-    const scope = projection.checkpointScopes.find(
+    const requestedScope = projection.checkpointScopes.find(
       (candidate) => candidate.id === checkpoint?.scopeId,
     );
-    if (checkpoint === undefined || scope === undefined) return none;
+    if (checkpoint === undefined || requestedScope === undefined) return none;
+    // Where the files would come back, as the revert resolves it; a turn from
+    // before the thread moved restores nothing here (the revert refuses).
+    const target = fileRestoreTargetOf({
+      thread: projection.thread,
+      checkpoint,
+      scope: requestedScope,
+      checkpoints: projection.checkpoints,
+      scopes: projection.checkpointScopes,
+    });
+    if (target === null) return none;
+    const scope = target.scope;
     const restoreScope = yield* restoreScopeOf(trellis, scope.cwd);
     if (restoreScope === null) return none;
     return yield* restoreConflictsIn(
@@ -1142,7 +1251,11 @@ const make = Effect.gen(function* () {
             .get(projectId)
             .pipe(Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot)),
       },
-      { threadId: input.threadId, scopePath: restoreScope.path, since: checkpoint.capturedAt },
+      {
+        threadId: input.threadId,
+        scopePath: restoreScope.path,
+        since: target.checkpoint.capturedAt,
+      },
     );
   });
 
@@ -1401,6 +1514,8 @@ const make = Effect.gen(function* () {
     find: (query) => find(query).pipe(asTrellisError("Trellis find failed")),
     restoreConflicts: (input) =>
       restoreConflicts(input).pipe(asTrellisError("Could not check the restore")),
+    projectFor,
+    listBases: requireReady.pipe(Effect.andThen(trellis.bases)),
   });
 });
 
