@@ -38,7 +38,7 @@ import type {
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
-import { guestNavigationNeedsMapping } from "./guestNavigation.ts";
+import { guestNavigationNeedsMapping, guestWindowOpenAction } from "./guestNavigation.ts";
 import {
   BrowserWindow,
   ClipboardItem,
@@ -1807,10 +1807,17 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           }
         }),
       );
+    // The URL the current main-frame navigation started from (or was last
+    // redirected to): a server redirect is judged against it, not against the
+    // page still showing, so a fresh tab's same-origin redirect loads as is.
+    let navigationUrl = "";
     const navigationStarted = (
       event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
     ) => {
-      if (event.isMainFrame && !event.isSameDocument) cancelFaviconCapture();
+      if (event.isMainFrame && !event.isSameDocument) {
+        navigationUrl = event.url;
+        cancelFaviconCapture();
+      }
     };
     const audioStateChanged = (
       event: Electron.Event<Electron.WebContentsAudioStateChangedEventParams>,
@@ -2027,6 +2034,17 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       event.preventDefault();
       requestNavigation(url);
     };
+    const willRedirect = (
+      event: Electron.Event<Electron.WebContentsWillRedirectEventParams>,
+    ): void => {
+      if (!event.isMainFrame) return;
+      if (!guestNavigationNeedsMapping(navigationUrl || wc.getURL(), event.url)) {
+        navigationUrl = event.url;
+        return;
+      }
+      event.preventDefault();
+      requestNavigation(event.url);
+    };
     const beforeInput = (event: Electron.Event, input: Electron.Input): void => {
       syncMenuShortcuts(wc, input);
       if (isPreviewRefreshShortcut(input)) {
@@ -2056,6 +2074,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.off("did-create-window", windowCreated);
         wc.off("before-input-event", beforeInput);
         wc.off("will-navigate", willNavigate);
+        wc.off("will-redirect", willRedirect);
         wc.ipc.off(HUMAN_INPUT_CHANNEL, humanInput);
         wc.ipc.off(RECORDING_INPUT_CHANNEL, recordingInput);
         wc.ipc.off(MOUSE_NAVIGATE_CHANNEL, mouseNavigate);
@@ -2080,12 +2099,17 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.ipc.on(RECORDING_INPUT_CHANNEL, recordingInput);
         wc.ipc.on(MOUSE_NAVIGATE_CHANNEL, mouseNavigate);
         wc.setWindowOpenHandler((details) => {
-          if (previewWindowOpenAction(details) === "popup") {
-            return { action: "allow", overrideBrowserWindowOptions: POPUP_WINDOW_OPTIONS };
-          }
-          if (guestNavigationNeedsMapping(wc.getURL(), details.url)) {
+          const action = guestWindowOpenAction(
+            wc.getURL(),
+            details.url,
+            previewWindowOpenAction(details),
+          );
+          if (action === "map") {
             requestNavigation(details.url);
             return { action: "deny" };
+          }
+          if (action === "popup") {
+            return { action: "allow", overrideBrowserWindowOptions: POPUP_WINDOW_OPTIONS };
           }
           runFork(
             attemptPromise({ operation: "openPreviewWindow", tabId, webContentsId: wc.id }, () =>
@@ -2097,6 +2121,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.on("did-create-window", windowCreated);
         wc.on("before-input-event", beforeInput);
         wc.on("will-navigate", willNavigate);
+        wc.on("will-redirect", willRedirect);
       });
       yield* Ref.update(attachedRef, (attached) =>
         replaceMap(attached, (copy) => {

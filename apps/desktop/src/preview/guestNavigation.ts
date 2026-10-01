@@ -23,3 +23,17 @@ export function guestNavigationNeedsMapping(currentUrl: string, targetUrl: strin
     return true;
   }
 }
+
+/**
+ * What a preview page's `window.open` does. A loopback target on another
+ * origin is mapped first, whatever its disposition, so a script cannot reach
+ * the host's `localhost` by opening it as a popup; everything else keeps the
+ * popup classification (`fallback`), so public OAuth popups still open.
+ */
+export function guestWindowOpenAction(
+  currentUrl: string,
+  url: string,
+  fallback: "popup" | "navigate",
+): "map" | "popup" | "navigate" {
+  return guestNavigationNeedsMapping(currentUrl, url) ? "map" : fallback;
+}
