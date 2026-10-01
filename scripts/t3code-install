@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Install as the development user. Reuses existing settings and preserves state.
+set -euo pipefail
+if [[ ${1:-} == --help ]]; then
+  cat <<'HELP'
+Usage: scripts/t3code-install [--package TARBALL --build-id ID]
+Install pinned T3 or a built npm tarball and restart its user service. Run without sudo.
+Custom packages use a separate runtime directory and leave VERSION unchanged.
+First install overrides: T3CODE_HOST, T3CODE_PORT, T3CODE_ORIGIN,
+T3CODE_BASE, T3CODE_WORKDIR, T3CODE_NODE (absolute node executable).
+Subsequent installs read ~/.config/t3code/service.env; edit it to reconfigure.
+HELP
+  exit 0
+fi
+package=""
+build_id=""
+while (($#)); do
+  case $1 in
+    --package|--build-id)
+      (($# >= 2)) || { echo "Missing value for $1" >&2; exit 2; }
+      case $1 in --package) package=$2 ;; --build-id) build_id=$2 ;; esac
+      shift 2 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+if [[ -n $package || -n $build_id ]]; then
+  [[ -f $package && $build_id =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || {
+    echo 'Custom installation requires a tarball and a valid build ID.' >&2; exit 2;
+  }
+  package=$(realpath -- "$package")
+fi
+[[ $EUID != 0 ]] || { echo 'Run as your normal user, without sudo.' >&2; exit 1; }
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+version=$(<"$repo/config/t3code/VERSION")
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+config_dir="$HOME/.config/t3code"
+if [[ -f $config_dir/service.env ]]; then source "$config_dir/service.env"; fi
+: "${T3CODE_HOST:=127.0.0.1}" "${T3CODE_PORT:=3773}"
+: "${T3CODE_ORIGIN:=http://localhost:$T3CODE_PORT}"
+: "${T3CODE_BASE:=$HOME/.local/share/t3code}" "${T3CODE_WORKDIR:=$HOME}"
+: "${T3CODE_NODE:=$(command -v node)}"
+# Volta shims resolve to volta-shim, so resolve Node through its own runtime.
+T3CODE_NODE=$("$T3CODE_NODE" -p 'process.execPath')
+[[ -d $T3CODE_WORKDIR ]] || { echo "Missing working directory: $T3CODE_WORKDIR" >&2; exit 1; }
+export PATH="$(dirname "$T3CODE_NODE"):$PATH"
+if [[ -n $package ]]; then
+  runtime="$T3CODE_BASE/runtime/builds/$build_id"
+else
+  runtime="$T3CODE_BASE/runtime/versions/$version"
+fi
+install -d -m 700 "$config_dir" "$T3CODE_BASE" "$runtime"
+exec 9>"$config_dir/install.lock"
+flock 9
+if [[ -n $package ]]; then
+  package_hash=$(sha256sum -- "$package")
+  package_hash=${package_hash%% *}
+  if [[ -f $runtime/.install-complete ]]; then
+    [[ -f $runtime/package.sha256 && $(<"$runtime/package.sha256") == "$package_hash" ]] || {
+      echo 'Build ID already exists with a different artifact; use a new ID.' >&2; exit 1;
+    }
+  fi
+fi
+if [[ ! -f $runtime/.install-complete ]]; then
+  npm install --prefix "$runtime" --omit=dev --no-save --package-lock=false --no-fund --no-audit "${package:-t3@$version}"
+  [[ -f $runtime/node_modules/t3/dist/bin.mjs ]] || { echo 'Incomplete runtime installation.' >&2; exit 1; }
+  "$T3CODE_NODE" "$runtime/node_modules/t3/dist/bin.mjs" --help >/dev/null
+  if [[ -n $package ]]; then printf '%s\n' "$package_hash" > "$runtime/package.sha256"; fi
+  touch "$runtime/.install-complete"
+fi
+T3CODE_ENTRY="$runtime/node_modules/t3/dist/bin.mjs"
+[[ -f $T3CODE_ENTRY ]] || { echo 'Incomplete runtime installation.' >&2; exit 1; }
+installed_version=$("$T3CODE_NODE" -p "require(process.argv[1]).version" "$runtime/node_modules/t3/package.json")
+if [[ -z $package ]]; then [[ $installed_version == "$version" ]]; fi
+T3CODE_BUILD_ID=${build_id:-npm-$version}
+umask 077
+env_tmp=$(mktemp "$config_dir/service.env.XXXXXX")
+trap 'rm -f -- "$env_tmp"' EXIT
+for name in T3CODE_BUILD_ID T3CODE_NODE T3CODE_ENTRY T3CODE_HOST T3CODE_PORT T3CODE_ORIGIN T3CODE_BASE T3CODE_WORKDIR; do
+  printf '%s=%q\n' "$name" "${!name}"
+done > "$env_tmp"
+mv -f -- "$env_tmp" "$config_dir/service.env"
+install -d "$HOME/.local/bin" "$HOME/.config/systemd/user"
+install -m 755 "$repo/scripts/t3code-run" "$repo/scripts/t3code-pair" "$HOME/.local/bin/"
+ln -sfn "$repo/scripts/t3code-update" "$HOME/.local/bin/t3code-update"
+install -m 644 "$repo/config/t3code/t3code.service" "$HOME/.config/systemd/user/t3code.service"
+systemctl --user daemon-reload
+systemctl --user enable t3code.service
+systemctl --user restart t3code.service
+for ((attempt=0; attempt<30; attempt++)); do
+  if curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 "http://$T3CODE_HOST:$T3CODE_PORT/" >/dev/null 2>&1; then
+    echo "T3 $installed_version ($T3CODE_BUILD_ID) is serving. Pair a browser with: t3code-pair DEVICE"
+    exit 0
+  fi
+  sleep 1
+done
+echo 'T3 did not become ready; inspect systemctl --user status t3code.service.' >&2
+exit 1

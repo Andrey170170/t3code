@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source "${HOME}/.config/t3code/service.env"
+export PATH="$(dirname "$T3CODE_NODE"):${HOME}/.local/bin:${HOME}/.volta/bin:/usr/local/bin:/usr/bin:/bin"
+exec "$T3CODE_NODE" "$T3CODE_ENTRY" serve --host "$T3CODE_HOST" \
+  --port "$T3CODE_PORT" --base-dir "$T3CODE_BASE" "$T3CODE_WORKDIR"
