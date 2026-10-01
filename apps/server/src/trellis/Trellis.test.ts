@@ -229,6 +229,52 @@ describe("Trellis client", () => {
     }),
   );
 
+  it.effect("tells a checkpoint refused before the stop from one that failed after it", () =>
+    Effect.gen(function* () {
+      const bodies = [
+        // Refused on another thread's open turn: nothing ran.
+        {
+          error: "checkpoint failed: other threads are mid-turn here: th-2",
+          details: { restarted: false, stopped: [], ms: { wait: 0, stop: 0 }, turns: [] },
+        },
+        // The snapshot failed after the stop; Trellis restarted it while unwinding.
+        {
+          error: "checkpoint failed: snapshot failed",
+          details: {
+            restarted: false,
+            stopped: [{ pid: 9, cmd: "npm run dev" }],
+            ms: { wait: 0, stop: 412 },
+          },
+        },
+      ];
+      const harness = setup(({ url }) => {
+        if (url === "/v1/status") return { body: { root: "/trellis", role: "user" } };
+        return { status: 409, body: bodies.shift() };
+      });
+      const layer = yield* Effect.promise(() => harness.listen());
+      const outcomes = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        yield* trellis.refresh;
+        const input = { target: "/x", thread: "th-1", interrupt: false };
+        return [yield* trellis.checkpoint(input), yield* trellis.checkpoint(input)];
+      }).pipe(Effect.provide(layer));
+      expect(outcomes).toEqual([
+        {
+          ok: false,
+          error: "checkpoint failed: other threads are mid-turn here: th-2",
+          restarted: false,
+          stopped: [],
+        },
+        {
+          ok: false,
+          error: "checkpoint failed: snapshot failed",
+          restarted: true,
+          stopped: [{ pid: 9, cmd: "npm run dev" }],
+        },
+      ]);
+    }),
+  );
+
   it.effect("names a route an older Trellis lacks, and the status of other bare failures", () =>
     Effect.gen(function* () {
       const harness = setup(({ url }) => {

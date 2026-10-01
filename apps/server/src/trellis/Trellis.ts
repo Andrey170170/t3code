@@ -45,6 +45,9 @@ const DEFAULT_TRELLIS_SOCKET = "/trellis/state/api.sock";
 /** How long a failed implicit probe of Trellis is not repeated. */
 const DISCOVERY_RETRY_MS = 10_000;
 
+/** Turn messages wait while a workspace checkpoints; Trellis gives up after 15 minutes. */
+const TURN_WAIT_MS = 16 * 60_000;
+
 export const TrellisWorkspaceView = Schema.Struct({
   id: Schema.String,
   kind: Schema.String,
@@ -139,6 +142,62 @@ const TrellisDescribeView = Schema.Struct({
 const TrellisPreviewView = Schema.Struct({ host_port: Schema.Finite, url: Schema.String });
 const TrellisPrimerView = Schema.Struct({ primer: Schema.String });
 const TrellisErrorBody = Schema.Struct({ error: Schema.String });
+const TrellisTurnsView = Schema.Struct({ restarted: Schema.Array(Schema.String) });
+
+/** An open turn as Trellis records it. */
+export const TrellisOpenTurn = Schema.Struct({
+  workspace: Schema.String,
+  thread: Schema.String,
+  turn: Schema.String,
+});
+export type TrellisOpenTurn = typeof TrellisOpenTurn.Type;
+
+const TrellisProc = Schema.Struct({ pid: Schema.Finite, cmd: Schema.String });
+
+/** What a checkpoint did (`POST /v1/checkpoint`). */
+export const TrellisCheckpointResult = Schema.Struct({
+  snapshot: Schema.optional(Schema.Struct({ id: Schema.String })),
+  checkpoint: Schema.Boolean,
+  stopped: Schema.Array(TrellisProc),
+  interrupted: Schema.Array(Schema.String),
+  restarted: Schema.Boolean,
+});
+export type TrellisCheckpointResult = typeof TrellisCheckpointResult.Type;
+
+/** A checkpoint Trellis refused or that failed; `details` carries how far it got. */
+const TrellisCheckpointRefusal = Schema.Struct({
+  error: Schema.String,
+  details: Schema.optional(
+    Schema.Struct({
+      restarted: Schema.optional(Schema.Boolean),
+      snapshot: Schema.optional(Schema.Unknown),
+      stopped: Schema.optional(Schema.Array(TrellisProc)),
+      late: Schema.optional(Schema.Array(TrellisProc)),
+      survivors: Schema.optional(Schema.Array(TrellisProc)),
+      ms: Schema.optional(Schema.Struct({ stop: Schema.optional(Schema.Finite) })),
+    }),
+  ),
+});
+
+/**
+ * A checkpoint's outcome: its result, or Trellis's refusal or failure, with
+ * whether the workspace was stopped and restarted anyway (its processes are
+ * gone then).
+ */
+export type TrellisCheckpointOutcome =
+  | { readonly ok: true; readonly result: TrellisCheckpointResult }
+  | {
+      readonly ok: false;
+      readonly error: string;
+      /** The stop ran (and Trellis restarted the workspace on its way out). */
+      readonly restarted: boolean;
+      /** Processes the stop ended, when it ran. */
+      readonly stopped: ReadonlyArray<{ readonly pid: number; readonly cmd: string }>;
+    };
+
+/** Trellis refuses a turn message older than one it applied (409). */
+export const isStaleTurnMessage = (error: TrellisError) =>
+  /^turn message -?\d+ is older than one already applied/.test(error.message);
 
 /** Enabled Trellis state. `shimDir` is null when provider shims could not be created. */
 export interface TrellisEnv {
@@ -305,6 +364,48 @@ export class Trellis extends Context.Service<
     ) => Effect.Effect<ReadonlyArray<{ readonly url: string }>, TrellisError>;
     /** Short agent orientation for sessions started in `target`. */
     readonly primer: (target: string) => Effect.Effect<string, TrellisError>;
+    /**
+     * Counts the times Trellis became reachable (from unreachable, or at
+     * startup), so a client can resynchronize on every connect.
+     */
+    readonly connects: Effect.Effect<number>;
+    /**
+     * Reports a turn starting or ending in `target` (user socket only). A
+     * start waits while the workspace is checkpointing; `restarted` lists the
+     * workspaces a checkpoint stopped and restarted meanwhile.
+     */
+    readonly reportTurn: (input: {
+      readonly target: string;
+      readonly thread: string;
+      readonly turn: string;
+      readonly event: "start" | "end";
+      readonly seq: number;
+    }) => Effect.Effect<{ readonly restarted: ReadonlyArray<string> }, TrellisError>;
+    /** Replaces the whole set of open turns; waits like a start for named workspaces. */
+    readonly replaceTurns: (input: {
+      readonly open: ReadonlyArray<{
+        readonly target: string;
+        readonly thread: string;
+        readonly turn: string;
+      }>;
+      readonly seq: number;
+    }) => Effect.Effect<{ readonly restarted: ReadonlyArray<string> }, TrellisError>;
+    /** The open turns of `target`'s workspace. */
+    readonly listTurns: (
+      target: string,
+    ) => Effect.Effect<ReadonlyArray<TrellisOpenTurn>, TrellisError>;
+    /**
+     * Takes a checkpoint of a dedicated workspace: waits for guards, stops
+     * it, snapshots it and restarts it. Other threads' open turns refuse it
+     * unless `interrupt`. Trellis's refusals and failures are outcomes; only
+     * an unreachable Trellis fails.
+     */
+    readonly checkpoint: (input: {
+      readonly target: string;
+      readonly name?: string | undefined;
+      readonly thread: string;
+      readonly interrupt: boolean;
+    }) => Effect.Effect<TrellisCheckpointOutcome, TrellisError>;
   }
 >()("t3/trellis/Trellis") {}
 
@@ -315,7 +416,7 @@ interface RawResponse {
 
 function requestOverSocket(input: {
   readonly socketPath: string;
-  readonly method: "GET" | "POST" | "PATCH" | "DELETE";
+  readonly method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   readonly path: string;
   readonly body: unknown;
   readonly timeoutMs: number;
@@ -379,6 +480,10 @@ const ROUTE_MINIMUM: ReadonlyArray<{ readonly route: string; readonly since: str
     route: "GET /v1/activities",
     since: "main at or after PR #15 (core/checkpoint, d949d28)",
   },
+  ...["POST /v1/turns", "PUT /v1/turns", "GET /v1/turns", "POST /v1/checkpoint"].map((route) => ({
+    route,
+    since: "main at or after PR #15 (core/checkpoint, d949d28)",
+  })),
 ];
 
 /** The error for a failed response whose body is not Trellis' `{error}`. */
@@ -474,9 +579,8 @@ const make = Effect.gen(function* () {
     Effect.orElseSucceed(() => false),
   );
 
-  const call = <S extends Schema.Top>(
-    schema: S,
-    method: "GET" | "POST" | "PATCH" | "DELETE",
+  const request = (
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
     path: string,
     options: { readonly body?: unknown; readonly timeoutMs?: number } = {},
   ) =>
@@ -501,7 +605,15 @@ const make = Effect.gen(function* () {
             message: `Trellis is unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
           }),
       });
-    }).pipe(
+    });
+
+  const call = <S extends Schema.Top>(
+    schema: S,
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+    path: string,
+    options: { readonly body?: unknown; readonly timeoutMs?: number } = {},
+  ) =>
+    request(method, path, options).pipe(
       Effect.flatMap((response) =>
         response.status >= 400
           ? // Trellis' own refusals carry `{error}`; a missing route does not.
@@ -543,6 +655,7 @@ const make = Effect.gen(function* () {
 
   // When a probe last found Trellis unreachable.
   let lastFailedProbeMs = Number.NEGATIVE_INFINITY;
+  let connects = 0;
   // Serialized so concurrent refreshes never run `trellis shims` twice or
   // let a slower refresh overwrite a newer result.
   const refreshLock = yield* Semaphore.make(1);
@@ -562,6 +675,7 @@ const make = Effect.gen(function* () {
       yield* Ref.set(state, null);
       return null;
     }
+    if (previous === null) connects += 1;
     // A failed shim setup is retried at most once a minute.
     const now = yield* Clock.currentTimeMillis;
     if (
@@ -762,6 +876,49 @@ const make = Effect.gen(function* () {
       call(TrellisPrimerView, "GET", `/v1/primer?${query({ target })}`, { timeoutMs: 5_000 }).pipe(
         Effect.map((view) => view.primer),
       ),
+    connects: Effect.sync(() => connects),
+    reportTurn: (body) =>
+      // A start waits while the workspace is checkpointing (Trellis gives up after 15 min).
+      call(TrellisTurnsView, "POST", "/v1/turns", { body, timeoutMs: TURN_WAIT_MS }),
+    replaceTurns: (body) =>
+      call(TrellisTurnsView, "PUT", "/v1/turns", { body, timeoutMs: TURN_WAIT_MS }),
+    listTurns: (target) =>
+      call(Schema.Array(TrellisOpenTurn), "GET", `/v1/turns?${query({ target })}`),
+    checkpoint: ({ target, name, thread, interrupt }) =>
+      request("POST", "/v1/checkpoint", {
+        body: { target, thread, interrupt, ...(name === undefined ? {} : { name }) },
+        // Up to five minutes for guarded commands, the graceful stop, the
+        // snapshot and the restart.
+        timeoutMs: 10 * 60_000,
+      }).pipe(
+        Effect.flatMap((response): Effect.Effect<TrellisCheckpointOutcome, TrellisError> =>
+          response.status >= 400
+            ? decodeJson(TrellisCheckpointRefusal, response.body, response.status).pipe(
+                Effect.mapError(() =>
+                  trellisStatusError("POST", "/v1/checkpoint", response.status),
+                ),
+                Effect.map((body) => {
+                  // A failure after the stop may not say `restarted` (Trellis
+                  // restarts the workspace while unwinding); the stop shows.
+                  const details = body.details;
+                  const stopped = [...(details?.stopped ?? []), ...(details?.late ?? [])];
+                  return {
+                    ok: false as const,
+                    error: body.error,
+                    restarted:
+                      details?.restarted === true ||
+                      details?.snapshot !== undefined ||
+                      (details?.ms?.stop ?? 0) > 0 ||
+                      stopped.length + (details?.survivors?.length ?? 0) > 0,
+                    stopped,
+                  };
+                }),
+              )
+            : decodeJson(TrellisCheckpointResult, response.body, response.status).pipe(
+                Effect.map((result) => ({ ok: true as const, result })),
+              ),
+        ),
+      ),
   });
 });
 
@@ -864,6 +1021,11 @@ export function makeTestTrellis(
     preview: unused,
     listPreviews: unused,
     primer: unused,
+    connects: Effect.succeed(1),
+    reportTurn: () => Effect.succeed({ restarted: [] }),
+    replaceTurns: () => Effect.succeed({ restarted: [] }),
+    listTurns: () => Effect.succeed([]),
+    checkpoint: unused,
     ...rest,
   });
 }

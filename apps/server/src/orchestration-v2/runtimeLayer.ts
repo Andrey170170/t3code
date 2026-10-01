@@ -65,12 +65,6 @@ const runtimePolicyProvided = TrellisRuntimePolicy.layer.pipe(
   Layer.provide(ProjectStore.layer),
 );
 
-// Restores, turn admission and the restore rule follow Trellis restore scopes
-// in Trellis projects; without the Trellis service they are V2's defaults.
-const restoreSeamsProvided = TrellisRestore.layer.pipe(
-  Layer.provide(Layer.mergeAll(ProjectStore.layer, effectOutboxLayer, projectionStoreLayer)),
-);
-
 const eventStoreProvided = eventStoreLayer.pipe(
   Layer.provide(OrchestrationEventInfrastructureLayerLive),
 );
@@ -129,6 +123,20 @@ const providerSessionManagerProvided = providerSessionManagerLayer.pipe(
       idAllocatorLayer,
       providerEventIngestorProvided,
       projectionStoreLayer,
+    ),
+  ),
+);
+
+// Restores, turn admission and the restore rule follow Trellis restore scopes
+// in Trellis projects; without the Trellis service they are V2's defaults.
+// Admission releases the sessions of a workspace a checkpoint restarted.
+const restoreSeamsProvided = TrellisRestore.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectStore.layer,
+      effectOutboxLayer,
+      projectionStoreLayer,
+      providerSessionManagerProvided,
     ),
   ),
 );

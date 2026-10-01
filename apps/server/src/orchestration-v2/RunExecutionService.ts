@@ -502,6 +502,8 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly shouldStartProviderTurn?: () => Effect.Effect<boolean, never>;
   readonly shouldFinalizeRun?: () => Effect.Effect<boolean, never>;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
+  /** Why the run was interrupted, when its interrupt request named a reason. */
+  readonly interruptReason?: () => Effect.Effect<string | undefined, never>;
   readonly message: ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
@@ -547,6 +549,7 @@ export const layer: Layer.Layer<
       readonly attempt: OrchestrationV2RunAttempt;
       readonly shouldFinalizeRun?: () => Effect.Effect<boolean, never>;
       readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
+      readonly interruptReason?: () => Effect.Effect<string | undefined, never>;
       readonly openRunOwnedSubagents?: OpenRunOwnedSubagentProjection;
       readonly terminal: ProviderTerminalEvent;
       readonly failureItemPersisted: boolean;
@@ -558,6 +561,10 @@ export const layer: Layer.Layer<
     }) =>
       Effect.gen(function* () {
         const completedAt = yield* DateTime.now;
+        const interruptReason =
+          input.terminal.status === "interrupted" && input.interruptReason !== undefined
+            ? yield* input.interruptReason()
+            : undefined;
         const finalizedAttempt: OrchestrationV2RunAttempt | null = {
           ...input.attempt,
           status: input.terminal.status,
@@ -592,6 +599,7 @@ export const layer: Layer.Layer<
                       rootNode: input.rootNode,
                       providerThread: input.providerThread,
                       completedAt,
+                      reason: interruptReason,
                     }),
                   },
                 ],
@@ -702,6 +710,7 @@ export const layer: Layer.Layer<
                       rootNode: input.rootNode,
                       providerThread: input.providerThread,
                       completedAt,
+                      reason: interruptReason,
                     }),
                   },
                 ]
@@ -962,6 +971,9 @@ export const layer: Layer.Layer<
                   : {
                       hasUnpairedRunInterruptRequest: input.hasUnpairedRunInterruptRequest,
                     }),
+                ...(input.interruptReason === undefined
+                  ? {}
+                  : { interruptReason: input.interruptReason }),
                 openRunOwnedSubagents: openSubagents,
                 terminal,
                 failureItemPersisted: terminal.status === "failed",
@@ -1283,6 +1295,9 @@ export const layer: Layer.Layer<
                                               hasUnpairedRunInterruptRequest:
                                                 input.hasUnpairedRunInterruptRequest,
                                             }),
+                                        ...(input.interruptReason === undefined
+                                          ? {}
+                                          : { interruptReason: input.interruptReason }),
                                         openRunOwnedSubagents: openSubagents,
                                         terminal: makeFailedTerminalEvent(
                                           makeProviderFailure({
@@ -1389,6 +1404,9 @@ export const layer: Layer.Layer<
                                   hasUnpairedRunInterruptRequest:
                                     input.hasUnpairedRunInterruptRequest,
                                 }),
+                            ...(input.interruptReason === undefined
+                              ? {}
+                              : { interruptReason: input.interruptReason }),
                             openRunOwnedSubagents: openSubagents,
                             terminal: makeFailedTerminalEvent(
                               makeProviderFailure({
@@ -1427,6 +1445,8 @@ function makeInterruptResultTurnItem(input: {
   readonly rootNode: OrchestrationV2ExecutionNode;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly completedAt: DateTime.Utc;
+  /** The interrupt request's reason; without one the user stopped the run. */
+  readonly reason?: string | undefined;
 }): OrchestrationV2TurnItem {
   return {
     id: input.idAllocator.derive.runSignalTurnItem({
@@ -1450,6 +1470,6 @@ function makeInterruptResultTurnItem(input: {
     completedAt: input.completedAt,
     updatedAt: input.completedAt,
     type: "run_interrupt_result",
-    message: "Run interrupted by user",
+    message: input.reason ?? "Run interrupted by user",
   };
 }

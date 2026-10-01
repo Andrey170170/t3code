@@ -32,7 +32,9 @@ import { assert, describe, it } from "@effect/vitest";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as CodexClient from "effect-codex-app-server/client";
+import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexReplay from "effect-codex-app-server/replay";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -764,6 +766,32 @@ describe("CodexAdapterV2 process spawning", () => {
         { command: "/t3/trellis-shims/codex", cwd: "/trellis/workspaces/ws-1/project" },
       ]);
     }).pipe(
+      Effect.provideService(HostProcessPlatform, "linux"),
+      Effect.provideService(SpawnExecutableResolution, (command) => command),
+    ),
+  );
+
+  it.effect("reports the app-server process exiting to the factory's caller", () =>
+    Effect.gen(function* () {
+      const factory = yield* CodexAppServerClientFactory.pipe(
+        Effect.provide(codexAppServerClientFactoryFromSettingsLayer),
+        Effect.provideService(ProviderEventLoggers, NoOpProviderEventLoggers),
+      );
+      const terminated = yield* Deferred.make<string>();
+      // `true app-server ...` exits at once, like an app-server killed by a workspace stop.
+      yield* factory.open({
+        instanceId: CODEX_DEFAULT_INSTANCE_ID,
+        threadId: ThreadId.make("thread-exit"),
+        providerSessionId: ProviderSessionId.make("provider-session-exit"),
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        settings: { ...DEFAULT_CODEX_SETTINGS, binaryPath: "true" },
+        environment: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+        onTermination: (error) => Deferred.succeed(terminated, error._tag).pipe(Effect.asVoid),
+      });
+      assert.equal(yield* Deferred.await(terminated), "CodexAppServerProcessExitedError");
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
       Effect.provideService(HostProcessPlatform, "linux"),
       Effect.provideService(SpawnExecutableResolution, (command) => command),
     ),
@@ -1927,6 +1955,56 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       }).pipe(Effect.scoped, Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
     );
   }
+
+  it.effect("fails the session's event stream when the app-server terminates", () =>
+    Effect.gen(function* () {
+      const transcript = makeCodexReplayTranscript({
+        scenario: "terminated",
+        entries: codexReplayPreamble({
+          nativeThreadId: "terminated",
+          nativeTurnId: "unused",
+          prompt: "unused",
+        }).slice(0, 3),
+      });
+      let terminate: ((error: CodexErrors.CodexAppServerError) => Effect.Effect<void>) | undefined;
+      const adapter = makeCodexAdapterV2({
+        instanceId: CODEX_DEFAULT_INSTANCE_ID,
+        settings: DEFAULT_CODEX_SETTINGS,
+        environment: {},
+        clientFactory: {
+          open: (openInput) => {
+            terminate = openInput.onTermination;
+            return Layer.build(CodexReplay.layerReplay(transcript)).pipe(
+              Effect.flatMap((context) =>
+                Effect.service(CodexClient.CodexAppServerClient).pipe(Effect.provide(context)),
+              ),
+              Effect.orDie,
+            );
+          },
+        },
+        fileSystem: yield* FileSystem.FileSystem,
+        idAllocator: yield* IdAllocatorV2,
+        serverConfig: yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie),
+        continuationRequests: { offer: () => Effect.void },
+      });
+      const runtime = yield* adapter.openSession({
+        threadId: ThreadId.make("thread-terminated"),
+        providerSessionId: ProviderSessionId.make("provider-session-terminated"),
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+      });
+      const drained = yield* runtime.events.pipe(Stream.runDrain, Effect.exit, Effect.forkScoped);
+      assert.isDefined(terminate);
+      yield* terminate!(new CodexErrors.CodexAppServerProcessExitedError({ code: 137 }));
+      const exit = yield* Fiber.join(drained);
+      assert.isTrue(exit._tag === "Failure");
+      const error = exit._tag === "Failure" ? Cause.squash(exit.cause) : undefined;
+      assert.equal(
+        (error as { _tag?: string } | undefined)?._tag,
+        "ProviderAdapterEventStreamError",
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+  );
 
   it.effect("unsubscribes from the native thread when it is unloaded", () =>
     Effect.gen(function* () {

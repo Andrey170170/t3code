@@ -52,6 +52,13 @@ describe("resolveT3McpToolPresentation", () => {
     });
   });
 
+  it("pretty prints the Trellis checkpoint tool", () => {
+    expect(resolveT3McpToolPresentation("mcp__t3-code__trellis_checkpoint")).toEqual({
+      displayName: "Take a Trellis checkpoint",
+      logo: "t3-code",
+    });
+  });
+
   it("pretty prints worktree T3 MCP tool names", () => {
     expect(resolveT3McpToolPresentation("mcp__t3-code__t3_worktree_handoff")).toEqual({
       displayName: "Hand off thread to a git worktree",

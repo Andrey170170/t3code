@@ -1,5 +1,7 @@
 import { OrchestratorV2 } from "../../../orchestration-v2/Orchestrator.ts";
 import { ProjectionStoreV2 } from "../../../orchestration-v2/ProjectionStore.ts";
+import { ProjectStoreV2 } from "../../../orchestration-v2/ProjectStore.ts";
+import { ProviderSessionManagerV2 } from "../../../orchestration-v2/ProviderSessionManager.ts";
 import { DeviceService } from "../../../device/DeviceService.ts";
 import * as ServerConfig from "../../../config.ts";
 import { expect, it } from "@effect/vitest";
@@ -29,6 +31,8 @@ import * as TrellisPreview from "../../../trellis/TrellisPreview.ts";
 const StubServicesLive = Layer.mergeAll(
   Layer.mock(OrchestratorV2)({}),
   Layer.mock(ProjectionStoreV2)({}),
+  Layer.mock(ProviderSessionManagerV2)({}),
+  Layer.mock(ProjectStoreV2)({}),
   Layer.mock(DeviceService)({}),
   TrellisPreview.layerDisabled,
   Layer.mock(ThreadManagementService)({}),

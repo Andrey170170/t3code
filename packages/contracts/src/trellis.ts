@@ -202,3 +202,47 @@ export const TrellisResolvePreviewUrlResult = Schema.Struct({
   url: Schema.String,
 });
 export type TrellisResolvePreviewUrlResult = typeof TrellisResolvePreviewUrlResult.Type;
+
+/**
+ * Input for the `trellis_checkpoint` MCP tool: a checkpoint of the calling
+ * thread's dedicated Trellis workspace, which ends the calling turn. The
+ * result arrives as the thread's next message.
+ */
+export const TrellisCheckpointMcpInput = Schema.Struct({
+  name: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(200)).annotate({
+      description: "Name of the checkpoint (it names and pins the snapshot).",
+    }),
+  ),
+  interrupt: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Also end the running turns of your own delegated workers (and theirs) in this workspace; they continue after the restart. Other threads' running turns always refuse the checkpoint.",
+    }),
+  ),
+});
+export type TrellisCheckpointMcpInput = typeof TrellisCheckpointMcpInput.Type;
+
+export const TrellisCheckpointMcpResult = Schema.Struct({
+  status: Schema.Literal("started"),
+  /** Workers whose turns are being ended, by title. */
+  interrupting: Schema.Array(Schema.String),
+  note: Schema.String,
+});
+export type TrellisCheckpointMcpResult = typeof TrellisCheckpointMcpResult.Type;
+
+export class TrellisCheckpointMcpFailure extends Schema.TaggedError<TrellisCheckpointMcpFailure>()(
+  "TrellisCheckpointMcpFailure",
+  {
+    code: Schema.Literals([
+      "capability_denied",
+      "thread_not_found",
+      "not_a_trellis_workspace",
+      "threads_running",
+      "checkpoint_in_progress",
+      "trellis_unavailable",
+      "operation_failed",
+    ]),
+    message: Schema.String,
+  },
+) {}

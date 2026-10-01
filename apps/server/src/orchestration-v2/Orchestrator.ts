@@ -59,6 +59,7 @@ import * as Stream from "effect/Stream";
 
 import * as ProjectStore from "./ProjectStore.ts";
 import { CheckpointRestoreRule } from "./CheckpointRestoreSafety.ts";
+import { TurnAdmission } from "./TurnAdmission.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
 import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
@@ -665,6 +666,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   const fileSystem = yield* FileSystem.FileSystem;
   const restoreRule = yield* CheckpointRestoreRule;
+  const turnAdmission = yield* TurnAdmission;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
   const continuationRequests = yield* ProviderContinuationRequests;
   const providerSessions = yield* ProviderSessionManagerV2;
@@ -1220,6 +1222,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       ]);
     });
+
+  const isTurnEndStatus = (status: OrchestrationV2Run["status"]) =>
+    status === "completed" ||
+    status === "interrupted" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "rolled_back";
 
   const startNextQueuedRun = (threadId: ThreadId, options?: { readonly failedRunId?: RunId }) =>
     Effect.gen(function* () {
@@ -7854,6 +7863,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const completionCohortRunId = completionMessage?.delegatedCompletion?.parentRunId ?? run.id;
       const stopCompletionCohort = () =>
         Effect.gen(function* () {
+          if (command.keepDelegatedCompletions === true) return;
           yield* disposeDelegatedCompletionCohort({
             command,
             events,
@@ -9611,6 +9621,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             stored.event.payload.status === "rolled_back"),
       ),
       Stream.runForEach(handleTerminalRun),
+      Effect.forkDetach,
+    );
+
+  // Every terminal run ends its admitted turn, whatever ended it, including
+  // the runtime reconciliation at shutdown that queue promotion skips.
+  yield* eventSink
+    .stream({ afterSequence: terminalEventsAfterSequence, eventType: "run.updated" })
+    .pipe(
+      Stream.runForEach((stored) =>
+        stored.event.type === "run.updated" && isTurnEndStatus(stored.event.payload.status)
+          ? turnAdmission.end({
+              threadId: stored.event.threadId,
+              runId: stored.event.payload.id,
+              status: stored.event.payload.status,
+            })
+          : Effect.void,
+      ),
+      Effect.catchCause((cause) => Effect.logWarning("Failed to report V2 turn ends", { cause })),
       Effect.forkDetach,
     );
 
