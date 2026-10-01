@@ -441,6 +441,21 @@ const make = Effect.gen(function* () {
         `${fork.name} is the workspace this thread works in; a lead discards it.`,
       );
     }
+    // Only forks this thread or its own workers spawned; others belong to other leads or the user.
+    const spawner = fork.spawned_by?.thread ?? null;
+    const shellForOwner = yield* threads
+      .getShellSnapshot()
+      .pipe(Effect.mapError((error) => failure("operation_failed", error.message)));
+    const own = new Set<string>([
+      caller.id,
+      ...descendantsOf(caller.id, [...shellForOwner.threads, ...shellForOwner.archivedThreads]),
+    ]);
+    if (spawner === null || !own.has(spawner)) {
+      return yield* failure(
+        "fork_not_owned",
+        `${fork.name} (${fork.id}) was not spawned by this thread or its workers${spawner === null ? " (the user made it)" : ""}, so it is not yours to discard. Ask the user.`,
+      );
+    }
     let discarded = false;
     if (fork.deleted_at === null) {
       // Refused while a thread there works; Trellis would stop it mid-turn.

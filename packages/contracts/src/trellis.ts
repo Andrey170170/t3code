@@ -373,6 +373,7 @@ export class TrellisDiscardForkMcpFailure extends Schema.TaggedError<TrellisDisc
       "thread_not_found",
       "not_a_trellis_workspace",
       "fork_not_found",
+      "fork_not_owned",
       "threads_running",
       "trellis_unavailable",
       "operation_failed",

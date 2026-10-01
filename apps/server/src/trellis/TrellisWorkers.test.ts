@@ -790,6 +790,39 @@ it.effect("resumes after the saved event cursor, so a restart misses no completi
   }).pipe(Effect.provide(testLayer(fake, events)));
 });
 
+it.effect("a lead discards only forks it or its workers spawned", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const workers = yield* TrellisWorkers.TrellisWorkers;
+    const lead = yield* startLead;
+    yield* delegate(lead.threadId, { fork: { from: "latest", name: "mine" } });
+    const other = yield* createThread("other", pathOf(LEAD_WS));
+    yield* sendMessage(other.threadId, "work");
+    for (const request of [{ fork: "mine" }, { fork: "ws-fork1", requestPurge: true }]) {
+      const refused = yield* workers
+        .discardFork(scopeOf(other.threadId), request)
+        .pipe(Effect.flip);
+      assert.equal(refused.code, "fork_not_owned");
+    }
+    assert.isNull(
+      fake.state.workspaces.find((workspace) => workspace.id === "ws-fork1")!.deleted_at,
+    );
+    assert.deepEqual(fake.state.purgeRequests, []);
+    // A fork a worker spawned belongs to its lead too.
+    const worker = yield* delegate(lead.threadId, "parent");
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    yield* service.delegateTask(scopeOf(worker.childThreadId), {
+      task: "Nested",
+      workspace: { fork: { from: "latest", name: "nested" } },
+    });
+    // Past the ownership check: only its running worker holds it now.
+    const busy = yield* workers
+      .discardFork(scopeOf(lead.threadId), { fork: "nested" })
+      .pipe(Effect.flip);
+    assert.equal(busy.code, "threads_running");
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
 it.effect("an exact fork id wins over another fork named like it", () => {
   const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
   return Effect.gen(function* () {

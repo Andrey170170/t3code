@@ -29,7 +29,7 @@ const TrellisCheckpoint = Tool.make("trellis_checkpoint", {
 
 const TrellisDiscardFork = Tool.make("trellis_discard_fork", {
   description:
-    "Discard a fork of this Trellis project (a worker's fork you merged or no longer need): it moves to the Trellis trash with its threads archived; it is refused while a thread works in it. Merge first if you want its work: `trellis merge-brief FORK` gives the incoming copy to fetch from, then `trellis merged FORK SNAP` records the merge. A discarded fork expires after 30 days unless it holds unmerged work (uncommitted changes, or commits the parent lacks), which keeps it until the user purges it; the result says which. With requestPurge, also ask the user to purge it for good (agents never purge); calling it on a fork already in the trash only files the request.",
+    "Discard a fork of this Trellis project that you or your workers spawned (a worker's fork you merged or no longer need; other forks are refused): it moves to the Trellis trash with its threads archived; it is refused while a thread works in it. Merge first if you want its work: `trellis merge-brief FORK` gives the incoming copy to fetch from, then `trellis merged FORK SNAP` records the merge. A discarded fork expires after 30 days unless it holds unmerged work (uncommitted changes, or commits the parent lacks), which keeps it until the user purges it; the result says which. With requestPurge, also ask the user to purge it for good (agents never purge); calling it on a fork already in the trash only files the request.",
   parameters: TrellisDiscardForkMcpInput,
   success: TrellisDiscardForkMcpResult,
   failure: TrellisDiscardForkMcpFailure,
