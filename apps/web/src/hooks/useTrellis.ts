@@ -22,7 +22,7 @@ import { waitForProject } from "~/state/entities";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useDebouncedValue } from "~/state/queries";
 import { useEnvironmentQuery } from "~/state/query";
-import { refreshTrellisStatus, trellisEnvironment } from "~/state/trellis";
+import { loadTrellisStatus, trellisEnvironment } from "~/state/trellis";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { resolveThreadRouteTarget } from "~/threadRoutes";
@@ -243,8 +243,9 @@ export function useTrellisTrash() {
         return "failed";
       }
       if (result.value.trashed === null) return "gone";
-      // Its retired root hides the emptied project from the sidebar.
-      refreshTrellisStatus(appAtomRegistry, environmentId);
+      // Its retired root hides the emptied project. Awaited, so a caller that
+      // navigates next never lands on a new draft in the trashed project.
+      await loadTrellisStatus(appAtomRegistry, environmentId);
       toastManager.add(
         stackedThreadToast({
           type: "success",
