@@ -8,6 +8,7 @@ import { VcsRepositoryDetectionError } from "@t3tools/contracts";
 
 import * as GitManager from "./GitManager.ts";
 import * as GitWorkflowService from "./GitWorkflowService.ts";
+import * as Trellis from "../trellis/Trellis.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 
@@ -26,6 +27,30 @@ function makeLayer(input: {
 }
 
 describe("GitWorkflowService", () => {
+  it.effect("refuses to create a worktree of a Trellis project", () => {
+    const detect = vi.fn(() => Effect.succeed(null));
+    return Effect.gen(function* () {
+      const workflow = yield* GitWorkflowService.GitWorkflowService;
+      const error = yield* workflow
+        .createWorktree({
+          cwd: "/trellis/workspaces/ws-1/project",
+          refName: "main",
+          newRefName: "feature",
+          path: null,
+        })
+        .pipe(Effect.flip);
+
+      assert.equal(error.detail, Trellis.TRELLIS_WORKTREE_REFUSAL);
+      expect(detect).not.toHaveBeenCalled();
+    }).pipe(
+      Effect.provide(
+        makeLayer({ detect }).pipe(
+          Layer.provide(Layer.succeed(Trellis.Trellis, Trellis.makeTestTrellis())),
+        ),
+      ),
+    );
+  });
+
   it.effect("reports a non-Git VCS repository as not a Git repository", () =>
     Effect.gen(function* () {
       const workflow = yield* GitWorkflowService.GitWorkflowService;

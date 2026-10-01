@@ -51,8 +51,40 @@ export const ProviderAdapterV2RuntimePolicy = Schema.Struct({
   approvalPolicy: Schema.optional(Schema.Unknown),
   sandboxPolicy: Schema.optional(Schema.Unknown),
   reasoningEffort: Schema.optional(Schema.String),
+  /**
+   * How to launch the provider when it must not run as configured, e.g. inside
+   * a Trellis workspace. Absent for ordinary threads.
+   */
+  launch: Schema.optional(
+    Schema.Struct({
+      /** Replaces the instance's provider binary (a Trellis shim). */
+      executable: Schema.String,
+      /** Merged over the instance environment. */
+      env: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+      /** Appended to the provider's system or developer instructions. */
+      instructions: Schema.optional(Schema.String),
+      /** Sessions are reused only by threads with the same key (one process per workspace). */
+      sessionKey: Schema.optional(Schema.String),
+      /** Host that replaces loopback in the T3 MCP URL, as seen from inside the launch. */
+      loopbackHost: Schema.optional(Schema.String),
+    }),
+  ),
 });
 export type ProviderAdapterV2RuntimePolicy = typeof ProviderAdapterV2RuntimePolicy.Type;
+export type ProviderAdapterV2Launch = NonNullable<ProviderAdapterV2RuntimePolicy["launch"]>;
+
+const LOOPBACK_URL = /^([a-z][a-z0-9+.-]*:\/\/)(?:127\.0\.0\.1|localhost|\[::1\])(?=[:/?#]|$)/i;
+
+/**
+ * `url` with a loopback host replaced by the launch's `loopbackHost`, for a
+ * provider whose loopback is not T3's host (a container). Other URLs, and all
+ * URLs without a launch host, come back unchanged.
+ */
+export function withLaunchLoopbackHost(url: string, launch: ProviderAdapterV2Launch | undefined) {
+  return launch?.loopbackHost === undefined
+    ? url
+    : url.replace(LOOPBACK_URL, `$1${launch.loopbackHost}`);
+}
 
 export const ProviderAdapterV2TurnMessage = Schema.Struct({
   messageId: MessageId,

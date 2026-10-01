@@ -684,6 +684,12 @@ export const OrchestrationV2ProviderSession = Schema.Struct({
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   lastError: Schema.NullOr(Schema.String),
+  /**
+   * The runtime policy's `launch.sessionKey` this session was opened with (a
+   * Trellis workspace id). A thread reuses a session only while its own key
+   * still matches, so a process never serves another workspace.
+   */
+  sessionKey: Schema.optional(Schema.String),
 });
 export type OrchestrationV2ProviderSession = typeof OrchestrationV2ProviderSession.Type;
 

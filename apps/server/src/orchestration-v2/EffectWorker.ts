@@ -136,6 +136,9 @@ export const executorLayer: Layer.Layer<
                 ...(effect.request.revokeMcpCredential === undefined
                   ? {}
                   : { revokeMcpCredential: effect.request.revokeMcpCredential }),
+                ...(effect.request.unloadProviderThreads === undefined
+                  ? {}
+                  : { unloadProviderThreads: effect.request.unloadProviderThreads }),
               })
               .pipe(
                 Effect.mapError(

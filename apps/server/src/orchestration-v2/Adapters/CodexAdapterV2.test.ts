@@ -672,6 +672,103 @@ describe("CodexAdapterV2 process spawning", () => {
     }
   });
 
+  it("adds the launch's instructions and reaches T3 MCP through the launch's loopback host", () => {
+    const threadId = ThreadId.make("thread-codex-launch");
+    McpProviderSession.setMcpProviderSession({
+      environmentId: EnvironmentId.make("environment-codex-launch"),
+      threadId,
+      providerSessionId: "mcp-session-codex-launch",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      endpoint: "http://127.0.0.1:43123/mcp",
+      authorizationHeader: "Bearer secret-codex-token",
+      browserToolsAvailable: true,
+    });
+    try {
+      const params = codexThreadRuntimeParams({
+        threadId,
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: "/trellis/workspaces/ws-1/project",
+          launch: {
+            executable: "/t3/trellis-shims/codex",
+            instructions: "You are in a Trellis workspace.",
+            sessionKey: "ws-1",
+            loopbackHost: "host.containers.internal",
+          },
+        },
+      });
+      assert.equal(params.config.developer_instructions, "You are in a Trellis workspace.");
+      assert.equal(
+        codexThreadRuntimeParams({
+          threadId,
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/trellis/workspaces/ws-1/project",
+            launch: { executable: "/t3/trellis-shims/codex", instructions: "Primer." },
+          },
+          configuredDeveloperInstructions: "The user's own instructions.",
+        }).config.developer_instructions,
+        "The user's own instructions.\n\nPrimer.",
+      );
+      assert.deepEqual(params.config.mcp_servers, {
+        "t3-code": {
+          url: "http://host.containers.internal:43123/mcp",
+          http_headers: { Authorization: "Bearer secret-codex-token" },
+        },
+      });
+    } finally {
+      McpProviderSession.clearMcpProviderSession(threadId);
+    }
+  });
+
+  it.effect("spawns a launched app-server through the launch executable in the thread's cwd", () =>
+    Effect.gen(function* () {
+      const spawned: Array<{ readonly command: string; readonly cwd: string | undefined }> = [];
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (ChildProcess.isStandardCommand(command)) {
+          spawned.push({ command: command.command, cwd: command.options.cwd });
+        }
+        return Effect.fail(
+          PlatformError.systemError({ _tag: "NotFound", module: "ChildProcess", method: "spawn" }),
+        );
+      });
+      const factory = yield* CodexAppServerClientFactory.pipe(
+        Effect.provide(codexAppServerClientFactoryFromSettingsLayer),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(ProviderEventLoggers, NoOpProviderEventLoggers),
+      );
+      const open = (launch: ProviderAdapterV2RuntimePolicy["launch"]) =>
+        factory
+          .open({
+            instanceId: CODEX_DEFAULT_INSTANCE_ID,
+            threadId: ThreadId.make("thread-launch"),
+            providerSessionId: ProviderSessionId.make("provider-session-launch"),
+            runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/trellis/workspaces/ws-1/project",
+              ...(launch === undefined ? {} : { launch }),
+            }),
+            settings: { ...DEFAULT_CODEX_SETTINGS, binaryPath: "/usr/local/bin/codex" },
+            environment: {},
+          })
+          .pipe(Effect.scoped, Effect.exit);
+
+      yield* open(undefined);
+      yield* open({ executable: "/t3/trellis-shims/codex", sessionKey: "ws-1" });
+
+      assert.deepEqual(spawned, [
+        { command: "/usr/local/bin/codex", cwd: undefined },
+        { command: "/t3/trellis-shims/codex", cwd: "/trellis/workspaces/ws-1/project" },
+      ]);
+    }).pipe(
+      Effect.provideService(HostProcessPlatform, "linux"),
+      Effect.provideService(SpawnExecutableResolution, (command) => command),
+    ),
+  );
+
   it.effect("resolves Windows command shims through the shared spawn policy", () =>
     Effect.gen(function* () {
       const command = yield* makeCodexAppServerSpawnCommand({
@@ -2558,6 +2655,90 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(resumed.nativeThreadRef?.nativeId, nativeThreadId);
         assert.equal(resumed.status, "idle");
         assert.equal(DateTime.toEpochMillis(resumed.updatedAt), 1782622450000);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("appends a launch primer to each cwd's own configured developer instructions", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-launch-instructions-per-cwd";
+        const nativeThreadId = `native-${scenario}-thread`;
+        const preamble = codexReplayPreamble({
+          nativeThreadId,
+          nativeTurnId: "unused-turn",
+          prompt: "unused-prompt",
+        }).slice(0, 5);
+        // Two projects of one workspace share the app-server, each with its config.
+        const projects = [
+          { cwd: "/trellis/workspaces/ws-1/project/a", instructions: "Project A rules." },
+          { cwd: "/trellis/workspaces/ws-1/project/b", instructions: "Project B rules." },
+        ];
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...preamble,
+            ...projects.flatMap(({ cwd, instructions }, index) => {
+              const readId = 3 + index * 2;
+              return [
+                {
+                  type: "expect_outbound" as const,
+                  label: "config/read",
+                  frame: {
+                    id: readId,
+                    method: "config/read",
+                    params: { cwd, includeLayers: false },
+                  },
+                },
+                {
+                  type: "emit_inbound" as const,
+                  label: "config/read",
+                  frame: {
+                    id: readId,
+                    result: { config: { developer_instructions: instructions }, origins: {} },
+                  },
+                },
+                {
+                  type: "expect_outbound" as const,
+                  label: "thread/resume",
+                  frame: {
+                    id: readId + 1,
+                    method: "thread/resume",
+                    params: {
+                      threadId: nativeThreadId,
+                      excludeTurns: true,
+                      cwd,
+                      config: {
+                        ...CODEX_THREAD_CONFIG,
+                        developer_instructions: `${instructions}\n\nPrimer.`,
+                      },
+                    },
+                  },
+                },
+                {
+                  type: "emit_inbound" as const,
+                  label: "thread/resume",
+                  frame: {
+                    id: readId + 1,
+                    result: { thread: { id: nativeThreadId, updatedAt: 1782622450 } },
+                  },
+                },
+              ];
+            }),
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        for (const { cwd } of projects) {
+          yield* harness.runtime.resumeThread({
+            providerThread: harness.providerThread,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+              ...CODEX_TEST_RUNTIME_POLICY,
+              cwd,
+              launch: { executable: "/t3/trellis-shims/codex", instructions: "Primer." },
+            }),
+          });
+        }
       }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
     ),
   );

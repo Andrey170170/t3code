@@ -703,6 +703,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly adapter: ProviderAdapterV2Shape;
     readonly providerInstanceId: ProviderInstanceId;
     readonly threadId: ThreadId;
+    readonly sessionKey: Option.Option<string | undefined>;
   }) =>
     input.adapter.getCapabilities().pipe(
       Effect.flatMap((capabilities) =>
@@ -710,6 +711,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? Effect.succeed(
               idAllocator.derive.providerSession({
                 providerInstanceId: input.providerInstanceId,
+                ...Option.match(input.sessionKey, {
+                  onNone: () => ({}),
+                  onSome: (sessionKey) => (sessionKey === undefined ? {} : { sessionKey }),
+                }),
               }),
             )
           : idAllocator.allocate.providerSession({
@@ -718,6 +723,104 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
       ),
     );
+
+  /**
+   * The `launch.sessionKey` (a Trellis workspace) the thread's next turn runs
+   * under; none when the policy does not resolve, which keeps V2's choice (the
+   * turn start resolves again and fails with the policy's reason).
+   */
+  const resolveSessionKey = (thread: OrchestrationV2AppThread, modelSelection: ModelSelection) =>
+    runtimePolicy.resolve({ thread, modelSelection }).pipe(
+      Effect.map((policy) => Option.some(policy.launch?.sessionKey)),
+      Effect.orElseSucceed(() => Option.none<string | undefined>()),
+    );
+
+  /**
+   * A thread keeps its provider session only while the session was opened for
+   * the same session key, so a shared process never serves another workspace.
+   */
+  const keepsProviderSession = (
+    projection: Pick<OrchestrationV2ThreadProjection, "providerSessions">,
+    providerSessionId: ProviderSessionId,
+    sessionKey: Option.Option<string | undefined>,
+  ) =>
+    Option.isNone(sessionKey) ||
+    projection.providerSessions.find((session) => session.id === providerSessionId)?.sessionKey ===
+      sessionKey.value;
+
+  /**
+   * The detach field naming `providerThread` with its native ref, when it is
+   * still recorded on `providerSessionId`: the dispatch moves its row to the
+   * new session before the detach runs, which then could not find it.
+   */
+  const unloadProviderThreadsOn = (
+    providerSessionId: ProviderSessionId,
+    providerThread: OrchestrationV2ProviderThread | undefined,
+  ) =>
+    providerThread?.providerSessionId === providerSessionId &&
+    providerThread.nativeThreadRef !== null
+      ? {
+          unloadProviderThreads: [
+            {
+              providerThreadId: providerThread.id,
+              nativeThreadRef: providerThread.nativeThreadRef,
+            },
+          ],
+        }
+      : {};
+
+  /**
+   * Detaches the live session a thread leaves because its session key changed
+   * (its project moved to another workspace), so the old workspace's process
+   * stops serving it.
+   */
+  const detachSupersededSession = (input: {
+    readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
+    readonly effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>;
+    readonly command: OrchestrationV2ServerCommand;
+    readonly threadId: ThreadId;
+    readonly projection: Pick<OrchestrationV2ThreadProjection, "providerSessions">;
+    readonly previous: ProviderSessionId | null;
+    readonly next: ProviderSessionId;
+    /** The thread's provider thread as it was on `previous`, to unload there. */
+    readonly providerThread: OrchestrationV2ProviderThread | undefined;
+  }) =>
+    Effect.gen(function* () {
+      const session = input.projection.providerSessions.find(
+        (candidate) =>
+          candidate.id === input.previous &&
+          candidate.id !== input.next &&
+          candidate.status !== "stopped" &&
+          candidate.status !== "error",
+      );
+      if (session === undefined) return;
+      const now = yield* DateTime.now;
+      yield* emit(
+        input.events,
+        input.command,
+      )({
+        type: "provider-session.detached",
+        threadId: input.threadId,
+        driver: session.driver,
+        providerInstanceId: session.providerInstanceId,
+        occurredAt: now,
+        payload: { providerSessionId: session.id, detachedAt: now, reason: "Workspace changed." },
+      });
+      yield* Ref.update(input.effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${input.command.commandId}:provider-session.detach:${session.id}`,
+          commandId: input.command.commandId,
+          threadId: input.threadId,
+          request: {
+            type: "provider-session.detach",
+            providerSessionId: session.id,
+            detail: "Workspace changed.",
+            ...unloadProviderThreadsOn(session.id, input.providerThread),
+          },
+        } satisfies PendingOrchestrationEffectV2,
+      ]);
+    });
 
   const enforceCommandPolicy =
     (command: OrchestrationV2Command) =>
@@ -1412,10 +1515,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 }),
             ),
           ));
+      const sessionKey = yield* resolveSessionKey(projection.thread, queuedRun.modelSelection);
       const providerSessionId =
         (!canResumeAcrossInstances &&
         queuedProviderThread.providerSessionId !== null &&
-        !switchPlan?.releaseProviderSessionIds.includes(queuedProviderThread.providerSessionId)
+        !switchPlan?.releaseProviderSessionIds.includes(queuedProviderThread.providerSessionId) &&
+        keepsProviderSession(projection, queuedProviderThread.providerSessionId, sessionKey)
           ? queuedProviderThread.providerSessionId
           : null) ??
         (yield* providerAdapters.get(queuedRun.providerInstanceId).pipe(
@@ -1424,6 +1529,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter,
               providerInstanceId: queuedRun.providerInstanceId,
               threadId,
+              sessionKey,
             }),
           ),
           Effect.mapError(
@@ -1550,9 +1656,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               },
             ]
           : [];
+      // A session kept from before the thread's session key changed is left too.
+      const supersededSessionId =
+        queuedProviderThread.providerSessionId !== null &&
+        queuedProviderThread.providerSessionId !== providerSessionId &&
+        !keepsProviderSession(projection, queuedProviderThread.providerSessionId, sessionKey)
+          ? queuedProviderThread.providerSessionId
+          : null;
       const sessionsToDetach = projection.providerSessions.filter(
         (session) =>
-          switchPlan?.releaseProviderSessionIds.includes(session.id) &&
+          (switchPlan?.releaseProviderSessionIds.includes(session.id) ||
+            session.id === supersededSessionId) &&
           session.status !== "stopped" &&
           session.status !== "error",
       );
@@ -1695,6 +1809,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               type: "provider-session.detach" as const,
               providerSessionId: session.id,
               detail: "Provider or model selection changed.",
+              ...(session.id === supersededSessionId
+                ? unloadProviderThreadsOn(session.id, queuedProviderThread)
+                : {}),
             },
           })),
           {
@@ -3720,15 +3837,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           input.projection,
           input.modelSelection.instanceId,
         ).find((candidate) => candidate.id !== providerThread.id);
+        const targetSessionKey = yield* resolveSessionKey(
+          input.projection.thread,
+          input.modelSelection,
+        );
+        const existingTargetProviderSessionId =
+          existingTargetProviderThread?.providerSessionId ?? null;
         const targetProviderSessionId =
-          existingTargetProviderThread?.providerSessionId ??
+          (existingTargetProviderSessionId !== null &&
+          keepsProviderSession(input.projection, existingTargetProviderSessionId, targetSessionKey)
+            ? existingTargetProviderSessionId
+            : null) ??
           (yield* mapDispatchError(input.command)(
             providerSessionIdFor({
               adapter: targetAdapter,
               providerInstanceId: input.modelSelection.instanceId,
               threadId: input.command.threadId,
+              sessionKey: targetSessionKey,
             }),
           ));
+        yield* detachSupersededSession({
+          events: input.events,
+          effects: input.effects,
+          command: input.command,
+          threadId: input.command.threadId,
+          projection: input.projection,
+          previous: existingTargetProviderSessionId,
+          next: targetProviderSessionId,
+          providerThread: existingTargetProviderThread,
+        });
         const targetProviderThreadBase: OrchestrationV2ProviderThread =
           existingTargetProviderThread === undefined
             ? {
@@ -4799,15 +4936,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               }),
           ),
         );
+        const sessionKey = yield* resolveSessionKey(projection.thread, modelSelection);
+        const activeProviderSessionId = activeProviderThread?.providerSessionId ?? null;
         const providerSessionId =
-          activeProviderThread?.providerSessionId ??
+          (activeProviderSessionId !== null &&
+          keepsProviderSession(projection, activeProviderSessionId, sessionKey)
+            ? activeProviderSessionId
+            : null) ??
           (yield* mapDispatchError(command)(
             providerSessionIdFor({
               adapter,
               providerInstanceId: modelSelection.instanceId,
               threadId: command.threadId,
+              sessionKey,
             }),
           ));
+        yield* detachSupersededSession({
+          events,
+          effects,
+          command,
+          threadId: command.threadId,
+          projection,
+          previous: activeProviderSessionId,
+          next: providerSessionId,
+          providerThread: activeProviderThread,
+        });
         const providerThreadId =
           activeProviderThread?.id ??
           idAllocator.derive.providerThread({
@@ -5183,15 +5336,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         isProviderSwitch && !canResumeAcrossInstances
           ? rootProviderThreadsForProvider(projection, modelSelection.instanceId)[0]
           : activeProviderThread;
+      const sessionKey = yield* resolveSessionKey(projection.thread, modelSelection);
+      const targetProviderSessionId = canResumeAcrossInstances
+        ? null
+        : (targetProviderThread?.providerSessionId ?? null);
       const providerSessionId =
-        (canResumeAcrossInstances ? undefined : targetProviderThread?.providerSessionId) ??
+        (targetProviderSessionId !== null &&
+        keepsProviderSession(projection, targetProviderSessionId, sessionKey)
+          ? targetProviderSessionId
+          : null) ??
         (yield* mapDispatchError(command)(
           providerSessionIdFor({
             adapter,
             providerInstanceId: modelSelection.instanceId,
             threadId: command.threadId,
+            sessionKey,
           }),
         ));
+      yield* detachSupersededSession({
+        events,
+        effects,
+        command,
+        threadId: command.threadId,
+        projection,
+        previous: targetProviderSessionId,
+        next: providerSessionId,
+        providerThread: targetProviderThread,
+      });
       const existingProviderSession = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
       );

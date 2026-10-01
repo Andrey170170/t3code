@@ -190,6 +190,47 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
     assert.include(options.settings, { showThinkingSummaries: true });
   });
 
+  it("takes the executable, environment and primer from the runtime policy's launch", () => {
+    const base = {
+      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+      nativeThreadId: "launched-thread",
+      resume: true,
+      cwd: "/trellis/workspaces/ws-1/project",
+      settings: { ...DEFAULT_CLAUDE_SETTINGS, binaryPath: "/usr/local/bin/claude" },
+      environment: { HOME: "/home/me", KEEP: "1" },
+      mcpServers: {
+        "t3-code": { type: "http" as const, url: "http://127.0.0.1:43123/mcp", headers: {} },
+      },
+    };
+    const host = makeClaudeQueryOptions(base);
+    const launched = makeClaudeQueryOptions({
+      ...base,
+      launch: {
+        executable: "/t3/trellis-shims/claude",
+        env: { KEEP: "2", TRELLIS_SOCKET: "/trellis/state/api.sock" },
+        instructions: "You are in a Trellis workspace.",
+        sessionKey: "ws-1",
+        loopbackHost: "host.containers.internal",
+      },
+    });
+    assert.equal(host.pathToClaudeCodeExecutable, "/usr/local/bin/claude");
+    assert.equal(launched.pathToClaudeCodeExecutable, "/t3/trellis-shims/claude");
+    assert.deepEqual(launched.env, {
+      HOME: "/home/me",
+      KEEP: "2",
+      TRELLIS_SOCKET: "/trellis/state/api.sock",
+    });
+    const hostPrompt = host.systemPrompt as { readonly append: string };
+    const launchedPrompt = launched.systemPrompt as { readonly append: string };
+    assert.equal(launchedPrompt.append, `${hostPrompt.append}\n\nYou are in a Trellis workspace.`);
+    assert.deepEqual(launched.mcpServers?.["t3-code"], {
+      type: "http",
+      url: "http://host.containers.internal:43123/mcp",
+      headers: {},
+    });
+    assert.deepEqual(host.mcpServers, base.mcpServers);
+  });
+
   it("preserves an explicit omitted thinking display", () => {
     const options = makeClaudeQueryOptions({
       modelSelection: CLAUDE_TEST_MODEL_SELECTION,

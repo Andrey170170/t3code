@@ -38,6 +38,8 @@ import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
+import * as Trellis from "./trellis/Trellis.ts";
+import * as TrellisPtyAdapter from "./trellis/TrellisPtyAdapter.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -191,7 +193,8 @@ const ApplicationObservabilityLive = EventLoopMonitor.layer.pipe(
   Layer.provideMerge(ResourceAttributionLayerLive),
 );
 
-const PtyAdapterLive = NodePtyAdapter.layer;
+// Terminals in Trellis project paths run inside the workspace container.
+const PtyAdapterLive = TrellisPtyAdapter.layer.pipe(Layer.provide(NodePtyAdapter.layer));
 
 const ServerSettingsLayerLive = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
@@ -555,6 +558,9 @@ const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
 
 const RuntimeCoreDependenciesLive = RuntimeCoreDependenciesBaseLive.pipe(
   Layer.provideMerge(PtyAdapterLive),
+  // The optional Trellis workspace service, off until enabled in settings.
+  // Runtime policy, terminals and worktree creation consult it when present.
+  Layer.provideMerge(Trellis.layer.pipe(Layer.provide(ServerSettingsLayerLive))),
   // Search, prepare, status inspection, and turn launch share one registry
   // cache so every client and provider instance sees the same prepared agents.
   Layer.provideMerge(AcpRegistryCatalogLive),

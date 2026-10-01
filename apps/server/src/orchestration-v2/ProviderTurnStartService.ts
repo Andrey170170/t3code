@@ -517,32 +517,38 @@ export const layer: Layer.Layer<
       });
       const { isCurrentAttemptInStatus } = runControls;
 
-      const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
-        thread: projection.thread,
-        modelSelection: run.modelSelection,
-      });
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
       );
+      // A policy that cannot resolve (for example a refused Trellis launch)
+      // fails the run with its reason like a session that cannot open.
       const sessionResult = yield* Effect.result(
-        providerSessions.open({
-          threadId: projection.thread.id,
-          providerSessionId,
-          modelSelection: run.modelSelection,
-          runtimePolicy: resolvedRuntimePolicy,
-          ...(existingSessionProjection === undefined
-            ? {}
-            : { resumeFromSession: existingSessionProjection }),
-          ...(providerThread.nativeThreadRef?.nativeId == null
-            ? {}
-            : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
-          ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
-            ? {}
-            : {
-                initialProviderItemIdentityVersion:
-                  providerThread.nativeMetadata.itemIdentityVersion,
-              }),
-        }),
+        runtimePolicy
+          .resolve({ thread: projection.thread, modelSelection: run.modelSelection })
+          .pipe(
+            Effect.flatMap((resolvedRuntimePolicy) =>
+              providerSessions
+                .open({
+                  threadId: projection.thread.id,
+                  providerSessionId,
+                  modelSelection: run.modelSelection,
+                  runtimePolicy: resolvedRuntimePolicy,
+                  ...(existingSessionProjection === undefined
+                    ? {}
+                    : { resumeFromSession: existingSessionProjection }),
+                  ...(providerThread.nativeThreadRef?.nativeId == null
+                    ? {}
+                    : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
+                  ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
+                    ? {}
+                    : {
+                        initialProviderItemIdentityVersion:
+                          providerThread.nativeMetadata.itemIdentityVersion,
+                      }),
+                })
+                .pipe(Effect.map((session) => ({ session, resolvedRuntimePolicy }))),
+            ),
+          ),
       );
       // The last start attempt fails the run with the provider's own reason
       // instead of leaving it `starting` after the effect gives up. A run that
@@ -586,7 +592,7 @@ export const layer: Layer.Layer<
         });
         return;
       }
-      const session = sessionResult.success;
+      const { session, resolvedRuntimePolicy } = sessionResult.success;
       // Only the provider's own thread load fails the run on the last attempt;
       // store, id and handoff failures around it keep their typed errors.
       const loadFromProvider = (
