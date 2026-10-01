@@ -354,8 +354,15 @@ const make = Effect.gen(function* () {
           return sent.run.id;
         });
 
-      const interruptRun = ({ threadId, runId }: { threadId: ThreadId; runId: RunId }) =>
+      /**
+       * Interrupts the thread's turn running now: usually the one validated,
+       * but if that ended meanwhile, the placeholder already promoted.
+       */
+      const interruptRun = (threadId: ThreadId) =>
         Effect.gen(function* () {
+          const runId = (yield* threads.getThreadShell(threadId))?.activeRunId ?? null;
+          if (runId === null) return;
+          interruptedRuns.push(runId);
           yield* threads.dispatch({
             type: "run.interrupt",
             commandId: yield* commandId("interrupt"),
@@ -366,6 +373,7 @@ const make = Effect.gen(function* () {
             holdQueue: true,
           });
         });
+      const interruptedRuns: Array<RunId> = ending.map((entry) => entry.runId);
 
       const resumeQueue = (threadId: ThreadId) =>
         Effect.gen(function* () {
@@ -379,9 +387,10 @@ const make = Effect.gen(function* () {
           }
         });
 
-      const awaitEnded = turns
-        .awaitEnded(ending.map((entry) => entry.runId))
-        .pipe(Effect.timeoutOption(TURN_END_TIMEOUT), Effect.asVoid);
+      const awaitEnded = Effect.suspend(() => turns.awaitEnded(interruptedRuns)).pipe(
+        Effect.timeoutOption(TURN_END_TIMEOUT),
+        Effect.asVoid,
+      );
 
       const run = Effect.gen(function* () {
         // A queue the user paused stays paused: such a thread gets its
@@ -412,8 +421,8 @@ const make = Effect.gen(function* () {
             ),
           );
         }
-        for (const entry of ending) {
-          yield* interruptRun(entry).pipe(failedQuietly("interrupt a run", entry.threadId));
+        for (const { threadId } of ending) {
+          yield* interruptRun(threadId).pipe(failedQuietly("interrupt a run", threadId));
         }
         yield* Deferred.succeed(dispatched, undefined);
         // Trellis must see those turns ended, or it refuses them; stale ones go too.
@@ -468,6 +477,7 @@ const make = Effect.gen(function* () {
             );
             continue;
           }
+          // A placeholder promoted before its queue was held cannot be edited; send the outcome then.
           yield* Effect.gen(function* () {
             yield* threads.dispatch({
               type: "queued-run.edit",
@@ -476,7 +486,10 @@ const make = Effect.gen(function* () {
               runId: placeholder,
               text,
             });
-          }).pipe(failedQuietly("write the outcome into the continuation", threadId));
+          }).pipe(
+            Effect.catchCause(() => send(threadId, projectOf(threadId), text)),
+            failedQuietly("write the outcome into the continuation", threadId),
+          );
           // Everything held here was queued (unpaused) before the interrupt held it.
           yield* resumeQueue(threadId).pipe(failedQuietly("resume the queue", threadId));
         }
