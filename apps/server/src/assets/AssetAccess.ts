@@ -720,10 +720,8 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
   };
 });
 
-export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
-  token: string,
-  relativePath: string,
-) {
+/** The claims of a token this server signed and that has not expired, else null. */
+const verifiedClaims = Effect.fn("AssetAccess.verifiedClaims")(function* (token: string) {
   const [encodedPayload, signature] = token.split(".");
   if (!encodedPayload || !signature) return null;
 
@@ -737,6 +735,32 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
 
   const claims = decodeClaims(encodedPayload);
   if (!claims || claims.expiresAt <= (yield* Clock.currentTimeMillis)) return null;
+  return claims;
+});
+
+/**
+ * Whether `url` is an asset URL this server issued and that is still valid,
+ * on whatever origin the client reached the server by. Checked by signature,
+ * never by path alone.
+ */
+export const isIssuedAssetUrl = Effect.fn("AssetAccess.isIssuedAssetUrl")(function* (url: string) {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return false;
+  }
+  if (!pathname.startsWith(`${ASSET_ROUTE_PREFIX}/`)) return false;
+  const token = pathname.slice(`${ASSET_ROUTE_PREFIX}/`.length).split("/")[0] ?? "";
+  return (yield* verifiedClaims(token)) !== null;
+});
+
+export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
+  token: string,
+  relativePath: string,
+) {
+  const claims = yield* verifiedClaims(token);
+  if (!claims) return null;
 
   if (claims.kind === "attachment") {
     const config = yield* ServerConfig.ServerConfig;

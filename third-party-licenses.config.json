@@ -234,6 +234,22 @@
       }
     },
     {
+      "name": "rehype-katex",
+      "version": "7.0.1",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) Junyoung Choi <fluke8259@gmail.com>"]
+      }
+    },
+    {
+      "name": "remark-math",
+      "version": "6.0.0",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) Junyoung Choi <fluke8259@gmail.com>"]
+      }
+    },
+    {
       "license": "MIT",
       "name": "type-fest",
       "generatedNotice": {

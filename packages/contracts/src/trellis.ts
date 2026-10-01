@@ -179,3 +179,19 @@ export const TrellisRestoreConflicts = Schema.Struct({
   later: Schema.Array(TrellisRestoreConflictThread),
 });
 export type TrellisRestoreConflicts = typeof TrellisRestoreConflicts.Type;
+
+/**
+ * Maps a loopback preview URL (`localhost:PORT`) of a thread in a Trellis
+ * workspace to that workspace port's preview address. Other URLs and
+ * threads come back unchanged.
+ */
+export const TrellisResolvePreviewUrlInput = Schema.Struct({
+  threadId: ThreadId,
+  url: TrimmedNonEmptyString,
+});
+export type TrellisResolvePreviewUrlInput = typeof TrellisResolvePreviewUrlInput.Type;
+
+export const TrellisResolvePreviewUrlResult = Schema.Struct({
+  url: Schema.String,
+});
+export type TrellisResolvePreviewUrlResult = typeof TrellisResolvePreviewUrlResult.Type;

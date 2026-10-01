@@ -260,6 +260,12 @@ export const updateCommand = Command.make("update", {
   ),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
+      if (packageJson.version.includes("-forgejo.")) {
+        return yield* new CliUpdateError({
+          reason:
+            "This Forgejo build uses custom npm packages. Run `t3code-update` on the server machine, or reinstall the custom package from Forgejo.",
+        });
+      }
       const logLevel = yield* GlobalFlag.LogLevel;
       const config = yield* resolveCliAuthConfig(flags, logLevel);
       return yield* runUpdate({

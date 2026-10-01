@@ -24,11 +24,13 @@ import { VcsStatusBroadcaster } from "../../../vcs/VcsStatusBroadcaster.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
+import * as TrellisPreview from "../../../trellis/TrellisPreview.ts";
 
 const StubServicesLive = Layer.mergeAll(
   Layer.mock(OrchestratorV2)({}),
   Layer.mock(ProjectionStoreV2)({}),
   Layer.mock(DeviceService)({}),
+  TrellisPreview.layerDisabled,
   Layer.mock(ThreadManagementService)({}),
   Layer.mock(ProviderRegistry)({}),
   Layer.mock(ProviderAdapterRegistryV2)({}),

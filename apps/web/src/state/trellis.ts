@@ -59,6 +59,10 @@ export const trellisEnvironment = {
     label: "environment-data:trellis:empty-trash",
     tag: WS_METHODS.trellisEmptyTrash,
   }),
+  resolvePreviewUrl: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:resolve-preview-url",
+    tag: WS_METHODS.trellisResolvePreviewUrl,
+  }),
 };
 
 /** The last Trellis status of an environment, for event handlers; null while unknown. */

@@ -1,6 +1,6 @@
 /**
- * PiTextGeneration — commit messages, PR content, branch names, and thread
- * titles generated through an ephemeral `pi --mode rpc --no-session` process.
+ * PiTextGeneration — commit messages, PR content, branch names, thread
+ * titles and project names generated through an ephemeral `pi --mode rpc --no-session` process.
  * No session file is written; the user's Pi configuration (default model,
  * auth, custom providers) still applies.
  */
@@ -24,10 +24,12 @@ import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
   buildPrContentPrompt,
+  buildProjectNamePrompt,
   buildThreadTitlePrompt,
 } from "./TextGenerationPrompts.ts";
 import {
   sanitizeCommitSubject,
+  sanitizeOneLine,
   sanitizePrTitle,
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
@@ -53,7 +55,8 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       | "generateCommitMessage"
       | "generatePrContent"
       | "generateBranchName"
-      | "generateThreadTitle";
+      | "generateThreadTitle"
+      | "generateProjectName";
     cwd: string;
     prompt: string;
     outputSchemaJson: S;
@@ -247,10 +250,30 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
+  const generateProjectName: TextGeneration.TextGeneration["Service"]["generateProjectName"] =
+    Effect.fn("PiTextGeneration.generateProjectName")(function* (input) {
+      const { prompt, outputSchema } = buildProjectNamePrompt({
+        message: input.message,
+        previousName: input.previousName,
+      });
+      const generated = yield* runPiJson({
+        operation: "generateProjectName",
+        cwd: input.cwd,
+        prompt,
+        outputSchemaJson: outputSchema,
+        modelSelection: input.modelSelection,
+      });
+      return {
+        name: sanitizeOneLine(generated.name, 40),
+        description: sanitizeOneLine(generated.description, 160),
+      };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
+    generateProjectName,
   } satisfies TextGeneration.TextGeneration["Service"];
 });
