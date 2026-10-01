@@ -82,6 +82,8 @@ import ReactMarkdown from "react-markdown";
 import { toHtml } from "hast-util-to-html";
 import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
 import { defaultUrlTransform } from "react-markdown";
+import rehypeKatex from "rehype-katex";
+import remarkMath from "remark-math";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
@@ -146,6 +148,7 @@ import {
   serializeTableElementToCsv,
   serializeTableElementToMarkdown,
 } from "../markdown-clipboard";
+import { normalizeMarkdownMathDelimiters } from "../markdown-rendering";
 import { remarkNormalizeListItemIndentation } from "../markdown-list-indentation";
 import {
   extractMarkdownLinkHrefs,
@@ -490,6 +493,7 @@ const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
 
 const CHAT_MARKDOWN_REMARK_PLUGINS = [
   remarkGfm,
+  [remarkMath, { singleDollarTextMath: false }],
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkCodexDirectives,
@@ -499,6 +503,7 @@ const CHAT_MARKDOWN_REMARK_PLUGINS = [
 
 const CHAT_MARKDOWN_REMARK_PLUGINS_WITH_BREAKS = [
   remarkGfm,
+  [remarkMath, { singleDollarTextMath: false }],
   remarkGithubAlerts,
   remarkNormalizeListItemIndentation,
   remarkCodexDirectives,
@@ -511,7 +516,9 @@ const CHAT_MARKDOWN_REHYPE_PLUGINS = [
   rehypeRaw,
   rehypePreserveImageSourceMeta,
   [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA],
+  rehypeKatex,
 ] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
+const CHAT_MARKDOWN_MATH_ONLY_REHYPE_PLUGINS = [rehypeKatex];
 
 /** GitHub's own five alert kinds, in its colors: the glyph names the urgency, the title says it. */
 const GITHUB_ALERT_PRESENTATIONS: Record<
@@ -3323,6 +3330,7 @@ function ChatMarkdown({
   extraRemarkPlugins = EMPTY_REMARK_PLUGINS,
   ...props
 }: ChatMarkdownProps) {
+  const renderedText = useMemo(() => normalizeMarkdownMathDelimiters(text), [text]);
   const {
     componentState,
     handleCopy,
@@ -3361,12 +3369,14 @@ function ChatMarkdown({
       <ChatMarkdownRendererContext value={componentState}>
         <ReactMarkdown
           remarkPlugins={remarkPlugins}
-          rehypePlugins={parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS : undefined}
+          rehypePlugins={
+            parseRawHtml ? CHAT_MARKDOWN_REHYPE_PLUGINS : CHAT_MARKDOWN_MATH_ONLY_REHYPE_PLUGINS
+          }
           skipHtml={false}
           components={CHAT_MARKDOWN_COMPONENTS}
           urlTransform={markdownUrlTransform}
         >
-          {text}
+          {renderedText}
         </ReactMarkdown>
       </ChatMarkdownRendererContext>
       {localMediaPreview ? (
