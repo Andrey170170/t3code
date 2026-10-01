@@ -39,6 +39,8 @@ import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
 import * as Trellis from "./trellis/Trellis.ts";
+import * as TrellisCatalog from "./trellis/TrellisCatalog.ts";
+import * as TrellisIdeaPromotion from "./trellis/TrellisIdeaPromotion.ts";
 import * as TrellisPtyAdapter from "./trellis/TrellisPtyAdapter.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
@@ -475,6 +477,15 @@ const ThreadPullRequestWorkerLive = Layer.effectDiscard(
   ThreadPullRequestService.make.pipe(Effect.flatMap((service) => service.start())),
 ).pipe(Layer.provide(PullRequestServiceLive));
 
+// Trellis catalog sync (one T3 project per Trellis workspace path), its
+// client operations and the lazy creation of new ideas. Idle while Trellis is off.
+const TrellisCatalogLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const catalog = yield* TrellisCatalog.TrellisCatalog;
+    yield* catalog.start();
+  }),
+).pipe(Layer.provideMerge(TrellisIdeaPromotion.layer), Layer.provideMerge(TrellisCatalog.layer));
+
 const ProviderInstallationRefreshLive = Layer.effectDiscard(
   Effect.gen(function* () {
     const antigravity = yield* AntigravityInstallation;
@@ -514,6 +525,7 @@ const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
     Layer.provide(ProjectionStoreV2.layer),
   ),
   ThreadPullRequestWorkerLive,
+  TrellisCatalogLive,
   Layer.effectDiscard(
     Effect.gen(function* () {
       const service = yield* PullRequestSyncReactor.PullRequestSyncReactor;

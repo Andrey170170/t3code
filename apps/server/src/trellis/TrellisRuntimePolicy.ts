@@ -18,7 +18,12 @@
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { ClaudeSettings, CodexSettings, type ProviderInstanceConfig } from "@t3tools/contracts";
+import {
+  ClaudeSettings,
+  CodexSettings,
+  isTrellisLandingPad,
+  type ProviderInstanceConfig,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -52,6 +57,9 @@ const TRELLIS_LOOPBACK_HOST = "host.containers.internal";
 /** Refusal for work in a Trellis project whose folder is outside the workspace. */
 export const TRELLIS_OUTSIDE_WORKSPACE_MESSAGE =
   "This thread belongs to a Trellis project but its folder is outside the Trellis workspace (for example a git worktree), so it would run on the host. Start a thread in the project folder instead; use `trellis fork` for parallel work.";
+
+export const TRELLIS_LANDING_PAD_MESSAGE =
+  "This new idea has no folder yet: send its first message from T3 Code, which creates the idea.";
 
 export const TRELLIS_CUSTOM_HOME_MESSAGE =
   "Trellis workspaces mount only the default ~/.claude and ~/.codex, so a provider instance with a custom home or config directory cannot run inside them yet. Use an instance with the default home for this project.";
@@ -223,6 +231,10 @@ export const layer: Layer.Layer<
             providerInstanceId: input.modelSelection.instanceId,
             cause: message,
           });
+        // A new idea's draft runs nowhere: its first send moves it into the idea.
+        if (isTrellisLandingPad(input.thread.projectId)) {
+          return yield* refuse(TRELLIS_LANDING_PAD_MESSAGE);
+        }
         const projectRoot = yield* projects.get(input.thread.projectId).pipe(
           Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot),
           Effect.orElseSucceed(() => undefined),

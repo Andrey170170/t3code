@@ -1,5 +1,20 @@
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
-import { TrellisStatus } from "./trellis.ts";
+import {
+  TrellisCreateResult,
+  TrellisEmptyTrashResult,
+  TrellisError,
+  TrellisFindInput,
+  TrellisFindResult,
+  TrellisIdeaDraftTarget,
+  TrellisNewIdeaInput,
+  TrellisNewProjectInput,
+  TrellisRestoreInput,
+  TrellisRestoreResult,
+  TrellisStatus,
+  TrellisTrashList,
+  TrellisTrashProjectInput,
+  TrellisTrashProjectResult,
+} from "./trellis.ts";
 import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
@@ -355,6 +370,14 @@ export const WS_METHODS = {
 
   // Trellis workspace service methods
   trellisGetStatus: "trellis.getStatus",
+  trellisNewIdea: "trellis.newIdea",
+  trellisPrepareIdeaDraft: "trellis.prepareIdeaDraft",
+  trellisTrashProject: "trellis.trashProject",
+  trellisListTrash: "trellis.listTrash",
+  trellisRestore: "trellis.restore",
+  trellisEmptyTrash: "trellis.emptyTrash",
+  trellisNewProject: "trellis.newProject",
+  trellisFind: "trellis.find",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1170,6 +1193,49 @@ const WsTrellisGetStatusRpc = Rpc.make(WS_METHODS.trellisGetStatus, {
   error: EnvironmentAuthorizationError,
 });
 
+const TrellisRpcError = Schema.Union([TrellisError, EnvironmentAuthorizationError]);
+
+const WsTrellisNewIdeaRpc = Rpc.make(WS_METHODS.trellisNewIdea, {
+  payload: TrellisNewIdeaInput,
+  success: TrellisCreateResult,
+  error: TrellisRpcError,
+});
+const WsTrellisPrepareIdeaDraftRpc = Rpc.make(WS_METHODS.trellisPrepareIdeaDraft, {
+  payload: Schema.Struct({}),
+  success: TrellisIdeaDraftTarget,
+  error: TrellisRpcError,
+});
+const WsTrellisTrashProjectRpc = Rpc.make(WS_METHODS.trellisTrashProject, {
+  payload: TrellisTrashProjectInput,
+  success: TrellisTrashProjectResult,
+  error: TrellisRpcError,
+});
+const WsTrellisListTrashRpc = Rpc.make(WS_METHODS.trellisListTrash, {
+  payload: Schema.Struct({}),
+  success: TrellisTrashList,
+  error: TrellisRpcError,
+});
+const WsTrellisRestoreRpc = Rpc.make(WS_METHODS.trellisRestore, {
+  payload: TrellisRestoreInput,
+  success: TrellisRestoreResult,
+  error: TrellisRpcError,
+});
+const WsTrellisEmptyTrashRpc = Rpc.make(WS_METHODS.trellisEmptyTrash, {
+  payload: Schema.Struct({}),
+  success: TrellisEmptyTrashResult,
+  error: TrellisRpcError,
+});
+const WsTrellisNewProjectRpc = Rpc.make(WS_METHODS.trellisNewProject, {
+  payload: TrellisNewProjectInput,
+  success: TrellisCreateResult,
+  error: TrellisRpcError,
+});
+const WsTrellisFindRpc = Rpc.make(WS_METHODS.trellisFind, {
+  payload: TrellisFindInput,
+  success: TrellisFindResult,
+  error: TrellisRpcError,
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1542,6 +1608,15 @@ const WsOrchestrationV2LaunchThreadRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.la
   error: Schema.Union([OrchestrationV2ThreadLaunchError, EnvironmentAuthorizationError]),
 });
 
+const WsOrchestrationV2MoveThreadToProjectRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.moveThreadToProject,
+  {
+    payload: OrchestrationV2RpcSchemas.moveThreadToProject.input,
+    success: OrchestrationV2RpcSchemas.moveThreadToProject.output,
+    error: Schema.Union([OrchestrationV2DispatchCommandError, EnvironmentAuthorizationError]),
+  },
+);
+
 const WsOrchestrationV2SubscribeArchivedShellRpc = Rpc.make(
   ORCHESTRATION_V2_WS_METHODS.subscribeArchivedShell,
   {
@@ -1774,6 +1849,14 @@ export const WsRpcGroup = RpcGroup.make(
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsTrellisGetStatusRpc,
+  WsTrellisNewIdeaRpc,
+  WsTrellisPrepareIdeaDraftRpc,
+  WsTrellisTrashProjectRpc,
+  WsTrellisListTrashRpc,
+  WsTrellisRestoreRpc,
+  WsTrellisEmptyTrashRpc,
+  WsTrellisNewProjectRpc,
+  WsTrellisFindRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,
@@ -1840,6 +1923,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetArchivedShellSnapshotRpc,
   WsOrchestrationV2GetThreadProjectionRpc,
   WsOrchestrationV2LaunchThreadRpc,
+  WsOrchestrationV2MoveThreadToProjectRpc,
   WsOrchestrationV2SubscribeArchivedShellRpc,
   WsOrchestrationV2SubscribeShellRpc,
   WsOrchestrationV2SubscribeThreadRpc,

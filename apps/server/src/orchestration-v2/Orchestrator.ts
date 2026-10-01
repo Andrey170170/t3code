@@ -357,6 +357,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "checkpoint.rollback":
     case "checkpoint.rollback.fail":
     case "provider.switch":
+    case "thread.project.move":
       return command.threadId;
     case "delegated_task.request":
     case "delegated_task.wake-policy":
@@ -3110,6 +3111,110 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
     }
   });
+
+  /**
+   * Moves a thread without history to another project. A thread that has run
+   * owns checkpoints resolved against its old directory, and a forked child
+   * whose native fork is still pending would fork from the source transcript
+   * in the wrong place, so both are refused. The worktree binding is cleared
+   * (the new project has its own root) and live sessions are detached, as a
+   * worktree change does; the next turn resolves the new project's policy.
+   */
+  const dispatchThreadProjectMove = Effect.fn("orchestrationV2.dispatch.threadProjectMove")(
+    function* (
+      command: Extract<OrchestrationV2InternalCommand, { readonly type: "thread.project.move" }>,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+      effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    ) {
+      const reject = (cause: string) =>
+        new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause,
+        });
+      const projection = yield* projectionStore
+        .getThreadRecords(command.threadId, [
+          "runs",
+          "checkpointScopes",
+          "contextTransfers",
+          "providerSessions",
+        ])
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        );
+      const thread = projection.thread;
+      if (thread.deletedAt !== null) {
+        return yield* reject(`Thread ${command.threadId} is deleted.`);
+      }
+      if (
+        command.expectedProjectId !== undefined &&
+        command.expectedProjectId !== thread.projectId
+      ) {
+        return yield* reject(
+          `Thread ${command.threadId} moved to another project before this move could be applied.`,
+        );
+      }
+      const project = yield* projects.get(command.projectId).pipe(mapDispatchError(command));
+      if (Option.isNone(project) || project.value.deletedAt !== null) {
+        return yield* reject(`Project ${command.projectId} does not exist.`);
+      }
+      if (projection.runs.some((run) => run.status === "queued" || isBlockingRun(run))) {
+        return yield* reject(
+          "This thread has an active or queued run (thread_busy); wait for it to finish, then move it.",
+        );
+      }
+      if (projection.checkpointScopes.length > 0) {
+        return yield* reject(
+          "This thread has history (thread_has_history), so it cannot move to another project yet.",
+        );
+      }
+      if (pendingForkTransferForThread(projection) !== undefined) {
+        return yield* reject(
+          "This thread is a fork that has not run yet (thread_pending_fork), so it cannot move to another project yet.",
+        );
+      }
+      if (thread.projectId === command.projectId) return;
+
+      const now = yield* DateTime.now;
+      const emitEvent = emit(events, command);
+      yield* emitEvent({
+        type: "thread.project-moved",
+        threadId: command.threadId,
+        providerInstanceId: thread.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          ...thread,
+          projectId: command.projectId,
+          worktreePath: null,
+          branch: null,
+          updatedAt: now,
+        },
+      });
+      const detail = "Project changed.";
+      for (const session of projection.providerSessions) {
+        if (session.status === "stopped" || session.status === "error") continue;
+        yield* emitEvent({
+          type: "provider-session.detached",
+          threadId: command.threadId,
+          driver: session.driver,
+          providerInstanceId: session.providerInstanceId,
+          occurredAt: now,
+          payload: { providerSessionId: session.id, detachedAt: now, reason: detail },
+        });
+        yield* Ref.update(effects, (existing) => [
+          ...existing,
+          {
+            id: `effect:${command.commandId}:provider-session.detach:${session.id}`,
+            commandId: command.commandId,
+            threadId: command.threadId,
+            request: { type: "provider-session.detach", providerSessionId: session.id, detail },
+          } satisfies PendingOrchestrationEffectV2,
+        ]);
+      }
+    },
+  );
 
   const dispatchProviderSessionDetach = Effect.fn("orchestrationV2.dispatch.providerSessionDetach")(
     function* (
@@ -8956,6 +9061,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.model-selection.set":
       case "provider.switch":
         yield* dispatchThreadMutation(command, events, effects);
+        break;
+      case "thread.project.move":
+        yield* dispatchThreadProjectMove(command, events, effects);
         break;
       case "provider-session.detach":
         yield* dispatchProviderSessionDetach(command, events, effects);

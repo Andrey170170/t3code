@@ -1,0 +1,1008 @@
+// @effect-diagnostics nodeBuiltinImport:off
+/**
+ * TrellisCatalog - keeps one T3 project per Trellis workspace path and serves
+ * the client-facing Trellis operations.
+ *
+ * Trellis is the source of truth for names. The sync polls the Trellis
+ * catalog, creates missing T3 projects (matched by `workspaceRoot`, so it never
+ * duplicates), renames them to the Trellis name, and retires projects whose
+ * Trellis item was trashed or graduated: their conversations are archived
+ * (reversibly) and only an empty project is deleted. A user rename in T3 is
+ * pushed to Trellis (which pins the name) instead of being overwritten.
+ * Nothing runs while the integration is off.
+ *
+ * New ideas are created lazily: a new-idea draft belongs to the hidden landing
+ * pad project (`TRELLIS_LANDING_PAD_PROJECT_ID`), and its first send creates
+ * the idea and moves the thread into the idea's project (TrellisIdeaPromotion).
+ *
+ * @module trellis/TrellisCatalog
+ */
+import * as NodePath from "node:path";
+
+import {
+  CommandId,
+  ProjectId,
+  type ThreadId,
+  TRELLIS_LANDING_PAD_PROJECT_ID,
+  TrellisError,
+  type TrellisCreateResult,
+  type TrellisFindHit,
+  type TrellisFindResult,
+  type TrellisIdeaDraftTarget,
+  type TrellisRestoreInput,
+  type TrellisRestoreResult,
+  type TrellisStatus,
+  type TrellisTrashItem,
+  type TrellisTrashProjectResult,
+} from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
+
+import { ServerConfig } from "../config.ts";
+import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import { OrchestrationEventStore } from "../persistence/Services/OrchestrationEventStore.ts";
+import { ProjectService } from "../project/ProjectService.ts";
+import { forkParked } from "../serverActivation.ts";
+import {
+  isTrellisManagedPath,
+  Trellis,
+  type TrellisFindHitView,
+  TrellisProjectView,
+  type TrellisTrashView,
+} from "./Trellis.ts";
+
+const POLL_INTERVAL = "3 seconds";
+const encodeListing = Schema.encodeSync(Schema.fromJsonString(Schema.Array(TrellisProjectView)));
+const SYNC_COMMAND_PREFIX = "server:trellis-sync:";
+
+export interface CatalogProject {
+  readonly id: ProjectId;
+  readonly title: string;
+  readonly workspaceRoot: string;
+}
+
+export interface CatalogThread {
+  readonly id: ThreadId;
+  readonly projectId: ProjectId;
+  readonly archived: boolean;
+  /** Epoch milliseconds of the last change, including an unarchive. */
+  readonly updatedAtMs: number;
+}
+
+export type CatalogSyncAction =
+  | { readonly type: "create"; readonly workspaceRoot: string; readonly title: string }
+  | { readonly type: "rename"; readonly projectId: ProjectId; readonly title: string }
+  | {
+      readonly type: "retire";
+      readonly projectId: ProjectId;
+      /** Active threads to archive; archiving is reversible and keeps them. */
+      readonly archiveThreadIds: ReadonlyArray<ThreadId>;
+      /** Only a project without any threads is deleted. */
+      readonly deleteProject: boolean;
+    };
+
+export interface DesiredProject {
+  readonly workspaceRoot: string;
+  readonly title: string;
+  /** False for fork workspaces, whose title is derived from the project name. */
+  readonly primary: boolean;
+}
+
+const normalizeRoot = (root: string) => NodePath.posix.normalize(root).replace(/(.)\/+$/, "$1");
+
+const isLive = (item: TrellisProjectView) => item.deleted_at === null && item.graduated_to === null;
+
+const titleOf = (name: string, path: string) =>
+  name.trim() || NodePath.posix.basename(path) || "Trellis project";
+
+/** One T3 project per live Trellis idea and per workspace of a live dedicated project. */
+export function desiredProjects(
+  items: ReadonlyArray<TrellisProjectView>,
+): ReadonlyArray<DesiredProject> {
+  const desired: Array<DesiredProject> = [];
+  for (const item of items) {
+    if (!isLive(item)) continue;
+    const name = titleOf(item.name, item.path);
+    if (item.kind === "idea" || item.workspaces.length === 0) {
+      desired.push({ workspaceRoot: normalizeRoot(item.path), title: name, primary: true });
+      continue;
+    }
+    for (const workspace of item.workspaces) {
+      const primary = workspace.id === item.workspace_id;
+      desired.push({
+        workspaceRoot: normalizeRoot(workspace.path),
+        title: primary ? name : `${name} · ${workspace.name.trim() || workspace.id}`,
+        primary,
+      });
+    }
+  }
+  return desired;
+}
+
+/** `<ws>` when `root` is exactly `<trellis root>/workspaces/<ws>/project`. */
+function workspaceIdOfRoot(trellisRoot: string, root: string): string | null {
+  const relative = NodePath.posix
+    .relative(NodePath.posix.join(trellisRoot, "workspaces"), root)
+    .split("/");
+  return relative.length === 2 && relative[1] === "project" && relative[0] ? relative[0] : null;
+}
+
+/**
+ * Workspaces that T3 projects point at but the live listing does not
+ * mention. Only these need a (costlier) workspace listing to learn whether
+ * they were deleted.
+ */
+export function unlistedWorkspaceIds(input: {
+  readonly root: string;
+  readonly items: ReadonlyArray<TrellisProjectView>;
+  readonly projects: ReadonlyArray<CatalogProject>;
+}): ReadonlyArray<string> {
+  const listed = new Set<string>();
+  for (const item of input.items) {
+    if (!isLive(item)) continue;
+    listed.add(item.workspace_id);
+    for (const workspace of item.workspaces) listed.add(workspace.id);
+  }
+  const unlisted = new Set<string>();
+  for (const project of input.projects) {
+    const id = workspaceIdOfRoot(input.root, normalizeRoot(project.workspaceRoot));
+    if (id !== null && !listed.has(id)) unlisted.add(id);
+  }
+  return [...unlisted];
+}
+
+/**
+ * Commands that bring the T3 projects in line with the Trellis catalog.
+ * `items` must include trashed and graduated items (`?all=true`). Projects
+ * outside Trellis project paths are never touched.
+ */
+export function planCatalogSync(input: {
+  readonly root: string;
+  readonly items: ReadonlyArray<TrellisProjectView>;
+  readonly projects: ReadonlyArray<CatalogProject>;
+  readonly threads: ReadonlyArray<CatalogThread>;
+  /**
+   * Workspaces Trellis reports as deleted, with their deletion time in Unix
+   * seconds; see `unlistedWorkspaceIds`.
+   */
+  readonly deletedWorkspaces: ReadonlyMap<string, number>;
+}): ReadonlyArray<CatalogSyncAction> {
+  const actions: Array<CatalogSyncAction> = [];
+  const projectsByRoot = new Map<string, CatalogProject>();
+  for (const project of input.projects) {
+    const root = normalizeRoot(project.workspaceRoot);
+    if (!projectsByRoot.has(root)) projectsByRoot.set(root, project);
+  }
+
+  const desired = desiredProjects(input.items);
+  const desiredRoots = new Set(desired.map((entry) => entry.workspaceRoot));
+  for (const entry of desired) {
+    const existing = projectsByRoot.get(entry.workspaceRoot);
+    if (!existing) {
+      actions.push({ type: "create", workspaceRoot: entry.workspaceRoot, title: entry.title });
+    } else if (existing.title !== entry.title) {
+      actions.push({ type: "rename", projectId: existing.id, title: entry.title });
+    }
+  }
+
+  // Retire only on a positive signal: the path of a trashed or graduated
+  // item, or the root of a workspace Trellis reports as deleted (a trashed
+  // fork). Absence from the listing is never enough. The value is when it
+  // happened, in Unix seconds (graduation records it as the update time).
+  const retiredAt = new Map<string, number>();
+  for (const item of input.items) {
+    if (!isLive(item)) retiredAt.set(normalizeRoot(item.path), item.deleted_at ?? item.updated_at);
+  }
+  for (const [root, project] of projectsByRoot) {
+    if (desiredRoots.has(root) || !isTrellisManagedPath(input.root, root)) continue;
+    const workspaceId = workspaceIdOfRoot(input.root, root);
+    const at =
+      retiredAt.get(root) ??
+      (workspaceId === null ? undefined : input.deletedWorkspaces.get(workspaceId));
+    if (at === undefined) continue;
+    const threads = input.threads.filter((thread) => thread.projectId === project.id);
+    // Only threads untouched since the retirement: one the user unarchived
+    // (or kept working in) afterwards stays where it is.
+    const archiveThreadIds = threads
+      .filter((thread) => !thread.archived && thread.updatedAtMs < at * 1000)
+      .map((thread) => thread.id);
+    if (archiveThreadIds.length === 0 && threads.length > 0) continue;
+    actions.push({
+      type: "retire",
+      projectId: project.id,
+      archiveThreadIds,
+      deleteProject: threads.length === 0,
+    });
+  }
+  return actions;
+}
+
+/** `<ws>` when `path` is `<trellis root>/workspaces/<ws>/project` or below it. */
+function workspaceIdOfPath(trellisRoot: string, path: string): string | null {
+  const relative = NodePath.posix
+    .relative(NodePath.posix.join(trellisRoot, "workspaces"), NodePath.posix.normalize(path))
+    .split("/");
+  return relative.length >= 2 && relative[1] === "project" && relative[0] && relative[0] !== ".."
+    ? relative[0]
+    : null;
+}
+
+/** What deleting the T3 project at `workspaceRoot` moves to the Trellis trash, if anything. */
+export function trashTargetOf(
+  items: ReadonlyArray<TrellisProjectView>,
+  workspaceRoot: string,
+):
+  | { readonly kind: "project"; readonly id: string; readonly name: string }
+  | { readonly kind: "workspace"; readonly id: string; readonly name: string }
+  | null {
+  const root = normalizeRoot(workspaceRoot);
+  for (const item of items) {
+    if (!isLive(item)) continue;
+    const name = titleOf(item.name, item.path);
+    if (item.kind === "idea" || item.workspaces.length === 0) {
+      if (normalizeRoot(item.path) === root) return { kind: "project", id: item.id, name };
+      continue;
+    }
+    const workspace = item.workspaces.find((entry) => normalizeRoot(entry.path) === root);
+    if (workspace === undefined) continue;
+    // The primary workspace stands for the whole project, forks for themselves.
+    return workspace.id === item.workspace_id
+      ? { kind: "project", id: item.id, name }
+      : {
+          kind: "workspace",
+          id: workspace.id,
+          name: `${name} · ${workspace.name.trim() || workspace.id}`,
+        };
+  }
+  return null;
+}
+
+/**
+ * Splits find hits per workspace: Trellis groups a project's matches, but a
+ * match in a fork must open that fork's T3 project, not the primary one.
+ * Returns one entry per T3 project root, in hit order.
+ */
+export function splitFindHits(
+  trellisRoot: string,
+  hits: ReadonlyArray<TrellisFindHitView>,
+): ReadonlyArray<{
+  readonly item: TrellisProjectView;
+  readonly workspaceRoot: string;
+  readonly title: string;
+  readonly matches: TrellisFindHitView["matches"];
+}> {
+  const entries = [];
+  for (const hit of hits) {
+    const item = hit.project;
+    const primaryRoot = normalizeRoot(item.path);
+    const name = titleOf(item.name, item.path);
+    if (item.kind === "idea" || item.workspaces.length === 0) {
+      entries.push({ item, workspaceRoot: primaryRoot, title: name, matches: hit.matches });
+      continue;
+    }
+    const byRoot = new Map<string, Array<TrellisFindHitView["matches"][number]>>();
+    for (const match of hit.matches) {
+      const workspaceId = workspaceIdOfPath(trellisRoot, match.path);
+      const workspace = item.workspaces.find((entry) => entry.id === workspaceId);
+      const root = workspace ? normalizeRoot(workspace.path) : primaryRoot;
+      byRoot.set(root, [...(byRoot.get(root) ?? []), match]);
+    }
+    // A match on the name or description alone opens the primary workspace.
+    if (byRoot.size === 0) byRoot.set(primaryRoot, []);
+    for (const [root, matches] of byRoot) {
+      const workspace = item.workspaces.find((entry) => normalizeRoot(entry.path) === root);
+      const primary = workspace === undefined || workspace.id === item.workspace_id;
+      entries.push({
+        item,
+        workspaceRoot: root,
+        title: primary ? name : `${name} · ${workspace.name.trim() || workspace.id}`,
+        matches,
+      });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Trash entries for the settings page. A fork trashed together with (or
+ * after) its project comes back with it, so only the project is listed. The
+ * expiry is what Trellis reports per item; Trellis versions without it purge
+ * every kind after `purge_after_days`.
+ */
+export function trashItems(view: TrellisTrashView): ReadonlyArray<TrellisTrashItem> {
+  const expiryOf = (entry: TrellisTrashView["projects"][number], deletedAt: number) =>
+    entry.expires_at !== undefined
+      ? entry.expires_at
+      : view.idea_expiry_days !== undefined
+        ? entry.kind === "idea"
+          ? deletedAt + view.idea_expiry_days * 86_400
+          : null
+        : deletedAt + (view.purge_after_days ?? 30) * 86_400;
+  const projectDeletedAt = new Map<string, number>();
+  const items: Array<TrellisTrashItem> = [];
+  for (const entry of view.projects) {
+    if (entry.deleted_at === null) continue;
+    projectDeletedAt.set(entry.id, entry.deleted_at);
+    items.push({
+      kind: entry.kind === "idea" ? "idea" : "project",
+      id: entry.id,
+      name: entry.name.trim() || entry.id,
+      deletedAt: entry.deleted_at,
+      expiresAt: expiryOf(entry, entry.deleted_at),
+    });
+  }
+  for (const entry of view.workspaces) {
+    if (entry.deleted_at === null || entry.kind === "scratch") continue;
+    const projectAt = entry.project_id == null ? undefined : projectDeletedAt.get(entry.project_id);
+    if (projectAt !== undefined && entry.deleted_at >= projectAt) continue;
+    items.push({
+      kind: "workspace",
+      id: entry.id,
+      name: entry.name.trim() || entry.id,
+      deletedAt: entry.deleted_at,
+      expiresAt: expiryOf(entry, entry.deleted_at),
+    });
+  }
+  return items.toSorted((left, right) => right.deletedAt - left.deletedAt);
+}
+
+/**
+ * T3 project roots whose Trellis item is gone (trashed or graduated), from a
+ * listing with `all`: every path of a non-live item, trashed forks of live
+ * items, and workspaces Trellis reports as deleted. Clients hide such
+ * projects once nothing in them is active.
+ */
+export function retiredRoots(
+  items: ReadonlyArray<TrellisProjectView>,
+  deletedWorkspaceRoots: ReadonlyArray<string>,
+): ReadonlyArray<string> {
+  const live = new Set(
+    desiredProjects(
+      items.map((item) => ({
+        ...item,
+        workspaces: item.workspaces.filter((workspace) => workspace.deleted_at === null),
+      })),
+    ).map((entry) => entry.workspaceRoot),
+  );
+  const roots = new Set<string>();
+  for (const item of items) {
+    if (!isLive(item)) {
+      roots.add(normalizeRoot(item.path));
+      // An idea's workspace is the shared scratch, which stays.
+      if (item.kind !== "idea") {
+        for (const workspace of item.workspaces) roots.add(normalizeRoot(workspace.path));
+      }
+    } else {
+      for (const workspace of item.workspaces) {
+        if (workspace.deleted_at !== null) roots.add(normalizeRoot(workspace.path));
+      }
+    }
+  }
+  for (const root of deletedWorkspaceRoots) roots.add(normalizeRoot(root));
+  return [...roots].filter((root) => !live.has(root)).toSorted();
+}
+
+/** True when one path is the other or contains it. */
+function pathsOverlap(left: string, right: string): boolean {
+  const inside = (path: string, root: string) =>
+    path === root || path.startsWith(root === "/" ? root : `${root}/`);
+  return inside(left, right) || inside(right, left);
+}
+
+export class TrellisCatalog extends Context.Service<
+  TrellisCatalog,
+  {
+    readonly start: () => Effect.Effect<void, never, Scope.Scope>;
+    /** Runs one sync pass and returns the T3 project id for each synced workspace root. */
+    readonly syncNow: Effect.Effect<ReadonlyMap<string, ProjectId>>;
+    /** Probes Trellis first when the integration is on but not yet reachable. */
+    readonly status: Effect.Effect<TrellisStatus>;
+    readonly newIdea: (input: {
+      readonly name?: string | undefined;
+    }) => Effect.Effect<TrellisCreateResult, TrellisError>;
+    /**
+     * Creates the idea for a new-idea draft's first send, with its T3 project.
+     * `trellisId` lets the caller discard it if the move fails; an idea whose
+     * T3 project cannot be created is discarded here.
+     */
+    readonly createIdeaForDraft: Effect.Effect<
+      TrellisCreateResult & { readonly trellisId: string },
+      TrellisError
+    >;
+    /** Trashes an idea that never got a thread. Never fails. */
+    readonly discardIdea: (trellisId: string) => Effect.Effect<void>;
+    /** Ensures the landing pad project that new-idea drafts belong to. Creates no idea. */
+    readonly prepareIdeaDraft: Effect.Effect<TrellisIdeaDraftTarget, TrellisError>;
+    /** Moves the Trellis item behind a T3 project to the trash and archives its conversations. */
+    readonly trashProject: (
+      projectId: ProjectId,
+    ) => Effect.Effect<TrellisTrashProjectResult, TrellisError>;
+    readonly listTrash: Effect.Effect<ReadonlyArray<TrellisTrashItem>, TrellisError>;
+    /** Restores a trashed item and unarchives the conversations its trashing archived. */
+    readonly restore: (
+      input: TrellisRestoreInput,
+    ) => Effect.Effect<TrellisRestoreResult, TrellisError>;
+    readonly emptyTrash: Effect.Effect<number, TrellisError>;
+    readonly newProject: (input: {
+      readonly name?: string | undefined;
+      readonly gitUrl?: string | undefined;
+      readonly base?: string | undefined;
+    }) => Effect.Effect<TrellisCreateResult, TrellisError>;
+    readonly find: (query: string) => Effect.Effect<TrellisFindResult, TrellisError>;
+  }
+>()("t3/trellis/TrellisCatalog") {}
+
+const errorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
+
+export const make = Effect.gen(function* () {
+  const trellis = yield* Trellis;
+  const orchestrator = yield* OrchestratorV2;
+  const projectStore = yield* ProjectStore.ProjectStoreV2;
+  const projectService = yield* ProjectService;
+  const applicationEvents = yield* OrchestrationEventStore;
+  const crypto = yield* Crypto.Crypto;
+  const serverConfig = yield* ServerConfig;
+  // An empty directory owned by T3, outside every Trellis path, so nothing
+  // treats the landing pad as a workspace. No thread ever runs there.
+  const landingPadRoot = NodePath.join(serverConfig.stateDir, "trellis-landing-pad");
+  const landingPadLock = yield* Semaphore.make(1);
+  const lock = yield* Semaphore.make(1);
+  // The last Trellis listing that was fully applied; unchanged listings skip
+  // the T3 read unless a T3 project or thread changed meanwhile.
+  const lastApplied = yield* Ref.make<{
+    readonly fingerprint: string;
+    readonly items: ReadonlyArray<TrellisProjectView>;
+    readonly ids: ReadonlyMap<string, ProjectId>;
+    readonly retiredRoots: ReadonlyArray<string>;
+  } | null>(null);
+  const dirty = yield* Ref.make(true);
+
+  const commandId = (tag: string) =>
+    crypto.randomUUIDv4.pipe(
+      Effect.map((uuid) => CommandId.make(`${SYNC_COMMAND_PREFIX}${tag}:${uuid}`)),
+    );
+
+  const activeProjects = projectStore.list().pipe(
+    Effect.map((rows) =>
+      rows.map((row): CatalogProject => ({
+        id: row.projectId,
+        title: row.title,
+        workspaceRoot: row.workspaceRoot,
+      })),
+    ),
+  );
+
+  // Active and archived threads (`threads` lists only the active ones).
+  const readThreads = orchestrator
+    .getShellSnapshot()
+    .pipe(Effect.map((snapshot) => [...snapshot.threads, ...snapshot.archivedThreads]));
+
+  const readT3 = Effect.gen(function* () {
+    const projects = yield* activeProjects;
+    const threads: Array<CatalogThread> = (yield* readThreads).map((thread) => ({
+      id: thread.id,
+      projectId: thread.projectId,
+      archived: thread.archivedAt !== null,
+      updatedAtMs: DateTime.toEpochMillis(thread.updatedAt),
+    }));
+    return { projects, threads };
+  });
+
+  const archiveThread = (threadId: ThreadId) =>
+    commandId("archive").pipe(
+      Effect.flatMap((id) =>
+        orchestrator.dispatch({ type: "thread.archive", commandId: id, threadId }),
+      ),
+    );
+
+  const apply = Effect.fn("TrellisCatalog.apply")(function* (action: CatalogSyncAction) {
+    switch (action.type) {
+      case "create": {
+        const projectId = ProjectId.make(yield* crypto.randomUUIDv4);
+        yield* projectService.create({
+          commandId: yield* commandId("create"),
+          projectId,
+          title: action.title,
+          workspaceRoot: action.workspaceRoot,
+        });
+        return { root: action.workspaceRoot, projectId };
+      }
+      case "rename":
+        yield* projectService.update({
+          commandId: yield* commandId("rename"),
+          projectId: action.projectId,
+          title: action.title,
+        });
+        return undefined;
+      case "retire":
+        for (const threadId of action.archiveThreadIds) yield* archiveThread(threadId);
+        if (action.deleteProject) {
+          yield* projectService.delete({
+            commandId: yield* commandId("retire"),
+            projectId: action.projectId,
+          });
+        }
+        return undefined;
+    }
+  });
+
+  const syncOnce = Effect.gen(function* () {
+    const env = yield* trellis.refresh;
+    if (env === null) {
+      yield* Ref.set(lastApplied, null);
+      return new Map<string, ProjectId>();
+    }
+    const items = yield* trellis.listProjects({ all: true });
+    const fingerprint = encodeListing(items);
+    const previous = yield* Ref.get(lastApplied);
+    if (previous?.fingerprint === fingerprint && !(yield* Ref.get(dirty))) {
+      return previous.ids;
+    }
+    yield* Ref.set(dirty, false);
+    const t3 = yield* readT3;
+    const ids = new Map<string, ProjectId>();
+    for (const project of t3.projects) ids.set(normalizeRoot(project.workspaceRoot), project.id);
+    const unlisted = unlistedWorkspaceIds({ root: env.root, items, projects: t3.projects });
+    const deletedWorkspaces = new Map<string, number>();
+    if (unlisted.length > 0) {
+      for (const workspace of yield* trellis.listWorkspaces({ all: true })) {
+        if (workspace.deleted_at !== null && unlisted.includes(workspace.id)) {
+          deletedWorkspaces.set(workspace.id, workspace.deleted_at);
+        }
+      }
+    }
+    const actions = planCatalogSync({
+      root: env.root,
+      items,
+      projects: t3.projects,
+      threads: t3.threads,
+      deletedWorkspaces,
+    });
+    let failed = false;
+    for (const action of actions) {
+      const created = yield* apply(action).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("Trellis catalog sync action failed", {
+            action: action.type,
+            detail: errorMessage(error),
+          }).pipe(
+            Effect.tap(() => Effect.sync(() => (failed = true))),
+            Effect.as(undefined),
+          ),
+        ),
+      );
+      if (created) ids.set(created.root, created.projectId);
+    }
+    // A failed action is retried on the next poll.
+    if (failed) yield* Ref.set(dirty, true);
+    yield* Ref.set(lastApplied, {
+      fingerprint,
+      items,
+      ids,
+      retiredRoots: retiredRoots(
+        items,
+        [...deletedWorkspaces.keys()].map((id) =>
+          NodePath.posix.join(env.root, "workspaces", id, "project"),
+        ),
+      ),
+    });
+    return ids as ReadonlyMap<string, ProjectId>;
+  });
+
+  const syncNow = lock
+    .withPermits(1)(syncOnce)
+    .pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.interrupt
+          : Effect.logWarning("Trellis catalog sync failed", { cause: Cause.pretty(cause) }).pipe(
+              Effect.andThen(Ref.get(lastApplied)),
+              Effect.map((applied) => applied?.ids ?? new Map<string, ProjectId>()),
+            ),
+      ),
+    );
+
+  // A user rename of a Trellis-managed project in T3 is pushed to Trellis,
+  // which pins the name. Fork titles are derived, so renaming one is not pushed.
+  const pushRename = Effect.fn("TrellisCatalog.pushRename")(function* (
+    projectId: ProjectId,
+    title: string,
+  ) {
+    const env = yield* trellis.current;
+    const applied = yield* Ref.get(lastApplied);
+    if (env === null || applied === null) return;
+    const project = yield* projectStore.get(projectId);
+    if (Option.isNone(project)) return;
+    const root = normalizeRoot(project.value.workspaceRoot);
+    const target = desiredProjects(applied.items).find(
+      (entry) => entry.primary && entry.workspaceRoot === root,
+    );
+    if (!target || target.title === title) return;
+    yield* trellis.describe({ target: root, name: title });
+  });
+
+  const keepAlive = (label: string) =>
+    Effect.catchCause((cause: Cause.Cause<unknown>) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.interrupt
+        : Effect.logWarning(label, { cause: Cause.pretty(cause) }),
+    );
+
+  const start: TrellisCatalog["Service"]["start"] = Effect.fn("TrellisCatalog.start")(function* () {
+    const fromSequence = yield* applicationEvents.latestApplicationSequence.pipe(
+      Effect.orElseSucceed(() => 0),
+    );
+    yield* forkParked(
+      Stream.runForEach(
+        applicationEvents.streamApplicationEvents({ afterSequence: fromSequence }),
+        (stored) => {
+          if (!("aggregateKind" in stored)) {
+            switch (stored.event.type) {
+              case "thread.created":
+              case "thread.archived":
+              case "thread.unarchived":
+              case "thread.deleted":
+              case "thread.project-moved":
+                return Ref.set(dirty, true);
+              default:
+                return Effect.void;
+            }
+          }
+          if (stored.type !== "project.meta-updated") return Ref.set(dirty, true);
+          const title = stored.payload.title;
+          const fromSync = stored.commandId?.startsWith(SYNC_COMMAND_PREFIX) === true;
+          return Ref.set(dirty, true).pipe(
+            Effect.andThen(
+              title === undefined || fromSync
+                ? Effect.void
+                : lock
+                    .withPermits(1)(pushRename(stored.payload.projectId, title))
+                    .pipe(
+                      Effect.andThen(syncNow),
+                      keepAlive("failed to push a project rename to Trellis"),
+                    ),
+            ),
+          );
+        },
+      ).pipe(keepAlive("the Trellis catalog stopped following project events")),
+    );
+    yield* forkParked(syncNow.pipe(Effect.repeat(Schedule.spaced(POLL_INTERVAL)), Effect.asVoid));
+  });
+
+  const requireReady = Effect.gen(function* () {
+    const env = (yield* trellis.current) ?? (yield* trellis.refresh);
+    if (env === null) {
+      return yield* new TrellisError({
+        message: (yield* trellis.enabled)
+          ? "Trellis is not running on this server."
+          : "The Trellis integration is turned off on this server.",
+      });
+    }
+    return env;
+  });
+
+  const asTrellisError = (prefix: string) =>
+    Effect.mapError((error: unknown) =>
+      Schema.is(TrellisError)(error)
+        ? error
+        : new TrellisError({ message: `${prefix}: ${errorMessage(error)}` }),
+    );
+
+  // The T3 project for a newly created Trellis item, created directly rather
+  // than waiting for the poll. Under the sync lock, so the poll never creates
+  // a second project for the same root.
+  const projectFor = Effect.fn("TrellisCatalog.projectFor")(function* (item: TrellisProjectView) {
+    const root = normalizeRoot(item.path);
+    const title = titleOf(item.name, item.path);
+    const projectId = yield* lock.withPermits(1)(
+      Effect.gen(function* () {
+        const existing = yield* projectStore.findActiveByWorkspaceRoot(root);
+        if (Option.isSome(existing)) return existing.value.projectId;
+        const projectId = ProjectId.make(yield* crypto.randomUUIDv4);
+        yield* projectService.create({
+          commandId: yield* commandId("create"),
+          projectId,
+          title,
+          workspaceRoot: root,
+        });
+        return projectId;
+      }),
+    );
+    yield* Ref.set(dirty, true);
+    return { projectId, workspaceRoot: root, name: title } satisfies TrellisCreateResult;
+  }, asTrellisError("Trellis created the item, but its T3 project could not be created"));
+
+  const find: TrellisCatalog["Service"]["find"] = Effect.fn("TrellisCatalog.find")(
+    function* (query) {
+      const env = yield* requireReady;
+      const hits = yield* trellis.find(query);
+      const entries = splitFindHits(env.root, hits);
+      let ids = (yield* Ref.get(lastApplied))?.ids ?? new Map<string, ProjectId>();
+      if (entries.some((entry) => isLive(entry.item) && !ids.has(entry.workspaceRoot))) {
+        ids = yield* syncNow;
+      }
+      return {
+        hits: entries.map((entry): TrellisFindHit => ({
+          projectId: isLive(entry.item) ? (ids.get(entry.workspaceRoot) ?? null) : null,
+          kind: entry.item.kind === "idea" ? "idea" : "project",
+          name: entry.title,
+          description: entry.item.description,
+          path: entry.workspaceRoot,
+          matches: entry.matches,
+        })),
+      };
+    },
+  );
+
+  const prepareIdeaDraft = Effect.gen(function* () {
+    yield* requireReady;
+    const existing = yield* projectStore.get(TRELLIS_LANDING_PAD_PROJECT_ID);
+    if (Option.isSome(existing)) {
+      return {
+        projectId: TRELLIS_LANDING_PAD_PROJECT_ID,
+        workspaceRoot: existing.value.workspaceRoot,
+      } satisfies TrellisIdeaDraftTarget;
+    }
+    const project = yield* projectService.create({
+      commandId: yield* commandId("landing-pad"),
+      projectId: TRELLIS_LANDING_PAD_PROJECT_ID,
+      title: "New idea",
+      workspaceRoot: landingPadRoot,
+      createWorkspaceRootIfMissing: true,
+    });
+    return {
+      projectId: TRELLIS_LANDING_PAD_PROJECT_ID,
+      workspaceRoot: project.workspaceRoot,
+    } satisfies TrellisIdeaDraftTarget;
+  }).pipe(landingPadLock.withPermits(1), asTrellisError("Could not prepare a new idea"));
+
+  // Threads of the T3 projects under `scopes` that are running or about to.
+  const busyThreadTitlesIn = Effect.fn("TrellisCatalog.busyThreadTitlesIn")(function* (
+    scopes: ReadonlyArray<string>,
+  ) {
+    if (scopes.length === 0) return [];
+    const projectIds = new Set(
+      (yield* activeProjects)
+        .filter((project) =>
+          scopes.some((scope) =>
+            pathsOverlap(normalizeRoot(scope), normalizeRoot(project.workspaceRoot)),
+          ),
+        )
+        .map((project) => project.id),
+    );
+    const active = yield* orchestrator.getShellSnapshot({ location: "active" });
+    return active.threads
+      .filter((thread) => projectIds.has(thread.projectId) && thread.activeRunId !== null)
+      .map((thread) => thread.title);
+  });
+
+  // Archives the active threads of the T3 projects rooted at `roots`. Archiving
+  // detaches their provider sessions, as a client archive does.
+  const archiveThreadsIn = (roots: ReadonlyArray<string>) =>
+    Effect.gen(function* () {
+      const wanted = new Set(roots.map(normalizeRoot));
+      const projectIds = new Set(
+        (yield* activeProjects)
+          .filter((project) => wanted.has(normalizeRoot(project.workspaceRoot)))
+          .map((project) => project.id),
+      );
+      const active = yield* orchestrator.getShellSnapshot({ location: "active" });
+      for (const thread of active.threads) {
+        if (!projectIds.has(thread.projectId) || thread.archivedAt !== null) continue;
+        yield* archiveThread(thread.id).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("could not archive a trashed Trellis thread", {
+              threadId: thread.id,
+              detail: errorMessage(error),
+            }),
+          ),
+        );
+      }
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("could not archive the threads of a trashed Trellis item", {
+          detail: errorMessage(error),
+        }),
+      ),
+    );
+
+  const trashProject: TrellisCatalog["Service"]["trashProject"] = Effect.fn(
+    "TrellisCatalog.trashProject",
+  )(function* (projectId) {
+    yield* requireReady;
+    const project = Option.getOrUndefined(
+      yield* projectStore.get(projectId).pipe(Effect.orElseSucceed(() => Option.none())),
+    );
+    if (project === undefined) {
+      return yield* new TrellisError({ message: "This project no longer exists." });
+    }
+    const items = yield* trellis.listProjects({ all: false });
+    const target = trashTargetOf(items, project.workspaceRoot);
+    if (target === null) {
+      return { trashed: null, name: project.title } satisfies TrellisTrashProjectResult;
+    }
+    const item = items.find((entry) =>
+      target.kind === "project"
+        ? entry.id === target.id
+        : entry.workspaces.some((workspace) => workspace.id === target.id),
+    );
+    const scopes =
+      target.kind === "workspace"
+        ? (item?.workspaces.filter((workspace) => workspace.id === target.id) ?? []).map(
+            (workspace) => workspace.path,
+          )
+        : item === undefined || item.kind === "idea" || item.workspaces.length === 0
+          ? [project.workspaceRoot]
+          : item.workspaces
+              .filter((workspace) => workspace.deleted_at === null)
+              .map((workspace) => workspace.path);
+    // Trashing moves the files away and stops the workspace, so running
+    // agents inside it would lose their work.
+    const busy = yield* busyThreadTitlesIn(scopes).pipe(Effect.orElseSucceed(() => []));
+    if (busy.length > 0) {
+      const one = busy.length === 1;
+      return yield* new TrellisError({
+        message: `${busy.map((title) => `"${title}"`).join(", ")} ${one ? "is" : "are"} still working in ${target.name}. Wait for ${one ? "it" : "them"} to finish or stop ${one ? "it" : "them"}, then try again.`,
+      });
+    }
+    if (target.kind === "project") yield* trellis.trashProject(target.id);
+    else yield* trellis.trashWorkspace(target.id);
+    // Archive the conversations here rather than through the sync's time
+    // heuristic: a session ending as the workspace stops bumps a thread past
+    // the deletion time, which would leave it active.
+    yield* archiveThreadsIn(scopes);
+    yield* syncNow;
+    return { trashed: target.kind, name: target.name } satisfies TrellisTrashProjectResult;
+  });
+
+  // Restoring also unarchives the conversations archived when the item went
+  // to the trash (archived since then), the reverse of retiring it.
+  const restore: TrellisCatalog["Service"]["restore"] = Effect.fn("TrellisCatalog.restore")(
+    function* (input) {
+      const env = yield* requireReady;
+      const trash = yield* trellis.listTrash;
+      const deletedAt =
+        [...trash.projects, ...trash.workspaces].find((entry) => entry.id === input.id)
+          ?.deleted_at ?? null;
+      const liveRoots = (item: TrellisProjectView) =>
+        item.kind === "idea" || item.workspaces.length === 0
+          ? [item.path]
+          : item.workspaces
+              .filter((workspace) => workspace.deleted_at === null)
+              .map((workspace) => workspace.path);
+      let root: string;
+      // Every T3 project the restore brings back. A project restores the
+      // workspaces of its deletion; a fork whose project is trashed brings
+      // the project back first. Workspaces still trashed stay archived.
+      let roots: ReadonlyArray<string>;
+      if (input.kind === "workspace") {
+        yield* trellis.restoreWorkspace(input.id);
+        root = NodePath.posix.join(env.root, "workspaces", input.id, "project");
+        const owner = (yield* trellis.listProjects({ all: false })).find((item) =>
+          item.workspaces.some((workspace) => workspace.id === input.id),
+        );
+        roots = owner === undefined ? [root] : liveRoots(owner);
+      } else {
+        const restored = yield* trellis.restoreProject(input.id);
+        root = restored.path;
+        roots = liveRoots(restored);
+      }
+      const ids = yield* syncNow;
+      const projectId = ids.get(normalizeRoot(root)) ?? null;
+      const restoredProjectIds = new Set(
+        roots.flatMap((entry) => {
+          const id = ids.get(normalizeRoot(entry));
+          return id === undefined ? [] : [id];
+        }),
+      );
+      if (deletedAt !== null) {
+        const archived = yield* orchestrator.getShellSnapshot({ location: "archive" }).pipe(
+          Effect.map((snapshot) => snapshot.archivedThreads),
+          Effect.orElseSucceed(() => []),
+        );
+        for (const thread of archived) {
+          if (
+            restoredProjectIds.has(thread.projectId) &&
+            thread.archivedAt !== null &&
+            DateTime.toEpochMillis(thread.archivedAt) >= deletedAt * 1000
+          ) {
+            yield* commandId("restore-unarchive").pipe(
+              Effect.flatMap((id) =>
+                orchestrator.dispatch({
+                  type: "thread.unarchive",
+                  commandId: id,
+                  threadId: thread.id,
+                }),
+              ),
+              Effect.catch((error) =>
+                Effect.logWarning("could not unarchive a restored Trellis thread", {
+                  threadId: thread.id,
+                  detail: errorMessage(error),
+                }),
+              ),
+            );
+          }
+        }
+      }
+      return { projectId } satisfies TrellisRestoreResult;
+    },
+  );
+
+  // Moves an idea that never got a thread back out of the catalog.
+  const discardIdea = (trellisId: string) =>
+    trellis.trashProject(trellisId).pipe(
+      Effect.andThen(syncNow),
+      Effect.tap(() => Effect.logInfo("discarded an unused Trellis idea", { trellisId })),
+      Effect.catch((error) =>
+        Effect.logWarning("could not discard an unused Trellis idea", {
+          trellisId,
+          detail: error.message,
+        }),
+      ),
+      Effect.asVoid,
+    );
+
+  return TrellisCatalog.of({
+    start,
+    syncNow,
+    status: Effect.gen(function* () {
+      let connection = yield* trellis.connection;
+      if (connection.state === "unavailable") {
+        yield* trellis.refresh;
+        connection = yield* trellis.connection;
+      }
+      const applied = yield* Ref.get(lastApplied);
+      return {
+        state: connection.state,
+        ...(connection.root === null ? {} : { root: connection.root }),
+        knownRoots: yield* trellis.expectedRoots,
+        socketPath: connection.socketPath,
+        ...(connection.state !== "ready" || applied === null
+          ? {}
+          : {
+              retiredRoots: applied.retiredRoots,
+              forkRoots: desiredProjects(applied.items)
+                .filter((entry) => !entry.primary)
+                .map((entry) => entry.workspaceRoot),
+            }),
+      } satisfies TrellisStatus;
+    }),
+    newIdea: (input) =>
+      requireReady.pipe(Effect.andThen(trellis.createIdea(input)), Effect.flatMap(projectFor)),
+    createIdeaForDraft: requireReady.pipe(
+      Effect.andThen(trellis.createIdea({})),
+      Effect.flatMap((item) =>
+        projectFor(item).pipe(
+          Effect.map((result) => ({ ...result, trellisId: item.id })),
+          // Without a T3 project the idea is unreachable: take it back.
+          Effect.tapError(() => discardIdea(item.id)),
+        ),
+      ),
+    ),
+    discardIdea,
+    newProject: (input) =>
+      requireReady.pipe(Effect.andThen(trellis.createProject(input)), Effect.flatMap(projectFor)),
+    prepareIdeaDraft,
+    trashProject: (projectId) =>
+      trashProject(projectId).pipe(asTrellisError("Could not move the project to the trash")),
+    listTrash: requireReady.pipe(Effect.andThen(trellis.listTrash), Effect.map(trashItems)),
+    restore: (input) => restore(input).pipe(asTrellisError("Could not restore it")),
+    emptyTrash: requireReady.pipe(Effect.andThen(trellis.emptyTrash)),
+    find: (query) => find(query).pipe(asTrellisError("Trellis find failed")),
+  });
+});
+
+export const layer = Layer.effect(TrellisCatalog, make);
