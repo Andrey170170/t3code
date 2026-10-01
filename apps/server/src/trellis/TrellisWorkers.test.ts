@@ -10,10 +10,12 @@ import {
   ProviderSessionId,
   type ServerProvider,
   type ThreadId,
+  TrellisError,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
@@ -69,6 +71,8 @@ function makeForkTrellis(input: { readonly checkpoints: ReadonlyArray<string> })
     }>,
     activities: [] as Array<{ target: string; kind: string; data: unknown }>,
     purgeRequests: [] as Array<{ ids: ReadonlyArray<string>; reason?: string; thread?: string }>,
+    /** Activity writes to fail before they succeed, as while Trellis restarts. */
+    failActivities: 0,
   };
   const trellis = makeTestTrellis({
     resolve: (target) =>
@@ -114,7 +118,13 @@ function makeForkTrellis(input: { readonly checkpoints: ReadonlyArray<string> })
               }),
         };
       }),
-    recordActivity: (activity) => Effect.sync(() => void state.activities.push(activity)),
+    recordActivity: (activity) =>
+      Effect.suspend(() => {
+        if (state.failActivities === 0)
+          return Effect.sync(() => void state.activities.push(activity));
+        state.failActivities -= 1;
+        return Effect.fail(new TrellisError({ message: "Trellis is unavailable: restarting" }));
+      }),
     listWorkspaces: () => Effect.sync(() => state.workspaces),
     listTrash: Effect.sync(() => ({
       projects: [],
@@ -338,6 +348,30 @@ it.effect(
   },
 );
 
+it.effect("concurrent spawns with one clientRequestId leave one fork and report it", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const lead = yield* startLead;
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    const spawn = service.delegateTask(scopeOf(lead.threadId), {
+      task: "Add the parser",
+      clientRequestId: "spawn-twice",
+      workspace: { fork: { from: "latest" } },
+    });
+    const [first, second] = yield* Effect.all([spawn, spawn], { concurrency: "unbounded" });
+    assert.equal(first.childThreadId, second.childThreadId);
+    assert.equal(first.fork?.workspaceId, second.fork?.workspaceId);
+    // Both calls forked; the one whose child lost the race went to the trash.
+    const live = fake.state.workspaces.filter(
+      (workspace) => workspace.spawned_by != null && workspace.deleted_at === null,
+    );
+    assert.deepEqual(
+      live.map((workspace) => workspace.id),
+      [first.fork?.workspaceId],
+    );
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
 it.effect(
   "spawns from an earlier checkpoint by id, and refuses one that is not a checkpoint",
   () => {
@@ -417,6 +451,81 @@ it.effect("posts a completed worker's result as its fork's summary", () => {
         },
       },
     ]);
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
+it.effect("retries a summary Trellis could not take until it is posted", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const workers = yield* TrellisWorkers.TrellisWorkers;
+    const lead = yield* startLead;
+    const forked = yield* delegate(lead.threadId, { fork: { from: "latest" } });
+    const task = (yield* threadOf(lead.threadId)).subagents.find(
+      (candidate) => candidate.childThreadId === forked.childThreadId,
+    )!;
+    fake.state.failActivities = 2;
+    yield* workers.handle({
+      type: "subagent.updated",
+      threadId: lead.threadId,
+      payload: { ...task, status: "completed", result: "Done.", completedAt: yield* DateTime.now },
+    } as unknown as OrchestrationV2DomainEvent);
+    assert.deepEqual(fake.state.activities, []);
+    assert.equal(fake.state.failActivities, 1, "first write attempted");
+    // Two retries 30 s apart (on the test clock); the second write succeeds.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      yield* TestClock.adjust("30 seconds");
+      yield* Effect.yieldNow;
+    }
+    assert.deepEqual(
+      fake.state.activities.map((activity) => activity.data),
+      [{ text: "Done.", thread: forked.childThreadId }],
+    );
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
+it.effect("archiving a lead reaches workers below an archived worker", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const workers = yield* TrellisWorkers.TrellisWorkers;
+    const orchestrator = yield* OrchestratorV2;
+    const lead = yield* startLead;
+    const middle = yield* delegate(lead.threadId, "parent");
+    // The middle worker delegates in turn, while its turn runs.
+    const middleRun = (yield* threadOf(middle.childThreadId)).runs.at(-1)!;
+    yield* orchestrator.dispatch({
+      type: "delegated_task.request",
+      createdBy: "agent",
+      creationSource: "mcp",
+      commandId: CommandId.make("middle:delegate"),
+      parentThreadId: middle.childThreadId,
+      parentRunId: middleRun.id,
+      parentNodeId: middleRun.rootNodeId!,
+      task: "Leaf task",
+      modelSelection: { instanceId: codex, model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    });
+    const leaf = (yield* orchestrator.getShellSnapshot()).threads.find(
+      (thread) => thread.lineage.parentThreadId === middle.childThreadId,
+    )!;
+    const archive = (threadId: ThreadId, label: string) =>
+      orchestrator
+        .dispatch({ type: "thread.archive", commandId: CommandId.make(label), threadId })
+        .pipe(
+          Effect.flatMap((result) =>
+            Effect.forEach(result.storedEvents, (stored) => workers.handle(stored.event)),
+          ),
+        );
+    // The middle worker is archived (taking the leaf with it); the leaf comes back.
+    yield* archive(middle.childThreadId, "middle:archive");
+    yield* orchestrator.dispatch({
+      type: "thread.unarchive",
+      commandId: CommandId.make("leaf:unarchive"),
+      threadId: leaf.id,
+    });
+    assert.isNull((yield* threadOf(leaf.id)).thread.archivedAt);
+    yield* archive(lead.threadId, "lead:archive");
+    assert.isNotNull((yield* threadOf(leaf.id)).thread.archivedAt);
   }).pipe(Effect.provide(testLayer(fake)));
 });
 

@@ -38,6 +38,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -169,6 +170,8 @@ const normalizeRoot = (root: string) => NodePath.posix.normalize(root).replace(/
 
 /** How many summaries posted are remembered against duplicate events. */
 const MAX_POSTED = 2_000;
+/** A failed summary write is retried every 30 s for half an hour (Trellis restarting, say). */
+const SUMMARY_RETRY = { times: 60, schedule: Schedule.spaced("30 seconds") } as const;
 
 const make = Effect.gen(function* () {
   const trellis = yield* Trellis;
@@ -177,6 +180,7 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectStoreV2;
   const applicationEvents = yield* OrchestrationEventStore;
   const crypto = yield* Crypto.Crypto;
+  const scope = yield* Effect.scope;
 
   const commandId = (operation: string) =>
     crypto.randomUUIDv4.pipe(
@@ -442,6 +446,8 @@ const make = Effect.gen(function* () {
   const posted = new Set<string>();
 
   /** Posts a finished worker's result as its fork's `summary` activity. */
+  // Summaries being posted, so a repeated event does not post one twice.
+  const posting = new Set<string>();
   const postSummary = (input: {
     readonly key: string;
     readonly parentThreadId: ThreadId;
@@ -449,7 +455,7 @@ const make = Effect.gen(function* () {
     readonly text: string;
   }) =>
     Effect.gen(function* () {
-      if (posted.has(input.key) || (yield* trellis.current) === null) return;
+      if (posted.has(input.key) || posting.has(input.key)) return;
       const [parent, child] = yield* Effect.all([
         threads.getThreadShell(input.parentThreadId),
         threads.getThreadShell(input.childThreadId),
@@ -458,16 +464,38 @@ const make = Effect.gen(function* () {
       if (parent == null || child == null || parent.projectId === child.projectId) return;
       const folder = yield* folderOf(child);
       if (folder === undefined) return;
-      posted.add(input.key);
-      if (posted.size > MAX_POSTED) posted.delete(posted.values().next().value!);
-      yield* trellis.recordActivity({
+      const write = trellis.recordActivity({
         target: folder,
         kind: "summary",
         data: { text: input.text, thread: input.childThreadId },
       });
+      const markPosted = Effect.sync(() => {
+        posted.add(input.key);
+        if (posted.size > MAX_POSTED) posted.delete(posted.values().next().value!);
+      });
+      const first = yield* Effect.result(write);
+      if (first._tag === "Success") return yield* markPosted;
+      // Retried in the background while Trellis is unreachable: the merge brief needs it.
+      posting.add(input.key);
+      yield* Effect.logWarning("could not post a worker's summary to its Trellis fork; retrying", {
+        childThreadId: input.childThreadId,
+        detail: first.failure.message,
+      });
+      yield* write.pipe(
+        Effect.retry(SUMMARY_RETRY),
+        Effect.andThen(markPosted),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("gave up posting a worker's summary to its Trellis fork", {
+            childThreadId: input.childThreadId,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+        Effect.ensuring(Effect.sync(() => posting.delete(input.key))),
+        Effect.forkIn(scope),
+      );
     }).pipe(
       Effect.catchCause((cause) =>
-        Effect.logWarning("could not post a worker's summary to its Trellis fork", {
+        Effect.logWarning("could not read a finished worker to post its summary", {
           childThreadId: input.childThreadId,
           cause: Cause.pretty(cause),
         }),
@@ -478,7 +506,8 @@ const make = Effect.gen(function* () {
   const archiveWorkers = (leadId: ThreadId) =>
     Effect.gen(function* () {
       if (!(yield* trellis.enabled)) return;
-      const shell = yield* threads.getShellSnapshot({ location: "active" });
+      // Lineage through archived workers too; only active ones are stopped.
+      const shell = yield* threads.getShellSnapshot();
       const workers = new Set(descendantsOf(leadId, [...shell.threads, ...shell.archivedThreads]));
       for (const worker of shell.threads) {
         if (!workers.has(worker.id) || worker.archivedAt !== null) continue;

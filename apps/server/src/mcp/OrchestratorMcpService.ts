@@ -1408,7 +1408,7 @@ const make = Effect.gen(function* () {
         const priorTask = parent.subagents.find(
           (task) => task.id === idAllocator.derive.delegatedTaskNode({ commandId }),
         );
-        const spawned =
+        let spawned =
           forkSpec === undefined
             ? undefined
             : Option.isNone(trellisWorkers)
@@ -1480,6 +1480,25 @@ const make = Effect.gen(function* () {
             "orchestration_error",
             "Delegated task command did not produce a task projection.",
           );
+        }
+        // A concurrent call with the same clientRequestId created the child
+        // first (the dispatch replayed it): report that child's fork, drop ours.
+        const childThreadId = taskEvent.event.payload.childThreadId;
+        if (
+          spawned !== undefined &&
+          priorTask === undefined &&
+          childThreadId !== null &&
+          Option.isSome(trellisWorkers)
+        ) {
+          const child = yield* threadManagement
+            .getThreadShell(childThreadId)
+            .pipe(Effect.orElseSucceed(() => null));
+          if (child != null && child.projectId !== spawned.projectId) {
+            yield* abandonFork;
+            spawned = yield* trellisWorkers.value
+              .forkOf(childThreadId)
+              .pipe(Effect.orElseSucceed(() => undefined));
+          }
         }
         const taskId = taskEvent.event.payload.id;
 
