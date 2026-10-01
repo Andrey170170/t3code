@@ -149,6 +149,7 @@ import {
   type ProviderAdapterV2SessionRuntime,
   type ProviderAdapterV2SteerInput,
   type ProviderAdapterV2TurnInput,
+  withLaunchLoopbackHost,
 } from "../ProviderAdapter.ts";
 import {
   makeSubagentChildThread,
@@ -1211,17 +1212,21 @@ export function codexThreadRuntimeParams(input: {
 } {
   const mcpSession =
     input.threadId === null ? undefined : McpProviderSession.readMcpProviderSession(input.threadId);
+  const launch = input.runtimePolicy?.launch;
   return {
     ...(input.runtimePolicy?.cwd == null ? {} : { cwd: input.runtimePolicy.cwd }),
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      ...(launch?.instructions === undefined
+        ? {}
+        : { developer_instructions: launch.instructions }),
       ...(mcpSession === undefined
         ? {}
         : {
             mcp_servers: {
               "t3-code": {
-                url: mcpSession.endpoint,
+                url: withLaunchLoopbackHost(mcpSession.endpoint, launch),
                 http_headers: {
                   Authorization: mcpSession.authorizationHeader,
                 },
@@ -1394,16 +1399,23 @@ export const codexAppServerClientFactoryFromSettingsLayer: Layer.Layer<
       open: (input) =>
         Effect.gen(function* () {
           const scope = yield* Scope.Scope;
+          // A launch (a Trellis shim) runs the app-server elsewhere, chosen by
+          // the process's cwd, so it also starts in the policy's directory.
+          const launch = input.runtimePolicy.launch;
           const environment = {
             ...input.environment,
             ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
+            ...launch?.env,
           };
           const command = yield* makeCodexAppServerSpawnCommand({
-            command: input.settings.binaryPath || "codex",
+            command: launch?.executable ?? (input.settings.binaryPath || "codex"),
             args: codexAppServerArgs(
               resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
             ),
             env: environment,
+            ...(launch === undefined || input.runtimePolicy.cwd === null
+              ? {}
+              : { cwd: input.runtimePolicy.cwd }),
           });
           const handle = yield* spawner.spawn(command).pipe(
             Effect.provideService(Scope.Scope, scope),

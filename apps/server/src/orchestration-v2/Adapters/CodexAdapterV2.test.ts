@@ -672,6 +672,90 @@ describe("CodexAdapterV2 process spawning", () => {
     }
   });
 
+  it("adds the launch's instructions and reaches T3 MCP through the launch's loopback host", () => {
+    const threadId = ThreadId.make("thread-codex-launch");
+    McpProviderSession.setMcpProviderSession({
+      environmentId: EnvironmentId.make("environment-codex-launch"),
+      threadId,
+      providerSessionId: "mcp-session-codex-launch",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      endpoint: "http://127.0.0.1:43123/mcp",
+      authorizationHeader: "Bearer secret-codex-token",
+      browserToolsAvailable: true,
+    });
+    try {
+      const params = codexThreadRuntimeParams({
+        threadId,
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: "/trellis/workspaces/ws-1/project",
+          launch: {
+            executable: "/t3/trellis-shims/codex",
+            instructions: "You are in a Trellis workspace.",
+            sessionKey: "ws-1",
+            loopbackHost: "host.containers.internal",
+          },
+        },
+      });
+      assert.equal(params.config.developer_instructions, "You are in a Trellis workspace.");
+      assert.deepEqual(params.config.mcp_servers, {
+        "t3-code": {
+          url: "http://host.containers.internal:43123/mcp",
+          http_headers: { Authorization: "Bearer secret-codex-token" },
+        },
+      });
+    } finally {
+      McpProviderSession.clearMcpProviderSession(threadId);
+    }
+  });
+
+  it.effect("spawns a launched app-server through the launch executable in the thread's cwd", () =>
+    Effect.gen(function* () {
+      const spawned: Array<{ readonly command: string; readonly cwd: string | undefined }> = [];
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (ChildProcess.isStandardCommand(command)) {
+          spawned.push({ command: command.command, cwd: command.options.cwd });
+        }
+        return Effect.fail(
+          PlatformError.systemError({ _tag: "NotFound", module: "ChildProcess", method: "spawn" }),
+        );
+      });
+      const factory = yield* CodexAppServerClientFactory.pipe(
+        Effect.provide(codexAppServerClientFactoryFromSettingsLayer),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(ProviderEventLoggers, NoOpProviderEventLoggers),
+      );
+      const open = (launch: ProviderAdapterV2RuntimePolicy["launch"]) =>
+        factory
+          .open({
+            instanceId: CODEX_DEFAULT_INSTANCE_ID,
+            threadId: ThreadId.make("thread-launch"),
+            providerSessionId: ProviderSessionId.make("provider-session-launch"),
+            runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/trellis/workspaces/ws-1/project",
+              ...(launch === undefined ? {} : { launch }),
+            }),
+            settings: { ...DEFAULT_CODEX_SETTINGS, binaryPath: "/usr/local/bin/codex" },
+            environment: {},
+          })
+          .pipe(Effect.scoped, Effect.exit);
+
+      yield* open(undefined);
+      yield* open({ executable: "/t3/trellis-shims/codex", sessionKey: "ws-1" });
+
+      assert.deepEqual(spawned, [
+        { command: "/usr/local/bin/codex", cwd: undefined },
+        { command: "/t3/trellis-shims/codex", cwd: "/trellis/workspaces/ws-1/project" },
+      ]);
+    }).pipe(
+      Effect.provideService(HostProcessPlatform, "linux"),
+      Effect.provideService(SpawnExecutableResolution, (command) => command),
+    ),
+  );
+
   it.effect("resolves Windows command shims through the shared spawn policy", () =>
     Effect.gen(function* () {
       const command = yield* makeCodexAppServerSpawnCommand({

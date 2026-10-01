@@ -1,6 +1,7 @@
 import * as NodeCrypto from "node:crypto";
 
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
+import * as TrellisClaudeTranscripts from "../../trellis/TrellisClaudeTranscripts.ts";
 import { formatReadToolLabel, formatSearchToolLabel } from "@t3tools/shared/toolActivity";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import { normalizeClaudeTurnTokenUsage } from "../../provider/ClaudeTurnTokenUsage.ts";
@@ -132,6 +133,7 @@ import {
   type ProviderAdapterV2Event,
   type ProviderAdapterV2ForkThreadInput,
   type ProviderAdapterV2InterruptInput,
+  type ProviderAdapterV2Launch,
   type ProviderAdapterV2OpenSessionInput,
   type ProviderAdapterV2RollbackThreadInput,
   type ProviderAdapterV2RuntimePolicy,
@@ -139,6 +141,7 @@ import {
   type ProviderAdapterV2SessionRuntime,
   type ProviderAdapterV2SteerInput,
   type ProviderAdapterV2TurnInput,
+  withLaunchLoopbackHost,
 } from "../ProviderAdapter.ts";
 import {
   ProviderAdapterDriverCreateError,
@@ -808,6 +811,8 @@ export function makeClaudeQueryOptions(input: {
   readonly onUserDialog?: ClaudeQueryOptions["onUserDialog"];
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
   readonly allowDangerouslySkipPermissions?: boolean;
+  /** The runtime policy's launch: its executable, environment and instructions win. */
+  readonly launch?: ProviderAdapterV2Launch;
 }): ClaudeAgentSdkQueryOptions {
   const compiledSelection = compileClaudeModelSelection(input.modelSelection);
   const {
@@ -842,6 +847,18 @@ export function makeClaudeQueryOptions(input: {
           ...(typeof querySettings === "object" && querySettings !== null ? querySettings : {}),
           autoCompactWindow: Number(input.settings.autoCompactWindow),
         } as ClaudeSdkSettings);
+  const launch = input.launch;
+  const mcpServers =
+    input.mcpServers === undefined || launch?.loopbackHost === undefined
+      ? input.mcpServers
+      : Object.fromEntries(
+          Object.entries(input.mcpServers).map(([name, server]) => [
+            name,
+            "url" in server
+              ? { ...server, url: withLaunchLoopbackHost(server.url, launch) }
+              : server,
+          ]),
+        );
   const options: ClaudeAgentSdkQueryOptions = {
     model: compiledSelection.apiModelId,
     tools: claudeAgentSdkQueryToolsForSdk(selectedTools),
@@ -882,17 +899,22 @@ export function makeClaudeQueryOptions(input: {
     ...(input.supportedDialogKinds === undefined
       ? {}
       : { supportedDialogKinds: input.supportedDialogKinds }),
-    ...(input.settings?.binaryPath
-      ? { pathToClaudeCodeExecutable: input.settings.binaryPath }
-      : {}),
-    ...(input.environment === undefined ? {} : { env: input.environment }),
-    ...(input.mcpServers === undefined ? {} : { mcpServers: input.mcpServers }),
+    ...(launch !== undefined
+      ? { pathToClaudeCodeExecutable: launch.executable }
+      : input.settings?.binaryPath
+        ? { pathToClaudeCodeExecutable: input.settings.binaryPath }
+        : {}),
+    ...(input.environment === undefined && launch?.env === undefined
+      ? {}
+      : { env: { ...input.environment, ...launch?.env } }),
+    ...(mcpServers === undefined ? {} : { mcpServers }),
     systemPrompt: {
       type: "preset" as const,
       preset: "claude_code" as const,
       append:
         buildRuntimeInstructions({ harness: "Claude Code" }) +
-        (input.mcpServers === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS),
+        (input.mcpServers === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS) +
+        (launch?.instructions === undefined ? "" : `\n\n${launch.instructions}`),
     },
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
   };
@@ -2778,6 +2800,33 @@ export function makeClaudeAdapterV2(
   const continuationRequests = adapterOptions.continuationRequests ?? {
     offer: () => Effect.void,
   };
+
+  // A launched session (a Trellis workspace) resumes only beside its
+  // transcript: the session's files follow the cwd before it is used there.
+  const claudeConfigDir =
+    adapterOptions.environment.CLAUDE_CONFIG_DIR ??
+    path.join(adapterOptions.environment.HOME ?? "", ".claude");
+  const prepareLaunchedTranscript = (
+    runtimePolicy: ProviderAdapterV2RuntimePolicy | undefined,
+    sessionId: string,
+  ) =>
+    runtimePolicy?.launch === undefined || runtimePolicy.cwd === null
+      ? Effect.succeed(true)
+      : TrellisClaudeTranscripts.prepareClaudeTranscript({
+          configDir: claudeConfigDir,
+          sessionId,
+          cwd: runtimePolicy.cwd,
+        }).pipe(
+          Effect.andThen(
+            TrellisClaudeTranscripts.hasClaudeTranscript({
+              configDir: claudeConfigDir,
+              sessionId,
+              cwd: runtimePolicy.cwd,
+            }),
+          ),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        );
 
   // Re-scan on every send: skills are added and switched off mid-session, and
   // the scan is a few directory reads. A skill switched off via skillOverrides,
@@ -6566,6 +6615,9 @@ export function makeClaudeAdapterV2(
           const hasPersistedProviderTurn = turnInput.providerTurnOrdinal > 1;
           const shouldResume =
             resumeSessionAt !== undefined || openedWithResume || hasPersistedProviderTurn;
+          if (shouldResume) {
+            yield* prepareLaunchedTranscript(turnInput.runtimePolicy, nativeThreadId);
+          }
           const querySession = yield* queryRunner
             .open({
               threadId: turnInput.threadId,
@@ -6590,6 +6642,9 @@ export function makeClaudeAdapterV2(
                 canUseTool,
                 onUserDialog,
                 supportedDialogKinds: ["resume_return"],
+                ...(turnInput.runtimePolicy.launch === undefined
+                  ? {}
+                  : { launch: turnInput.runtimePolicy.launch }),
               }),
             })
             .pipe(
@@ -7089,7 +7144,26 @@ export function makeClaudeAdapterV2(
               ),
           ),
           resumeThread: Effect.fn("ClaudeAdapterV2.resumeThread")(
-            function* (threadInput: { readonly providerThread: OrchestrationV2ProviderThread }) {
+            function* (threadInput: {
+              readonly providerThread: OrchestrationV2ProviderThread;
+              readonly runtimePolicy?: ProviderAdapterV2RuntimePolicy;
+            }) {
+              // Resume is metadata-only; the native resume happens when the
+              // query opens. A launched session whose transcript cannot be put
+              // beside its cwd fails here, so V2 falls back to a fresh session.
+              const nativeId = threadInput.providerThread.nativeThreadRef?.nativeId;
+              if (
+                nativeId != null &&
+                !(yield* prepareLaunchedTranscript(
+                  threadInput.runtimePolicy ?? input.runtimePolicy,
+                  nativeId,
+                ))
+              ) {
+                return yield* new ProviderAdapterProtocolError({
+                  driver: CLAUDE_PROVIDER,
+                  detail: `Claude session ${nativeId} has no transcript beside ${input.runtimePolicy.cwd}.`,
+                });
+              }
               const updatedAt = yield* DateTime.now;
               return {
                 ...threadInput.providerThread,
