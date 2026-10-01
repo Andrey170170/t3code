@@ -56,7 +56,7 @@ function makeCheckpointTrellis(result: TrellisCheckpointResult | string) {
         checkpoints.push({ name, thread, interrupt });
         return Effect.succeed(
           typeof result === "string"
-            ? { ok: false as const, error: result, restarted: false }
+            ? { ok: false as const, error: result, restarted: false, stopped: [] }
             : { ok: true as const, result },
         );
       }),

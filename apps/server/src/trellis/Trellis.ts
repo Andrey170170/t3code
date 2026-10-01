@@ -167,7 +167,16 @@ export type TrellisCheckpointResult = typeof TrellisCheckpointResult.Type;
 /** A checkpoint Trellis refused or that failed; `details` carries how far it got. */
 const TrellisCheckpointRefusal = Schema.Struct({
   error: Schema.String,
-  details: Schema.optional(Schema.Struct({ restarted: Schema.optional(Schema.Boolean) })),
+  details: Schema.optional(
+    Schema.Struct({
+      restarted: Schema.optional(Schema.Boolean),
+      snapshot: Schema.optional(Schema.Unknown),
+      stopped: Schema.optional(Schema.Array(TrellisProc)),
+      late: Schema.optional(Schema.Array(TrellisProc)),
+      survivors: Schema.optional(Schema.Array(TrellisProc)),
+      ms: Schema.optional(Schema.Struct({ stop: Schema.optional(Schema.Finite) })),
+    }),
+  ),
 });
 
 /**
@@ -177,7 +186,14 @@ const TrellisCheckpointRefusal = Schema.Struct({
  */
 export type TrellisCheckpointOutcome =
   | { readonly ok: true; readonly result: TrellisCheckpointResult }
-  | { readonly ok: false; readonly error: string; readonly restarted: boolean };
+  | {
+      readonly ok: false;
+      readonly error: string;
+      /** The stop ran (and Trellis restarted the workspace on its way out). */
+      readonly restarted: boolean;
+      /** Processes the stop ended, when it ran. */
+      readonly stopped: ReadonlyArray<{ readonly pid: number; readonly cmd: string }>;
+    };
 
 /** Trellis refuses a turn message older than one it applied (409). */
 export const isStaleTurnMessage = (error: TrellisError) =>
@@ -881,11 +897,22 @@ const make = Effect.gen(function* () {
                 Effect.mapError(() =>
                   trellisStatusError("POST", "/v1/checkpoint", response.status),
                 ),
-                Effect.map((body) => ({
-                  ok: false as const,
-                  error: body.error,
-                  restarted: body.details?.restarted === true,
-                })),
+                Effect.map((body) => {
+                  // A failure after the stop may not say `restarted` (Trellis
+                  // restarts the workspace while unwinding); the stop shows.
+                  const details = body.details;
+                  const stopped = [...(details?.stopped ?? []), ...(details?.late ?? [])];
+                  return {
+                    ok: false as const,
+                    error: body.error,
+                    restarted:
+                      details?.restarted === true ||
+                      details?.snapshot !== undefined ||
+                      (details?.ms?.stop ?? 0) > 0 ||
+                      stopped.length + (details?.survivors?.length ?? 0) > 0,
+                    stopped,
+                  };
+                }),
               )
             : decodeJson(TrellisCheckpointResult, response.body, response.status).pipe(
                 Effect.map((result) => ({ ok: true as const, result })),

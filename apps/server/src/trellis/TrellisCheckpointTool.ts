@@ -137,29 +137,31 @@ function callerContinuation(
     input.workers.length === 0
       ? ""
       : ` The turns of ${quoted(input.workers)} were ended too; they continue on their own.`;
+  const stoppedText = (procs: ReadonlyArray<{ readonly cmd: string }>) => {
+    const commands = procs
+      .map((proc) => proc.cmd)
+      .filter((cmd) => !PROVIDER_PROCESS.test(cmd))
+      .map(shownCommand);
+    const listed = commands
+      .slice(0, MAX_LISTED)
+      .map((cmd) => `\`${cmd}\``)
+      .join(", ");
+    const more = commands.length > MAX_LISTED ? ` and ${commands.length - MAX_LISTED} more` : "";
+    return commands.length === 0
+      ? "Nothing else was running in it."
+      : `These processes were stopped; restart any you still need: ${listed}${more}.`;
+  };
   if (!outcome.ok) {
     let reason = outcome.error;
     for (const [id, title] of input.titles) reason = reason.replaceAll(id, `"${title}"`);
     const restarted = outcome.restarted
-      ? " The workspace was stopped and restarted anyway, ending the processes that ran in it."
+      ? ` The workspace was stopped and restarted anyway. ${stoppedText(outcome.stopped)}`
       : " Nothing was stopped.";
     return `[trellis_checkpoint] The checkpoint failed: ${reason}.${restarted}${workers} Continue the task; call trellis_checkpoint again if you still need a checkpoint.`;
   }
   const result = outcome.result;
   const snapshot = result.snapshot?.id ?? "unknown";
-  const commands = result.stopped
-    .map((proc) => proc.cmd)
-    .filter((cmd) => !PROVIDER_PROCESS.test(cmd))
-    .map(shownCommand);
-  const listed = commands
-    .slice(0, MAX_LISTED)
-    .map((cmd) => `\`${cmd}\``)
-    .join(", ");
-  const more = commands.length > MAX_LISTED ? ` and ${commands.length - MAX_LISTED} more` : "";
-  const stopped =
-    commands.length === 0
-      ? "Nothing else was running in it."
-      : `These processes were stopped; restart any you still need: ${listed}${more}.`;
+  const stopped = stoppedText(result.stopped);
   return `[trellis_checkpoint] Checkpoint ${snapshot}${input.name === undefined ? "" : ` ("${input.name}")`} taken. The workspace was stopped and restarted. ${stopped}${workers} Continue the task.`;
 }
 
@@ -442,7 +444,12 @@ const make = Effect.gen(function* () {
               })
               .pipe(
                 Effect.catch((error) =>
-                  Effect.succeed({ ok: false as const, error: error.message, restarted: false }),
+                  Effect.succeed({
+                    ok: false as const,
+                    error: error.message,
+                    restarted: false,
+                    stopped: [],
+                  }),
                 ),
               );
             // Only a workspace that stopped lost its processes; a refusal keeps them.
@@ -475,6 +482,10 @@ const make = Effect.gen(function* () {
             yield* send(threadId, projectOf(threadId), text).pipe(
               failedQuietly("continue the thread", threadId),
             );
+            // Unless the user paused it, the interrupt held this queue.
+            if (!paused.has(threadId)) {
+              yield* resumeQueue(threadId).pipe(failedQuietly("resume the queue", threadId));
+            }
             continue;
           }
           // A placeholder promoted before its queue was held cannot be edited; send the outcome then.
