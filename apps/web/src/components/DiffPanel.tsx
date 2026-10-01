@@ -85,8 +85,8 @@ import { useAtomCommand } from "../state/use-atom-command";
 import { serverEnvironment } from "../state/server";
 import { reviewEnvironment } from "../state/review";
 import { vcsEnvironment } from "../state/vcs";
-import { useTrellisRoot } from "../hooks/useTrellis";
-import { isTrellisWorkspaceRoot } from "../lib/trellis";
+import { useTrellisKnownRoots } from "../hooks/useTrellis";
+import { isUnderTrellisRoots } from "../lib/trellis";
 import { buildBaseRefChoices, filterBaseRefChoices } from "../lib/baseRefChoices";
 import { createGitDiffFileContentsLoader } from "../lib/diffFileContents";
 
@@ -194,9 +194,9 @@ export default function DiffPanel({
   const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
   // Trellis checkpoints are workspace snapshots, so its turns have diffs
   // without git; only the working-tree and branch views need a repository.
-  const trellisRoot = useTrellisRoot(activeThread?.environmentId ?? null);
+  const trellisRoots = useTrellisKnownRoots(activeThread?.environmentId ?? null);
   const hasTurnDiffs =
-    isGitRepo || (activeCwd != null && isTrellisWorkspaceRoot(activeCwd, trellisRoot));
+    isGitRepo || (activeCwd != null && isUnderTrellisRoots(activeCwd, trellisRoots));
   const { turnDiffSummaries, inferredCheckpointTurnCountByRunId } =
     useTurnDiffSummaries(activeThreadProjection);
   const orderedTurnDiffSummaries = useMemo(

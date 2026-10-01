@@ -20,6 +20,7 @@ import {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -41,6 +42,7 @@ import {
   CHECKPOINT_EXPIRED_MESSAGE,
   CheckpointRollbackServiceV2,
   layer as checkpointRollbackLayer,
+  rollbackFailureMessage,
 } from "../orchestration-v2/CheckpointRollbackService.ts";
 import { CheckpointRestoreRule } from "../orchestration-v2/CheckpointRestoreSafety.ts";
 import {
@@ -240,6 +242,7 @@ function makeFakeTrellis(root: string) {
     calls,
     failures,
     hooks,
+    activities,
     workspacePath,
     /** Thinning or maintenance removing a snapshot. */
     remove: (id: string) => {
@@ -349,23 +352,61 @@ it.effect("a turn captures a tagged snapshot and the baseline once, pinned", () 
   }).pipe(Effect.provide(storeLayer(fake)));
 });
 
-it.effect("a baseline is created pinned where Trellis supports it", () => {
-  const fake = makeFakeTrellis(tempRoot());
-  fake.hooks.pinOnCreate = true;
-  const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
-  const scope = scopeAt(idea, "pinned-create");
-  return Effect.gen(function* () {
-    yield* runTurn(scope, 1, () => NodeFS.writeFileSync(`${idea}/a.txt`, "one\n"));
-    // Pinned in the creating request; no separate pin, no unpinned window.
-    assert.deepEqual(
-      fake.calls.filter((call) => call.startsWith("create")),
-      [`create ${refOf(scope, 0)} pinned`, `create ${refOf(scope, 1)}`],
-    );
-    const baseline = fake.snapshots[0]!;
-    assert.isTrue(baseline.pinned);
-    assert.notInclude(fake.calls, `pin ${baseline.id}`);
-  }).pipe(Effect.provide(storeLayer(fake)));
-});
+it.effect(
+  "captures are created pinned where Trellis supports it; turns are unpinned once mapped",
+  () => {
+    const fake = makeFakeTrellis(tempRoot());
+    fake.hooks.pinOnCreate = true;
+    const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+    const scope = scopeAt(idea, "pinned-create");
+    return Effect.gen(function* () {
+      yield* runTurn(scope, 1, () => NodeFS.writeFileSync(`${idea}/a.txt`, "one\n"));
+      // Pinned in the creating request; no separate pin, no unpinned window.
+      assert.deepEqual(
+        fake.calls.filter((call) => call.startsWith("create")),
+        [`create ${refOf(scope, 0)} pinned`, `create ${refOf(scope, 1)} pinned`],
+      );
+      const [baseline, turn] = fake.snapshots;
+      assert.notInclude(fake.calls, `pin ${baseline!.id}`);
+      assert.isTrue(baseline!.pinned);
+      // The mapping holds the turn snapshot now; retention may thin it.
+      assert.isFalse(turn!.pinned);
+    }).pipe(Effect.provide(storeLayer(fake)));
+  },
+);
+
+it.effect(
+  "a turn snapshot taken but not yet mapped when T3 stopped stays pinned until mapped",
+  () => {
+    const fake = makeFakeTrellis(tempRoot());
+    const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+    const scope = rootScopeOf(idea, "thread-turn-intent");
+    return Effect.gen(function* () {
+      const store = yield* CheckpointStore.CheckpointStore;
+      const pins = yield* TrellisCheckpointStore.TrellisCheckpointPins;
+      fake.hooks.afterCreate = () => {
+        throw new Error("T3 stopped");
+      };
+      yield* Effect.suspend(() =>
+        store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1) }),
+      ).pipe(Effect.catchDefect(() => Effect.void));
+      delete fake.hooks.afterCreate;
+      const taken = fake.snapshots.find((snapshot) => snapshot.turn === refOf(scope, 1))!;
+      yield* pins.reconcile({
+        liveThreadIds: [scope.threadId],
+        readAt: DateTime.makeUnsafe("2999-01-01T00:00:00.000Z"),
+      });
+      assert.isTrue(taken.pinned);
+      // The retried capture adopts it, maps it and lets retention have it.
+      yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1) });
+      assert.lengthOf(
+        fake.snapshots.filter((snapshot) => snapshot.turn === refOf(scope, 1)),
+        1,
+      );
+      assert.isFalse(taken.pinned);
+    }).pipe(Effect.provide(storeLayer(fake)));
+  },
+);
 
 it.effect("a thinned snapshot is still captured and never recaptured from newer files", () => {
   const fake = makeFakeTrellis(tempRoot());
@@ -760,6 +801,8 @@ interface RollbackFixture {
     readonly capturing?: boolean;
     /** An older stopped run whose capture is still queued (it was retried). */
     readonly olderCapturing?: boolean;
+    /** Its run's id; acknowledgements name "run-other". */
+    readonly runId?: string;
   };
   /** Reading the other thread's project fails. */
   readonly projectReadFails?: boolean;
@@ -849,7 +892,7 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
         ? []
         : [
             {
-              id: RunId.make("run-other"),
+              id: RunId.make(other.runId ?? "run-other"),
               ordinal: 1,
               // Its own capture finished, after an older one was requeued.
               checkpointId: other.olderCapturing === true ? "checkpoint-other" : null,
@@ -1015,7 +1058,15 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
         providerThreadId,
         checkpointId: checkpoint.id,
         scopeId: fixture.scope.id,
-        ...(acknowledgeThreads === undefined ? {} : { acknowledgeThreads }),
+        // The user saw each acknowledged thread's latest run, "run-other".
+        ...(acknowledgeThreads === undefined
+          ? {}
+          : {
+              acknowledgeWork: acknowledgeThreads.map((id) => ({
+                threadId: id,
+                runId: RunId.make(id === otherThreadId ? "run-other" : "run-unknown"),
+              })),
+            }),
         ...(requestId === undefined ? {} : { requestId }),
       }),
     );
@@ -1133,6 +1184,28 @@ it.effect(
   },
 );
 
+it.effect("a revert Trellis cannot restore tells the user why", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const harness = rollbackHarness(fake, {
+    scope: ideaScope(fake),
+    beforeRestore: () =>
+      Effect.fail(
+        new CheckpointBackendError({
+          operation: "restore",
+          detail: "This Trellis does not support GET /v1/activities, which T3 needs here.",
+        }),
+      ),
+  });
+  return Effect.gen(function* () {
+    yield* harness.captureBaseline;
+    const error = yield* Effect.flip(harness.execute());
+    assert.include(
+      rollbackFailureMessage(Cause.fail(error)),
+      "does not support GET /v1/activities",
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
+
 it.effect("a retried revert never rewinds the conversation twice", () => {
   const fake = makeFakeTrellis(tempRoot());
   let failures = 1;
@@ -1178,6 +1251,27 @@ it.effect.each([
     }).pipe(Effect.provide(harness.layer));
   },
 );
+
+it.effect("an acknowledgement covers only the run the user saw", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const scope = ideaScope(fake);
+  // The other thread finished another run after the user confirmed.
+  const harness = rollbackHarness(fake, {
+    scope,
+    other: {
+      cwd: scope.cwd,
+      runStatus: "completed",
+      completedAt: "2026-10-01T00:05:00.000Z",
+      runId: "run-other-newer",
+    },
+  });
+  return Effect.gen(function* () {
+    yield* harness.captureBaseline;
+    const refused = yield* Effect.flip(harness.execute([otherThreadId]));
+    assert.include(refused.message, "later work");
+    assert.deepEqual(harness.log, []);
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect("a revert is refused while another thread runs in the same idea, not in another", () =>
   Effect.gen(function* () {
@@ -1448,6 +1542,43 @@ it.effect("a turn is not held by a revert that failed for good without its recei
   }).pipe(Effect.provide(harness.layer));
 });
 
+it.effect("a retry after a rollback without an undo identity is not taken as done", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+  const scope = scopeAt(idea, "unknown-watermark");
+  return Effect.gen(function* () {
+    const store = yield* CheckpointStore.CheckpointStore;
+    yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1) });
+    const snapshotId = fake.snapshots.at(-1)!.id;
+    // An earlier rollback of the same snapshot, recorded without its undo.
+    fake.activities.push({ at: 0, kind: "rollback", data: { snapshot: snapshotId } });
+    NodeFS.writeFileSync(`${idea}/later.txt`, "later\n");
+    const restore = () =>
+      store.restoreCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1), requestId: "r" });
+    fake.hooks.rollbackRefused = true;
+    yield* Effect.flip(restore());
+    fake.hooks.rollbackRefused = false;
+    yield* restore();
+    assert.isFalse(NodeFS.existsSync(`${idea}/later.txt`));
+  }).pipe(Effect.provide(storeLayer(fake)));
+});
+
+it.effect("the undo command quotes a path a shell would split", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const idea = NodePath.join(fake.workspacePath("ws-s"), "my idea");
+  NodeFS.mkdirSync(idea);
+  const scope = scopeAt(idea, "quoted");
+  return Effect.gen(function* () {
+    const store = yield* CheckpointStore.CheckpointStore;
+    yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1) });
+    const { notice } = yield* store.restoreCheckpoint({
+      cwd: idea,
+      checkpointRef: refOf(scope, 1),
+    });
+    assert.include(notice ?? "", `--target '${idea}' `);
+  }).pipe(Effect.provide(storeLayer(fake)));
+});
+
 it.effect("a turn waits while whether its thread's revert is pending cannot be read", () => {
   const fake = makeFakeTrellis(tempRoot());
   const scope = ideaScope(fake);
@@ -1551,7 +1682,7 @@ it.effect("outside Trellis the seams are V2's: the cwd lease and the isolated-wo
           thread: { id: threadId, worktreePath: null },
           scope,
           checkpoint: { capturedAt: scope.createdAt } as OrchestrationV2Checkpoint,
-          acknowledgeThreads: [],
+          acknowledgeWork: [],
         },
         {
           fileSystem: yield* FileSystem.FileSystem,

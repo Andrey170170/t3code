@@ -351,9 +351,9 @@ export const executorLayer: Layer.Layer<
                 ...(effect.request.restoreFiles === undefined
                   ? {}
                   : { restoreFiles: effect.request.restoreFiles }),
-                ...(effect.request.acknowledgeThreads === undefined
+                ...(effect.request.acknowledgeWork === undefined
                   ? {}
-                  : { acknowledgeThreads: effect.request.acknowledgeThreads }),
+                  : { acknowledgeWork: effect.request.acknowledgeWork }),
                 requestId: effect.commandId,
               })
               .pipe(

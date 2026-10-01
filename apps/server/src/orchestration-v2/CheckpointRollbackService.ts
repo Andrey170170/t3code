@@ -1,6 +1,7 @@
 import {
   CheckpointId,
   CheckpointScopeId,
+  type OrchestrationV2AcknowledgedWork,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2TurnItem,
@@ -15,9 +16,13 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
-import { CheckpointSnapshotUnavailableError } from "../checkpointing/Errors.ts";
+import {
+  CheckpointBackendError,
+  CheckpointSnapshotUnavailableError,
+} from "../checkpointing/Errors.ts";
 
 import {
   CheckpointRestoreRule,
@@ -126,6 +131,23 @@ export function rollbackFailureMessage(cause: Cause.Cause<unknown>): string {
   return ROLLBACK_FAILED_MESSAGE;
 }
 
+const isCheckpointBackendError = Schema.is(CheckpointBackendError);
+
+/**
+ * The checkpoint store's own reason, when the failure came from a store
+ * that reports one (Trellis unreachable or too old), for the client.
+ */
+function storeFailureDetail(cause: unknown): { readonly detail?: string } {
+  let current: unknown = cause;
+  for (let depth = 0; depth < 4 && current !== undefined && current !== null; depth++) {
+    if (isCheckpointBackendError(current)) {
+      return { detail: `Restoring the files failed: ${current.detail}` };
+    }
+    current = Predicate.hasProperty(current, "cause") ? current.cause : undefined;
+  }
+  return {};
+}
+
 const isWithin = (parent: string, child: string) => {
   const base = parent.replace(/\/+$/, "");
   return child === base || child.startsWith(`${base}/`);
@@ -138,7 +160,7 @@ export interface CheckpointRollbackServiceV2Shape {
     readonly checkpointId: CheckpointId;
     readonly scopeId: CheckpointScopeId;
     readonly restoreFiles?: boolean;
-    readonly acknowledgeThreads?: ReadonlyArray<ThreadId>;
+    readonly acknowledgeWork?: ReadonlyArray<OrchestrationV2AcknowledgedWork>;
     /** The rollback command, the same on every retry of its effect. */
     readonly requestId?: string;
   }) => Effect.Effect<void, CheckpointRollbackExecutionError>;
@@ -199,7 +221,7 @@ export const layer: Layer.Layer<
       readonly checkpointId: CheckpointId;
       readonly scopeId: CheckpointScopeId;
       readonly restoreFiles?: boolean;
-      readonly acknowledgeThreads?: ReadonlyArray<ThreadId>;
+      readonly acknowledgeWork?: ReadonlyArray<OrchestrationV2AcknowledgedWork>;
       readonly requestId?: string;
     }) {
       const projection = yield* projections.getThreadRecords(input.threadId, [
@@ -272,7 +294,7 @@ export const layer: Layer.Layer<
             thread: projection.thread,
             scope,
             checkpoint,
-            acknowledgeThreads: input.acknowledgeThreads ?? [],
+            acknowledgeWork: input.acknowledgeWork ?? [],
           },
           { fileSystem, projections },
         );
@@ -582,6 +604,7 @@ export const layer: Layer.Layer<
                   providerThreadId: input.providerThreadId,
                   checkpointId: input.checkpointId,
                   cause,
+                  ...storeFailureDetail(cause),
                 }),
           ),
         ),

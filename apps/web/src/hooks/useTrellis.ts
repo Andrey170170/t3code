@@ -8,7 +8,7 @@ import type {
   ProjectId,
   ScopedThreadRef,
   TrellisFindHit,
-  ThreadId,
+  OrchestrationV2AcknowledgedWork,
   TrellisNewProjectInput,
   TrellisRestoreConflictsInput,
   TrellisState,
@@ -75,6 +75,20 @@ export function useTrellisStatusFor(
  */
 export function useTrellisRoot(environmentId: EnvironmentId | null): string | null {
   return useTrellisStatusFor(environmentId)?.root ?? null;
+}
+
+/**
+ * Every root an environment's Trellis project paths may live under, the
+ * current one and earlier ones, so projects of an earlier root still count.
+ */
+export function useTrellisKnownRoots(environmentId: EnvironmentId | null): ReadonlyArray<string> {
+  const status = useTrellisStatusFor(environmentId);
+  const root = status?.root ?? null;
+  const knownRoots = status?.knownRoots ?? NO_ROOTS;
+  return useMemo(
+    () => [...new Set([...(root === null ? [] : [root]), ...knownRoots])],
+    [root, knownRoots],
+  );
 }
 
 /** Environment of the routed thread or draft, if any. */
@@ -276,7 +290,7 @@ export function useTrellisRestoreCheck() {
       environmentId: EnvironmentId,
       input: TrellisRestoreConflictsInput,
       confirm: (message: string) => Promise<boolean>,
-    ): Promise<ReadonlyArray<ThreadId> | null> => {
+    ): Promise<ReadonlyArray<OrchestrationV2AcknowledgedWork> | null> => {
       const result = await run({ environmentId, input });
       if (result._tag === "Failure") return [];
       const { running, later } = result.value;
@@ -292,7 +306,9 @@ export function useTrellisRestoreCheck() {
       const confirmed = await confirm(
         `Restoring the files also undoes the later work of ${names(later)} in the same Trellis workspace.\nRestore anyway?`,
       );
-      return confirmed ? later.map((thread) => thread.threadId) : null;
+      return confirmed
+        ? later.map((thread) => ({ threadId: thread.threadId, runId: thread.runId }))
+        : null;
     },
     [run],
   );

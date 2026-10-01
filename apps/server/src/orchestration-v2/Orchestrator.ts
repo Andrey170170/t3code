@@ -8209,7 +8209,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               thread: projection.thread,
               scope: targetScope,
               checkpoint: targetCheckpoint,
-              acknowledgeThreads: command.acknowledgeThreads ?? [],
+              acknowledgeWork: command.acknowledgeWork ?? [],
             },
             { fileSystem, projections: projectionStore },
           )
@@ -8293,9 +8293,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           request: {
             type: "provider-thread.rollback",
             ...(command.restoreFiles === undefined ? {} : { restoreFiles: command.restoreFiles }),
-            ...(command.acknowledgeThreads === undefined
+            ...(command.acknowledgeWork === undefined
               ? {}
-              : { acknowledgeThreads: command.acknowledgeThreads }),
+              : { acknowledgeWork: command.acknowledgeWork }),
             providerThreadId: providerThread.id,
             checkpointId: targetCheckpoint.id,
             scopeId: targetScope.id,

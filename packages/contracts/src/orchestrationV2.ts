@@ -2431,6 +2431,17 @@ export const OrchestrationV2StoredEventJson = Schema.Struct({
 });
 export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJson.Type;
 
+/**
+ * Another thread's later work a file restore would undo, as the user saw it
+ * when agreeing: the thread and its latest run then. A newer run there is
+ * not covered.
+ */
+export const OrchestrationV2AcknowledgedWork = Schema.Struct({
+  threadId: ThreadId,
+  runId: RunId,
+});
+export type OrchestrationV2AcknowledgedWork = typeof OrchestrationV2AcknowledgedWork.Type;
+
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
@@ -2772,10 +2783,10 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("checkpoint.rollback"),
     restoreFiles: Schema.optional(Schema.Boolean),
     /**
-     * Other threads whose later work in a shared workspace the user agreed to
-     * undo. A restore rule that names such threads refuses without them.
+     * Other threads' later work in a shared workspace the user agreed to
+     * undo. A restore rule that names such work refuses without it.
      */
-    acknowledgeThreads: Schema.optional(Schema.Array(ThreadId)),
+    acknowledgeWork: Schema.optional(Schema.Array(OrchestrationV2AcknowledgedWork)),
     commandId: CommandId,
     threadId: ThreadId,
     scopeId: CheckpointScopeId,

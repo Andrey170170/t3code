@@ -55,6 +55,7 @@ import { pathsOverlap } from "@t3tools/shared/trellis";
 
 import { ServerConfig } from "../config.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { OrchestrationEventStore } from "../persistence/Services/OrchestrationEventStore.ts";
@@ -68,7 +69,12 @@ import {
   type TrellisTrashView,
 } from "./Trellis.ts";
 import { TrellisCheckpointPins } from "./TrellisCheckpointStore.ts";
-import { restoreConflictsIn, restoreScopeOf, TrellisRestoreGate } from "./TrellisRestore.ts";
+import {
+  captureOutstandingIn,
+  restoreConflictsIn,
+  restoreScopeOf,
+  TrellisRestoreGate,
+} from "./TrellisRestore.ts";
 
 const POLL_INTERVAL = "3 seconds";
 const PIN_RECONCILE_INTERVAL = "10 minutes";
@@ -501,6 +507,8 @@ const errorMessage = (error: unknown) =>
 const make = Effect.gen(function* () {
   const trellis = yield* Trellis;
   const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+  // Read only: whether a stopped run's checkpoint capture is still queued.
+  const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
   // Absent in tests that never trash; trash then only checks for busy threads.
   const restoreGate = yield* Effect.serviceOption(TrellisRestoreGate);
   const checkpointPins = yield* Effect.serviceOption(TrellisCheckpointPins);
@@ -1054,6 +1062,7 @@ const make = Effect.gen(function* () {
       {
         shell: projectionStore.getShellSnapshot(),
         records: (threadId) => projectionStore.getThreadRecords(threadId, ["runs"]),
+        captureOutstanding: captureOutstandingIn(effectOutbox),
         projectRoot: (projectId) =>
           projectStore
             .get(projectId)
@@ -1321,4 +1330,6 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(TrellisCatalog, make).pipe(Layer.provide(ProjectionStore.layer));
+export const layer = Layer.effect(TrellisCatalog, make).pipe(
+  Layer.provide(Layer.merge(ProjectionStore.layer, EffectOutbox.layer)),
+);

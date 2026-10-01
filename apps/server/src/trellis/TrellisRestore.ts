@@ -20,6 +20,7 @@
  * @module trellis/TrellisRestore
  */
 import type {
+  OrchestrationV2AcknowledgedWork,
   OrchestrationV2Run,
   OrchestrationV2ThreadShellSnapshot,
   ProjectId,
@@ -169,7 +170,7 @@ const ENDED_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
 
 type ConflictRun = Pick<
   OrchestrationV2Run,
-  "id" | "status" | "completedAt" | "checkpointId" | "rollbackRestoredFiles"
+  "id" | "ordinal" | "status" | "completedAt" | "checkpointId" | "rollbackRestoredFiles"
 >;
 
 /**
@@ -189,8 +190,15 @@ export interface TrellisRestoreConflicts {
    * checkpoint is still being captured; the requesting thread included.
    */
   readonly running: ReadonlyArray<{ readonly threadId: ThreadId; readonly title: string }>;
-  /** Other threads with runs in the scope that ended after the checkpoint. */
-  readonly later: ReadonlyArray<{ readonly threadId: ThreadId; readonly title: string }>;
+  /**
+   * Other threads with runs in the scope that ended after the checkpoint,
+   * with the latest such run (what an acknowledgement must name).
+   */
+  readonly later: ReadonlyArray<{
+    readonly threadId: ThreadId;
+    readonly title: string;
+    readonly runId: RunId;
+  }>;
 }
 
 /** What restore conflicts are computed from, so both the rule and the RPC can share it. */
@@ -230,7 +238,7 @@ export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")
   const shell = yield* reads.shell;
   const archived = new Set(shell.archivedThreads.map((thread) => thread.id));
   const running: Array<{ threadId: ThreadId; title: string }> = [];
-  const later: Array<{ threadId: ThreadId; title: string }> = [];
+  const later: Array<{ threadId: ThreadId; title: string; runId: RunId }> = [];
   for (const thread of [...shell.threads, ...shell.archivedThreads]) {
     if (thread.deletedAt !== null) continue;
     const requesting = thread.id === input.threadId;
@@ -270,8 +278,14 @@ export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")
       capturing
     ) {
       running.push(entry);
-    } else if (!requesting && records.runs.some((run) => leftChangesSince(run, input.since))) {
-      later.push(entry);
+    } else if (!requesting) {
+      const latest = records.runs
+        .filter((run) => leftChangesSince(run, input.since))
+        .reduce<ConflictRun | undefined>(
+          (newest, run) => (newest === undefined || run.ordinal > newest.ordinal ? run : newest),
+          undefined,
+        );
+      if (latest !== undefined) later.push({ ...entry, runId: latest.id });
     }
   }
   return { running, later } satisfies TrellisRestoreConflicts;
@@ -283,14 +297,18 @@ const quoted = (threads: ReadonlyArray<{ readonly title: string }>) =>
 /** The refusal for `conflicts`, or null when nothing unacknowledged stands in the way. */
 function restoreRefusal(
   conflicts: TrellisRestoreConflicts,
-  acknowledged: ReadonlyArray<ThreadId>,
+  acknowledged: ReadonlyArray<OrchestrationV2AcknowledgedWork>,
 ): string | null {
   if (conflicts.running.length > 0) {
     const one = conflicts.running.length === 1;
     return `${quoted(conflicts.running)} ${one ? "is" : "are"} still working in this Trellis workspace, and restoring its files would undo that work. Wait for ${one ? "it" : "them"} to finish or stop ${one ? "it" : "them"}, then try again.`;
   }
   const unacknowledged = conflicts.later.filter(
-    (thread) => !acknowledged.includes(thread.threadId),
+    // Bound to the run the user saw: newer work there needs a new confirmation.
+    (thread) =>
+      !acknowledged.some(
+        (work) => work.threadId === thread.threadId && work.runId === thread.runId,
+      ),
   );
   if (unacknowledged.length === 0) return null;
   return `Restoring these files would also undo later work by ${quoted(unacknowledged)} in the same Trellis workspace. Confirm the restore to undo it too.`;
@@ -301,6 +319,23 @@ function restoreRefusal(
  * the gate by restore scope, and the rule reports conflicts instead of
  * requiring an isolated worktree. Paths outside Trellis keep V2's defaults.
  */
+/**
+ * Whether a run's checkpoint capture is still queued or running. The capture
+ * effect of a run has a fixed id (see RunExecutionService); an unreadable
+ * outbox counts as outstanding.
+ */
+export const captureOutstandingIn =
+  (outbox: EffectOutboxV2["Service"]) =>
+  (runId: RunId): Effect.Effect<boolean> =>
+    outbox.get(`effect:checkpoint.capture:${runId}`).pipe(
+      Effect.map(
+        (effect) =>
+          Option.isSome(effect) &&
+          (effect.value.status === "pending" || effect.value.status === "running"),
+      ),
+      Effect.orElseSucceed(() => true),
+    );
+
 const ROLLBACK_POLL_INTERVAL = "250 millis";
 
 export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | ProjectionStoreV2> =
@@ -321,17 +356,7 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | 
           Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.succeed(false)),
           Effect.orElseSucceed(() => true),
         );
-      // The capture effect of a run has a fixed id (see RunExecutionService);
-      // an unreadable outbox counts as outstanding.
-      const captureOutstanding = (runId: RunId) =>
-        outbox.get(`effect:checkpoint.capture:${runId}`).pipe(
-          Effect.map(
-            (effect) =>
-              Option.isSome(effect) &&
-              (effect.value.status === "pending" || effect.value.status === "running"),
-          ),
-          Effect.orElseSucceed(() => true),
-        );
+      const captureOutstanding = captureOutstandingIn(outbox);
       const cwdLease = makeCwdRestoreLease();
       const seams = (
         lease: RestoreLeaseShape,
@@ -402,7 +427,7 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | 
                   since: input.checkpoint.capturedAt,
                 },
               ).pipe(Effect.mapError((cause) => new CheckpointRestoreRuleError({ cause })));
-              return restoreRefusal(conflicts, input.acknowledgeThreads);
+              return restoreRefusal(conflicts, input.acknowledgeWork);
             }),
         },
       );

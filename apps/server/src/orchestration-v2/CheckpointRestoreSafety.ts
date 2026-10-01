@@ -1,8 +1,8 @@
 import type {
+  OrchestrationV2AcknowledgedWork,
   OrchestrationV2AppThread,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
-  ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -77,8 +77,8 @@ export interface CheckpointRestoreRuleInput {
   readonly thread: Pick<OrchestrationV2AppThread, "id" | "worktreePath">;
   readonly scope: OrchestrationV2CheckpointScope;
   readonly checkpoint: OrchestrationV2Checkpoint;
-  /** Threads whose later work the user agreed to undo. */
-  readonly acknowledgeThreads: ReadonlyArray<ThreadId>;
+  /** Other threads' later work the user agreed to undo. */
+  readonly acknowledgeWork: ReadonlyArray<OrchestrationV2AcknowledgedWork>;
 }
 
 export interface CheckpointRestoreRuleShape {

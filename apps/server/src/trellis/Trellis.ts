@@ -360,12 +360,38 @@ function requestOverSocket(input: {
   });
 }
 
-const decodeJson = <S extends Schema.Top>(schema: S, text: string) =>
+const decodeJson = <S extends Schema.Top>(schema: S, text: string, status: number) =>
   Schema.decodeUnknownEffect(Schema.fromJsonString(schema))(text).pipe(
     Effect.mapError(
-      (error) => new TrellisError({ message: `Unexpected Trellis response: ${error.message}` }),
+      (error) =>
+        new TrellisError({
+          message: `Unexpected Trellis response (HTTP ${status}): ${error.message}`,
+        }),
     ),
   );
+
+/**
+ * Routes newer than the Trellis T3 first ran against, with the first Trellis
+ * that serves them. An older Trellis answers 404 or 405 without an error body.
+ */
+const ROUTE_MINIMUM: ReadonlyArray<{ readonly route: string; readonly since: string }> = [
+  {
+    route: "GET /v1/activities",
+    since: "main at or after PR #15 (core/checkpoint, d949d28)",
+  },
+];
+
+/** The error for a failed response whose body is not Trellis' `{error}`. */
+function trellisStatusError(method: string, path: string, status: number): TrellisError {
+  const route = `${method} ${path.split("?")[0]}`;
+  if (status === 404 || status === 405) {
+    const minimum = ROUTE_MINIMUM.find((entry) => entry.route === route);
+    return new TrellisError({
+      message: `This Trellis does not support ${route}, which T3 needs here. Update Trellis to ${minimum?.since ?? "a newer version"}.`,
+    });
+  }
+  return new TrellisError({ message: `Trellis answered ${route} with HTTP ${status}.` });
+}
 
 const query = (params: Record<string, string>) => new URLSearchParams(params).toString();
 
@@ -478,10 +504,12 @@ const make = Effect.gen(function* () {
     }).pipe(
       Effect.flatMap((response) =>
         response.status >= 400
-          ? decodeJson(TrellisErrorBody, response.body).pipe(
+          ? // Trellis' own refusals carry `{error}`; a missing route does not.
+            decodeJson(TrellisErrorBody, response.body, response.status).pipe(
+              Effect.mapError(() => trellisStatusError(method, path, response.status)),
               Effect.flatMap((body) => Effect.fail(new TrellisError({ message: body.error }))),
             )
-          : decodeJson(schema, response.body),
+          : decodeJson(schema, response.body, response.status),
       ),
     );
 
