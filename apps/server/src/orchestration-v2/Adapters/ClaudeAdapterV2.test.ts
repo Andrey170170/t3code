@@ -6307,6 +6307,96 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  // Ported from the fork's client fold (5e8edd787a): Claude resumes a failed
+  // subagent (e.g. after a usage limit) under the same task id through a new
+  // tool call; it must show as running again, without the old failure.
+  it.effect("re-opens a failed subagent that a new tool call resumes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const SUBAGENT_TASK_ID = "task-resume-after-failure";
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const subagentEvents = () =>
+          harness.events.filter(
+            (event): event is Extract<ProviderAdapterV2Event, { type: "subagent.updated" }> =>
+              event.type === "subagent.updated",
+          );
+        const taskStarted = (toolUseId: string, prompt: string, uuid: string) =>
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_started",
+            task_id: SUBAGENT_TASK_ID,
+            tool_use_id: toolUseId,
+            description: "Delegated task",
+            subagent_type: "general-purpose",
+            task_type: "local_agent",
+            prompt,
+            uuid,
+            session_id: WAKE_NATIVE_SESSION,
+          });
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-resume-after-failure"),
+            text: "Delegate this task.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          taskStarted("toolu-old-launch", "Do the task.", "00000000-0000-4000-8000-000000000901"),
+        );
+        yield* awaitUntil(() => subagentEvents().length === 1, "subagent node created");
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: SUBAGENT_TASK_ID,
+            tool_use_id: "toolu-old-launch",
+            status: "failed",
+            output_file: "/tmp/task-resume-after-failure.output",
+            summary: "Usage limit",
+            uuid: "00000000-0000-4000-8000-000000000902",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* awaitUntil(
+          () => subagentEvents().at(-1)?.subagent.status === "failed",
+          "subagent failed",
+        );
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          taskStarted(
+            "toolu-new-launch",
+            "Continue the task.",
+            "00000000-0000-4000-8000-000000000903",
+          ),
+        );
+        yield* awaitUntil(
+          () => subagentEvents().at(-1)?.subagent.status === "running",
+          "subagent re-opened",
+        );
+        const reopened = subagentEvents().at(-1)?.subagent;
+        assert.equal(reopened?.result ?? null, null);
+        assert.equal(new Set(subagentEvents().map((event) => event.subagent.id)).size, 1);
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000904",
+            result: "Resumed the subagent.",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
   it.effect("releases the idle pin when a post-settle subagent stops without completing", () =>
     Effect.scoped(
       Effect.gen(function* () {
