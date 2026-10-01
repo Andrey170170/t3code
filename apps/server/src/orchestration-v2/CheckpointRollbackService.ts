@@ -36,6 +36,8 @@ import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
 export const ROLLBACK_FAILED_MESSAGE =
   "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
 
+const ROLLBACK_SUPERSEDED_MESSAGE = "A newer revert of this thread replaced this one.";
+
 export const CHECKPOINT_EXPIRED_MESSAGE =
   "This checkpoint's saved files are no longer available, so it can no longer be restored.";
 
@@ -74,9 +76,6 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
 }
 
 const isCheckpointRollbackExecutionError = Schema.is(CheckpointRollbackExecutionError);
-
-export const ROLLBACK_IN_FLIGHT_MESSAGE =
-  "This thread is still being reverted. Try again once the current revert finishes.";
 
 /**
  * Whether the thread's latest rollback may still run: accepted, neither
@@ -234,6 +233,21 @@ export const layer: Layer.Layer<
           providerThreadId: input.providerThreadId,
           checkpointId: input.checkpointId,
           ...(checkpoint?.status === "missing" ? { detail: CHECKPOINT_EXPIRED_MESSAGE } : {}),
+        });
+      }
+      // A newer rollback replaced this one while it waited to retry; running
+      // it now would restore its older checkpoint over the newer one.
+      if (
+        input.requestId !== undefined &&
+        projection.thread.rollbackRequestId !== undefined &&
+        projection.thread.rollbackRequestId !== input.requestId
+      ) {
+        return yield* new CheckpointRollbackExecutionError({
+          reason: "rollback-target-invalid",
+          threadId: input.threadId,
+          providerThreadId: input.providerThreadId,
+          checkpointId: input.checkpointId,
+          detail: ROLLBACK_SUPERSEDED_MESSAGE,
         });
       }
       if (

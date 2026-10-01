@@ -59,7 +59,6 @@ import * as Stream from "effect/Stream";
 
 import * as ProjectStore from "./ProjectStore.ts";
 import { CheckpointRestoreRule } from "./CheckpointRestoreSafety.ts";
-import { ROLLBACK_IN_FLIGHT_MESSAGE, rollbackInFlight } from "./CheckpointRollbackService.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
 import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
@@ -68,11 +67,7 @@ import { notificationTurnItem } from "./Notification.ts";
 import { isRestartNoteSource } from "./RestartBackgroundNote.ts";
 import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
 import { EventSinkV2 } from "./EventSink.ts";
-import {
-  EffectOutboxV2,
-  type OrchestrationEffectRequestV2,
-  type PendingOrchestrationEffectV2,
-} from "./EffectOutbox.ts";
+import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import { IdAllocatorV2 } from "./IdAllocator.ts";
 import {
   ThreadCommandExecutor,
@@ -670,8 +665,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   const fileSystem = yield* FileSystem.FileSystem;
   const restoreRule = yield* CheckpointRestoreRule;
-  // Optional so test orchestrators without an outbox keep working.
-  const rollbackOutbox = yield* Effect.serviceOption(EffectOutboxV2);
   const providerAdapters = yield* ProviderAdapterRegistryV2;
   const continuationRequests = yield* ProviderContinuationRequests;
   const providerSessions = yield* ProviderSessionManagerV2;
@@ -8175,15 +8168,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       );
 
-      // A rollback waiting to retry would otherwise run after this one and
-      // restore its older checkpoint over it.
-      if (yield* rollbackInFlight(projection.thread, rollbackOutbox)) {
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: ROLLBACK_IN_FLIGHT_MESSAGE,
-        });
-      }
       const targetCheckpoint = projection.checkpoints.find(
         (candidate) => candidate.id === command.checkpointId,
       );

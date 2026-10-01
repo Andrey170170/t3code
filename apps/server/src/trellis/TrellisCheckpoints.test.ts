@@ -1032,6 +1032,8 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
     captureBaseline,
     runs,
     rollbackState,
+    /** The thread the rollback reads (its latest accepted rollback included). */
+    thread: projection.thread as { rollbackRequestId?: string },
   };
 }
 
@@ -1414,6 +1416,21 @@ it.effect(
     }).pipe(Effect.provide(storeLayer(fake)));
   },
 );
+
+it.effect("a rollback a newer one replaced never runs", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const harness = rollbackHarness(fake, { scope: ideaScope(fake) });
+  return Effect.gen(function* () {
+    yield* harness.captureBaseline;
+    // The older request waits for its retry; a newer one was accepted.
+    harness.thread.rollbackRequestId = "rollback-newer";
+    const refused = yield* Effect.flip(harness.execute(undefined, "rollback-older"));
+    assert.equal(refused.reason, "rollback-target-invalid");
+    assert.deepEqual(harness.log, []);
+    yield* harness.execute(undefined, "rollback-newer");
+    assert.deepEqual(harness.log, ["rewind", "files"]);
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect("a turn is not held by a revert that failed for good without its receipt", () => {
   const fake = makeFakeTrellis(tempRoot());
