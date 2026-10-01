@@ -703,6 +703,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly adapter: ProviderAdapterV2Shape;
     readonly providerInstanceId: ProviderInstanceId;
     readonly threadId: ThreadId;
+    readonly sessionKey: Option.Option<string | undefined>;
   }) =>
     input.adapter.getCapabilities().pipe(
       Effect.flatMap((capabilities) =>
@@ -710,6 +711,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? Effect.succeed(
               idAllocator.derive.providerSession({
                 providerInstanceId: input.providerInstanceId,
+                ...Option.match(input.sessionKey, {
+                  onNone: () => ({}),
+                  onSome: (sessionKey) => (sessionKey === undefined ? {} : { sessionKey }),
+                }),
               }),
             )
           : idAllocator.allocate.providerSession({
@@ -718,6 +723,30 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
       ),
     );
+
+  /**
+   * The `launch.sessionKey` (a Trellis workspace) the thread's next turn runs
+   * under; none when the policy does not resolve, which keeps V2's choice (the
+   * turn start resolves again and fails with the policy's reason).
+   */
+  const resolveSessionKey = (thread: OrchestrationV2AppThread, modelSelection: ModelSelection) =>
+    runtimePolicy.resolve({ thread, modelSelection }).pipe(
+      Effect.map((policy) => Option.some(policy.launch?.sessionKey)),
+      Effect.orElseSucceed(() => Option.none<string | undefined>()),
+    );
+
+  /**
+   * A thread keeps its provider session only while the session was opened for
+   * the same session key, so a shared process never serves another workspace.
+   */
+  const keepsProviderSession = (
+    projection: Pick<OrchestrationV2ThreadProjection, "providerSessions">,
+    providerSessionId: ProviderSessionId,
+    sessionKey: Option.Option<string | undefined>,
+  ) =>
+    Option.isNone(sessionKey) ||
+    projection.providerSessions.find((session) => session.id === providerSessionId)?.sessionKey ===
+      sessionKey.value;
 
   const enforceCommandPolicy =
     (command: OrchestrationV2Command) =>
@@ -1412,10 +1441,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 }),
             ),
           ));
+      const sessionKey = yield* resolveSessionKey(projection.thread, queuedRun.modelSelection);
       const providerSessionId =
         (!canResumeAcrossInstances &&
         queuedProviderThread.providerSessionId !== null &&
-        !switchPlan?.releaseProviderSessionIds.includes(queuedProviderThread.providerSessionId)
+        !switchPlan?.releaseProviderSessionIds.includes(queuedProviderThread.providerSessionId) &&
+        keepsProviderSession(projection, queuedProviderThread.providerSessionId, sessionKey)
           ? queuedProviderThread.providerSessionId
           : null) ??
         (yield* providerAdapters.get(queuedRun.providerInstanceId).pipe(
@@ -1424,6 +1455,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter,
               providerInstanceId: queuedRun.providerInstanceId,
               threadId,
+              sessionKey,
             }),
           ),
           Effect.mapError(
@@ -3720,13 +3752,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           input.projection,
           input.modelSelection.instanceId,
         ).find((candidate) => candidate.id !== providerThread.id);
+        const targetSessionKey = yield* resolveSessionKey(
+          input.projection.thread,
+          input.modelSelection,
+        );
+        const existingTargetProviderSessionId =
+          existingTargetProviderThread?.providerSessionId ?? null;
         const targetProviderSessionId =
-          existingTargetProviderThread?.providerSessionId ??
+          (existingTargetProviderSessionId !== null &&
+          keepsProviderSession(input.projection, existingTargetProviderSessionId, targetSessionKey)
+            ? existingTargetProviderSessionId
+            : null) ??
           (yield* mapDispatchError(input.command)(
             providerSessionIdFor({
               adapter: targetAdapter,
               providerInstanceId: input.modelSelection.instanceId,
               threadId: input.command.threadId,
+              sessionKey: targetSessionKey,
             }),
           ));
         const targetProviderThreadBase: OrchestrationV2ProviderThread =
@@ -4799,13 +4841,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               }),
           ),
         );
+        const sessionKey = yield* resolveSessionKey(projection.thread, modelSelection);
+        const activeProviderSessionId = activeProviderThread?.providerSessionId ?? null;
         const providerSessionId =
-          activeProviderThread?.providerSessionId ??
+          (activeProviderSessionId !== null &&
+          keepsProviderSession(projection, activeProviderSessionId, sessionKey)
+            ? activeProviderSessionId
+            : null) ??
           (yield* mapDispatchError(command)(
             providerSessionIdFor({
               adapter,
               providerInstanceId: modelSelection.instanceId,
               threadId: command.threadId,
+              sessionKey,
             }),
           ));
         const providerThreadId =
@@ -5183,13 +5231,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         isProviderSwitch && !canResumeAcrossInstances
           ? rootProviderThreadsForProvider(projection, modelSelection.instanceId)[0]
           : activeProviderThread;
+      const sessionKey = yield* resolveSessionKey(projection.thread, modelSelection);
+      const targetProviderSessionId = canResumeAcrossInstances
+        ? null
+        : (targetProviderThread?.providerSessionId ?? null);
       const providerSessionId =
-        (canResumeAcrossInstances ? undefined : targetProviderThread?.providerSessionId) ??
+        (targetProviderSessionId !== null &&
+        keepsProviderSession(projection, targetProviderSessionId, sessionKey)
+          ? targetProviderSessionId
+          : null) ??
         (yield* mapDispatchError(command)(
           providerSessionIdFor({
             adapter,
             providerInstanceId: modelSelection.instanceId,
             threadId: command.threadId,
+            sessionKey,
           }),
         ));
       const existingProviderSession = projection.providerSessions.find(

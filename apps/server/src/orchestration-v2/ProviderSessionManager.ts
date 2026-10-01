@@ -288,6 +288,31 @@ function providerThreadLoadKey(input: {
   });
 }
 
+/**
+ * Stamps the launch's session key on everything the runtime reports about its
+ * session, so the projection records which workspace the process serves.
+ */
+function withSessionKey(
+  runtime: ProviderAdapterV2SessionRuntime,
+  key: string | undefined,
+): ProviderAdapterV2SessionRuntime {
+  if (key === undefined) return runtime;
+  const stamp = (session: OrchestrationV2ProviderSession) => ({ ...session, sessionKey: key });
+  return {
+    ...runtime,
+    get providerSession() {
+      return stamp(runtime.providerSession);
+    },
+    events: runtime.events.pipe(
+      Stream.map((event) =>
+        event.type === "provider_session.updated"
+          ? { ...event, providerSession: stamp(event.providerSession) }
+          : event,
+      ),
+    ),
+  };
+}
+
 export const layerWithOptions = (
   options: ProviderSessionManagerV2LayerOptions = {},
 ): Layer.Layer<
@@ -1566,6 +1591,20 @@ export const layerWithOptions = (
               const key = sessionKey(input.providerSessionId);
               const existing = (yield* Ref.get(sessions)).get(key);
               if (existing !== undefined) {
+                // A live process serves only threads launched the same way
+                // (one Trellis workspace); ids normally differ per key, so this
+                // guards a thread that kept an id from before its key changed.
+                if (
+                  existing.runtime.providerSession.sessionKey !==
+                  input.runtimePolicy.launch?.sessionKey
+                ) {
+                  return yield* new ProviderSessionOpenError({
+                    instanceId: input.modelSelection.instanceId,
+                    providerSessionId: input.providerSessionId,
+                    cause:
+                      "This provider session runs in another workspace; send the message again to start one in this thread's workspace.",
+                  });
+                }
                 if (
                   !existing.attachedThreadIds.has(input.threadId) &&
                   !existing.supportsMultipleProviderThreads
@@ -1612,7 +1651,7 @@ export const layerWithOptions = (
                 }
               });
               const sessionScope = yield* Scope.make();
-              const runtime = yield* adapter
+              const opened = yield* adapter
                 .openSession({
                   threadId: input.threadId,
                   providerSessionId: input.providerSessionId,
@@ -1657,6 +1696,7 @@ export const layerWithOptions = (
                       }),
                   ),
                 );
+              const runtime = withSessionKey(opened, input.runtimePolicy.launch?.sessionKey);
               const eventSubscribers = yield* Ref.make<
                 ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
               >(new Map());

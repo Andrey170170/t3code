@@ -840,6 +840,59 @@ it.effect("ProviderSessionManagerV2 opens a duplicate session only once", () =>
   }),
 );
 
+it.effect("ProviderSessionManagerV2 serves a launched session only to its own session key", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSinkV2;
+      const idAllocator = yield* IdAllocatorV2;
+      const manager = yield* ProviderSessionManagerV2;
+      const projectionStore = yield* ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const first = ThreadId.make("thread-provider-session-manager-key-a");
+      const second = ThreadId.make("thread-provider-session-manager-key-b");
+      const providerSessionId = idAllocator.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        sessionKey: "ws-a",
+      });
+      const launched = (sessionKey: string) => ({
+        ...runtimePolicy,
+        launch: { executable: "/shims/codex", sessionKey },
+      });
+      yield* eventSink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: first, now }),
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: second, now }),
+        ],
+      });
+
+      const runtime = yield* manager.open({
+        threadId: first,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy: launched("ws-a"),
+      });
+      assert.equal(runtime.providerSession.sessionKey, "ws-a");
+      const projection = yield* projectionStore.getThreadProjection(first);
+      assert.equal(projection.providerSessions.at(-1)?.sessionKey, "ws-a");
+
+      // A thread resolved to another workspace never reattaches to the live process.
+      const refused = yield* manager
+        .open({
+          threadId: second,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy: launched("ws-b"),
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused._tag, "ProviderSessionOpenError");
+      assert.equal((yield* Ref.get(state)).openCount, 1);
+    });
+
+    yield* effect.pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 60_000 })));
+  }),
+);
+
 it.effect("ProviderSessionManagerV2 releases live sessions when its layer shuts down", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
