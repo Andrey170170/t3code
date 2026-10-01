@@ -1085,3 +1085,33 @@ describe("TrellisCatalog service", () => {
     );
   });
 });
+
+describe("sessionsEndedByTrash", () => {
+  const sessions = [
+    { id: "codex-ws-b", status: "ready", cwd: "/trellis/workspaces/ws-b/project" },
+    { id: "claude-ws-b-sub", status: "running", cwd: "/trellis/workspaces/ws-b/project/src" },
+    { id: "stopped-ws-b", status: "stopped", cwd: "/trellis/workspaces/ws-b/project" },
+    { id: "codex-ws-bb", status: "ready", cwd: "/trellis/workspaces/ws-bb/project" },
+    { id: "scratch", status: "ready", cwd: "/trellis/workspaces/ws-s/project/idea-a" },
+  ];
+
+  it("releases the live sessions working in a trashed workspace, and only those", () => {
+    expect(
+      TrellisCatalog.sessionsEndedByTrash({
+        dedicated: true,
+        roots: ["/trellis/workspaces/ws-b/project/"],
+        sessions: [...sessions, sessions[0]!],
+      }),
+    ).toEqual(["codex-ws-b", "claude-ws-b-sub"]);
+  });
+
+  it("releases none for an idea, whose scratch workspace keeps running", () => {
+    expect(
+      TrellisCatalog.sessionsEndedByTrash({
+        dedicated: false,
+        roots: ["/trellis/workspaces/ws-s/project/idea-a"],
+        sessions,
+      }),
+    ).toEqual([]);
+  });
+});

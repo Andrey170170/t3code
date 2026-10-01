@@ -55,6 +55,7 @@ import { pathsOverlap } from "@t3tools/shared/trellis";
 
 import { ServerConfig } from "../config.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { OrchestrationEventStore } from "../persistence/Services/OrchestrationEventStore.ts";
@@ -294,6 +295,34 @@ export function trashTargetOf(
 }
 
 /**
+ * The provider sessions a trash ends. Trashing a project or fork stops its
+ * workspace and the provider processes running in it, so the sessions working
+ * there are released and the next turn there (after a restore) opens a new
+ * process instead of reusing the dead one. An idea's folder lives in the
+ * shared scratch workspace, which keeps running, so trashing one ends none.
+ */
+export function sessionsEndedByTrash(input: {
+  readonly dedicated: boolean;
+  readonly roots: ReadonlyArray<string>;
+  readonly sessions: ReadonlyArray<{
+    readonly id: string;
+    readonly status: string;
+    readonly cwd: string;
+  }>;
+}): ReadonlyArray<string> {
+  if (!input.dedicated) return [];
+  const roots = input.roots.map(normalizeRoot);
+  const within = (cwd: string) => roots.some((root) => cwd === root || cwd.startsWith(`${root}/`));
+  return [
+    ...new Set(
+      input.sessions
+        .filter((session) => session.status !== "stopped" && within(normalizeRoot(session.cwd)))
+        .map((session) => session.id),
+    ),
+  ];
+}
+
+/**
  * Splits find hits per workspace: Trellis groups a project's matches, but a
  * match in a fork must open that fork's T3 project, not the primary one.
  * Returns one entry per T3 project root, in hit order.
@@ -504,6 +533,7 @@ const make = Effect.gen(function* () {
   // Absent in tests that never trash; trash then only checks for busy threads.
   const restoreGate = yield* Effect.serviceOption(TrellisRestoreGate);
   const checkpointPins = yield* Effect.serviceOption(TrellisCheckpointPins);
+  const providerSessions = yield* ProviderSessionManagerV2;
   const orchestrator = yield* OrchestratorV2;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const projectService = yield* ProjectService;
@@ -958,6 +988,41 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  // Best effort: the trash already happened, and a session left behind
+  // only fails its next turn.
+  const releaseSessionsEndedByTrash = (input: {
+    readonly dedicated: boolean;
+    readonly roots: ReadonlyArray<string>;
+  }) =>
+    Effect.gen(function* () {
+      if (!input.dedicated) return;
+      const shell = yield* projectionStore.getShellSnapshot();
+      const sessions = [];
+      for (const thread of shell.threads) {
+        const records = yield* projectionStore.getThreadRecords(thread.id, ["providerSessions"]);
+        sessions.push(...records.providerSessions);
+      }
+      const ended = sessionsEndedByTrash({ ...input, sessions });
+      yield* Effect.logInfo("releasing the provider sessions of a trashed Trellis workspace", {
+        roots: input.roots,
+        sessions: ended,
+      });
+      for (const id of ended) {
+        const session = sessions.find((candidate) => candidate.id === id)!;
+        yield* providerSessions.release({
+          providerSessionId: session.id,
+          reason: "manual_shutdown",
+          detail: "The workspace was moved to the Trellis trash.",
+        });
+      }
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("could not release the sessions of a trashed Trellis workspace", {
+          detail: errorMessage(error),
+        }),
+      ),
+    );
+
   const trashProject: TrellisCatalog["Service"]["trashProject"] = Effect.fn(
     "TrellisCatalog.trashProject",
   )(function* (projectId) {
@@ -1014,6 +1079,12 @@ const make = Effect.gen(function* () {
         else yield* trellis.trashWorkspace(target.id);
       }),
     );
+    // Before archiving, whose detach drops the threads' bindings to the
+    // sessions this looks them up by.
+    yield* releaseSessionsEndedByTrash({
+      dedicated: target.kind === "workspace" || (item !== undefined && item.kind !== "idea"),
+      roots: scopes,
+    });
     // Archive the conversations here rather than through the sync's time
     // heuristic: a session ending as the workspace stops bumps a thread past
     // the deletion time, which would leave it active.
