@@ -127,7 +127,10 @@ const settleInterrupted = (run: OrchestrationV2Run) =>
 
 const continuationOf = (threadId: ThreadId) =>
   Effect.map(projectionOf(threadId), (projection) => ({
-    text: projection.messages.filter((message) => message.role === "user").at(-1)?.text ?? "",
+    text:
+      projection.messages
+        .filter((message) => message.role === "user" && message.text.startsWith("[trellis_"))
+        .at(-1)?.text ?? "",
     runs: projection.runs.map((run) => run.status),
   }));
 
@@ -212,6 +215,101 @@ it.effect("a failed checkpoint still continues the thread, with the reason", () 
     assert.include(next.text, "Nothing was stopped.");
     // Refused before the stop: the workspace's live sessions are kept.
     assert.deepEqual(released, []);
+  }).pipe(Effect.provide(toolLayer(fake)));
+});
+
+it.effect("a queue the user paused stays paused, and the thread still continues", () => {
+  const fake = makeCheckpointTrellis({
+    snapshot: { id: "snap-3" },
+    checkpoint: true,
+    stopped: [],
+    interrupted: [],
+    restarted: true,
+  });
+  return Effect.gen(function* () {
+    const tool = yield* TrellisCheckpointTool.TrellisCheckpointTool;
+    const orchestrator = yield* OrchestratorV2;
+    const lead = yield* createThread("lead", WS);
+    const run = yield* startTurn(lead.threadId, "work");
+    // A message the user queued and paused.
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      createdBy: "user",
+      creationSource: "web",
+      commandId: CommandId.make("lead:later"),
+      threadId: lead.threadId,
+      messageId: "lead:later" as never,
+      text: "later",
+      attachments: [],
+      modelSelection,
+      dispatchMode: { type: "queue_after_active" },
+    });
+    const queued = (yield* projectionOf(lead.threadId)).runs.at(-1)!;
+    yield* writeEvent({
+      id: "lead:pause" as never,
+      type: "run.updated",
+      threadId: lead.threadId,
+      runId: queued.id,
+      providerInstanceId: queued.providerInstanceId,
+      occurredAt: queued.requestedAt,
+      payload: { ...queued, queueHeld: true },
+    });
+    yield* tool.checkpoint(scopeOf(lead.threadId), {});
+    if (
+      (yield* projectionOf(lead.threadId)).runs.find((r) => r.id === run.id)!.status !==
+      "interrupted"
+    ) {
+      yield* settleInterrupted(run);
+    }
+    yield* tool.drain;
+    const runs = (yield* projectionOf(lead.threadId)).runs;
+    assert.isTrue(runs.find((r) => r.id === queued.id)!.queueHeld === true);
+    const next = yield* continuationOf(lead.threadId);
+    assert.include(next.text, "Checkpoint snap-3");
+    assert.equal(runs.at(-1)!.status, "starting");
+  }).pipe(Effect.provide(toolLayer(fake)));
+});
+
+it.effect("a worker is told nothing stopped when the checkpoint was refused", () => {
+  const fake = makeCheckpointTrellis("checkpoint failed: guarded commands did not end in time");
+  return Effect.gen(function* () {
+    const tool = yield* TrellisCheckpointTool.TrellisCheckpointTool;
+    const orchestrator = yield* OrchestratorV2;
+    const lead = yield* createThread("lead", WS);
+    const leadRun = yield* startTurn(lead.threadId, "work");
+    yield* orchestrator.dispatch({
+      type: "delegated_task.request",
+      createdBy: "agent",
+      creationSource: "mcp",
+      commandId: CommandId.make("lead:delegate"),
+      parentThreadId: lead.threadId,
+      parentRunId: leadRun.id,
+      parentNodeId: leadRun.rootNodeId!,
+      task: "Write the tests",
+      title: "Tests worker",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    });
+    const shell = yield* orchestrator.getShellSnapshot({ location: "active" });
+    const worker = shell.threads.find((thread) => thread.lineage.parentThreadId === lead.threadId)!;
+    const workerRun = yield* admitLatest(worker.id);
+    yield* tool.checkpoint(scopeOf(lead.threadId), { interrupt: true });
+    for (const [threadId, run] of [
+      [lead.threadId, leadRun],
+      [worker.id, workerRun],
+    ] as const) {
+      if (
+        (yield* projectionOf(threadId)).runs.find((r) => r.id === run.id)!.status !== "interrupted"
+      ) {
+        yield* settleInterrupted(run);
+      }
+    }
+    yield* tool.drain;
+    assert.include(
+      (yield* continuationOf(worker.id)).text,
+      "which did not happen; nothing was stopped",
+    );
   }).pipe(Effect.provide(toolLayer(fake)));
 });
 

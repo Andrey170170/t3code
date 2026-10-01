@@ -57,9 +57,8 @@ function makeTurnsTrellis() {
   const state: {
     startGate?: Deferred.Deferred<ReadonlyArray<string>>;
     failNext?: string | undefined;
-    putRestarted: ReadonlyArray<string>;
     connects: number;
-  } = { putRestarted: [], connects: 1 };
+  } = { connects: 1 };
   const refuse = () => {
     const message = state.failNext;
     state.failNext = undefined;
@@ -82,7 +81,7 @@ function makeTurnsTrellis() {
         const error = refuse();
         if (error !== undefined) return yield* error;
         messages.push({ kind: "put", open: open.map((entry) => entry.turn), seq });
-        return { restarted: state.putRestarted };
+        return { restarted: [] };
       }),
   });
   return { trellis, messages, state };
@@ -262,7 +261,7 @@ it.effect("a message Trellis finds stale is resent with a newer sequence number"
 
 it.effect("open turns are resynchronized on every connect and after a lost message", () => {
   const fake = makeTurnsTrellis();
-  const { layer, released } = admissionLayer(fake);
+  const { layer } = admissionLayer(fake);
   const puts = () =>
     fake.messages.flatMap((message) => (message.kind === "put" ? [message.open] : []));
   return Effect.gen(function* () {
@@ -277,21 +276,16 @@ it.effect("open turns are resynchronized on every connect and after a lost messa
     // Nothing new: no resynchronization.
     yield* TestClock.adjust("5 seconds");
     assert.equal(puts().length, 1);
-    // Trellis restarted (a reconnect), meanwhile a checkpoint restarted ws-b.
+    // Trellis restarted: a reconnect.
     fake.state.connects = 2;
-    fake.state.putRestarted = ["ws-b"];
     yield* TestClock.adjust("5 seconds");
     assert.deepEqual(puts().at(-1), [one.runId, two.runId]);
     // An end that cannot be delivered is corrected by the next resynchronization.
-    fake.state.putRestarted = [];
     fake.state.failNext = "Trellis is unavailable: connect ENOENT";
     yield* admission.end({ ...one, status: "completed" });
     yield* (yield* TrellisTurns.TrellisTurns).awaitEnded([one.runId]);
     yield* TestClock.adjust("5 seconds");
     assert.deepEqual(puts().at(-1), [two.runId]);
-    // The next turn in ws-b opens fresh sessions there.
-    assert.isTrue(yield* admission.start({ ...turn("three"), cwd: WS_B }));
-    assert.deepEqual(released, ["session-b"]);
   }).pipe(Effect.provide(layer));
 });
 

@@ -9,15 +9,16 @@
  * 4: an agent may end only the threads below it). Any other thread mid-turn
  * in the workspace refuses the call by name. Then, in the background:
  *
- * 1. queue each ended thread's continuation first in its queue (the
- *    caller's a placeholder for the result), so ending a delegated worker's
- *    turn does not finalize its task; then interrupt, holding the queues;
+ * 1. queue each ended thread's continuation first in its queue, as a
+ *    placeholder for the outcome, so ending a delegated worker's turn does
+ *    not finalize its task; then interrupt, holding the queues (a queue the
+ *    user paused stays paused, and gets its continuation afterwards);
  * 2. wait until those turns ended, and make Trellis's open turns T3's;
  * 3. holding T3's turn admission in the workspace, `POST /v1/checkpoint
  *    {target, name, thread}`, and if the workspace stopped release its
  *    provider sessions (their processes are gone), so a turn admitted as
  *    the checkpoint ends opens fresh ones;
- * 4. write the outcome into the caller's continuation and resume the queues.
+ * 4. write the outcome into the continuations and resume the queues.
  *
  * Trellis's `interrupt` is never passed: T3 has ended the workers' turns
  * itself, so Trellis's own conflict check keeps refusing any other thread
@@ -162,13 +163,16 @@ function callerContinuation(
   return `[trellis_checkpoint] Checkpoint ${snapshot}${input.name === undefined ? "" : ` ("${input.name}")`} taken. The workspace was stopped and restarted. ${stopped}${workers} Continue the task.`;
 }
 
-/** Stands in for the caller's continuation until the checkpoint's outcome replaces it. */
+/** Stands in for a continuation until the checkpoint's outcome replaces it. */
 const PENDING_CONTINUATION =
   "[trellis_checkpoint] A checkpoint of this workspace is under way; its result replaces this message.";
 
 /** The message continuing a worker whose turn the checkpoint ended. */
-function workerContinuation(lead: string): string {
-  return `[trellis_checkpoint] Your turn was ended because "${lead}" took a checkpoint of this workspace, which stopped and restarted it; processes you had running have ended. Continue where you left off.`;
+function workerContinuation(lead: string, outcome: TrellisCheckpointOutcome): string {
+  const stopped = outcome.ok || outcome.restarted;
+  return stopped
+    ? `[trellis_checkpoint] Your turn was ended because "${lead}" took a checkpoint of this workspace, which stopped and restarted it; processes you had running have ended. Continue where you left off.`
+    : `[trellis_checkpoint] Your turn was ended because "${lead}" was taking a checkpoint of this workspace, which did not happen; nothing was stopped. Continue where you left off.`;
 }
 
 const make = Effect.gen(function* () {
@@ -380,14 +384,25 @@ const make = Effect.gen(function* () {
         .pipe(Effect.timeoutOption(TURN_END_TIMEOUT), Effect.asVoid);
 
       const run = Effect.gen(function* () {
+        // A queue the user paused stays paused: such a thread gets its
+        // continuation after the checkpoint (an idle thread starts it at
+        // once), and its held messages keep a delegated task open meanwhile.
+        const paused = new Set<ThreadId>();
+        for (const { threadId } of ending) {
+          const records = yield* threads
+            .getThreadRecords(threadId, ["runs"])
+            .pipe(Effect.orElseSucceed(() => ({ runs: [] })));
+          if (records.runs.some((run) => run.status === "queued" && run.queueHeld === true)) {
+            paused.add(threadId);
+          }
+        }
         // Continuations first, so ending the turns finalizes nothing.
         const pending = new Map<ThreadId, RunId | undefined>();
         for (const { threadId } of ending) {
-          const text =
-            threadId === caller.id ? PENDING_CONTINUATION : workerContinuation(caller.title);
+          if (paused.has(threadId)) continue;
           pending.set(
             threadId,
-            yield* queueContinuation(threadId, text).pipe(
+            yield* queueContinuation(threadId, PENDING_CONTINUATION).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("trellis_checkpoint could not queue a continuation", {
                   threadId,
@@ -438,28 +453,31 @@ const make = Effect.gen(function* () {
         );
         // A run whose interrupt did not land died with the stop; it settles shortly.
         yield* awaitEnded;
-        const text = callerContinuation(outcome, {
+        const callerText = callerContinuation(outcome, {
           name: input.name,
           workers: interrupted.map(nameOf),
           titles,
         });
-        const callerPending = pending.get(caller.id);
-        if (callerPending === undefined) {
-          yield* send(caller.id, caller.projectId, text).pipe(
-            failedQuietly("continue the thread", caller.id),
-          );
-        } else {
+        for (const threadId of new Set([caller.id, ...interrupted])) {
+          const text =
+            threadId === caller.id ? callerText : workerContinuation(caller.title, outcome);
+          const placeholder = pending.get(threadId);
+          if (placeholder === undefined) {
+            yield* send(threadId, projectOf(threadId), text).pipe(
+              failedQuietly("continue the thread", threadId),
+            );
+            continue;
+          }
           yield* Effect.gen(function* () {
             yield* threads.dispatch({
               type: "queued-run.edit",
               commandId: yield* commandId("result"),
-              threadId: caller.id,
-              runId: callerPending,
+              threadId,
+              runId: placeholder,
               text,
             });
-          }).pipe(failedQuietly("write the result into the continuation", caller.id));
-        }
-        for (const threadId of new Set([caller.id, ...interrupted])) {
+          }).pipe(failedQuietly("write the outcome into the continuation", threadId));
+          // Everything held here was queued (unpaused) before the interrupt held it.
           yield* resumeQueue(threadId).pipe(failedQuietly("resume the queue", threadId));
         }
       }).pipe(

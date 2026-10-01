@@ -49,7 +49,7 @@ export interface TrellisTurnsShape {
   }) => Effect.Effect<void>;
   /** Waits until each run's end has been reported (or was not open). */
   readonly awaitEnded: (runIds: ReadonlyArray<RunId>) => Effect.Effect<void>;
-  /** Replaces Trellis's open turns with T3's. */
+  /** Replaces Trellis's open turns with T3's (waiting while a named workspace checkpoints). */
   readonly reconcile: Effect.Effect<void>;
 }
 
@@ -76,8 +76,6 @@ const make = Effect.gen(function* () {
   const open = new Map<RunId, OpenTurn>();
   // Ended runs whose end message is still being sent.
   const ending = new Map<RunId, OpenTurn>();
-  // Workspaces a resynchronization found restarted, until a turn starts there.
-  const restartedSinceSync = new Set<string>();
   let lastSeq = 0;
   let dirty = false;
   let syncedConnects = 0;
@@ -125,12 +123,10 @@ const make = Effect.gen(function* () {
       const reply = yield* send("start", (seq) =>
         trellis.reportTurn({ target: cwd, thread: threadId, turn: runId, event: "start", seq }),
       ).pipe(turn.lock.withPermits(1));
-      if (workspace === null) return { restarted: false };
-      const restarted =
-        (Option.isSome(reply) && reply.value.restarted.includes(workspace)) ||
-        restartedSinceSync.has(workspace);
-      restartedSinceSync.delete(workspace);
-      return { restarted };
+      return {
+        restarted:
+          workspace !== null && Option.isSome(reply) && reply.value.restarted.includes(workspace),
+      };
     });
 
   const end: TrellisTurnsShape["end"] = ({ threadId, runId }) =>
@@ -166,7 +162,9 @@ const make = Effect.gen(function* () {
   const reconcile: TrellisTurnsShape["reconcile"] = Effect.gen(function* () {
     // Read and cleared before the message is built: a failure marks it again.
     dirty = false;
-    const reply = yield* send("resynchronization", (seq) =>
+    // A restart it waited through ended turns whose sessions died with their
+    // processes and were released then; it adds nothing for later turns.
+    yield* send("resynchronization", (seq) =>
       trellis.replaceTurns({
         open: [...open].map(([runId, turn]) => ({
           target: turn.cwd,
@@ -176,9 +174,6 @@ const make = Effect.gen(function* () {
         seq,
       }),
     );
-    if (Option.isSome(reply)) {
-      for (const workspace of reply.value.restarted) restartedSinceSync.add(workspace);
-    }
   });
 
   // Resynchronizes on every connect and after a failed message.
