@@ -370,7 +370,17 @@ export const refuseOfflineTrellisProjectDelete = (input: {
       .readFileString(NodePath.join(input.stateDir, "trellis-root"))
       .pipe(
         Effect.map(parseKnownRoots),
-        Effect.orElseSucceed((): ReadonlyArray<string> => []),
+        // No file: Trellis was never used here. Any other failure refuses,
+        // since a Trellis project could not be told apart.
+        Effect.catch((error) =>
+          error.reason._tag === "NotFound"
+            ? Effect.succeed<ReadonlyArray<string>>([])
+            : Effect.fail(
+                new TrellisError({
+                  message: `Could not read the recorded Trellis roots, so "${input.title}" was not removed: ${error.message}`,
+                }),
+              ),
+        ),
       );
     if (roots.some((root) => isTrellisManagedPath(root, input.workspaceRoot))) {
       return yield* new TrellisError({
