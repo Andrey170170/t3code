@@ -239,6 +239,11 @@ const PendingSummary = Schema.Struct({
   text: Schema.String,
   /** Epoch milliseconds when it was queued. */
   at: Schema.Finite,
+  /**
+   * The fork's folder, resolved when queued, so delivery needs no thread;
+   * absent when it could not be resolved then (tried again at each flush).
+   */
+  target: Schema.optionalKey(Schema.String),
 });
 type PendingSummary = typeof PendingSummary.Type;
 const decodePending = Schema.decodeUnknownEffect(
@@ -625,18 +630,32 @@ const make = Effect.gen(function* () {
     });
 
   /** Writes one summary to its worker's fork; true once written or not owed. */
-  const writeSummary = (entry: PendingSummary) =>
+  /**
+   * Where a worker's summary goes: its fork's folder, `none` for a worker
+   * sharing its lead's folder (nothing owed), `unknown` while its threads
+   * cannot be read.
+   */
+  const summaryTarget = (parentThreadId: string, childThreadId: string) =>
     Effect.gen(function* () {
       const [parent, child] = yield* Effect.all([
-        threads.getThreadShell(ThreadId.make(entry.parentThreadId)),
-        threads.getThreadShell(ThreadId.make(entry.childThreadId)),
+        threads.getThreadShell(ThreadId.make(parentThreadId)),
+        threads.getThreadShell(ThreadId.make(childThreadId)),
       ]);
-      // Only a worker in a project of its own (its fork), never one sharing its lead's folder.
-      if (parent == null || child == null || parent.projectId === child.projectId) return true;
-      const folder = yield* folderOf(child);
-      if (folder === undefined) return true;
+      if (parent == null || child == null) return "unknown" as const;
+      if (parent.projectId === child.projectId) return "none" as const;
+      return (yield* folderOf(child)) ?? ("unknown" as const);
+    }).pipe(Effect.catchCause(() => Effect.succeed("unknown" as const)));
+
+  /** Writes one summary to its worker's fork; true once written or not owed. */
+  const writeSummary = (entry: PendingSummary) =>
+    Effect.gen(function* () {
+      const target =
+        entry.target ?? (yield* summaryTarget(entry.parentThreadId, entry.childThreadId));
+      if (target === "none") return true;
+      // Kept until its fork is known (or it ages out); never dropped for a missing thread.
+      if (target === "unknown") return false;
       yield* trellis.recordActivity({
-        target: folder,
+        target,
         kind: "summary",
         data: { text: entry.text, thread: entry.childThreadId },
       });
@@ -676,15 +695,19 @@ const make = Effect.gen(function* () {
   );
 
   const queueSummary = (entry: PendingSummary) =>
-    pendingLock.withPermits(1)(
-      Effect.gen(function* () {
-        const pending = yield* readPending;
-        if (posted.has(entry.key) || pending.some((candidate) => candidate.key === entry.key)) {
-          return;
-        }
-        yield* writePending([...pending, entry]);
-      }),
-    );
+    Effect.gen(function* () {
+      const target = yield* summaryTarget(entry.parentThreadId, entry.childThreadId);
+      if (target === "none") return;
+      yield* pendingLock.withPermits(1)(
+        Effect.gen(function* () {
+          const pending = yield* readPending;
+          if (posted.has(entry.key) || pending.some((candidate) => candidate.key === entry.key)) {
+            return;
+          }
+          yield* writePending([...pending, target === "unknown" ? entry : { ...entry, target }]);
+        }),
+      );
+    });
 
   /**
    * Cancels and archives the workers below a thread archived (or deleted) at `archivedAt`;

@@ -607,6 +607,49 @@ it.effect("keeps a summary Trellis could not take and posts it on a later flush"
   }).pipe(Effect.provide(testLayer(fake)));
 });
 
+it.effect("a pending summary is delivered to its fork after the worker thread is gone", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const workers = yield* TrellisWorkers.TrellisWorkers;
+    const orchestrator = yield* OrchestratorV2;
+    const lead = yield* startLead;
+    const forked = yield* delegate(lead.threadId, { fork: { from: "latest" } });
+    const task = (yield* threadOf(lead.threadId)).subagents.find(
+      (candidate) => candidate.childThreadId === forked.childThreadId,
+    )!;
+    fake.state.failActivities = 1;
+    yield* workers.handle({
+      type: "subagent.updated",
+      threadId: lead.threadId,
+      payload: { ...task, status: "completed", result: "Done.", completedAt: yield* DateTime.now },
+    } as unknown as OrchestrationV2DomainEvent);
+    // The worker is deleted before Trellis comes back.
+    const run = (yield* threadOf(forked.childThreadId)).runs.at(-1)!;
+    yield* writeEvent({
+      id: `completed:${run.id}` as never,
+      type: "run.updated",
+      threadId: forked.childThreadId,
+      runId: run.id,
+      providerInstanceId: run.providerInstanceId,
+      occurredAt: run.requestedAt,
+      payload: { ...run, status: "completed", completedAt: run.requestedAt },
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.delete",
+      commandId: CommandId.make("worker:delete"),
+      threadId: forked.childThreadId,
+    });
+    yield* workers.flushSummaries;
+    assert.deepEqual(fake.state.activities, [
+      {
+        target: pathOf("ws-fork1"),
+        kind: "summary",
+        data: { text: "Done.", thread: forked.childThreadId },
+      },
+    ]);
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
 it.effect("an unreadable pending file fails the event and is left as it was", () => {
   const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
   return Effect.gen(function* () {
