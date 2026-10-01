@@ -137,8 +137,13 @@ describe("TrellisRuntimePolicy", () => {
         assert.equal(policy.cwd, idea);
         assert.deepEqual(policy.launch, {
           executable: `/t3/trellis-shims/${shim}`,
-          env: { TRELLIS_ROOT: "/trellis", TRELLIS_SOCKET: "/trellis/state/api.sock" },
-          instructions: "You are in a Trellis workspace.",
+          env: {
+            TRELLIS_ROOT: "/trellis",
+            TRELLIS_SOCKET: "/trellis/state/api.sock",
+            // A Codex app-server serves several threads, so only Claude's names one.
+            ...(instance === "claudeAgent" ? { TRELLIS_THREAD: "thread-trellis-policy" } : {}),
+          },
+          instructions: `You are in a Trellis workspace.\n\n${TrellisRuntimePolicy.TRELLIS_T3_GUIDE}`,
           sessionKey: "ws-1",
           loopbackHost: "host.containers.internal",
         });

@@ -46,6 +46,7 @@ import * as TrellisNaming from "./trellis/TrellisNaming.ts";
 import * as TrellisPreview from "./trellis/TrellisPreview.ts";
 import * as TrellisPtyAdapter from "./trellis/TrellisPtyAdapter.ts";
 import * as TrellisRestore from "./trellis/TrellisRestore.ts";
+import * as TrellisTurns from "./trellis/TrellisTurns.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -583,6 +584,8 @@ const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
 
 const RuntimeCoreDependenciesLive = RuntimeCoreDependenciesBaseLive.pipe(
   Layer.provideMerge(PtyAdapterLive),
+  // Reports turns in Trellis paths to Trellis (idle while it is off).
+  Layer.provideMerge(TrellisTurns.layer),
   // The optional Trellis workspace service, off until enabled in settings.
   // Runtime policy, terminals and worktree creation consult it when present.
   Layer.provideMerge(Trellis.layer.pipe(Layer.provide(ServerSettingsLayerLive))),

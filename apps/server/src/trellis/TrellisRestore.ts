@@ -14,6 +14,11 @@
  * before the safety check through the file restore, and a turn starting
  * inside a held scope waits until it is released.
  *
+ * Turn admission also reports each turn to Trellis (`TrellisTurns`), which
+ * holds a start while the workspace is checkpointing; when that checkpoint
+ * restarted the workspace, its provider sessions are released before the
+ * turn opens one, since their processes are gone.
+ *
  * Provides V2's `RestoreLease`, `TurnAdmission` and `CheckpointRestoreRule`
  * seams; without the Trellis service each is V2's default.
  *
@@ -51,8 +56,10 @@ import {
   RestoreLease,
   type RestoreLeaseShape,
 } from "../orchestration-v2/RestoreLease.ts";
+import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import { TurnAdmission, type TurnAdmissionShape } from "../orchestration-v2/TurnAdmission.ts";
 import { Trellis, trellisRootOf, trellisWorkspaceOf } from "./Trellis.ts";
+import { TrellisTurns } from "./TrellisTurns.ts";
 
 export interface TrellisRestoreGateShape {
   /**
@@ -338,11 +345,52 @@ export const captureOutstandingIn =
 
 const ROLLBACK_POLL_INTERVAL = "250 millis";
 
+/** The project directory of the workspace holding `path` (`<root>/workspaces/<ws>/project`). */
+const workspaceProjectOf = Effect.fn("TrellisRestore.workspaceProjectOf")(function* (
+  trellis: Trellis["Service"],
+  path: string,
+) {
+  const roots = yield* trellis.expectedRoots;
+  const root = trellisRootOf(roots, path);
+  const workspace = trellisWorkspaceOf(roots, path);
+  return root !== null && workspace !== null ? `${root}/workspaces/${workspace}/project` : path;
+});
+
+/**
+ * Releases every live provider session running in `directory` (its process
+ * is gone or about to be), so the next turn there opens a fresh one. Returns
+ * the sessions that could not be released.
+ */
+export const releaseSessionsWithin = Effect.fn("TrellisRestore.releaseSessionsWithin")(function* (
+  sessions: ProviderSessionManagerV2["Service"],
+  directory: string,
+  detail: string,
+) {
+  const failed: Array<string> = [];
+  for (const session of yield* sessions.listLive) {
+    if (session.cwd !== directory && !session.cwd.startsWith(`${directory}/`)) continue;
+    const released = yield* sessions
+      .release({ providerSessionId: session.providerSessionId, reason: "manual_shutdown", detail })
+      .pipe(Effect.result);
+    if (released._tag === "Failure") {
+      yield* Effect.logWarning("could not release a provider session of a restarted workspace", {
+        providerSessionId: session.providerSessionId,
+        detail: released.failure.message,
+      });
+      failed.push(session.providerSessionId);
+    }
+  }
+  return failed;
+});
+
 export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | ProjectionStoreV2> =
   Layer.effectContext(
     Effect.gen(function* () {
       const trellisOption = yield* Effect.serviceOption(Trellis);
       const gateOption = yield* Effect.serviceOption(TrellisRestoreGate);
+      // Present in the server; restore-only tests run without them.
+      const turns = Option.getOrUndefined(yield* Effect.serviceOption(TrellisTurns));
+      const sessions = Option.getOrUndefined(yield* Effect.serviceOption(ProviderSessionManagerV2));
       const projects = yield* ProjectStoreV2;
       const outbox = yield* EffectOutboxV2;
       const projections = yield* ProjectionStoreV2;
@@ -369,7 +417,11 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | 
           Context.add(CheckpointRestoreRule, rule),
         );
       if (Option.isNone(trellisOption) || Option.isNone(gateOption)) {
-        return seams(cwdLease, { start: () => Effect.succeed(false) }, isolatedWorktreeRestoreRule);
+        return seams(
+          cwdLease,
+          { start: () => Effect.succeed(false), end: () => Effect.void },
+          isolatedWorktreeRestoreRule,
+        );
       }
       const trellis = trellisOption.value;
       const gate = gateOption.value;
@@ -401,8 +453,21 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | 
                 waited = true;
                 yield* Effect.sleep(ROLLBACK_POLL_INTERVAL);
               }
-              return (yield* gate.waitFree(path)) || waited;
+              if (yield* gate.waitFree(path)) waited = true;
+              if (turns === undefined) return waited;
+              // Waits while the workspace is checkpointing.
+              const { restarted } = yield* turns.start({ threadId, runId, cwd: path });
+              if (restarted && sessions !== undefined) {
+                yield* releaseSessionsWithin(
+                  sessions,
+                  yield* workspaceProjectOf(trellis, path),
+                  "The workspace restarted for a Trellis checkpoint.",
+                );
+              }
+              return waited || restarted;
             }).pipe(Effect.ensuring(Effect.sync(() => held.delete(runId)))),
+          end: ({ threadId, runId }) =>
+            turns === undefined ? Effect.void : turns.end({ threadId, runId }),
         },
         {
           check: (input, dependencies) =>

@@ -59,6 +59,7 @@ import * as Stream from "effect/Stream";
 
 import * as ProjectStore from "./ProjectStore.ts";
 import { CheckpointRestoreRule } from "./CheckpointRestoreSafety.ts";
+import { TurnAdmission } from "./TurnAdmission.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
 import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
@@ -665,6 +666,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   const fileSystem = yield* FileSystem.FileSystem;
   const restoreRule = yield* CheckpointRestoreRule;
+  const turnAdmission = yield* TurnAdmission;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
   const continuationRequests = yield* ProviderContinuationRequests;
   const providerSessions = yield* ProviderSessionManagerV2;
@@ -9556,6 +9558,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
       const threadId = stored.event.threadId;
+      // Every terminal run ends its admitted turn, whatever path ended it.
+      if (stored.event.type === "run.updated") {
+        yield* turnAdmission.end({
+          threadId,
+          runId: stored.event.payload.id,
+          status: stored.event.payload.status,
+        });
+      }
       // finalize writes the parent thread and startNextQueuedRun writes this
       // thread, so each takes its own thread's lock, sequentially and never
       // nested: dispatchDelegatedTaskRequest already writes child events
