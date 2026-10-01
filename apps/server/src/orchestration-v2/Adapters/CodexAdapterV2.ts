@@ -1205,6 +1205,11 @@ export function codexThreadRuntimeParams(input: {
   readonly threadId: ThreadId | null;
   readonly modelSelection?: { readonly model: string };
   readonly runtimePolicy?: ProviderAdapterV2RuntimePolicy;
+  /**
+   * The user's configured `developer_instructions`. The override replaces
+   * them, so a launch's instructions are appended to them.
+   */
+  readonly configuredDeveloperInstructions?: string | undefined;
 }): {
   readonly cwd?: string;
   readonly model?: string;
@@ -1220,7 +1225,11 @@ export function codexThreadRuntimeParams(input: {
       ...CODEX_THREAD_CONFIG,
       ...(launch?.instructions === undefined
         ? {}
-        : { developer_instructions: launch.instructions }),
+        : {
+            developer_instructions: [input.configuredDeveloperInstructions, launch.instructions]
+              .filter((part) => part !== undefined && part.length > 0)
+              .join("\n\n"),
+          }),
       ...(mcpSession === undefined
         ? {}
         : {
@@ -1623,6 +1632,8 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             ),
           );
         const initialized = yield* Ref.make(false);
+        // Read once at initialization when a launch adds instructions.
+        let configuredDeveloperInstructions: string | undefined;
         const ensureInitialized = Effect.gen(function* () {
           const alreadyInitialized = yield* Ref.get(initialized);
           if (alreadyInitialized) {
@@ -1634,6 +1645,19 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             capabilities: CODEX_CLIENT_CAPABILITIES,
           });
           yield* client.notify("initialized", undefined);
+          if (input.runtimePolicy.launch?.instructions !== undefined) {
+            configuredDeveloperInstructions = yield* client
+              .request("config/read", {
+                ...(input.runtimePolicy.cwd === null ? {} : { cwd: input.runtimePolicy.cwd }),
+                includeLayers: false,
+              })
+              .pipe(
+                Effect.map(
+                  (response) => response.config.developer_instructions?.trim() || undefined,
+                ),
+                Effect.orElseSucceed(() => undefined),
+              );
+          }
           yield* Ref.set(initialized, true);
         });
         const now = yield* DateTime.now;
@@ -5402,13 +5426,14 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             }),
           ensureThread: (threadInput) =>
             ensureInitialized.pipe(
-              Effect.andThen(
+              Effect.andThen(() =>
                 client.request(
                   "thread/start",
                   codexThreadRuntimeParams({
                     threadId: threadInput.threadId,
                     modelSelection: threadInput.modelSelection,
                     runtimePolicy: threadInput.runtimePolicy,
+                    configuredDeveloperInstructions,
                   }),
                 ),
               ),
@@ -5436,12 +5461,13 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
 
               const response = yield* ensureInitialized.pipe(
-                Effect.andThen(
+                Effect.andThen(() =>
                   // excludeTurns is not in the generated request schema yet.
                   client.raw.request("thread/resume", {
                     threadId: nativeThreadId,
                     excludeTurns: true,
                     ...codexThreadRuntimeParams({
+                      configuredDeveloperInstructions,
                       threadId: threadInput.threadId ?? threadInput.providerThread.appThreadId,
                       ...(threadInput.modelSelection === undefined
                         ? {}
@@ -6169,6 +6195,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                     threadId: threadInput.providerThread.appThreadId,
                     modelSelection: input.modelSelection,
                     runtimePolicy: input.runtimePolicy,
+                    configuredDeveloperInstructions,
                   }),
                 });
               }
@@ -6208,13 +6235,14 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               const threadId = yield* getNativeThreadId(threadInput.sourceProviderThread);
               const boundary = yield* resolveCodexForkBoundary(threadInput);
               const response = yield* ensureInitialized.pipe(
-                Effect.andThen(
+                Effect.andThen(() =>
                   client.request("thread/fork", {
                     threadId,
                     ...(boundary.lastTurnId === undefined
                       ? {}
                       : { lastTurnId: boundary.lastTurnId }),
                     ...codexThreadRuntimeParams({
+                      configuredDeveloperInstructions,
                       threadId: threadInput.targetThreadId,
                       ...(threadInput.modelSelection === undefined
                         ? {}
