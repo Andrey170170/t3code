@@ -17,6 +17,7 @@ import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/uns
 import { ProjectService } from "../project/ProjectService.ts";
 import * as ServerConfig from "../config.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
+import * as TrellisPreview from "../trellis/TrellisPreview.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
@@ -47,6 +48,7 @@ const client = McpSchema.McpServerClient.of({
 });
 const TestLayer = McpHttpServer.PreviewToolkitRegistrationLive.pipe(
   Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provideMerge(TrellisPreview.layerDisabled),
   Layer.provideMerge(PreviewAutomationBroker.layer),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-http-server-test-" })),
   Layer.provideMerge(NodeServices.layer),
@@ -113,6 +115,52 @@ const callSnapshot = (args: Record<string, unknown>) =>
         Effect.provideService(McpSchema.McpServerClient, client),
       );
   });
+
+// A stand-in for a Trellis thread: loopback means the workspace's published port.
+const TrellisTestLayer = McpHttpServer.PreviewToolkitRegistrationLive.pipe(
+  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provideMerge(
+    Layer.succeed(
+      TrellisPreview.TrellisPreview,
+      TrellisPreview.TrellisPreview.of({
+        resolveUrl: (_threadId, url) =>
+          Effect.succeed(url.replace("localhost:8000", "preview.test:30008")),
+        resolvePort: (_threadId, input) =>
+          Effect.succeed(`http://preview.test:3${String(input.port).padStart(4, "0")}/`),
+      }),
+    ),
+  ),
+  Layer.provideMerge(PreviewAutomationBroker.layer),
+  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-http-server-test-" })),
+  Layer.provideMerge(NodeServices.layer),
+);
+
+it.effect("maps workspace previews before the browser loads them", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const inputs = yield* serveSnapshots("mcp-trellis-client", { url: "ignored" });
+      const call = (name: string, args: Record<string, unknown>) =>
+        server
+          .callTool({ name, arguments: args })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+
+      yield* call("preview_open", { url: "http://localhost:8000/x" });
+      yield* call("preview_navigate", { target: { kind: "environment-port", port: 8000 } });
+      yield* call("preview_navigate", { url: "https://example.com/" });
+
+      expect(inputs).toMatchObject([
+        { url: "http://preview.test:30008/x" },
+        { url: "http://preview.test:38000/" },
+        { url: "https://example.com/" },
+      ]);
+      expect(inputs[1]).not.toHaveProperty("target");
+    }),
+  ).pipe(Effect.provide(TrellisTestLayer)),
+);
 
 it("normalizes empty successful notification responses to accepted", () => {
   const notificationResponse = McpHttpServer.normalizeMcpHttpResponse(

@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import {
   isHiddenRetiredProject,
+  isLoopbackPreviewUrl,
   isTrellisIdeaPath,
   isTrellisWorkspaceRoot,
   pickTrellisEnvironment,
@@ -242,5 +243,16 @@ describe("threadMoveBlocker", () => {
       }),
     ).toContain("working");
     expect(threadMoveBlocker({ latestRun: null, runtime: idle, forkedFrom: {} })).toContain("fork");
+  });
+});
+
+describe("isLoopbackPreviewUrl", () => {
+  it("recognizes loopback preview URLs only", () => {
+    expect(isLoopbackPreviewUrl("localhost:5173")).toBe(true);
+    expect(isLoopbackPreviewUrl("http://127.0.0.1:3000/x")).toBe(true);
+    expect(isLoopbackPreviewUrl("http://[::1]:8080")).toBe(true);
+    expect(isLoopbackPreviewUrl("http://0.0.0.0:4000")).toBe(true);
+    expect(isLoopbackPreviewUrl("https://example.com")).toBe(false);
+    expect(isLoopbackPreviewUrl("http://node.ts.net:21001/")).toBe(false);
   });
 });

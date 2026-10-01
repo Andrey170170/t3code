@@ -5,6 +5,7 @@ import {
   type TrellisFindHit,
   type TrellisState,
 } from "@t3tools/contracts";
+import { isLoopbackHost, normalizePreviewUrl } from "@t3tools/shared/preview";
 import { isTrellisManagedPath } from "@t3tools/shared/trellis";
 
 /**
@@ -226,4 +227,13 @@ export function trellisMoveMenu<
     blockedReason: threadMoveBlocker(thread),
     targets: targets.map((project) => ({ projectId: project.id, label: project.title })),
   };
+}
+
+/** Whether a preview URL points at loopback (`localhost`, `127.0.0.1`, `[::1]`, `0.0.0.0`). */
+export function isLoopbackPreviewUrl(url: string): boolean {
+  try {
+    return isLoopbackHost(new URL(normalizePreviewUrl(url)).hostname);
+  } catch {
+    return false;
+  }
 }

@@ -1,0 +1,174 @@
+import { it } from "@effect/vitest";
+import { ProjectId, ThreadId, TrellisError } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import { describe, expect } from "vite-plus/test";
+
+import { OrchestratorProjectionError, OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import { ProjectService } from "../project/ProjectService.ts";
+import { makeTestTrellis, Trellis } from "./Trellis.ts";
+import * as TrellisPreview from "./TrellisPreview.ts";
+
+const ROOT = "/trellis";
+const IDEA = `${ROOT}/workspaces/ws-1/project/idea-1`;
+const threadId = ThreadId.make("thread-1");
+
+describe("loopbackPort", () => {
+  it("detects loopback hosts with explicit and default ports", () => {
+    expect(TrellisPreview.loopbackPort("http://localhost:5173/x")).toBe(5173);
+    expect(TrellisPreview.loopbackPort("http://127.0.0.1:3000")).toBe(3000);
+    expect(TrellisPreview.loopbackPort("http://[::1]:8080/")).toBe(8080);
+    expect(TrellisPreview.loopbackPort("http://0.0.0.0:4000")).toBe(4000);
+    expect(TrellisPreview.loopbackPort("localhost:5173")).toBe(5173);
+    expect(TrellisPreview.loopbackPort("http://localhost/")).toBe(80);
+    expect(TrellisPreview.loopbackPort("https://localhost/")).toBe(443);
+  });
+
+  it("ignores other hosts", () => {
+    expect(TrellisPreview.loopbackPort("https://example.com:5173")).toBeNull();
+    expect(TrellisPreview.loopbackPort("http://100.64.0.3:5173")).toBeNull();
+    expect(TrellisPreview.loopbackPort("http://localhost.example.com:5173")).toBeNull();
+  });
+});
+
+describe("rewriteToPreview", () => {
+  it("keeps scheme, path, query and fragment", () => {
+    expect(
+      TrellisPreview.rewriteToPreview(
+        "http://localhost:5173/app/page?tab=a&b=2#section",
+        "http://node.tailnet.ts.net:21001/",
+      ),
+    ).toBe("http://node.tailnet.ts.net:21001/app/page?tab=a&b=2#section");
+  });
+});
+
+describe("TrellisPreview service", () => {
+  const makeLayer = (input: {
+    readonly workspaceRoot: string;
+    readonly worktreePath?: string;
+    readonly fail?: boolean;
+    readonly readFails?: boolean;
+    readonly missingThread?: boolean;
+    readonly published: Array<{ target: string; port: number }>;
+  }) =>
+    TrellisPreview.layer.pipe(
+      Layer.provide(
+        Layer.succeed(
+          Trellis,
+          makeTestTrellis({
+            preview: (request) =>
+              input.fail
+                ? Effect.fail(new TrellisError({ message: "workspace is not running" }))
+                : Effect.sync(() => {
+                    input.published.push(request);
+                    return { hostPort: 21001, url: "http://node.tailnet.ts.net:21001/" };
+                  }),
+          }),
+        ),
+      ),
+      Layer.provide(
+        Layer.mock(OrchestratorV2)({
+          getThreadShell: (id) =>
+            input.readFails
+              ? Effect.fail(new OrchestratorProjectionError({ threadId: id }))
+              : Effect.succeed(
+                  input.missingThread
+                    ? null
+                    : ({
+                        projectId: ProjectId.make("p"),
+                        worktreePath: input.worktreePath ?? null,
+                      } as never),
+                ),
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(ProjectService)({
+          getById: () =>
+            Effect.succeed(Option.some({ workspaceRoot: input.workspaceRoot } as never)),
+        }),
+      ),
+    );
+
+  const resolve = (url: string, layer: ReturnType<typeof makeLayer>) =>
+    Effect.gen(function* () {
+      const preview = yield* TrellisPreview.TrellisPreview;
+      return yield* preview.resolveUrl(threadId, url);
+    }).pipe(Effect.provide(layer));
+
+  it.effect("maps a loopback URL of a Trellis thread to the workspace preview", () =>
+    Effect.gen(function* () {
+      const published: Array<{ target: string; port: number }> = [];
+      const url = yield* resolve(
+        "http://localhost:8000/a?b=1#c",
+        makeLayer({ workspaceRoot: IDEA, published }),
+      );
+      expect(url).toBe("http://node.tailnet.ts.net:21001/a?b=1#c");
+      expect(published).toEqual([{ target: IDEA, port: 8000 }]);
+    }),
+  );
+
+  it.effect("leaves other URLs and non-Trellis threads unchanged", () =>
+    Effect.gen(function* () {
+      const published: Array<{ target: string; port: number }> = [];
+      expect(
+        yield* resolve("https://example.com/", makeLayer({ workspaceRoot: IDEA, published })),
+      ).toBe("https://example.com/");
+      expect(
+        yield* resolve(
+          "http://localhost:5173/",
+          makeLayer({ workspaceRoot: "/home/me/code", published }),
+        ),
+      ).toBe("http://localhost:5173/");
+      // A host worktree of a Trellis project is not the workspace.
+      expect(
+        yield* resolve(
+          "http://localhost:5173/",
+          makeLayer({ workspaceRoot: IDEA, worktreePath: "/home/me/wt", published }),
+        ),
+      ).toBe("http://localhost:5173/");
+      expect(published).toEqual([]);
+    }),
+  );
+
+  it.effect("fails instead of falling back to the host when Trellis cannot publish", () =>
+    Effect.gen(function* () {
+      const error = yield* resolve(
+        "http://localhost:5173/",
+        makeLayer({ workspaceRoot: IDEA, fail: true, published: [] }),
+      ).pipe(Effect.flip);
+      expect(error._tag).toBe("PreviewTrellisError");
+      expect(error.message).toContain("workspace is not running");
+    }),
+  );
+
+  it.effect("fails on a read-model error instead of loading the host's localhost", () =>
+    Effect.gen(function* () {
+      const layer = makeLayer({ workspaceRoot: IDEA, readFails: true, published: [] });
+      const error = yield* resolve("http://localhost:5173/", layer).pipe(Effect.flip);
+      expect(error._tag).toBe("PreviewTrellisError");
+      // Non-loopback URLs never need the read model.
+      expect(yield* resolve("https://example.com/", layer)).toBe("https://example.com/");
+    }),
+  );
+
+  it.effect("leaves the URL unchanged for a thread that does not exist", () =>
+    Effect.gen(function* () {
+      const url = yield* resolve(
+        "http://localhost:5173/",
+        makeLayer({ workspaceRoot: IDEA, missingThread: true, published: [] }),
+      );
+      expect(url).toBe("http://localhost:5173/");
+    }),
+  );
+
+  it.effect("maps an environment port target", () =>
+    Effect.gen(function* () {
+      const url = yield* Effect.gen(function* () {
+        const preview = yield* TrellisPreview.TrellisPreview;
+        return yield* preview.resolvePort(threadId, { port: 5173, path: "settings?x=1" });
+      }).pipe(Effect.provide(makeLayer({ workspaceRoot: IDEA, published: [] })));
+      expect(url).toBe("http://node.tailnet.ts.net:21001/settings?x=1");
+    }),
+  );
+});
