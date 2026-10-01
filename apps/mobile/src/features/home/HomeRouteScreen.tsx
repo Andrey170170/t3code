@@ -101,13 +101,14 @@ export function HomeRouteScreen() {
     () =>
       buildHomeProjectScopes({
         projects,
+        threads,
         environmentId: selectedEnvironmentId,
         projectGroupingMode: listOptions.projectGroupingMode,
       }).map((scope) => ({
         key: scope.key,
         label: scope.title,
       })),
-    [listOptions.projectGroupingMode, projects, selectedEnvironmentId],
+    [listOptions.projectGroupingMode, projects, selectedEnvironmentId, threads],
   );
   useEffect(() => {
     if (
