@@ -1788,7 +1788,10 @@ describe("ClaudeAdapterV2 native fork", () => {
 });
 
 describe("ClaudeAdapterV2 native session identity", () => {
-  const openTurnWithOrdinal = (providerTurnOrdinal: number) =>
+  // `resumed`: the provider thread comes from an earlier session instance and
+  // is resumed on a new one (an idle release); otherwise this session
+  // allocated it, as for a new thread or a failed resume's fallback.
+  const openTurnWithOrdinal = (providerTurnOrdinal: number, resumed = false) =>
     Effect.scoped(
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -1831,13 +1834,29 @@ describe("ClaudeAdapterV2 native session identity", () => {
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
           runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
         });
-        const providerThread = yield* runtime.ensureThread({
+        const allocated = yield* runtime.ensureThread({
           threadId,
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
           runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
         });
+        const turnRuntime = resumed
+          ? yield* adapter.openSession({
+              threadId,
+              providerSessionId: ProviderSessionId.make("provider-session-claude-identity-2"),
+              modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+              runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+            })
+          : runtime;
+        const providerThread = resumed
+          ? yield* turnRuntime.resumeThread({
+              threadId,
+              providerThread: allocated,
+              modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+              runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+            })
+          : allocated;
         const now = yield* DateTime.now;
-        yield* runtime.startTurn(
+        yield* turnRuntime.startTurn(
           makeClaudeTestTurnInput({
             threadId,
             providerThread,
@@ -1865,11 +1884,119 @@ describe("ClaudeAdapterV2 native session identity", () => {
     "resumes the native session on a fresh session instance when prior provider turns exist",
     () =>
       Effect.gen(function* () {
-        const openedQueries = yield* openTurnWithOrdinal(2);
+        const openedQueries = yield* openTurnWithOrdinal(2, true);
         assert.equal(openedQueries.length, 1);
         assert.equal(openedQueries[0]?.options.resume, "native-session-identity");
         assert.equal(openedQueries[0]?.options.sessionId, undefined);
       }),
+  );
+
+  // A failed resume keeps the provider-thread row (and its turn ordinals) but
+  // binds a newly allocated native session, which must be created, not resumed.
+  it.effect("creates a replacement native session even when prior provider turns exist", () =>
+    Effect.gen(function* () {
+      const openedQueries = yield* openTurnWithOrdinal(3);
+      assert.equal(openedQueries.length, 1);
+      assert.equal(openedQueries[0]?.options.sessionId, "native-session-identity");
+      assert.equal(openedQueries[0]?.options.resume, undefined);
+    }),
+  );
+});
+
+describe("ClaudeAdapterV2 resume fallback", () => {
+  // The sequence V2 runs when a resume fails: `resumeThread` fails (here a
+  // launched session whose transcript is gone), `ensureThread` binds a new
+  // native session to the same provider-thread row, and the turn starts with
+  // that row's next ordinal. The new session must be created, not resumed.
+  it.effect("opens the replacement session fresh after a failed resume", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const idAllocator = yield* IdAllocatorV2;
+        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-fallback-" });
+        const cwd = path.join(home, "workspace");
+        yield* fileSystem.makeDirectory(path.join(home, ".claude", "projects"), {
+          recursive: true,
+        });
+        yield* fileSystem.makeDirectory(cwd);
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd,
+          launch: { executable: "/t3/trellis-shims/claude", sessionKey: "ws-1" },
+        });
+        const sessionIds = ["native-original", "native-replacement"];
+        const openedQueries: Array<ClaudeAgentSdkQueryOpenInput> = [];
+        const adapter = makeClaudeAdapterV2({
+          instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+          settings: DEFAULT_CLAUDE_SETTINGS,
+          environment: { HOME: home },
+          attachmentsDir: path.join(home, "attachments"),
+          fileSystem,
+          path,
+          idAllocator,
+          queryRunner: {
+            allocateSessionId: Effect.sync(() => sessionIds.shift() ?? "native-unexpected"),
+            open: (input) =>
+              Effect.sync(() => {
+                openedQueries.push(input);
+                return {
+                  messages: Stream.empty,
+                  offer: () => Effect.void,
+                  setModel: () => Effect.void,
+                  interrupt: Effect.void,
+                  close: Effect.void,
+                };
+              }),
+            forkSession: () => Effect.die("unused forkSession"),
+            subagentLaunchToolUseId: () => Effect.succeed(null),
+            assertComplete: Effect.void,
+          },
+        });
+        const threadId = ThreadId.make("thread-claude-resume-fallback");
+        const openSession = (id: string) =>
+          adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make(id),
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy,
+          });
+        // An earlier session created the native thread; its transcript is gone.
+        const original = yield* (yield* openSession("provider-session-before")).ensureThread({
+          threadId,
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy,
+        });
+
+        const runtime = yield* openSession("provider-session-after");
+        const resumed = yield* Effect.result(
+          runtime.resumeThread({ threadId, providerThread: original, runtimePolicy }),
+        );
+        assert.equal(resumed._tag, "Failure");
+        const replacement = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy,
+          existingProviderThread: { ...original, nativeThreadRef: null },
+        });
+        yield* runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId,
+            providerThread: replacement,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("run-attempt-claude-resume-fallback"),
+            text: "Continue from the summary",
+            attachments: [],
+            providerTurnOrdinal: 2,
+            runtimePolicy,
+          }),
+        );
+        assert.equal(openedQueries.length, 1);
+        assert.equal(openedQueries[0]?.options.sessionId, "native-replacement");
+        assert.equal(openedQueries[0]?.options.resume, undefined);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
   );
 });
 

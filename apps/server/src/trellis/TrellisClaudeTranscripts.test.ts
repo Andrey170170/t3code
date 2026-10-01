@@ -133,6 +133,20 @@ describe("TrellisClaudeTranscripts", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("completes a memory copy that was interrupted mid-file", () =>
+    Effect.gen(function* () {
+      const { fileSystem, path, configDir, b, slugB, read, exists } = yield* setup;
+      // A crash during the copy left only the partial file beside the target.
+      yield* fileSystem.makeDirectory(path.join(slugB, "memory"), { recursive: true });
+      yield* fileSystem.writeFileString(path.join(slugB, "memory", ".notes.md.trellis-copy"), "no");
+
+      yield* prepareClaudeTranscript({ configDir, sessionId, cwd: b });
+      assert.equal(yield* read(path.join(slugB, "memory", "notes.md")), "notes\n");
+      assert.isFalse(yield* exists(path.join(slugB, "memory", ".notes.md.trellis-copy")));
+      assert.isTrue(yield* exists(path.join(slugB, `${sessionId}.jsonl`)));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("fails on a collision without moving anything", () =>
     Effect.gen(function* () {
       const { fileSystem, path, configDir, b, slugA, slugB, read } = yield* setup;

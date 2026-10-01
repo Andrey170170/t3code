@@ -101,7 +101,15 @@ const copyMissing = (
     ) {
       return;
     }
-    yield* fileSystem.copyFile(from, to).pipe(Effect.mapError(fail(`Could not copy ${from}.`)));
+    // Copied beside the target and renamed into place, so an interrupted copy
+    // never leaves a partial file that a later call would take as present.
+    const partial = path.join(path.dirname(to), `.${path.basename(to)}.trellis-copy`);
+    yield* fileSystem
+      .copyFile(from, partial)
+      .pipe(
+        Effect.andThen(fileSystem.rename(partial, to)),
+        Effect.mapError(fail(`Could not copy ${from}.`)),
+      );
   });
 
 /**
