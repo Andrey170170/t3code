@@ -1261,6 +1261,11 @@ export interface DesktopBridge {
 /** Renderer callback invoked by Electron with a fresh user gesture before display-media capture. */
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
 
+export interface DesktopPreviewNavigationRequest {
+  readonly tabId: string;
+  readonly url: string;
+}
+
 export interface DesktopPreviewBridge {
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
@@ -1348,6 +1353,11 @@ export interface DesktopPreviewBridge {
     waitFor: (tabId: string, input: PreviewAutomationWaitForInput) => Promise<void>;
   };
   onStateChange: (listener: (tabId: string, state: DesktopPreviewTabState) => void) => () => void;
+  /**
+   * A navigation the guest page started toward a loopback address, held back
+   * until the renderer maps it for the tab's thread and calls `navigate`.
+   */
+  onNavigationRequest: (listener: (request: DesktopPreviewNavigationRequest) => void) => () => void;
   onPointerEvent: (listener: (event: DesktopPreviewPointerEvent) => void) => () => void;
 }
 

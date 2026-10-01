@@ -20,6 +20,7 @@ class FakeText {
 class FakeElement {
   readonly nodeType = ELEMENT_NODE;
   checked = false;
+  parentElement: FakeElement | null = null;
   readonly childNodes: Array<FakeElement | FakeText> = [];
   readonly classList = {
     contains: (name: string) => this.classNames.includes(name),
@@ -44,6 +45,9 @@ class FakeElement {
   }
 
   append(...children: Array<FakeElement | FakeText>): this {
+    for (const child of children) {
+      if (child instanceof FakeElement) child.parentElement = this;
+    }
     this.childNodes.push(...children);
     return this;
   }
@@ -76,6 +80,12 @@ class FakeElement {
     const matches = (element: FakeElement): boolean => {
       if (target === 'input[type="checkbox"]') {
         return element.tagName === "INPUT" && element.getAttribute("type") === "checkbox";
+      }
+      if (target === 'annotation[encoding="application/x-tex"]') {
+        return (
+          element.tagName === "ANNOTATION" &&
+          element.getAttribute("encoding") === "application/x-tex"
+        );
       }
       return element.tagName === target?.toUpperCase();
     };
@@ -144,6 +154,23 @@ describe("serializeRenderedMarkdownFragment", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it.each([false, true])("copies math source once (display=%s)", (display) => {
+    const math = new FakeElement("SPAN", ["katex"]).append(
+      new FakeElement("SPAN", ["katex-mathml"]).append(
+        new FakeElement("ANNOTATION", [], { encoding: "application/x-tex" }).append(
+          new FakeText("x^2"),
+        ),
+      ),
+      new FakeElement("SPAN", ["katex-html"]).append(new FakeText("duplicated visual text")),
+    );
+    const container = new FakeElement("DIV").append(
+      display ? new FakeElement("SPAN", ["katex-display"]).append(math) : math,
+    );
+    expect(serializeRenderedMarkdownFragment(asNode(container))).toBe(
+      display ? "$$\nx^2\n$$" : "$$x^2$$",
+    );
   });
 
   it("wraps inline code in backticks", () => {

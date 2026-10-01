@@ -1,9 +1,12 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as NetService from "@t3tools/shared/Net";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import { Command } from "effect/unstable/cli";
+import { vi } from "vite-plus/test";
 import {
   HostProcessEnvironment,
   HostProcessInvokedAs,
@@ -11,9 +14,25 @@ import {
   HostProcessWorkingDirectory,
 } from "@t3tools/shared/hostProcess";
 
-import { repointLauncher, resolveLauncherPath } from "./update.ts";
+import { repointLauncher, resolveLauncherPath, updateCommand } from "./update.ts";
+
+vi.mock("../../package.json", async (importOriginal) => {
+  const original = await importOriginal<{ default: typeof import("../../package.json") }>();
+  return { ...original, default: { ...original.default, version: "0.0.42-forgejo.1" } };
+});
 
 it.layer(NodeServices.layer)("t3 update launcher", (it) => {
+  it.effect("keeps Forgejo installs off the upstream updater before resolving host state", () =>
+    Effect.gen(function* () {
+      for (const args of [[], ["0.0.43", "--yes"], ["--channel", "nightly", "--yes"]]) {
+        const error = yield* Command.runWith(updateCommand, { version: "0.0.42-forgejo.1" })(
+          args,
+        ).pipe(Effect.flip);
+        assert.include(error.message, "t3code-update");
+      }
+    }).pipe(Effect.provide(NetService.layer)),
+  );
+
   it.effect("repoints a symlink that lives in a runtime versions tree", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

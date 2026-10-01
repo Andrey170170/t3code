@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  isLoopbackHostname,
   isLoopbackHost,
   newPreviewTabId,
   normalizePreviewUrl,
@@ -88,5 +89,67 @@ describe("normalizePreviewUrl", () => {
         /user|password|access_token|secret|fragment/,
       );
     }
+  });
+});
+
+describe("isLoopbackHostname", () => {
+  it("recognizes every loopback spelling a URL can carry", () => {
+    for (const host of [
+      "localhost",
+      "LOCALHOST",
+      "localhost.",
+      "app.localhost",
+      "127.0.0.1",
+      "127.0.0.2",
+      "127.255.255.254",
+      "0.0.0.0",
+      "[::1]",
+      "::1",
+      "[::]",
+      "[0:0:0:0:0:0:0:1]",
+      "[::ffff:127.0.0.1]",
+      "[::ffff:7f00:2]",
+      "::ffff:127.1.2.3",
+      "[::127.0.0.1]",
+    ]) {
+      expect(isLoopbackHostname(host), host).toBe(true);
+    }
+  });
+
+  it("leaves other hosts alone", () => {
+    for (const host of [
+      "example.com",
+      "localhost.example.com",
+      "128.0.0.1",
+      "10.0.0.1",
+      "100.64.0.3",
+      "[::2]",
+      "[::ffff:10.0.0.1]",
+      "[fe80::1]",
+      "127.0.0.256",
+    ]) {
+      expect(isLoopbackHostname(host), host).toBe(false);
+    }
+  });
+
+  it("agrees with URL parsing of numeric and mapped forms", () => {
+    for (const url of [
+      "http://127.1:8000/",
+      "http://0x7f.0.0.1/",
+      "http://[::ffff:127.0.0.1]:8000/",
+    ]) {
+      expect(isLoopbackHostname(new URL(url).hostname), url).toBe(true);
+    }
+  });
+});
+
+describe("normalizePreviewUrl for bare loopback hosts", () => {
+  it("gives every loopback spelling plain HTTP", () => {
+    expect(normalizePreviewUrl("127.0.0.2:8000")).toBe("http://127.0.0.2:8000/");
+    expect(normalizePreviewUrl("app.localhost:8000")).toBe("http://app.localhost:8000/");
+    expect(normalizePreviewUrl("127.1:8000")).toBe("http://127.0.0.1:8000/");
+    expect(normalizePreviewUrl("localhost.:8000/x")).toBe("http://localhost.:8000/x");
+    expect(normalizePreviewUrl("[::ffff:127.0.0.1]:8000")).toBe("http://[::ffff:7f00:1]:8000/");
+    expect(normalizePreviewUrl("example.com")).toBe("https://example.com/");
   });
 });

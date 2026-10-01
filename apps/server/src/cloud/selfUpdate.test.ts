@@ -10,6 +10,7 @@ import * as Fiber from "effect/Fiber";
 import * as Path from "effect/Path";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import { beforeEach, vi } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
@@ -17,6 +18,23 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 import * as ServerSelfUpdate from "./selfUpdate.ts";
+
+const release = vi.hoisted(() => ({ version: "0.0.42" }));
+vi.mock("../../package.json", async (importOriginal) => {
+  const original = await importOriginal<{ default: typeof import("../../package.json") }>();
+  return {
+    ...original,
+    default: {
+      ...original.default,
+      get version() {
+        return release.version;
+      },
+    },
+  };
+});
+beforeEach(() => {
+  release.version = "0.0.42";
+});
 
 interface HarnessOptions {
   readonly mode?: "web" | "desktop";
@@ -129,6 +147,26 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
 });
 
 it.layer(NodeServices.layer)("server self update", (it) => {
+  it.effect("rejects upstream updates for Forgejo builds before download or service handoff", () =>
+    Effect.gen(function* () {
+      release.version = "0.0.42-forgejo.1";
+      for (const managed of [false, true]) {
+        const { selfUpdate, order } = yield* makeHarness({ managed });
+        const stages: string[] = [];
+        const error = yield* selfUpdate
+          .update({ targetVersion: "1.1.0" }, (stage) =>
+            Effect.sync(() => {
+              stages.push(stage);
+            }),
+          )
+          .pipe(Effect.flip);
+        expect(error.reason).toContain("t3code-update");
+        expect(stages).toEqual([]);
+        expect(order).toEqual([]);
+      }
+    }),
+  );
+
   it.effect("marks running threads at the boot-service handoff", () =>
     Effect.gen(function* () {
       const events: string[] = [];

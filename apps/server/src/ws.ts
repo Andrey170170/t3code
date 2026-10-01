@@ -197,6 +197,7 @@ import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as TrellisCatalog from "./trellis/TrellisCatalog.ts";
 import * as TrellisIdeaPromotion from "./trellis/TrellisIdeaPromotion.ts";
+import * as TrellisPreview from "./trellis/TrellisPreview.ts";
 import { refreshPushedPullRequests } from "./git/refreshPushedPullRequests.ts";
 import { linkCreatedPullRequest } from "./git/linkCreatedPullRequest.ts";
 import * as ReviewService from "./review/ReviewService.ts";
@@ -1149,6 +1150,7 @@ const makeWsRpcLayer = (
       const terminalManager = yield* TerminalManager.TerminalManager;
       const trellisCatalog = yield* TrellisCatalog.TrellisCatalog;
       const trellisIdeas = yield* TrellisIdeaPromotion.TrellisIdeaPromotion;
+      const trellisPreview = yield* TrellisPreview.TrellisPreview;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -3148,6 +3150,14 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.trellisNewProject, trellisCatalog.newProject(input), {
             "rpc.aggregate": "trellis",
           }),
+        [WS_METHODS.trellisResolvePreviewUrl]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisResolvePreviewUrl,
+            trellisPreview
+              .resolveUrl(input.threadId, input.url)
+              .pipe(Effect.map((url) => ({ url }))),
+            { "rpc.aggregate": "trellis" },
+          ),
         [WS_METHODS.trellisFind]: (input) =>
           observeRpcEffect(WS_METHODS.trellisFind, trellisCatalog.find(input.query), {
             "rpc.aggregate": "trellis",
@@ -3479,14 +3489,32 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "terminal" },
           ),
+        // `localhost` in a Trellis thread means its workspace, not this host.
         [WS_METHODS.previewOpen]: (input) =>
-          observeRpcEffect(WS_METHODS.previewOpen, previewManager.open(input), {
-            "rpc.aggregate": "preview",
-          }),
+          observeRpcEffect(
+            WS_METHODS.previewOpen,
+            Effect.gen(function* () {
+              const { alreadyResolved, ...open } = input;
+              if (open.url === undefined) return yield* previewManager.open(open);
+              const url = yield* trellisPreview.resolveUrl(open.threadId, open.url, {
+                alreadyResolved,
+              });
+              return yield* previewManager.open({ ...open, url });
+            }),
+            { "rpc.aggregate": "preview" },
+          ),
         [WS_METHODS.previewNavigate]: (input) =>
-          observeRpcEffect(WS_METHODS.previewNavigate, previewManager.navigate(input), {
-            "rpc.aggregate": "preview",
-          }),
+          observeRpcEffect(
+            WS_METHODS.previewNavigate,
+            Effect.gen(function* () {
+              const { alreadyResolved, ...navigate } = input;
+              const url = yield* trellisPreview.resolveUrl(navigate.threadId, navigate.url, {
+                alreadyResolved,
+              });
+              return yield* previewManager.navigate({ ...navigate, url });
+            }),
+            { "rpc.aggregate": "preview" },
+          ),
         [WS_METHODS.previewResize]: (input) =>
           observeRpcEffect(WS_METHODS.previewResize, previewManager.resize(input), {
             "rpc.aggregate": "preview",
