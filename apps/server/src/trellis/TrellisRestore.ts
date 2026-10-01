@@ -20,7 +20,6 @@
  * @module trellis/TrellisRestore
  */
 import type {
-  OrchestrationV2CheckpointScope,
   OrchestrationV2Run,
   OrchestrationV2ThreadShellSnapshot,
   ProjectId,
