@@ -324,7 +324,7 @@ it.effect("spawns a worker in a fork of the latest checkpoint, in the fork's own
       '[Trellis worker] You work in your own Trellis fork "parser" (ws-fork1)',
     );
     assert.include(prompt, "Add the parser");
-    // The task comes first, so the worker's title is the task's.
+    // The task comes first, and the worker is titled from it, not from the guide.
     assert.isTrue(prompt.startsWith("Add the parser"));
 
     // Its project is a worker fork, which clients keep out of the sidebar.
@@ -380,6 +380,8 @@ it.effect("the lead's thread tools reach its worker in a fork; other threads' do
       threadId: forked.childThreadId,
     });
     assert.equal(read.thread.threadId, forked.childThreadId);
+    // Untitled, it is titled from its task, not from the worker guide after it.
+    assert.equal(read.thread.title, "Add the parser");
     const sent = yield* service.sendToThread(scopeOf(lead.threadId), {
       threadId: forked.childThreadId,
       message: "Also handle empty input.",

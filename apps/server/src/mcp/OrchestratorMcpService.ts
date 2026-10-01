@@ -558,6 +558,12 @@ function threadTitle(input: {
   return detail.length > 80 ? `${detail.slice(0, 77)}...` : detail;
 }
 
+/** A title from a task's first line, clipped like the orchestrator's subagent titles. */
+function taskTitle(task: string): string {
+  const line = task.trim().split("\n")[0]!.trim();
+  return line.length > 72 ? `${line.slice(0, 69)}...` : line;
+}
+
 function taskPrompt(input: OrchestratorMcpDelegateTaskInput): string {
   return input.role === undefined || input.role === "general"
     ? input.task
@@ -1491,13 +1497,18 @@ const make = Effect.gen(function* () {
             parentThreadId: scope.threadId,
             parentRunId: parentRun.id,
             parentNodeId: parentRun.rootNodeId,
-            // The guide follows the task, so the child's title still comes from the task.
+            // A fork worker's guide follows its task.
             task:
               spawned === undefined
                 ? taskPrompt(input)
                 : `${taskPrompt(input)}\n\n${spawned.guide}`,
             ...(spawned === undefined ? {} : { projectId: spawned.projectId }),
-            ...(input.title === undefined ? {} : { title: input.title }),
+            // A fork worker's task ends with the guide: title it from the task alone.
+            ...(input.title !== undefined
+              ? { title: input.title }
+              : spawned === undefined
+                ? {}
+                : { title: taskTitle(input.task) }),
             modelSelection: target.modelSelection,
             runtimeMode,
             interactionMode,
