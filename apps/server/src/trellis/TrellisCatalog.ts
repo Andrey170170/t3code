@@ -1058,10 +1058,11 @@ const make = Effect.gen(function* () {
           : item.workspaces
               .filter((workspace) => workspace.deleted_at === null)
               .map((workspace) => workspace.path);
-    yield* Effect.scoped(
+    const { unreleased, archived } = yield* Effect.scoped(
       Effect.gen(function* () {
-        // New turns there wait from before the busy check until the trash is
-        // done, so none starts in between.
+        // New turns there wait from before the busy check until the trash,
+        // the session release, the archive and the sync are done, so none
+        // starts in between or is shut down by the release.
         if (Option.isSome(restoreGate)) yield* restoreGate.value.hold(scopes);
         // Trashing moves the files away and stops the workspace, so running
         // agents inside it would lose their work.
@@ -1082,19 +1083,20 @@ const make = Effect.gen(function* () {
         }
         if (target.kind === "project") yield* trellis.trashProject(target.id);
         else yield* trellis.trashWorkspace(target.id);
+        const unreleased = yield* releaseSessionsEndedByTrash({
+          dedicated: target.kind === "workspace" || (item !== undefined && item.kind !== "idea"),
+          roots: scopes,
+        });
+        // Archive the conversations here rather than through the sync's time
+        // heuristic: a session ending as the workspace stops bumps a thread past
+        // the deletion time, which would leave it active.
+        // Already in the trash: a failure here leaves conversations active
+        // against removed files, so it is reported rather than swallowed.
+        const archived = yield* archiveThreadsIn(scopes).pipe(Effect.result);
+        yield* syncNow;
+        return { unreleased, archived };
       }),
     );
-    const unreleased = yield* releaseSessionsEndedByTrash({
-      dedicated: target.kind === "workspace" || (item !== undefined && item.kind !== "idea"),
-      roots: scopes,
-    });
-    // Archive the conversations here rather than through the sync's time
-    // heuristic: a session ending as the workspace stops bumps a thread past
-    // the deletion time, which would leave it active.
-    // Already in the trash: a failure here leaves conversations active
-    // against removed files, so it is reported rather than swallowed.
-    const archived = yield* archiveThreadsIn(scopes).pipe(Effect.result);
-    yield* syncNow;
     if (archived._tag === "Failure") {
       return yield* new TrellisError({
         message: `${target.name} is in the Trellis trash, but ${archived.failure.message} Archive them by hand, or restore it from Settings → Trellis.`,

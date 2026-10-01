@@ -1092,6 +1092,63 @@ describe("TrellisCatalog service", () => {
     );
   });
 
+  // The release, archive and sync after the Trellis trash run under the same
+  // gate: a turn admitted meanwhile could be shut down by the release.
+  const releaseReached = Deferred.makeUnsafe<void>();
+  const releaseGo = Deferred.makeUnsafe<void>();
+  const lateState: CatalogState = {
+    items: [dedicated("prj-late", "Late", [workspace("ws-late")])],
+    trashed: [],
+  };
+  const slowSessions = Layer.mock(ProviderSessionManagerV2)({
+    listLive: Deferred.succeed(releaseReached, undefined).pipe(
+      Effect.andThen(Deferred.await(releaseGo)),
+      Effect.as([]),
+    ),
+  });
+
+  effectIt.layer(catalogLayer(lateState, slowSessions))(
+    "trash cleanup against turn admission",
+    (it) => {
+      it.effect("a turn waits until the trash has released sessions, archived and synced", () =>
+        Effect.gen(function* () {
+          const catalog = yield* TrellisCatalog.TrellisCatalog;
+          yield* catalog.syncNow;
+          const project = (yield* projectIdAt(`${ROOT}/workspaces/ws-late/project`))!;
+          const trashing = yield* Effect.forkChild(catalog.trashProject(project.projectId));
+          // Trellis has trashed it; the session release is under way.
+          yield* Deferred.await(releaseReached);
+          assert.deepEqual(lateState.trashed, ["prj-late"]);
+          const turn = yield* Effect.forkChild(
+            Effect.flatMap(TurnAdmission, (admission) =>
+              admission.start({
+                threadId: ThreadId.make("late-thread"),
+                runId: RunId.make("late-run"),
+                cwd: `${ROOT}/workspaces/ws-late/project`,
+              }),
+            ).pipe(
+              Effect.provide(
+                TrellisRestore.layer.pipe(
+                  Layer.provide(Layer.mock(EffectOutboxV2)({})),
+                  Layer.provide(
+                    Layer.mock(ProjectionStore.ProjectionStoreV2)({
+                      getThread: () => Effect.succeed({} as never),
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          );
+          yield* Effect.yieldNow;
+          assert.isUndefined(turn.pollUnsafe());
+          yield* Deferred.succeed(releaseGo, undefined);
+          yield* Fiber.join(trashing);
+          assert.isTrue(yield* Fiber.join(turn));
+        }),
+      );
+    },
+  );
+
   // Runtimes stay live after their threads are archived, until idle release.
   const live = [
     { providerSessionId: "codex-ws-trash", cwd: `${ROOT}/workspaces/ws-trash/project` },
