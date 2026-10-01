@@ -203,40 +203,9 @@ const make = Effect.gen(function* () {
       return yield* failure("graduation_in_progress", "This idea is already graduating.");
     }
 
-    // The idea's other threads mid-turn, as T3 and Trellis each see them.
-    const caller = input.caller;
-    const ideaThreads = input.shell.filter((thread) => thread.projectId === input.ideaProjectId);
-    const titles = new Map(input.shell.map((thread) => [thread.id, thread.title]));
-    const nameOf = (thread: ThreadId) => titles.get(thread) ?? thread;
-    const running = new Map<ThreadId, RunId | null>();
-    for (const thread of ideaThreads) {
-      if (thread.id !== caller?.id && thread.activeRunId !== null) {
-        running.set(thread.id, thread.activeRunId);
-      }
-    }
-    for (const turn of yield* trellis.listTurns(root).pipe(Effect.mapError(unavailable))) {
-      if (turn.project !== idea.id) continue;
-      const thread = ThreadId.make(turn.thread);
-      if (thread !== caller?.id && !running.has(thread)) running.set(thread, null);
-    }
-    const workers = caller === null ? new Set<ThreadId>() : workersOf(caller.id, input.shell);
-    const others = [...running.keys()];
-    const notWorkers = others.filter((thread) => !workers.has(thread));
-    if (notWorkers.length > 0 || (others.length > 0 && !input.interrupt)) {
-      const one = others.length === 1;
-      const reason =
-        caller === null
-          ? `Wait until ${one ? "it finishes" : "they finish"} or stop ${one ? "it" : "them"}, then graduate the idea.`
-          : notWorkers.length > 0
-            ? `${quoted(notWorkers.map(nameOf))} ${notWorkers.length === 1 ? "is not a worker" : "are not workers"} of this thread, so the graduation cannot end ${notWorkers.length === 1 ? "its turn" : "their turns"}. Wait until ${one ? "it finishes" : "they finish"} or ask the user, then call trellis_graduate again.`
-            : `${one ? "It is your worker" : "They are your workers"}: pass interrupt: true to end ${one ? "its turn" : "their turns"} too; ${one ? "it continues" : "they continue"} in the new project.`;
-      return yield* failure(
-        "threads_running",
-        `${quoted(others.map(nameOf))} ${one ? "is" : "are"} mid-turn in this idea, and the graduation copies its folder. ${reason}`,
-      );
-    }
-
-    // Reserved in the same step as the check; released here unless the graduation started.
+    // Reserved in the same step as the check (nothing yields in between), so a
+    // concurrent request for the same idea is refused; released below unless
+    // the graduation started.
     const done = Deferred.makeUnsafe<Outcome>();
     inFlight.set(idea.id, done);
     let launched = false;
@@ -246,6 +215,39 @@ const make = Effect.gen(function* () {
       Deferred.doneUnsafe(done, Exit.succeed({ ok: false, error: "it did not start" }));
     });
     return yield* Effect.gen(function* () {
+      // The idea's other threads mid-turn, as T3 and Trellis each see them.
+      const caller = input.caller;
+      const ideaThreads = input.shell.filter((thread) => thread.projectId === input.ideaProjectId);
+      const titles = new Map(input.shell.map((thread) => [thread.id, thread.title]));
+      const nameOf = (thread: ThreadId) => titles.get(thread) ?? thread;
+      const running = new Map<ThreadId, RunId | null>();
+      for (const thread of ideaThreads) {
+        if (thread.id !== caller?.id && thread.activeRunId !== null) {
+          running.set(thread.id, thread.activeRunId);
+        }
+      }
+      for (const turn of yield* trellis.listTurns(root).pipe(Effect.mapError(unavailable))) {
+        if (turn.project !== idea.id) continue;
+        const thread = ThreadId.make(turn.thread);
+        if (thread !== caller?.id && !running.has(thread)) running.set(thread, null);
+      }
+      const workers = caller === null ? new Set<ThreadId>() : workersOf(caller.id, input.shell);
+      const others = [...running.keys()];
+      const notWorkers = others.filter((thread) => !workers.has(thread));
+      if (notWorkers.length > 0 || (others.length > 0 && !input.interrupt)) {
+        const one = others.length === 1;
+        const reason =
+          caller === null
+            ? `Wait until ${one ? "it finishes" : "they finish"} or stop ${one ? "it" : "them"}, then graduate the idea.`
+            : notWorkers.length > 0
+              ? `${quoted(notWorkers.map(nameOf))} ${notWorkers.length === 1 ? "is not a worker" : "are not workers"} of this thread, so the graduation cannot end ${notWorkers.length === 1 ? "its turn" : "their turns"}. Wait until ${one ? "it finishes" : "they finish"} or ask the user, then call trellis_graduate again.`
+              : `${one ? "It is your worker" : "They are your workers"}: pass interrupt: true to end ${one ? "its turn" : "their turns"} too; ${one ? "it continues" : "they continue"} in the new project.`;
+        return yield* failure(
+          "threads_running",
+          `${quoted(others.map(nameOf))} ${one ? "is" : "are"} mid-turn in this idea, and the graduation copies its folder. ${reason}`,
+        );
+      }
+
       // Workers with a turn T3 runs; a stale Trellis row goes with the resynchronization.
       const interrupted = others.filter((thread) => running.get(thread) != null);
       const ending = [
@@ -414,22 +416,32 @@ const make = Effect.gen(function* () {
           yield* interruptRun(threadId).pipe(failedQuietly("interrupt a run", threadId));
         }
         yield* Deferred.succeed(dispatched, undefined);
-        // Trellis must see those turns ended, or it refuses them; stale ones go too.
-        yield* awaitEnded;
+        // Trellis must see those turns ended, or it refuses them; stale ones go
+        // too. A turn still going would keep writing while the folder is
+        // copied (and the caller's own turn does not refuse the graduation).
+        const ended = yield* Effect.suspend(() => turns.awaitEnded(interruptedRuns)).pipe(
+          Effect.timeoutOption(TURN_END_TIMEOUT),
+        );
         yield* turns.reconcile;
 
-        const graduated = yield* trellis
-          .graduate({
-            id: idea.id,
-            base: input.base,
-            name: input.name,
-            thread: caller?.id,
-          })
-          .pipe(
-            Effect.catch((error) =>
-              Effect.succeed({ ok: false as const, error: error.message, turns: [] }),
-            ),
-          );
+        const graduated = Option.isNone(ended)
+          ? {
+              ok: false as const,
+              error: "the turns it ended did not stop in time, so nothing was copied",
+              turns: [],
+            }
+          : yield* trellis
+              .graduate({
+                id: idea.id,
+                base: input.base,
+                name: input.name,
+                thread: caller?.id,
+              })
+              .pipe(
+                Effect.catch((error) =>
+                  Effect.succeed({ ok: false as const, error: error.message, turns: [] }),
+                ),
+              );
         let outcome: Outcome;
         let moved: ReadonlyArray<OrchestrationV2ThreadShell> = [];
         if (!graduated.ok) {

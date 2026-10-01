@@ -272,3 +272,47 @@ it.effect("diffs a moved thread's turns within the scope of the project they ran
     );
   }).pipe(Effect.provide(layer));
 });
+
+it.effect("a moved thread's diff is unavailable when its new scope's baseline is missing", () => {
+  const projectScope = CheckpointScopeId.make("scope:moved-missing:root:1");
+  const ref = (ordinal: number) =>
+    checkpointRefForScopeOrdinal({ scopeId: projectScope, ordinalWithinScope: ordinal });
+  const layer = makeLayer({
+    projection: Effect.succeed({
+      runs: [{ id: secondRunId, ordinal: 2, status: "completed" }],
+      checkpointScopes: [
+        {
+          id: projectScope,
+          runId: secondRunId,
+          kind: "root_run",
+          cwd: "/project",
+          workspaceAssignment: 1,
+        },
+      ],
+      checkpoints: [
+        {
+          scopeId: projectScope,
+          runId: null,
+          ordinalWithinScope: 1,
+          appRunOrdinal: null,
+          status: "missing",
+          ref: ref(1),
+        },
+        {
+          scopeId: projectScope,
+          runId: secondRunId,
+          ordinalWithinScope: 2,
+          appRunOrdinal: 2,
+          status: "ready",
+          ref: ref(2),
+        },
+      ],
+    }),
+  });
+
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    const error = yield* query.getFullThreadDiff({ threadId, toTurnCount: 2 }).pipe(Effect.flip);
+    assert.instanceOf(error, CheckpointRefUnavailableError);
+  }).pipe(Effect.provide(layer));
+});

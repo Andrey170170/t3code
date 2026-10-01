@@ -161,16 +161,27 @@ export const make = Effect.gen(function* () {
       // taken when the thread first ran there): earlier states are in another
       // directory.
       const toAssignment = toScope.workspaceAssignment ?? 0;
-      const scopeOrdinals = projection.checkpoints
-        .filter((checkpoint) => checkpoint.scopeId === toScope.id && checkpoint.status === "ready")
-        .map((checkpoint) => checkpoint.ordinalWithinScope);
-      const fromOrdinal =
-        scopeOrdinals.length === 0
+      const scopeCheckpoints = projection.checkpoints.filter(
+        (checkpoint) => checkpoint.scopeId === toScope.id,
+      );
+      // The scope starts at its earliest checkpoint, whatever its status: a
+      // baseline that could not be captured makes the range unavailable rather
+      // than starting at a later capture.
+      const scopeStart =
+        scopeCheckpoints.length === 0
           ? undefined
-          : Math.max(input.fromTurnCount, Math.min(...scopeOrdinals));
+          : Math.min(...scopeCheckpoints.map((checkpoint) => checkpoint.ordinalWithinScope));
+      const fromOrdinal =
+        scopeStart === undefined ? undefined : Math.max(input.fromTurnCount, scopeStart);
+      const fromReady =
+        fromOrdinal !== undefined &&
+        scopeCheckpoints.some(
+          (checkpoint) =>
+            checkpoint.ordinalWithinScope === fromOrdinal && checkpoint.status === "ready",
+        );
       const fromCheckpointRef =
         toAssignment > 0
-          ? fromOrdinal === undefined || !scopeOrdinals.includes(fromOrdinal)
+          ? fromOrdinal === undefined || !fromReady
             ? undefined
             : checkpointRefForScopeOrdinal({ scopeId: toScope.id, ordinalWithinScope: fromOrdinal })
           : input.fromTurnCount === 0

@@ -16,6 +16,7 @@ import * as Layer from "effect/Layer";
 
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import {
   ProjectionStoreThreadNotFoundError,
   ProjectionStoreV2,
@@ -106,13 +107,18 @@ function graduationLayer(fake: ReturnType<typeof makeGraduationTrellis>) {
   return TrellisGraduation.layer.pipe(
     // The catalog makes the new project's T3 project.
     Layer.provide(
-      Layer.mock(TrellisCatalog)({
-        projectFor: (item) =>
-          projectEvent("project.created", NEW_PROJECT, item.path).pipe(
-            Effect.as({ projectId: NEW_PROJECT, workspaceRoot: item.path, name: item.name }),
-            Effect.orDie,
-          ),
-      }),
+      Layer.unwrap(
+        Effect.map(Effect.context<ProjectStore.ProjectStoreV2>(), (context) =>
+          Layer.mock(TrellisCatalog)({
+            projectFor: (item) =>
+              projectEvent("project.created", NEW_PROJECT, item.path).pipe(
+                Effect.as({ projectId: NEW_PROJECT, workspaceRoot: item.path, name: item.name }),
+                Effect.provide(context),
+                Effect.orDie,
+              ),
+          }),
+        ),
+      ),
     ),
     Layer.provideMerge(TrellisOrchestratorTestLayer),
     Layer.provideMerge(TrellisTurns.layer),
