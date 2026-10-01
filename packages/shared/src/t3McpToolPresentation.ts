@@ -42,6 +42,7 @@ export type T3McpToolSummaryAction =
   | "worktree-list"
   | "worktree-status"
   | "trellis-checkpoint"
+  | "trellis-graduate"
   | "project-list"
   | "project-read"
   | "project-create"
@@ -135,6 +136,10 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   trellis_checkpoint: tool(
     ["Take", "Taking", "Took", "a Trellis checkpoint"],
     "trellis-checkpoint",
+  ),
+  trellis_graduate: tool(
+    ["Graduate", "Graduating", "Graduated", "the Trellis idea"],
+    "trellis-graduate",
   ),
   preview_status: tool(["Get", "Getting", "Got", "preview browser status"], "browser", "browser"),
   preview_open: tool(

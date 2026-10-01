@@ -60,7 +60,9 @@ const view = (overrides: Partial<TrellisProjectView>): TrellisProjectView => ({
  * open turns T3 reports, refuses a graduation while another thread has one
  * open (as Trellis does), and graduates into "Demo" at `PROJECT`.
  */
-function makeGraduationTrellis(options: { readonly refuse?: string } = {}) {
+function makeGraduationTrellis(
+  options: { readonly refuse?: string; readonly dies?: boolean } = {},
+) {
   const open = new Map<string, string>();
   const graduations: Array<{ base?: string | undefined; thread?: string | undefined }> = [];
   // Session releases and graduations, in order.
@@ -86,29 +88,36 @@ function makeGraduationTrellis(options: { readonly refuse?: string } = {}) {
         [...open].map(([turn, thread]) => ({ workspace: "ws-s", project: "idea-1", thread, turn })),
       ),
     graduate: ({ base, thread }) =>
-      Effect.sync(() => {
-        graduations.push({ base, thread });
-        log.push("graduate");
-        if (options.refuse !== undefined) {
-          return { ok: false as const, error: options.refuse, turns: [] };
-        }
-        const others = [...open].filter(([, owner]) => owner !== thread);
-        if (others.length > 0) {
-          return {
-            ok: false as const,
-            error: `other threads are mid-turn in this idea: ${others.map(([, owner]) => owner).join(", ")}`,
-            turns: others.map(([turn, owner]) => ({ thread: owner, turn })),
-          };
-        }
-        return { ok: true as const, project };
-      }),
+      (options.dies === true ? Effect.die(new Error("Trellis client crashed")) : Effect.void).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            graduations.push({ base, thread });
+            log.push("graduate");
+            if (options.refuse !== undefined) {
+              return { ok: false as const, error: options.refuse, turns: [] };
+            }
+            const others = [...open].filter(([, owner]) => owner !== thread);
+            if (others.length > 0) {
+              return {
+                ok: false as const,
+                error: `other threads are mid-turn in this idea: ${others.map(([, owner]) => owner).join(", ")}`,
+                turns: others.map(([turn, owner]) => ({ thread: owner, turn })),
+              };
+            }
+            return { ok: true as const, project };
+          }),
+        ),
+      ),
   });
   return { trellis, graduations, open, log };
 }
 
 const NEW_PROJECT = ProjectId.make("project-demo");
 
-function graduationLayer(fake: ReturnType<typeof makeGraduationTrellis>) {
+function graduationLayer(
+  fake: ReturnType<typeof makeGraduationTrellis>,
+  options: { readonly projectForFails?: boolean } = {},
+) {
   return TrellisGraduation.layer.pipe(
     Layer.provide(
       Layer.mock(ProviderSessionManagerV2)({
@@ -121,12 +130,19 @@ function graduationLayer(fake: ReturnType<typeof makeGraduationTrellis>) {
       Layer.unwrap(
         Effect.map(Effect.context<ProjectStore.ProjectStoreV2>(), (context) =>
           Layer.mock(TrellisCatalog)({
+            syncNow: Effect.succeed(new Map()),
             projectFor: (item) =>
-              projectEvent("project.created", NEW_PROJECT, item.path).pipe(
-                Effect.as({ projectId: NEW_PROJECT, workspaceRoot: item.path, name: item.name }),
-                Effect.provide(context),
-                Effect.orDie,
-              ),
+              options.projectForFails === true
+                ? Effect.fail(new TrellisError({ message: "the project store is busy" }))
+                : projectEvent("project.created", NEW_PROJECT, item.path).pipe(
+                    Effect.as({
+                      projectId: NEW_PROJECT,
+                      workspaceRoot: item.path,
+                      name: item.name,
+                    }),
+                    Effect.provide(context),
+                    Effect.orDie,
+                  ),
           }),
         ),
       ),
@@ -529,6 +545,47 @@ it.effect("the caller's own session and background work stop before the copy", (
     assert.include(
       yield* continuationOf(lead.threadId),
       "Background tasks you had running were stopped",
+    );
+  }).pipe(Effect.provide(graduationLayer(fake)));
+});
+
+it.effect(
+  "a graduation whose project is not made yet still reports it, and holds the thread",
+  () => {
+    const fake = makeGraduationTrellis();
+    return Effect.gen(function* () {
+      const graduation = yield* TrellisGraduation.TrellisGraduation;
+      const lead = yield* createThread("lead", IDEA);
+      const run = yield* startTurn(lead.threadId, "work");
+      yield* graduation.graduateFromTool(scopeOf(lead.threadId), {});
+      yield* settleInterrupted(run);
+      yield* graduation.drain;
+      const text = yield* continuationOf(lead.threadId);
+      assert.include(text, 'The idea graduated into the project "Demo"');
+      assert.include(text, "Do not graduate again");
+      // Not run in the retired idea: it stays held until the catalog moved it.
+      const placeholder = (yield* projectionOf(lead.threadId)).runs.at(-1)!;
+      assert.equal(placeholder.status, "queued");
+      assert.isTrue(placeholder.queueHeld === true);
+    }).pipe(Effect.provide(graduationLayer(fake, { projectForFails: true })));
+  },
+);
+
+it.effect("a graduation that stops early replaces its placeholder and resumes the queue", () => {
+  const fake = makeGraduationTrellis({ dies: true });
+  return Effect.gen(function* () {
+    const graduation = yield* TrellisGraduation.TrellisGraduation;
+    const lead = yield* createThread("lead", IDEA);
+    const run = yield* startTurn(lead.threadId, "work");
+    yield* graduation.graduateFromTool(scopeOf(lead.threadId), {});
+    yield* settleInterrupted(run);
+    yield* graduation.drain;
+    assert.include(yield* continuationOf(lead.threadId), "the graduation stopped unexpectedly");
+    const runs = (yield* projectionOf(lead.threadId)).runs;
+    // The continuation was released and starts.
+    assert.deepEqual(
+      runs.map((candidate) => candidate.status),
+      ["interrupted", "starting"],
     );
   }).pipe(Effect.provide(graduationLayer(fake)));
 });

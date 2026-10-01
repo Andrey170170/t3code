@@ -3249,9 +3249,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
    * running thread is refused (queued runs prepare their scope when they
    * start), and so is a forked child whose native fork is still pending,
    * which would fork from the source transcript in the wrong place. The
-   * worktree binding is cleared (the new project has its own root) and live
-   * sessions are detached, as a worktree change does; the next turn resolves
-   * the new project's policy and resumes the same native session there.
+   * worktree binding is cleared (the new project has its own root), live
+   * sessions are detached, as a worktree change does, and the thread's
+   * terminals close; the next turn resolves the new project's policy and
+   * resumes the same native session there.
    */
   const dispatchThreadProjectMove = Effect.fn("orchestrationV2.dispatch.threadProjectMove")(
     function* (
@@ -3358,6 +3359,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         });
       }
+      // Terminals run in the old project's directory: they close, and the
+      // terminal panel opens new ones in the new project.
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${command.commandId}:terminal.cleanup`,
+          commandId: command.commandId,
+          threadId: command.threadId,
+          request: { type: "terminal.cleanup" },
+        } satisfies PendingOrchestrationEffectV2,
+      ]);
       const detail = "Project changed.";
       for (const session of projection.providerSessions) {
         if (session.status === "stopped" || session.status === "error") continue;

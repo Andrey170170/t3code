@@ -100,6 +100,11 @@ type Outcome =
       /** Titles of the idea's threads left for the catalog to move. */
       readonly notMoved: ReadonlyArray<string>;
     }
+  /**
+   * Trellis graduated the idea, but its T3 project could not be made yet:
+   * the catalog makes it and moves the threads on a later sync.
+   */
+  | { readonly ok: "pending"; readonly name: string; readonly path: string }
   | { readonly ok: false; readonly error: string };
 
 const ENVIRONMENT_NOTE =
@@ -111,14 +116,20 @@ function callerContinuation(outcome: Outcome, workers: ReadonlyArray<string>): s
     workers.length === 0
       ? ""
       : ` The turns of ${quoted(workers)} were ended too; they continue on their own.`;
-  if (!outcome.ok) {
+  if (outcome.ok === false) {
     return `[trellis_graduate] The graduation failed: ${outcome.error}. This thread is still in the idea.${ended} Continue the task; call trellis_graduate again if you still want to graduate.`;
+  }
+  if (outcome.ok === "pending") {
+    return `[trellis_graduate] The idea graduated into the project "${outcome.name}" (${outcome.path}); T3 moves this thread there within moments. Do not graduate again. ${ENVIRONMENT_NOTE}${ended} Continue the task once this thread works in the project.`;
   }
   return `[trellis_graduate] The idea graduated into the project "${outcome.project.name}", its own Trellis workspace; this thread moved there and now works in ${outcome.project.workspaceRoot}. ${ENVIRONMENT_NOTE}${ended} Continue the task.`;
 }
 
 /** The continuation of a worker whose turn the graduation ended. */
 function workerContinuation(lead: string, outcome: Outcome): string {
+  if (outcome.ok === "pending") {
+    return `[trellis_graduate] Your turn was ended because "${lead}" graduated this idea into the project "${outcome.name}"; T3 moves this thread there within moments. ${ENVIRONMENT_NOTE} Continue where you left off once this thread works in the project.`;
+  }
   return outcome.ok
     ? `[trellis_graduate] Your turn was ended because "${lead}" graduated this idea into the project "${outcome.project.name}"; this thread moved there and now works in ${outcome.project.workspaceRoot}. ${ENVIRONMENT_NOTE} Continue where you left off.`
     : `[trellis_graduate] Your turn was ended because "${lead}" was graduating this idea, which did not happen; nothing moved. Continue where you left off.`;
@@ -452,10 +463,15 @@ const make = Effect.gen(function* () {
         ),
       );
 
+      // The placeholders this graduation queued, the queues it held (those
+      // the user had not paused) and the threads it already continued, for
+      // the cleanup when it ends before continuing them.
+      const pending = new Map<ThreadId, RunId | undefined>();
+      const paused = new Set<ThreadId>();
+      const continued = new Set<ThreadId>();
       const run = Effect.gen(function* () {
         // A queue the user paused stays paused; such a thread gets its
         // continuation afterwards (an idle thread starts it at once).
-        const paused = new Set<ThreadId>();
         for (const { threadId } of ending) {
           const records = yield* threads
             .getThreadRecords(threadId, ["runs"])
@@ -465,7 +481,6 @@ const make = Effect.gen(function* () {
           }
         }
         // Continuations first, so ending the turns finalizes nothing.
-        const pending = new Map<ThreadId, RunId | undefined>();
         for (const { threadId } of ending) {
           if (paused.has(threadId)) continue;
           pending.set(
@@ -524,14 +539,20 @@ const make = Effect.gen(function* () {
           for (const [id, title] of titles) reason = reason.replaceAll(id, `"${title}"`);
           outcome = { ok: false, error: reason };
         } else {
-          const created = yield* catalog.projectFor(graduated.project).pipe(Effect.result);
+          // Once more after a sync pass, which may make the project itself.
+          const created = yield* catalog.projectFor(graduated.project).pipe(
+            Effect.catch(() =>
+              catalog.syncNow.pipe(Effect.andThen(catalog.projectFor(graduated.project))),
+            ),
+            Effect.result,
+          );
           if (created._tag === "Failure") {
-            // Trellis graduated it: the catalog creates the project and moves
-            // the threads on its next sync.
-            outcome = {
-              ok: false,
-              error: `the idea graduated, but its T3 project could not be created yet (${created.failure.message}); its threads move there shortly`,
-            };
+            // Trellis graduated it, irreversibly: the catalog makes the project
+            // and moves the threads on a later sync.
+            yield* Effect.logWarning("trellis graduation left the move to the catalog", {
+              detail: created.failure.message,
+            });
+            outcome = { ok: "pending", name: graduated.project.name, path: graduated.project.path };
           } else {
             const notMoved = yield* moveThreads(created.success.projectId);
             outcome = { ok: true, project: created.success, notMoved };
@@ -545,7 +566,11 @@ const make = Effect.gen(function* () {
           (callerHadBackgroundWork && !Option.isNone(ended)
             ? " Background tasks you had running were stopped for the copy; restart any you still need."
             : "");
+        // Still in the retired idea, a continuation could only be refused: it
+        // stays held until the thread has moved, when the user resumes it.
+        const resume = outcome.ok !== "pending";
         for (const threadId of new Set(ending.map((entry) => entry.threadId))) {
+          continued.add(threadId);
           const text =
             threadId === caller?.id
               ? callerText
@@ -556,7 +581,7 @@ const make = Effect.gen(function* () {
             yield* send(threadId, projectId, text).pipe(
               failedQuietly("continue the thread", threadId),
             );
-            if (!paused.has(threadId)) {
+            if (resume && !paused.has(threadId)) {
               yield* resumeQueue(threadId).pipe(failedQuietly("resume the queue", threadId));
             }
             continue;
@@ -574,10 +599,47 @@ const make = Effect.gen(function* () {
             Effect.catchCause(() => send(threadId, projectId, text)),
             failedQuietly("write the outcome into the continuation", threadId),
           );
-          yield* resumeQueue(threadId).pipe(failedQuietly("resume the queue", threadId));
+          if (resume) {
+            yield* resumeQueue(threadId).pipe(failedQuietly("resume the queue", threadId));
+          }
         }
         return outcome;
       }).pipe(
+        // Ended early (a failure, or the server stopping): every placeholder
+        // still waiting says so, and the queues this graduation held resume.
+        Effect.onExit((exit) =>
+          Exit.isSuccess(exit)
+            ? Effect.void
+            : Effect.forEach(
+                ending.map((entry) => entry.threadId).filter((id) => !continued.has(id)),
+                (threadId) =>
+                  Effect.gen(function* () {
+                    continued.add(threadId);
+                    const text =
+                      threadId === caller?.id
+                        ? callerContinuation(STOPPED, [])
+                        : workerContinuation(caller?.title ?? "the user", STOPPED);
+                    const placeholder = pending.get(threadId);
+                    if (placeholder !== undefined) {
+                      yield* threads
+                        .dispatch({
+                          type: "queued-run.edit",
+                          commandId: yield* commandId("stopped"),
+                          threadId,
+                          runId: placeholder,
+                          text,
+                        })
+                        .pipe(failedQuietly("replace a continuation", threadId));
+                    }
+                    if (!paused.has(threadId)) {
+                      yield* resumeQueue(threadId).pipe(
+                        failedQuietly("resume the queue", threadId),
+                      );
+                    }
+                  }),
+                { discard: true },
+              ),
+        ),
         Effect.onExit((exit) =>
           Effect.sync(() => inFlight.delete(idea.id)).pipe(
             Effect.andThen(Deferred.succeed(done, Exit.isSuccess(exit) ? exit.value : STOPPED)),
@@ -638,6 +700,11 @@ const make = Effect.gen(function* () {
         interrupt: false,
       }).pipe(Effect.mapError(asError));
       const outcome = yield* Deferred.await(started.done);
+      if (outcome.ok === "pending") {
+        return yield* new TrellisError({
+          message: `The idea graduated into "${outcome.name}", but its project is still being set up; its threads move there within moments.`,
+        });
+      }
       if (!outcome.ok) {
         return yield* new TrellisError({ message: `The graduation failed: ${outcome.error}.` });
       }

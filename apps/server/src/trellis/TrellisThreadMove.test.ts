@@ -96,9 +96,12 @@ it.layer(TrellisOrchestratorTestLayer)("thread.project.move", (it) => {
           moved.storedEvents.map((stored) => stored.event.type),
           ["thread.project-moved", "provider-session.detached"],
         );
+        const effects = yield* outbox.listByCommandId(CommandId.make(`${threadId}:move:1`));
+        // Its terminals, in the old directory, close.
+        assert.isTrue(effects.some((effect) => effect.request.type === "terminal.cleanup"));
         // The detach unloads the thread from the old workspace's process by
         // the native ref it had there.
-        const [detach] = yield* outbox.listByCommandId(CommandId.make(`${threadId}:move:1`));
+        const detach = effects.find((effect) => effect.request.type === "provider-session.detach");
         assert.deepInclude(detach?.request, {
           type: "provider-session.detach",
           providerSessionId: sessionA,
