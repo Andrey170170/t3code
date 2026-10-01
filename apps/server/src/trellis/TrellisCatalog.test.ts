@@ -1066,7 +1066,11 @@ describe("TrellisCatalog service", () => {
             Effect.provide(
               TrellisRestore.layer.pipe(
                 Layer.provide(Layer.mock(EffectOutboxV2)({})),
-                Layer.provide(Layer.mock(ProjectionStore.ProjectionStoreV2)({})),
+                Layer.provide(
+                  Layer.mock(ProjectionStore.ProjectionStoreV2)({
+                    getThread: () => Effect.succeed({} as never),
+                  }),
+                ),
               ),
             ),
           ),

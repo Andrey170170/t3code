@@ -47,7 +47,13 @@ import {
 import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointService.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
 import * as ProcessRunner from "../processRunner.ts";
-import { Trellis, type TrellisSnapshot, trellisRootOf, trellisWorkspaceOf } from "./Trellis.ts";
+import {
+  Trellis,
+  type TrellisActivity,
+  type TrellisSnapshot,
+  trellisRootOf,
+  trellisWorkspaceOf,
+} from "./Trellis.ts";
 import { restoreScopeOf } from "./TrellisRestore.ts";
 
 /** Patches larger than this are not shown (as for v0's Trellis-only turns). */
@@ -176,6 +182,15 @@ export const layer: Layer.Layer<
         undo_snapshot TEXT
       )
     `.pipe(Effect.orDie);
+    // The newest rollback activity before the request's own (its undo
+    // snapshot, unique), so recovery only looks at later ones. Added after
+    // the table first shipped on this branch.
+    const restoreColumns = yield* sql<{ readonly name: string }>`
+      PRAGMA table_info(trellis_restores)
+    `.pipe(Effect.orDie);
+    if (!restoreColumns.some((column) => column.name === "watermark_undo")) {
+      yield* sql`ALTER TABLE trellis_restores ADD COLUMN watermark_undo TEXT`.pipe(Effect.orDie);
+    }
     // Pins taken for a read, recorded before they are taken, so a crash
     // mid-read cannot leave a snapshot pinned for good.
     yield* sql`
@@ -499,41 +514,51 @@ export const layer: Layer.Layer<
         if (requestId === undefined) return (yield* rollback).undoSnapshot;
         const prior = (yield* sql<{
           readonly snapshot_id: string;
-          readonly started_at: number;
           readonly undo_snapshot: string | null;
+          readonly watermark_undo: string | null;
         }>`
-          SELECT snapshot_id, started_at, undo_snapshot FROM trellis_restores
+          SELECT snapshot_id, undo_snapshot, watermark_undo FROM trellis_restores
           WHERE request_id = ${requestId}
         `.pipe(Effect.mapError(backendError("restore"))))[0];
+        const listRollbacks = trellis
+          .listActivities({ target: cwd, kind: "rollback" })
+          .pipe(Effect.mapError(backendError("restore")));
         if (prior !== undefined && prior.snapshot_id === snapshotId) {
           if (prior.undo_snapshot !== null) return prior.undo_snapshot || null;
-          const activities = yield* trellis
-            .listActivities({ target: cwd, kind: "rollback" })
-            .pipe(Effect.mapError(backendError("restore")));
-          const done = activities.find(
+          // Newest first: only the rollbacks after the request's watermark
+          // can be its own (restores of one scope run one at a time).
+          const activities = yield* listRollbacks;
+          const watermark =
+            prior.watermark_undo === null
+              ? -1
+              : activities.findIndex((activity) => undoOf(activity) === prior.watermark_undo);
+          const done = (watermark < 0 ? activities : activities.slice(0, watermark)).find(
             (activity) =>
-              activity.at >= prior.started_at &&
               Predicate.hasProperty(activity.data, "snapshot") &&
               activity.data.snapshot === snapshotId,
           );
           if (done !== undefined) {
-            const undo =
-              Predicate.hasProperty(done.data, "undo") && typeof done.data.undo === "string"
-                ? done.data.undo
-                : null;
+            const undo = undoOf(done);
             yield* recordRestoreResult(requestId, undo);
             return undo;
           }
         }
         const startedAt = Math.floor((yield* Clock.currentTimeMillis) / 1000);
+        const before = (yield* listRollbacks)[0];
+        const watermarkUndo = before === undefined ? null : undoOf(before);
         yield* sql`
-          INSERT OR REPLACE INTO trellis_restores (request_id, snapshot_id, started_at, undo_snapshot)
-          VALUES (${requestId}, ${snapshotId}, ${startedAt}, NULL)
+          INSERT OR REPLACE INTO trellis_restores
+            (request_id, snapshot_id, started_at, undo_snapshot, watermark_undo)
+          VALUES (${requestId}, ${snapshotId}, ${startedAt}, NULL, ${watermarkUndo})
         `.pipe(Effect.mapError(backendError("restore")));
         const { undoSnapshot } = yield* rollback;
         yield* recordRestoreResult(requestId, undoSnapshot);
         return undoSnapshot;
       });
+    const undoOf = (activity: TrellisActivity) =>
+      Predicate.hasProperty(activity.data, "undo") && typeof activity.data.undo === "string"
+        ? activity.data.undo
+        : null;
     const recordRestoreResult = (requestId: string, undo: string | null) =>
       sql`
         UPDATE trellis_restores SET undo_snapshot = ${undo ?? ""} WHERE request_id = ${requestId}

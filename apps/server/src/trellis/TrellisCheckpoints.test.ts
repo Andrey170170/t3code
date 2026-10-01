@@ -50,7 +50,10 @@ import {
 } from "../orchestration-v2/CheckpointService.ts";
 import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
-import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
+import {
+  ProjectionStoreReadError,
+  ProjectionStoreV2,
+} from "../orchestration-v2/ProjectionStore.ts";
 import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
 import { ProjectStoreV2, ProjectStoreV2Error } from "../orchestration-v2/ProjectStore.ts";
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
@@ -88,6 +91,8 @@ function makeFakeTrellis(root: string) {
     pinAnswerLost?: boolean;
     /** Rollbacks take effect, but the answer reports a failure. */
     rollbackAnswerLost?: boolean;
+    /** Rollbacks fail before Trellis does anything. */
+    rollbackRefused?: boolean;
     /** This Trellis honours `pinned` on snapshot creation. */
     pinOnCreate?: boolean;
   } = {};
@@ -206,6 +211,9 @@ function makeFakeTrellis(root: string) {
       Effect.sync(() => activities.filter((activity) => activity.kind === kind).toReversed()),
     rollback: ({ target, snapshot: id }) =>
       Effect.suspend(() => {
+        if (hooks.rollbackRefused) {
+          return Effect.fail({ _tag: "TrellisError", message: "workspace busy" } as never);
+        }
         calls.push(`rollback ${target} ${id}`);
         const ws = workspaceOf(target);
         const undo = take(target, "pre-rollback", null);
@@ -869,6 +877,7 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
   };
   // The main thread's rollback bookkeeping, as the orchestrator records it.
   const rollbackState: {
+    readFails?: boolean;
     rollbackRequestId?: string;
     rollbackCompletedRequestId?: string | null;
   } = {};
@@ -891,7 +900,10 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
     ),
     Layer.provide(
       Layer.mock(ProjectionStoreV2)({
-        getThread: () => Effect.succeed(rollbackState as never),
+        getThread: () =>
+          rollbackState.readFails === true
+            ? Effect.fail(new ProjectionStoreReadError({ threadId }))
+            : Effect.succeed(rollbackState as never),
       }),
     ),
     Layer.provide(
@@ -1360,6 +1372,51 @@ it.effect("a retried restore never rolls Trellis back twice", () => {
     yield* restore("request-3");
     assert.equal(rollbacks(), 3);
   }).pipe(Effect.provide(storeLayer(fake)));
+});
+
+it.effect(
+  "a retry never takes an earlier request's rollback of the same snapshot for its own",
+  () => {
+    const fake = makeFakeTrellis(tempRoot());
+    const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+    const scope = scopeAt(idea, "watermark");
+    return Effect.gen(function* () {
+      const store = yield* CheckpointStore.CheckpointStore;
+      yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1) });
+      const restore = (requestId: string) =>
+        store.restoreCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1), requestId });
+      yield* restore("request-a");
+      NodeFS.writeFileSync(`${idea}/later.txt`, "later\n");
+      // Request B records its intent, then Trellis refuses before doing anything.
+      fake.hooks.rollbackRefused = true;
+      yield* Effect.flip(restore("request-b"));
+      fake.hooks.rollbackRefused = false;
+      yield* restore("request-b");
+      assert.lengthOf(
+        fake.calls.filter((call) => call.startsWith("rollback")),
+        2,
+      );
+      assert.isFalse(NodeFS.existsSync(`${idea}/later.txt`));
+    }).pipe(Effect.provide(storeLayer(fake)));
+  },
+);
+
+it.effect("a turn waits while whether its thread's revert is pending cannot be read", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const scope = ideaScope(fake);
+  const harness = rollbackHarness(fake, { scope });
+  return Effect.gen(function* () {
+    const admission = yield* TurnAdmission;
+    harness.rollbackState.readFails = true;
+    const turn = yield* Effect.forkChild(
+      admission.start({ threadId, runId: RunId.make("run-2"), cwd: scope.cwd }),
+    );
+    yield* TestClock.adjust("1 second");
+    assert.isUndefined(turn.pollUnsafe());
+    harness.rollbackState.readFails = false;
+    yield* TestClock.adjust("1 second");
+    assert.isTrue(yield* Fiber.join(turn));
+  }).pipe(Effect.provide(harness.layer));
 });
 
 it.effect("a baseline taken but not yet pinned when T3 stopped is pinned on recovery", () => {

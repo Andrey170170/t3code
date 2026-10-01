@@ -333,7 +333,10 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | 
       const rollbackPendingIn = (threadId: ThreadId) =>
         projections.getThread(threadId).pipe(
           Effect.map(isRollbackPending),
-          Effect.orElseSucceed(() => false),
+          // A thread without a projection has no rollback; any other failure
+          // to read counts as pending, so the turn waits for the next read.
+          Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.succeed(false)),
+          Effect.orElseSucceed(() => true),
         );
       // The capture effect of a run has a fixed id (see RunExecutionService);
       // an unreadable outbox counts as outstanding.
