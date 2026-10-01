@@ -2,17 +2,17 @@
  * TrellisNaming - names Trellis ideas and projects from their threads.
  *
  * New Trellis items are called "Idea" / "Project" until someone names them.
- * After the first user message of a thread in a Trellis project path, the
+ * When a thread in a Trellis project path completes its first turn, the
  * text-generation model configured for thread titles proposes a short name
- * and a one-line description; once the thread has completed its third turn,
- * they are regenerated from the conversation so far. The first is sent to
+ * and a one-line description from its first message; once the thread has
+ * completed its third turn, they are regenerated from the conversation so
+ * far. The first is sent to
  * Trellis as `generated`, the refinement as `refined`, which is final for
  * the item: no later thread renames it. Neither overrides a name given by
  * the user, an agent or the git repository. Failures are logged and never
  * affect the turn.
  *
- * Driven by V2's live domain events: a user `message.updated` and a
- * completed `run.updated`.
+ * Driven by V2's live domain events: a completed `run.updated`.
  *
  * @module trellis/TrellisNaming
  */
@@ -106,7 +106,6 @@ const make = Effect.gen(function* () {
     });
     const messages = records.messages.filter((message) => !message.streaming);
     const userMessages = messages.filter((message) => message.role === "user");
-    if (request.stage === "initial" && userMessages.length !== 1) return;
     if (request.stage === "refine" && userMessages.length < TRELLIS_NAME_REFINE_TURN) return;
 
     const message =
@@ -174,16 +173,14 @@ const make = Effect.gen(function* () {
 
   const handleEvent = (event: OrchestrationV2DomainEvent): Effect.Effect<void> => {
     switch (event.type) {
-      case "message.updated":
-        return event.payload.role === "user" && !event.payload.streaming
-          ? enqueue({ threadId: event.payload.threadId, stage: "initial" })
-          : Effect.void;
-      // The item's name source makes the refinement happen once per item.
+      // The item's name source makes each stage happen once per item: an
+      // initial name only replaces the placeholder, a refined one is final.
       case "run.updated":
-        return event.payload.status === "completed" &&
-          event.payload.ordinal >= TRELLIS_NAME_REFINE_TURN
-          ? enqueue({ threadId: event.payload.threadId, stage: "refine" })
-          : Effect.void;
+        if (event.payload.status !== "completed") return Effect.void;
+        return enqueue({
+          threadId: event.payload.threadId,
+          stage: event.payload.ordinal >= TRELLIS_NAME_REFINE_TURN ? "refine" : "initial",
+        });
       default:
         return Effect.void;
     }

@@ -9,12 +9,10 @@ import {
   DEFAULT_BROWSER_PROFILE_ID,
   FILL_PREVIEW_VIEWPORT,
   type PreviewAnnotationPayload,
-  PreviewTrellisError,
   type PreviewViewportSetting,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
-import * as Schema from "effect/Schema";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -35,9 +33,7 @@ import {
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
-import { readTrellisStatus, trellisEnvironment } from "~/state/trellis";
-import { appAtomRegistry } from "~/rpc/atomRegistry";
-import { isLoopbackPreviewUrl } from "~/lib/trellis";
+import { mapThreadPreviewUrl } from "~/state/trellisPreview";
 import { useAtomCommand } from "~/state/use-atom-command";
 import {
   browserMiniPlayerSource,
@@ -77,8 +73,6 @@ import {
 } from "~/browser/browserRecording";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
-
-const isPreviewTrellisError = Schema.is(PreviewTrellisError);
 
 interface Props {
   threadRef: ScopedThreadRef;
@@ -135,9 +129,6 @@ export function PreviewView({
     ? new URL(environmentHttpBaseUrl).hostname
     : null;
   const open = useAtomCommand(previewEnvironment.open);
-  const resolveTrellisPreviewUrl = useAtomCommand(trellisEnvironment.resolvePreviewUrl, {
-    reportFailure: false,
-  });
   const resize = useAtomCommand(previewEnvironment.resize, "preview viewport resize");
 
   usePreviewSession(threadRef);
@@ -196,36 +187,23 @@ export function PreviewView({
   }, [environmentHostname, latestHistoryUrl, navTitle, navUrl, threadKey]);
 
   /**
-   * `url` as the browser should load it in this thread: `localhost` in a
-   * Trellis thread means its workspace, which the server maps to a published
-   * port. Null when that mapping failed; the URL must then not load at all.
-   * Servers without Trellis (no status, or never used) get the URL unchanged.
+   * `url` as the browser should load it in this thread (`localhost` in a
+   * Trellis thread is its workspace), or null when it must not load at all.
    */
   const mapTrellisUrl = useCallback(
     async (url: string): Promise<string | null> => {
-      if (!isLoopbackPreviewUrl(url)) return url;
-      const status = readTrellisStatus(appAtomRegistry, threadRef.environmentId);
-      if (status === null || (status.state === "disabled" && status.knownRoots.length === 0)) {
-        return url;
-      }
-      const result = await resolveTrellisPreviewUrl({
-        environmentId: threadRef.environmentId,
-        input: { threadId: threadRef.threadId, url },
-      });
-      if (result._tag === "Success") return result.value.url;
-      if (!isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
+      const mapped = await mapThreadPreviewUrl(threadRef, url);
+      if ("url" in mapped) return mapped.url;
+      if (mapped.error !== null) {
         toastManager.add({
           type: "error",
           title: "Unable to open workspace port",
-          description: isPreviewTrellisError(error)
-            ? error.message
-            : "Could not ask the server where this port is. Try again.",
+          description: mapped.error.message,
         });
       }
       return null;
     },
-    [resolveTrellisPreviewUrl, threadRef],
+    [threadRef],
   );
 
   const navigateToResolvedUrl = useCallback(

@@ -27,8 +27,8 @@ nothing behind.
 repository. **Find in Trellis** searches ideas and projects and opens the workspace that matched,
 including forks.
 
-New ideas and projects are named from their first thread: a name appears shortly after the first
-message and is refined once after the third turn. A name you or an agent gave, or a repository's
+New ideas and projects are named from their first thread: a name appears when its first turn
+finishes and is refined once after the third turn. A name you or an agent gave, or a repository's
 name, is never replaced.
 
 ## Agents, terminals and previews
@@ -61,9 +61,11 @@ running. Deleting a conversation only deletes the conversation.
 
 ## Restoring files from a turn
 
-Reverting a turn in a Trellis project restores its files from Trellis' snapshot of that turn. An
-idea restores only its folder; a project restores its whole workspace and restarts it. While another
-thread is working in the same idea or workspace, the restore is refused; try again once it
-finishes. If other threads did later work there, T3 Code names them and asks before undoing it.
-Trellis keeps a snapshot of the files from before the restore, so a restore can itself be undone
-with Trellis. A turn whose snapshot is missing or has expired cannot be restored.
+Reverting a turn in a Trellis project can restore its files from Trellis' snapshot of that turn. An
+idea restores only its folder; a project restores its whole workspace and restarts it, so agents
+working there start again on their next turn. While another thread is running or has a queued turn
+in the same idea or workspace, the restore is refused and names that thread; try again once it
+finishes. If other threads did later work there, T3 Code names them and asks you to confirm before
+their changes are undone. The thread then notes the snapshot Trellis took of the files just before
+the restore, so the restore itself can be undone. A turn whose snapshot is missing or has expired
+cannot have its files restored. Reverting without restoring files only rewinds the conversation.

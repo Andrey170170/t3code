@@ -114,16 +114,16 @@ const runCompleted = (ordinal: number) =>
   }) as unknown as OrchestrationV2DomainEvent;
 
 describe("TrellisNaming", () => {
-  it.effect("names an item after the first message, then refines it once", () => {
+  it.effect("names an item after its first turn, then refines it once", () => {
     const harness = makeHarness();
     const turn = (text: string, ordinal: number) =>
       Effect.gen(function* () {
         const naming = yield* TrellisNaming.TrellisNaming;
         harness.messages.push({ role: "user", text });
-        yield* naming.handleEvent(userMessage);
-        // Message updates repeat; they never rename a generated name.
+        // A sent message alone names nothing: naming waits for the turn.
         yield* naming.handleEvent(userMessage);
         yield* naming.drain;
+        if (ordinal === 1) expect(harness.generated).toEqual([]);
         harness.messages.push({ role: "assistant", text: `done ${ordinal}` });
         yield* naming.handleEvent(runCompleted(ordinal));
         yield* naming.drain;
@@ -155,7 +155,7 @@ describe("TrellisNaming", () => {
     return Effect.gen(function* () {
       const naming = yield* TrellisNaming.TrellisNaming;
       harness.messages.push({ role: "user", text: "plot the weather" });
-      yield* naming.handleEvent(userMessage);
+      yield* naming.handleEvent(runCompleted(1));
       yield* naming.drain;
       expect(harness.generated).toEqual([]);
       expect(harness.described).toEqual([]);
