@@ -78,7 +78,13 @@ function makeFakeTrellis(root: string) {
   let seq = 0;
   const failures = { create: 0, list: 0 };
   /** Runs right after a turn snapshot is taken, as a process still writing would. */
-  const hooks: { afterCreate?: () => void } = {};
+  const hooks: {
+    afterCreate?: () => void;
+    /** Runs while a pin is being taken, before Trellis answers. */
+    whilePinning?: () => Effect.Effect<void>;
+    /** Pins are taken, but the answer reports a failure. */
+    pinAnswerLost?: boolean;
+  } = {};
   const workspacePath = (ws: string) => NodePath.join(root, "workspaces", ws, "project");
   for (const path of [
     NodePath.join(workspacePath("ws-s"), "idea-a"),
@@ -149,14 +155,21 @@ function makeFakeTrellis(root: string) {
         return Effect.succeed(snapshot);
       }),
     setSnapshotPinned: (id, pinned) =>
-      Effect.suspend(() => {
+      Effect.gen(function* () {
         calls.push(`${pinned ? "pin" : "unpin"} ${id}`);
         const snapshot = live(id);
         if (snapshot === undefined) {
-          return Effect.fail({ _tag: "TrellisError", message: `unknown snapshot ${id}` } as never);
+          return yield* Effect.fail({
+            _tag: "TrellisError",
+            message: `unknown snapshot ${id}`,
+          } as never);
         }
+        if (pinned && hooks.whilePinning !== undefined) yield* hooks.whilePinning();
         snapshot.pinned = pinned;
-        return Effect.succeed(snapshot);
+        if (pinned && hooks.pinAnswerLost) {
+          return yield* Effect.fail({ _tag: "TrellisError", message: "connection reset" } as never);
+        }
+        return snapshot;
       }),
     resolve: (target) =>
       Effect.sync(() => {
@@ -611,6 +624,76 @@ it.effect("a read pin left by a crash is released, and a read in progress keeps 
     );
     assert.isFalse(reading!.pinned);
     assert.deepEqual(yield* sql`SELECT snapshot_id FROM trellis_read_pins`, []);
+  }).pipe(Effect.provide(storeLayer(fake)));
+});
+
+it.effect("a reconcile never releases the pin of a read that is taking it", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+  const scope = scopeAt(idea, "racing-read");
+  const pinning = Deferred.makeUnsafe<void>();
+  const proceed = Deferred.makeUnsafe<void>();
+  return Effect.gen(function* () {
+    const store = yield* CheckpointStore.CheckpointStore;
+    const pins = yield* TrellisCheckpointStore.TrellisCheckpointPins;
+    yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1) });
+    const snapshot = fake.snapshots.at(-1)!;
+    fake.hooks.whilePinning = () =>
+      Deferred.succeed(pinning, undefined).pipe(Effect.andThen(Deferred.await(proceed)));
+    const holding = Deferred.makeUnsafe<void>();
+    const release = Deferred.makeUnsafe<void>();
+    const reader = yield* Effect.forkChild(
+      Effect.scoped(
+        store
+          .reserve({ cwd: idea, checkpointRef: refOf(scope, 1) })
+          .pipe(
+            Effect.andThen(Deferred.succeed(holding, undefined)),
+            Effect.andThen(Deferred.await(release)),
+          ),
+      ),
+    );
+    // The read recorded its pin and waits on Trellis; a reconcile starts.
+    yield* Deferred.await(pinning);
+    const reconciling = yield* Effect.forkChild(
+      pins.reconcile({ liveThreadIds: [], readAt: DateTime.makeUnsafe(0) }),
+    );
+    yield* Effect.yieldNow;
+    yield* Deferred.succeed(proceed, undefined);
+    yield* Deferred.await(holding);
+    yield* Fiber.join(reconciling);
+    assert.isTrue(snapshot.pinned);
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(reader);
+    assert.isFalse(snapshot.pinned);
+  }).pipe(Effect.provide(storeLayer(fake)));
+});
+
+it.effect("a baseline pinned by a capture that never finished is released with its thread", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+  const scope = rootScopeOf(idea, "thread-unfinished");
+  return Effect.gen(function* () {
+    const store = yield* CheckpointStore.CheckpointStore;
+    const pins = yield* TrellisCheckpointStore.TrellisCheckpointPins;
+    // The pin is taken but its answer lost, and Trellis stays unreachable
+    // for the retries, as when the server dies right after pinning.
+    fake.hooks.pinAnswerLost = true;
+    fake.hooks.whilePinning = () => Effect.sync(() => void (fake.failures.list = 10));
+    const capturing = yield* Effect.forkChild(
+      Effect.exit(store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 0) })),
+    );
+    while (capturing.pollUnsafe() === undefined) yield* TestClock.adjust("1 second");
+    assert.isTrue((yield* Fiber.join(capturing))._tag === "Failure");
+    const baseline = fake.snapshots.find((snapshot) => snapshot.turn === refOf(scope, 0))!;
+    assert.isTrue(baseline.pinned);
+    assert.isFalse(yield* store.hasCheckpointRef({ cwd: idea, checkpointRef: refOf(scope, 0) }));
+    fake.failures.list = 0;
+    const readAt = DateTime.makeUnsafe("2999-01-01T00:00:00.000Z");
+    // Kept while the thread lives (a later capture adopts it), released after.
+    yield* pins.reconcile({ liveThreadIds: [scope.threadId], readAt });
+    assert.isTrue(baseline.pinned);
+    yield* pins.reconcile({ liveThreadIds: [], readAt });
+    assert.isFalse(baseline.pinned);
   }).pipe(Effect.provide(storeLayer(fake)));
 });
 

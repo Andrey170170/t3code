@@ -151,6 +151,16 @@ export const layer: Layer.Layer<
         retired_snapshot_ids TEXT NOT NULL DEFAULT '[]'
       )
     `.pipe(Effect.orDie);
+    // Baseline pins of captures not yet mapped, recorded before they are
+    // taken; the mapping in `trellis_checkpoint_refs` owns them once it exists.
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS trellis_pending_pins (
+        ref TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL,
+        target TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+      )
+    `.pipe(Effect.orDie);
     // Pins taken for a read, recorded before they are taken, so a crash
     // mid-read cannot leave a snapshot pinned for good.
     yield* sql`
@@ -425,6 +435,13 @@ export const layer: Layer.Layer<
             .createSnapshot({ target: cwd, turn: ref })
             .pipe(Effect.mapError(backendError("capture"))));
         if (isBaselineRef(ref) && snapshot.pinned !== true) {
+          // Owned before it is taken, so a capture that never finishes still
+          // leaves a pin the reconcile can release.
+          const recordedAt = DateTime.formatIso(yield* DateTime.now);
+          yield* sql`
+            INSERT OR REPLACE INTO trellis_pending_pins (ref, snapshot_id, target, recorded_at)
+            VALUES (${ref}, ${snapshot.id}, ${cwd}, ${recordedAt})
+          `.pipe(Effect.mapError(backendError("capture")));
           yield* trellis
             .setSnapshotPinned(snapshot.id, true)
             .pipe(Effect.mapError(backendError("capture")));
@@ -443,6 +460,10 @@ export const layer: Layer.Layer<
             snapshot_id = excluded.snapshot_id,
             captured_at = excluded.captured_at
         `.pipe(Effect.mapError(backendError("capture")));
+        // The mapping owns the baseline's pin from here.
+        yield* sql`DELETE FROM trellis_pending_pins WHERE ref = ${ref}`.pipe(
+          Effect.mapError(backendError("capture")),
+        );
       });
 
     /**
@@ -540,25 +561,27 @@ export const layer: Layer.Layer<
 
     const reconcile: TrellisCheckpointPinsShape["reconcile"] = (input) =>
       Effect.gen(function* () {
-        const readPins = yield* sql<{ readonly snapshot_id: string; readonly target: string }>`
-          SELECT snapshot_id, target FROM trellis_read_pins
-        `.pipe(Effect.mapError(backendError("reconcile")));
-        // Under the protection lock, so a read taking its pin now is either
-        // already recorded in memory or not yet pinned.
-        yield* Effect.forEach(
-          readPins.filter((pin) => !protections.has(pin.snapshot_id)),
-          (pin) =>
-            unpin(pin.target, pin.snapshot_id).pipe(
-              Effect.andThen(forgetReadPin(pin.snapshot_id)),
-              Effect.catch((error) =>
-                Effect.logWarning("could not release a stale Trellis read pin", {
-                  snapshotId: pin.snapshot_id,
-                  detail: error.message,
-                }),
+        // Read and filtered under the protection lock, so a read taking its
+        // pin now has either finished (and is in memory) or not yet started.
+        yield* Effect.gen(function* () {
+          const readPins = yield* sql<{ readonly snapshot_id: string; readonly target: string }>`
+            SELECT snapshot_id, target FROM trellis_read_pins
+          `.pipe(Effect.mapError(backendError("reconcile")));
+          yield* Effect.forEach(
+            readPins.filter((pin) => !protections.has(pin.snapshot_id)),
+            (pin) =>
+              unpin(pin.target, pin.snapshot_id).pipe(
+                Effect.andThen(forgetReadPin(pin.snapshot_id)),
+                Effect.catch((error) =>
+                  Effect.logWarning("could not release a stale Trellis read pin", {
+                    snapshotId: pin.snapshot_id,
+                    detail: error.message,
+                  }),
+                ),
               ),
-            ),
-          { discard: true },
-        ).pipe(protectionLock.withPermits(1));
+            { discard: true },
+          );
+        }).pipe(protectionLock.withPermits(1));
 
         const ids = yield* IdAllocatorV2;
         const live = new Set<string>();
@@ -576,6 +599,30 @@ export const layer: Layer.Layer<
           SELECT ref, target, snapshot_id FROM trellis_checkpoint_refs
           WHERE captured_at < ${DateTime.formatIso(input.readAt)}
         `.pipe(Effect.mapError(backendError("reconcile")));
+        const pending = yield* sql<{
+          readonly ref: string;
+          readonly target: string;
+          readonly snapshot_id: string;
+        }>`
+          SELECT ref, target, snapshot_id FROM trellis_pending_pins
+          WHERE recorded_at < ${DateTime.formatIso(input.readAt)}
+        `.pipe(Effect.mapError(backendError("reconcile")));
+        for (const pin of pending) {
+          if (live.has(scopeKeyOfRef(pin.ref))) continue;
+          yield* unpin(pin.target, pin.snapshot_id).pipe(
+            Effect.andThen(
+              sql`DELETE FROM trellis_pending_pins WHERE ref = ${pin.ref}`.pipe(
+                Effect.mapError(backendError("reconcile")),
+              ),
+            ),
+            Effect.catch((error) =>
+              Effect.logWarning("could not release an unfinished Trellis baseline pin", {
+                ref: pin.ref,
+                detail: error.message,
+              }),
+            ),
+          );
+        }
         for (const row of rows) {
           if (live.has(scopeKeyOfRef(row.ref))) continue;
           yield* Effect.gen(function* () {
