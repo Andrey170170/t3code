@@ -1513,6 +1513,7 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.interaction-mode-updated",
       "thread.model-selection-updated",
       "thread.provider-switched",
+      "thread.project-moved",
     ]),
     payload: OrchestrationV2AppThread,
   }),
@@ -2300,6 +2301,7 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.interaction-mode-updated",
       "thread.model-selection-updated",
       "thread.provider-switched",
+      "thread.project-moved",
     ]),
     payload: OrchestrationV2AppThreadJson,
   }),
@@ -2851,6 +2853,20 @@ const OrchestrationV2InternalCommand = Schema.Union([
     requestId: CommandId,
     message: TrimmedNonEmptyString,
   }),
+  /**
+   * Moves a thread to another project. Only a thread without history (no
+   * checkpoint scope) and without an active or queued run moves; its worktree
+   * binding is cleared and its provider sessions are detached. Clients use the
+   * `moveThreadToProject` RPC, which also queues an optional continuation.
+   */
+  Schema.Struct({
+    type: Schema.Literal("thread.project.move"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    projectId: ProjectId,
+    /** Reject unless the thread is still in this project. */
+    expectedProjectId: Schema.optional(ProjectId),
+  }),
 ]);
 export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalCommand.Type;
 
@@ -2866,6 +2882,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",
   launchThread: "orchestration.launchThread",
+  moveThreadToProject: "orchestration.moveThreadToProject",
   subscribeArchivedShell: "orchestration.subscribeArchivedShell",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
@@ -2947,6 +2964,17 @@ export const OrchestrationV2ThreadLaunchResult = Schema.Struct({
   resumed: Schema.Boolean,
 });
 export type OrchestrationV2ThreadLaunchResult = typeof OrchestrationV2ThreadLaunchResult.Type;
+
+export const OrchestrationV2MoveThreadToProjectInput = Schema.Struct({
+  commandId: CommandId,
+  threadId: ThreadId,
+  projectId: ProjectId,
+  expectedProjectId: Schema.optional(ProjectId),
+  /** Queued to the thread after the move, saying where it now is. */
+  continuationPrompt: Schema.optional(TrimmedNonEmptyString),
+});
+export type OrchestrationV2MoveThreadToProjectInput =
+  typeof OrchestrationV2MoveThreadToProjectInput.Type;
 
 export const OrchestrationV2DispatchCommandResult = Schema.Struct({
   sequence: NonNegativeInt,
@@ -3232,6 +3260,10 @@ export const OrchestrationV2RpcSchemas = {
   launchThread: {
     input: OrchestrationV2ThreadLaunchInput,
     output: OrchestrationV2ThreadLaunchResult,
+  },
+  moveThreadToProject: {
+    input: OrchestrationV2MoveThreadToProjectInput,
+    output: OrchestrationV2DispatchCommandResult,
   },
   subscribeArchivedShell: {
     input: Schema.Struct({}),

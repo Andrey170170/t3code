@@ -166,4 +166,19 @@ describe("buildThreadActionMenuItems", () => {
     );
     expect(archiveItem?.disabled).toBe(true);
   });
+
+  it("lists Trellis move targets, or only the reason a move is blocked", () => {
+    const targets = [{ projectId: "p1", label: "Alpha" }];
+    const moveItem = (blockedReason: string | null) =>
+      buildThreadActionMenuItems({
+        ...baseState,
+        moveToProject: { blockedReason, targets },
+      }).find((item) => item.id === "move-to-project");
+
+    expect(moveItem(null)?.children).toEqual([{ id: "move-to-project:p1", label: "Alpha" }]);
+    expect(moveItem("Busy")?.children).toEqual([
+      { id: "move-to-project", label: "Busy", disabled: true },
+    ]);
+    expect(ids(baseState)).not.toContain("move-to-project");
+  });
 });

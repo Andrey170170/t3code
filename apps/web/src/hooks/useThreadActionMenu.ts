@@ -41,6 +41,10 @@ import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
 import { useThreadActions } from "./useThreadActions";
+import { useMoveThreadToProject } from "./useTrellis";
+import { trellisMoveMenu } from "../lib/trellis";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { readTrellisStatus } from "../state/trellis";
 
 function failureToast(title: string, error: unknown) {
   toastManager.add(
@@ -98,6 +102,7 @@ export function useThreadActionMenu(input: {
     reportFailure: false,
   });
   const handleNewThread = useNewThreadHandler();
+  const moveThreadToProject = useMoveThreadToProject();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
@@ -141,7 +146,13 @@ export function useThreadActionMenu(input: {
         };
         const isRegeneratingTitle = thread.titleRegeneration != null;
         const snoozePresets = resolveSnoozePresets(now, timestampFormat);
+        const moveMenu = trellisMoveMenu(
+          thread,
+          projects,
+          readTrellisStatus(appAtomRegistry, threadRef.environmentId),
+        );
         const items = buildThreadActionMenuItems({
+          moveToProject: moveMenu,
           branch: thread.branch ?? null,
           projectFilter: null,
           isPinned: thread.pinnedAt != null,
@@ -166,6 +177,19 @@ export function useThreadActionMenu(input: {
           const result = await snoozeThread(threadRef, preset.snoozedUntil);
           if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
             failureToast("Failed to snooze thread", squashAtomCommandFailure(result));
+          }
+          return;
+        }
+        if (action.startsWith("move-to-project:")) {
+          const target = moveMenu?.targets.find(
+            (candidate) => `move-to-project:${candidate.projectId}` === action,
+          );
+          if (target) {
+            await moveThreadToProject(threadRef, {
+              fromProjectId: thread.projectId,
+              toProjectId: target.projectId,
+              toProjectTitle: target.label,
+            });
           }
           return;
         }
@@ -335,6 +359,7 @@ export function useThreadActionMenu(input: {
       handleNewThread,
       logicalProjectKeyByPhysicalKey,
       markThreadUnread,
+      moveThreadToProject,
       onStartRename,
       pinThread,
       projectCwd,

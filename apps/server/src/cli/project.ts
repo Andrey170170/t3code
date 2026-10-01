@@ -36,6 +36,7 @@ import {
   clearPersistedServerRuntimeState,
   readPersistedServerRuntimeState,
 } from "../serverRuntimeState.ts";
+import { refuseOfflineTrellisProjectDelete } from "../trellis/Trellis.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
@@ -426,7 +427,21 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
       const projects = yield* ProjectService.ProjectService;
       const output = yield* run({
         snapshot,
-        dispatch: (command) => projectMutationOperation(projects, command).pipe(Effect.asVoid),
+        dispatch: (command) => {
+          const deleted =
+            command.type === "project.delete"
+              ? snapshot.projects.find((project) => project.id === command.projectId)
+              : undefined;
+          return (
+            deleted === undefined
+              ? Effect.void
+              : refuseOfflineTrellisProjectDelete({
+                  stateDir: config.stateDir,
+                  workspaceRoot: deleted.workspaceRoot,
+                  title: deleted.title,
+                })
+          ).pipe(Effect.andThen(projectMutationOperation(projects, command)), Effect.asVoid);
+        },
         mode: "offline",
       });
       yield* Console.log(output);

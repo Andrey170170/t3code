@@ -367,6 +367,7 @@ export const make = Effect.gen(function* () {
       case "thread.created":
       case "thread.unarchived":
       case "thread.metadata-updated":
+      case "thread.project-moved":
         return worker.enqueue({ threadId: event.threadId, refresh: false });
       case "thread.unsettled":
       case "checkpoint.captured":

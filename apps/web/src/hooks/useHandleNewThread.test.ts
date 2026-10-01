@@ -174,6 +174,7 @@ vi.mock("../state/server", () => ({
   primaryServerSettingsAtom: "primary-settings",
 }));
 vi.mock("../threadRoutes", () => ({ resolveThreadRouteTarget: () => null }));
+vi.mock("./useSidebarProjects", () => ({ useSidebarProjects: () => [] }));
 vi.mock("../uiStateStore", () => ({
   legacyProjectCwdPreferenceKey: () => "remote-project",
   useUiStateStore: () => [],

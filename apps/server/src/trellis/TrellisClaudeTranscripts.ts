@@ -45,15 +45,21 @@ export function claudeProjectSlug(path: string): string {
     : `${slug.slice(0, MAX_SLUG_LENGTH)}-${Math.abs(claudeStringHash(path)).toString(36)}`;
 }
 
-// One relocation per session id at a time, across all callers in the process.
-const sessionLocks = new Map<string, Semaphore.Semaphore>();
-const lockFor = (sessionId: string) => {
-  const existing = sessionLocks.get(sessionId);
-  if (existing !== undefined) return existing;
-  const created = Semaphore.makeUnsafe(1);
-  sessionLocks.set(sessionId, created);
-  return created;
+const keyedLocks = () => {
+  const locks = new Map<string, Semaphore.Semaphore>();
+  return (key: string) => {
+    const existing = locks.get(key);
+    if (existing !== undefined) return existing;
+    const created = Semaphore.makeUnsafe(1);
+    locks.set(key, created);
+    return created;
+  };
 };
+// One relocation per session id at a time, across all callers in the process.
+const lockFor = keyedLocks();
+// One memory copy per destination at a time: sessions relocating into the
+// same workspace copy the same files through the same partial-file names.
+const memoryLockFor = keyedLocks();
 
 const fail = (message: string) => (cause: unknown) =>
   new TrellisClaudeTranscriptError({ message, cause });
@@ -101,7 +107,15 @@ const copyMissing = (
     ) {
       return;
     }
-    yield* fileSystem.copyFile(from, to).pipe(Effect.mapError(fail(`Could not copy ${from}.`)));
+    // Copied beside the target and renamed into place, so an interrupted copy
+    // never leaves a partial file that a later call would take as present.
+    const partial = path.join(path.dirname(to), `.${path.basename(to)}.trellis-copy`);
+    yield* fileSystem
+      .copyFile(from, partial)
+      .pipe(
+        Effect.andThen(fileSystem.rename(partial, to)),
+        Effect.mapError(fail(`Could not copy ${from}.`)),
+      );
   });
 
 /**
@@ -158,9 +172,11 @@ export const prepareClaudeTranscript = (input: {
 
     // Memory first: until every artifact has moved, its source still names
     // where the memory comes from, so an interrupted call can finish.
-    for (const source of sources) {
-      yield* copyMissing(path.join(source, "memory"), path.join(destination, "memory"));
-    }
+    yield* Effect.forEach(
+      sources,
+      (source) => copyMissing(path.join(source, "memory"), path.join(destination, "memory")),
+      { discard: true },
+    ).pipe(memoryLockFor(destination).withPermits(1));
     yield* fileSystem
       .makeDirectory(destination, { recursive: true })
       .pipe(Effect.mapError(fail(`Could not create ${destination}.`)));
