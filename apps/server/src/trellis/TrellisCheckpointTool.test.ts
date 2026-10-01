@@ -66,7 +66,7 @@ function toolLayer(fake: ReturnType<typeof makeCheckpointTrellis>) {
   return TrellisCheckpointTool.layer.pipe(
     Layer.provideMerge(TrellisOrchestratorTestLayer),
     Layer.provideMerge(TrellisTurns.layer),
-    Layer.provide(TrellisRestore.gateLayer),
+    Layer.provideMerge(TrellisRestore.gateLayer),
     Layer.provide(Layer.succeed(Trellis, fake.trellis)),
     Layer.provide(NodeCrypto.layer),
   );
@@ -153,6 +153,29 @@ it.effect("ends the calling turn, checkpoints, and continues the thread with the
     assert.notInclude(next.text, "claude");
     assert.notInclude(next.text, "playwright-mcp");
     assert.deepEqual(next.runs, ["interrupted", "starting"]);
+  }).pipe(Effect.provide(toolLayer(fake)));
+});
+
+it.effect("a second checkpoint of the workspace is refused while one is under way", () => {
+  const fake = makeCheckpointTrellis({
+    snapshot: { id: "snap-1" },
+    checkpoint: true,
+    stopped: [],
+    interrupted: [],
+    restarted: true,
+  });
+  return Effect.gen(function* () {
+    const tool = yield* TrellisCheckpointTool.TrellisCheckpointTool;
+    const lead = yield* createThread("lead", WS);
+    const run = yield* startTurn(lead.threadId, "work");
+    yield* tool.checkpoint(scopeOf(lead.threadId), {});
+    const refusal = yield* tool.checkpoint(scopeOf(lead.threadId), {}).pipe(Effect.flip);
+    assert.equal(refusal.code, "checkpoint_in_progress");
+    if ((yield* projectionOf(lead.threadId)).runs.at(-1)!.status !== "interrupted") {
+      yield* settleInterrupted(run);
+    }
+    yield* tool.drain;
+    assert.equal(fake.checkpoints.length, 1);
   }).pipe(Effect.provide(toolLayer(fake)));
 });
 
@@ -249,8 +272,9 @@ it.effect("with interrupt, ends the caller's worker too and continues both", () 
     }
     yield* tool.drain;
 
+    // The workers' turns were ended by T3; Trellis is never asked to interrupt.
     assert.deepEqual(fake.checkpoints, [
-      { name: undefined, thread: lead.threadId, interrupt: true },
+      { name: undefined, thread: lead.threadId, interrupt: false },
     ]);
     assert.include(
       (yield* continuationOf(lead.threadId)).text,

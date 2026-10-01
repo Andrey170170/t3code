@@ -112,7 +112,7 @@ function admissionLayer(fake: ReturnType<typeof makeTurnsTrellis>) {
           Effect.sync(() => void released.push(providerSessionId)),
       }),
     ),
-    Layer.provide(TrellisRestore.gateLayer),
+    Layer.provideMerge(TrellisRestore.gateLayer),
     Layer.provideMerge(TrellisTurns.layer),
     Layer.provide(trellisLayer),
   );
@@ -169,6 +169,38 @@ it.effect(
       assert.deepEqual(released, []);
       // The checkpoint ends, having restarted the workspace.
       yield* Deferred.succeed(gate, ["ws-a"]);
+      assert.isTrue(yield* Fiber.join(starting));
+      assert.deepEqual(released, ["session-a", "session-a-idea"]);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect(
+  "a turn admitted as T3's checkpoint ends waits until that checkpoint released the sessions",
+  () => {
+    const fake = makeTurnsTrellis();
+    const { layer, released } = admissionLayer(fake);
+    return Effect.gen(function* () {
+      const admission = yield* TurnAdmission;
+      const gate = yield* TrellisRestore.TrellisRestoreGate;
+      const checkpointEnds = yield* Deferred.make<ReadonlyArray<string>>();
+      fake.state.startGate = checkpointEnds;
+      const starting = yield* Effect.forkChild(admission.start({ ...turn("one"), cwd: WS_A }));
+      yield* Effect.yieldNow;
+      // The checkpoint tool holds the workspace from before its checkpoint ...
+      const sessionsReleased = yield* Deferred.make<void>();
+      const checkpoint = yield* Effect.forkChild(
+        Effect.scoped(gate.hold([WS_A]).pipe(Effect.andThen(Deferred.await(sessionsReleased)))),
+      );
+      yield* Effect.yieldNow;
+      // ... Trellis lets the waiting start through before T3 has its answer ...
+      yield* Deferred.succeed(checkpointEnds, ["ws-a"]);
+      yield* Effect.yieldNow;
+      assert.isUndefined(starting.pollUnsafe());
+      assert.deepEqual(released, []);
+      // ... and the turn proceeds once the tool released the sessions.
+      yield* Deferred.succeed(sessionsReleased, undefined);
+      yield* Fiber.join(checkpoint);
       assert.isTrue(yield* Fiber.join(starting));
       assert.deepEqual(released, ["session-a", "session-a-idea"]);
     }).pipe(Effect.provide(layer));

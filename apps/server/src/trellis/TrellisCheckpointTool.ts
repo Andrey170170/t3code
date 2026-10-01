@@ -9,11 +9,17 @@
  * 4: an agent may end only the threads below it). Any other thread mid-turn
  * in the workspace refuses the call by name. Then, in the background:
  *
- * 1. wait until those turns ended and Trellis has their ends;
- * 2. `POST /v1/checkpoint {target, name, thread, interrupt}`;
- * 3. release every provider session in the workspace (their processes are gone);
- * 4. continue the caller with the result, and each interrupted worker,
+ * 1. wait until those turns ended, and make Trellis's open turns T3's;
+ * 2. holding T3's turn admission in the workspace, `POST /v1/checkpoint
+ *    {target, name, thread}` and release every provider session there (their
+ *    processes are gone), so a turn admitted as the checkpoint ends opens
+ *    fresh ones;
+ * 3. continue the caller with the result, and each interrupted worker,
  *    resuming queues the interrupts held.
+ *
+ * Trellis's `interrupt` is never passed: T3 has ended the workers' turns
+ * itself, so Trellis's own conflict check keeps refusing any other thread
+ * that started a turn since the call was validated.
  *
  * The work runs detached from the MCP request, which the caller's interrupt
  * ends. Follows `t3_worktree_handoff` (WorktreeMcpService).
@@ -45,7 +51,7 @@ import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
 import { Trellis, type TrellisCheckpointResult, trellisRootOf } from "./Trellis.ts";
-import { releaseSessionsWithin } from "./TrellisRestore.ts";
+import { releaseSessionsWithin, TrellisRestoreGate } from "./TrellisRestore.ts";
 import { TrellisTurns } from "./TrellisTurns.ts";
 
 export class TrellisCheckpointTool extends Context.Service<
@@ -117,7 +123,12 @@ function shownCommand(cmd: string): string {
 /** The message continuing the calling thread with the checkpoint's outcome. */
 function callerContinuation(
   outcome: Exit.Exit<TrellisCheckpointResult, TrellisError>,
-  input: { readonly name: string | undefined; readonly workers: ReadonlyArray<string> },
+  input: {
+    readonly name: string | undefined;
+    readonly workers: ReadonlyArray<string>;
+    /** Thread titles by id, to name the threads in a refusal. */
+    readonly titles: ReadonlyMap<string, string>;
+  },
 ): string {
   const workers =
     input.workers.length === 0
@@ -125,7 +136,9 @@ function callerContinuation(
       : ` The turns of ${quoted(input.workers)} were ended too; they continue on their own.`;
   if (Exit.isFailure(outcome)) {
     const error = Option.getOrUndefined(Exit.findErrorOption(outcome));
-    return `[trellis_checkpoint] The checkpoint failed: ${error?.message ?? "Trellis did not answer"}. The workspace may have restarted anyway, ending the processes that ran in it.${workers} Continue the task; call trellis_checkpoint again if you still need a checkpoint.`;
+    let reason = error?.message ?? "Trellis did not answer";
+    for (const [id, title] of input.titles) reason = reason.replaceAll(id, `"${title}"`);
+    return `[trellis_checkpoint] The checkpoint failed: ${reason}. The workspace may have restarted anyway, ending the processes that ran in it.${workers} Continue the task; call trellis_checkpoint again if you still need a checkpoint.`;
   }
   const result = outcome.value;
   const snapshot = result.snapshot?.id ?? "unknown";
@@ -153,6 +166,7 @@ function workerContinuation(lead: string): string {
 const make = Effect.gen(function* () {
   const trellisOption = yield* Effect.serviceOption(Trellis);
   const turnsOption = yield* Effect.serviceOption(TrellisTurns);
+  const gateOption = yield* Effect.serviceOption(TrellisRestoreGate);
   const threads = yield* ThreadManagementService;
   const projects = yield* ProjectStoreV2;
   const sessions = yield* ProviderSessionManagerV2;
@@ -171,11 +185,12 @@ const make = Effect.gen(function* () {
     if (!callScope.capabilities.has("orchestration")) {
       return yield* failure("capability_denied", "This credential cannot control threads.");
     }
-    if (Option.isNone(trellisOption) || Option.isNone(turnsOption)) {
+    if (Option.isNone(trellisOption) || Option.isNone(turnsOption) || Option.isNone(gateOption)) {
       return yield* failure("not_a_trellis_workspace", "Trellis is not available on this server.");
     }
     const trellis = trellisOption.value;
     const turns = turnsOption.value;
+    const gate = gateOption.value;
     const unavailable = (error: { readonly message: string }) =>
       failure("trellis_unavailable", `Trellis could not be asked: ${error.message}`);
     const failed = (error: { readonly message: string }) =>
@@ -224,149 +239,176 @@ const make = Effect.gen(function* () {
         "A checkpoint of this workspace is already under way.",
       );
     }
-
-    // Other threads mid-turn here, as T3 and Trellis each see them.
-    const within = (path: string | undefined) =>
-      path !== undefined && (path === directory || path.startsWith(`${directory}/`));
-    const titles = new Map(shell.threads.map((thread) => [thread.id, thread.title]));
-    const running = new Map<ThreadId, RunId | null>();
-    for (const thread of shell.threads) {
-      if (thread.id === caller.id || thread.activeRunId === null) continue;
-      if (within(yield* folderOf(thread))) running.set(thread.id, thread.activeRunId);
-    }
-    for (const turn of yield* trellis.listTurns(cwd).pipe(Effect.mapError(unavailable))) {
-      const thread = ThreadId.make(turn.thread);
-      if (thread !== caller.id && !running.has(thread)) running.set(thread, null);
-    }
-    const workers = workersOf(caller.id, shell.threads);
-    const nameOf = (thread: ThreadId) => titles.get(thread) ?? thread;
-    const others = [...running.keys()];
-    const notWorkers = others.filter((thread) => !workers.has(thread));
-    if (notWorkers.length > 0 || (others.length > 0 && input.interrupt !== true)) {
-      const one = others.length === 1;
-      const reason =
-        notWorkers.length > 0
-          ? `${quoted(notWorkers.map(nameOf))} ${notWorkers.length === 1 ? "is not a worker" : "are not workers"} of this thread, so the checkpoint cannot end ${notWorkers.length === 1 ? "its turn" : "their turns"}. Wait until ${one ? "it finishes" : "they finish"} or ask the user, then call trellis_checkpoint again.`
-          : `${one ? "It is your worker" : "They are your workers"}: pass interrupt: true to end ${one ? "its turn" : "their turns"} too; ${one ? "it continues" : "they continue"} after the restart.`;
-      return yield* failure(
-        "threads_running",
-        `${quoted(others.map(nameOf))} ${one ? "is" : "are"} mid-turn in this workspace, and a checkpoint stops everything in it. ${reason}`,
-      );
-    }
-
-    const interrupted = others;
-    const ending = [
-      ...(caller.activeRunId === null ? [] : [{ threadId: caller.id, runId: caller.activeRunId }]),
-      ...interrupted.flatMap((threadId) => {
-        const runId = running.get(threadId);
-        return runId == null ? [] : [{ threadId, runId }];
-      }),
-    ];
-    const done = yield* Deferred.make<void>();
+    // Reserved in the same step as the check; released here unless the checkpoint started.
+    const done = Deferred.makeUnsafe<void>();
     inFlight.set(workspace, done);
-    const dispatched = yield* Deferred.make<void>();
+    let launched = false;
+    const unreserve = Effect.sync(() => {
+      if (launched) return;
+      inFlight.delete(workspace);
+      Deferred.doneUnsafe(done, Exit.void);
+    });
+    return yield* Effect.gen(function* () {
+      // Other threads mid-turn here, as T3 and Trellis each see them.
+      const within = (path: string | undefined) =>
+        path !== undefined && (path === directory || path.startsWith(`${directory}/`));
+      const titles = new Map(shell.threads.map((thread) => [thread.id, thread.title]));
+      const running = new Map<ThreadId, RunId | null>();
+      for (const thread of shell.threads) {
+        if (thread.id === caller.id || thread.activeRunId === null) continue;
+        if (within(yield* folderOf(thread))) running.set(thread.id, thread.activeRunId);
+      }
+      for (const turn of yield* trellis.listTurns(cwd).pipe(Effect.mapError(unavailable))) {
+        const thread = ThreadId.make(turn.thread);
+        if (thread !== caller.id && !running.has(thread)) running.set(thread, null);
+      }
+      const workers = workersOf(caller.id, shell.threads);
+      const nameOf = (thread: ThreadId) => titles.get(thread) ?? thread;
+      const others = [...running.keys()];
+      const notWorkers = others.filter((thread) => !workers.has(thread));
+      if (notWorkers.length > 0 || (others.length > 0 && input.interrupt !== true)) {
+        const one = others.length === 1;
+        const reason =
+          notWorkers.length > 0
+            ? `${quoted(notWorkers.map(nameOf))} ${notWorkers.length === 1 ? "is not a worker" : "are not workers"} of this thread, so the checkpoint cannot end ${notWorkers.length === 1 ? "its turn" : "their turns"}. Wait until ${one ? "it finishes" : "they finish"} or ask the user, then call trellis_checkpoint again.`
+            : `${one ? "It is your worker" : "They are your workers"}: pass interrupt: true to end ${one ? "its turn" : "their turns"} too; ${one ? "it continues" : "they continue"} after the restart.`;
+        return yield* failure(
+          "threads_running",
+          `${quoted(others.map(nameOf))} ${one ? "is" : "are"} mid-turn in this workspace, and a checkpoint stops everything in it. ${reason}`,
+        );
+      }
 
-    const interruptRuns = Effect.forEach(
-      ending,
-      ({ threadId, runId }) =>
+      const interrupted = others;
+      const ending = [
+        ...(caller.activeRunId === null
+          ? []
+          : [{ threadId: caller.id, runId: caller.activeRunId }]),
+        ...interrupted.flatMap((threadId) => {
+          const runId = running.get(threadId);
+          return runId == null ? [] : [{ threadId, runId }];
+        }),
+      ];
+      const dispatched = yield* Deferred.make<void>();
+
+      const interruptRuns = Effect.forEach(
+        ending,
+        ({ threadId, runId }) =>
+          Effect.gen(function* () {
+            yield* threads.dispatch({
+              type: "run.interrupt",
+              commandId: yield* commandId("interrupt"),
+              threadId,
+              runId,
+              reason: "A Trellis checkpoint stops the workspace.",
+              // Queued messages wait for the continuation, not the stop.
+              holdQueue: true,
+            });
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("trellis_checkpoint could not interrupt a run", { runId, cause }),
+            ),
+          ),
+        { discard: true },
+      );
+      const awaitEnded = turns
+        .awaitEnded(ending.map((entry) => entry.runId))
+        .pipe(Effect.timeoutOption(TURN_END_TIMEOUT), Effect.asVoid);
+
+      const continueThread = (threadId: ThreadId, projectId: ProjectId, text: string) =>
         Effect.gen(function* () {
-          yield* threads.dispatch({
-            type: "run.interrupt",
-            commandId: yield* commandId("interrupt"),
+          const id = yield* uuid;
+          yield* threads.sendToThread({
+            projectId,
+            commandId: CommandId.make(`command:mcp:trellis-checkpoint:continuation:${id}`),
             threadId,
-            runId,
-            reason: "A Trellis checkpoint stops the workspace.",
-            // Queued messages wait for the continuation, not the stop.
-            holdQueue: true,
+            messageId: MessageId.make(`message:mcp:trellis-checkpoint:continuation:${id}`),
+            text,
+            attachments: [],
+            mode: "queue",
+            createdBy: "agent",
+            creationSource: "mcp",
           });
+          // The interrupt held what was queued before; it follows the continuation.
+          const records = yield* threads.getThreadRecords(threadId, ["runs"]);
+          if (records.runs.some((run) => run.status === "queued" && run.queueHeld === true)) {
+            yield* threads.dispatch({
+              type: "queue.resume",
+              commandId: yield* commandId("resume"),
+              threadId,
+            });
+          }
         }).pipe(
           Effect.catchCause((cause) =>
-            Effect.logWarning("trellis_checkpoint could not interrupt a run", { runId, cause }),
+            Effect.logWarning("trellis_checkpoint could not continue a thread", {
+              threadId,
+              cause,
+            }),
           ),
-        ),
-      { discard: true },
-    );
-    const awaitEnded = turns
-      .awaitEnded(ending.map((entry) => entry.runId))
-      .pipe(Effect.timeoutOption(TURN_END_TIMEOUT), Effect.asVoid);
+        );
 
-    const continueThread = (threadId: ThreadId, projectId: ProjectId, text: string) =>
-      Effect.gen(function* () {
-        const id = yield* uuid;
-        yield* threads.sendToThread({
-          projectId,
-          commandId: CommandId.make(`command:mcp:trellis-checkpoint:continuation:${id}`),
-          threadId,
-          messageId: MessageId.make(`message:mcp:trellis-checkpoint:continuation:${id}`),
-          text,
-          attachments: [],
-          mode: "queue",
-          createdBy: "agent",
-          creationSource: "mcp",
-        });
-        // The interrupt held what was queued before; it follows the continuation.
-        const records = yield* threads.getThreadRecords(threadId, ["runs"]);
-        if (records.runs.some((run) => run.status === "queued" && run.queueHeld === true)) {
-          yield* threads.dispatch({
-            type: "queue.resume",
-            commandId: yield* commandId("resume"),
-            threadId,
-          });
+      const run = Effect.gen(function* () {
+        yield* interruptRuns;
+        yield* Deferred.succeed(dispatched, undefined);
+        // Trellis must see those turns ended, or it refuses them; stale ones go too.
+        yield* awaitEnded;
+        yield* turns.reconcile;
+        const outcome = yield* Effect.scoped(
+          Effect.gen(function* () {
+            // Turns admitted as the checkpoint ends wait until the sessions are released.
+            yield* gate.hold([directory]);
+            const outcome = yield* Effect.exit(
+              trellis.checkpoint({
+                target: directory,
+                name: input.name,
+                thread: caller.id,
+                interrupt: false,
+              }),
+            );
+            yield* releaseSessionsWithin(
+              sessions,
+              directory,
+              "The workspace restarted for a Trellis checkpoint.",
+            );
+            return outcome;
+          }),
+        );
+        // A run whose interrupt did not land died with the stop; it settles shortly.
+        yield* awaitEnded;
+        yield* continueThread(
+          caller.id,
+          caller.projectId,
+          callerContinuation(outcome, {
+            name: input.name,
+            workers: interrupted.map(nameOf),
+            titles,
+          }),
+        );
+        for (const threadId of interrupted) {
+          const worker = shell.threads.find((thread) => thread.id === threadId);
+          if (worker !== undefined) {
+            yield* continueThread(threadId, worker.projectId, workerContinuation(caller.title));
+          }
         }
       }).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("trellis_checkpoint could not continue a thread", { threadId, cause }),
+        Effect.ensuring(
+          Effect.sync(() => inFlight.delete(workspace)).pipe(
+            Effect.andThen(Deferred.succeed(done, undefined)),
+            Effect.andThen(Deferred.succeed(dispatched, undefined)),
+          ),
         ),
       );
+      // Detached: the caller's interrupt ends the MCP request that started it.
+      yield* Effect.uninterruptible(
+        Effect.forkIn(run, scope).pipe(Effect.andThen(Effect.sync(() => (launched = true)))),
+      );
+      yield* Deferred.await(dispatched);
 
-    const run = Effect.gen(function* () {
-      yield* interruptRuns;
-      yield* Deferred.succeed(dispatched, undefined);
-      // Trellis must see those turns ended, or it refuses (or interrupts) them.
-      yield* awaitEnded;
-      const outcome = yield* Effect.exit(
-        trellis.checkpoint({
-          target: directory,
-          name: input.name,
-          thread: caller.id,
-          interrupt: interrupted.length > 0,
-        }),
-      );
-      yield* releaseSessionsWithin(
-        sessions,
-        directory,
-        "The workspace restarted for a Trellis checkpoint.",
-      );
-      // A run whose interrupt did not land died with the stop; it settles shortly.
-      yield* awaitEnded;
-      yield* continueThread(
-        caller.id,
-        caller.projectId,
-        callerContinuation(outcome, { name: input.name, workers: interrupted.map(nameOf) }),
-      );
-      for (const threadId of interrupted) {
-        const worker = shell.threads.find((thread) => thread.id === threadId);
-        if (worker !== undefined) {
-          yield* continueThread(threadId, worker.projectId, workerContinuation(caller.title));
-        }
-      }
-    }).pipe(
-      Effect.ensuring(
-        Effect.sync(() => inFlight.delete(workspace)).pipe(
-          Effect.andThen(Deferred.succeed(done, undefined)),
-          Effect.andThen(Deferred.succeed(dispatched, undefined)),
-        ),
-      ),
-    );
-    // Detached: the caller's interrupt ends the MCP request that started it.
-    yield* Effect.forkIn(run, scope);
-    yield* Deferred.await(dispatched);
-
-    return {
-      status: "started",
-      interrupting: interrupted.map(nameOf),
-      note: "The checkpoint is under way and this turn is being ended; stop here. Its result arrives as your next message, after the workspace restarted.",
-    } satisfies TrellisCheckpointMcpResult;
+      return {
+        status: "started",
+        interrupting: interrupted.map(nameOf),
+        note: "The checkpoint is under way and this turn is being ended; stop here. Its result arrives as your next message, after the workspace restarted.",
+      } satisfies TrellisCheckpointMcpResult;
+    }).pipe(Effect.onExit(() => unreserve));
   });
 
   const drain = Effect.suspend(() =>

@@ -457,6 +457,9 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | 
               if (turns === undefined) return waited;
               // Waits while the workspace is checkpointing.
               const { restarted } = yield* turns.start({ threadId, runId, cwd: path });
+              // A checkpoint T3 started holds the gate until it released the
+              // workspace's sessions, so this turn opens a fresh one after.
+              if (yield* gate.waitFree(path)) waited = true;
               if (restarted && sessions !== undefined) {
                 yield* releaseSessionsWithin(
                   sessions,
