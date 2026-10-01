@@ -7,6 +7,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   RunId,
   ThreadId,
   TrellisError,
@@ -31,6 +32,10 @@ import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { TurnAdmission } from "../orchestration-v2/TurnAdmission.ts";
 import type { ProviderAdapterV2Shape } from "../orchestration-v2/ProviderAdapter.ts";
+import {
+  ProviderSessionManagerV2,
+  ProviderSessionReleaseError,
+} from "../orchestration-v2/ProviderSessionManager.ts";
 import {
   OrchestrationV2EventSinkLayerLive,
   OrchestrationV2LayerLive,
@@ -788,8 +793,10 @@ describe("TrellisCatalog service", () => {
     }),
   );
 
-  const catalogLayer = (state: CatalogState) =>
+  const catalogLayer = (state: CatalogState, sessions?: Layer.Layer<ProviderSessionManagerV2>) =>
     TrellisCatalog.layer.pipe(
+      // A fake session manager, when given, stands in for the live one.
+      sessions === undefined ? (layer) => layer : Layer.provide(sessions),
       Layer.provide(Layer.merge(flakyProjectStore, flakyOrchestrator)),
       Layer.provideMerge(
         Layer.mergeAll(
@@ -1084,33 +1091,92 @@ describe("TrellisCatalog service", () => {
       }),
     );
   });
+
+  // Runtimes stay live after their threads are archived, until idle release.
+  const live = [
+    { providerSessionId: "codex-ws-trash", cwd: `${ROOT}/workspaces/ws-trash/project` },
+    { providerSessionId: "claude-ws-trash", cwd: `${ROOT}/workspaces/ws-trash/project/src` },
+    { providerSessionId: "codex-ws-keep", cwd: `${ROOT}/workspaces/ws-keep/project` },
+    { providerSessionId: "codex-scratch", cwd: `${SCRATCH}/idea-t` },
+  ].map((session) => ({
+    ...session,
+    providerSessionId: ProviderSessionId.make(session.providerSessionId),
+  }));
+  const released: Array<string> = [];
+  const sessionsLayer = Layer.mock(ProviderSessionManagerV2)({
+    listLive: Effect.succeed(live),
+    release: ({ providerSessionId }) =>
+      Effect.sync(() => void released.push(providerSessionId)).pipe(
+        Effect.andThen(
+          providerSessionId === "codex-ws-trash"
+            ? Effect.fail(
+                new ProviderSessionReleaseError({
+                  providerSessionId,
+                  reason: "manual_shutdown",
+                  cause: "process gone",
+                }),
+              )
+            : Effect.void,
+        ),
+      ),
+  });
+  const sessionState: CatalogState = {
+    items: [
+      dedicated("prj-trash", "Doomed", [workspace("ws-trash")]),
+      dedicated("prj-keep", "Kept", [workspace("ws-keep")]),
+      idea("idea-t", "Scratch idea"),
+    ],
+    trashed: [],
+  };
+
+  effectIt.layer(catalogLayer(sessionState, sessionsLayer))("trash and live sessions", (it) => {
+    it.effect(
+      "releases every live runtime in a trashed workspace and reports the ones that fail",
+      () =>
+        Effect.gen(function* () {
+          const catalog = yield* TrellisCatalog.TrellisCatalog;
+          yield* catalog.syncNow;
+          const doomed = (yield* projectIdAt(`${ROOT}/workspaces/ws-trash/project`))!;
+          const failure = yield* catalog.trashProject(doomed.projectId).pipe(Effect.flip);
+          // One failure does not stop the other release, nor touch other workspaces.
+          assert.deepEqual(released, ["codex-ws-trash", "claude-ws-trash"]);
+          assert.include(failure.message, "1 agent session running in it could not be stopped");
+          assert.deepEqual(sessionState.trashed, ["prj-trash"]);
+
+          // An idea lives in the scratch workspace, which keeps running.
+          released.length = 0;
+          const idea = (yield* projectIdAt(`${SCRATCH}/idea-t`))!;
+          yield* catalog.trashProject(idea.projectId);
+          assert.deepEqual(released, []);
+        }),
+    );
+  });
 });
 
 describe("sessionsEndedByTrash", () => {
-  const sessions = [
-    { id: "codex-ws-b", status: "ready", cwd: "/trellis/workspaces/ws-b/project" },
-    { id: "claude-ws-b-sub", status: "running", cwd: "/trellis/workspaces/ws-b/project/src" },
-    { id: "stopped-ws-b", status: "stopped", cwd: "/trellis/workspaces/ws-b/project" },
-    { id: "codex-ws-bb", status: "ready", cwd: "/trellis/workspaces/ws-bb/project" },
-    { id: "scratch", status: "ready", cwd: "/trellis/workspaces/ws-s/project/idea-a" },
+  const live = [
+    { providerSessionId: "codex-ws-b", cwd: "/trellis/workspaces/ws-b/project" },
+    { providerSessionId: "claude-ws-b-sub", cwd: "/trellis/workspaces/ws-b/project/src" },
+    { providerSessionId: "codex-ws-bb", cwd: "/trellis/workspaces/ws-bb/project" },
+    { providerSessionId: "scratch", cwd: "/trellis/workspaces/ws-s/project/idea-a" },
   ];
 
-  it("releases the live sessions working in a trashed workspace, and only those", () => {
+  it("picks the live runtimes in a trashed workspace, and only those", () => {
     expect(
       TrellisCatalog.sessionsEndedByTrash({
         dedicated: true,
         roots: ["/trellis/workspaces/ws-b/project/"],
-        sessions: [...sessions, sessions[0]!],
+        live: [...live, live[0]!],
       }),
     ).toEqual(["codex-ws-b", "claude-ws-b-sub"]);
   });
 
-  it("releases none for an idea, whose scratch workspace keeps running", () => {
+  it("picks none for an idea, whose scratch workspace keeps running", () => {
     expect(
       TrellisCatalog.sessionsEndedByTrash({
         dedicated: false,
         roots: ["/trellis/workspaces/ws-s/project/idea-a"],
-        sessions,
+        live,
       }),
     ).toEqual([]);
   });
