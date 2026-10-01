@@ -196,6 +196,7 @@ import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as TrellisCatalog from "./trellis/TrellisCatalog.ts";
+import * as TrellisGraduation from "./trellis/TrellisGraduation.ts";
 import * as TrellisIdeaPromotion from "./trellis/TrellisIdeaPromotion.ts";
 import * as TrellisPreview from "./trellis/TrellisPreview.ts";
 import { refreshPushedPullRequests } from "./git/refreshPushedPullRequests.ts";
@@ -1149,6 +1150,7 @@ const makeWsRpcLayer = (
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const terminalManager = yield* TerminalManager.TerminalManager;
       const trellisCatalog = yield* TrellisCatalog.TrellisCatalog;
+      const trellisGraduation = yield* TrellisGraduation.TrellisGraduation;
       const trellisIdeas = yield* TrellisIdeaPromotion.TrellisIdeaPromotion;
       const trellisPreview = yield* TrellisPreview.TrellisPreview;
       const previewManager = yield* PreviewManager.PreviewManager;
@@ -3166,6 +3168,14 @@ const makeWsRpcLayer = (
           ),
         [WS_METHODS.trellisFind]: (input) =>
           observeRpcEffect(WS_METHODS.trellisFind, trellisCatalog.find(input.query), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisGraduate]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisGraduate, trellisGraduation.graduate(input), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisListBases]: () =>
+          observeRpcEffect(WS_METHODS.trellisListBases, trellisCatalog.listBases, {
             "rpc.aggregate": "trellis",
           }),
         [WS_METHODS.filesystemBrowse]: (input) =>

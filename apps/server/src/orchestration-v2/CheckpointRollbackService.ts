@@ -28,7 +28,13 @@ import {
   CheckpointRestoreRule,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
-import { CheckpointServiceV2 } from "./CheckpointService.ts";
+import {
+  CheckpointServiceV2,
+  checkpointRunOrdinal,
+  MOVE_BOUNDARY_RESTORE_MESSAGE,
+  scopeAssignmentOf,
+  workspaceAssignmentOf,
+} from "./CheckpointService.ts";
 import type { EffectOutboxV2Shape } from "./EffectOutbox.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import { IdAllocatorV2 } from "./IdAllocator.ts";
@@ -284,10 +290,24 @@ export const layer: Layer.Layer<
         });
       }
 
+      const restoreFiles = input.restoreFiles !== false;
+      const targetAssignment = scopeAssignmentOf(scope, projection.checkpointScopes);
       // Held through the provider rewind and the file restore; released when
       // `execute` ends.
       yield* restoreLease.acquire(scope);
-      const restoreFiles = input.restoreFiles !== false;
+      // The decider resolved file restores into the thread's current project;
+      // read again under the lease, a move since then puts this one across
+      // the boundary.
+      const current = (yield* projections.getThreadRecords(input.threadId, [])).thread;
+      if (restoreFiles && targetAssignment !== workspaceAssignmentOf(current)) {
+        return yield* new CheckpointRollbackExecutionError({
+          reason: "rollback-target-invalid",
+          threadId: input.threadId,
+          providerThreadId: input.providerThreadId,
+          checkpointId: input.checkpointId,
+          detail: MOVE_BOUNDARY_RESTORE_MESSAGE,
+        });
+      }
       if (restoreFiles) {
         const refusal = yield* restoreRule.check(
           {
@@ -350,12 +370,26 @@ export const layer: Layer.Layer<
         thread: projection.thread,
         modelSelection,
       });
-      const existingSession = projection.providerSessions.find(
+      const storedSession = projection.providerSessions.find(
         (candidate) => candidate.id === providerThread.providerSessionId,
       );
+      // A thread that moved since its session opened rewinds in its new
+      // workspace's session, as its next turn would run, never in a process
+      // still serving the old workspace for other threads.
+      const sessionKey = resolvedRuntimePolicy.launch?.sessionKey;
+      const rebound = storedSession !== undefined && storedSession.sessionKey !== sessionKey;
+      const providerSessionId = !rebound
+        ? providerThread.providerSessionId
+        : storedSession.capabilities.sessions.supportsMultipleProviderThreadsPerSession
+          ? ids.derive.providerSession({
+              providerInstanceId: providerThread.providerInstanceId,
+              ...(sessionKey === undefined ? {} : { sessionKey }),
+            })
+          : providerThread.providerSessionId;
+      const existingSession = rebound ? undefined : storedSession;
       const session = yield* sessions.open({
         threadId: input.threadId,
-        providerSessionId: providerThread.providerSessionId,
+        providerSessionId,
         modelSelection,
         runtimePolicy: resolvedRuntimePolicy,
         ...(existingSession === undefined ? {} : { resumeFromSession: existingSession }),
@@ -369,7 +403,7 @@ export const layer: Layer.Layer<
             }),
       });
 
-      const targetOrdinal = checkpoint.appRunOrdinal ?? 0;
+      const targetOrdinal = checkpointRunOrdinal(checkpoint, scope);
       // Stopped and failed runs after the target leave the provider
       // conversation too, so they must not stay visible.
       const runsToRollback = projection.runs.filter(
@@ -458,6 +492,7 @@ export const layer: Layer.Layer<
           occurredAt: now,
           payload: {
             ...snapshot.providerThread,
+            providerSessionId,
             lastRunOrdinal: targetOrdinal === 0 ? null : targetOrdinal,
             updatedAt: now,
           },
@@ -503,15 +538,41 @@ export const layer: Layer.Layer<
           ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
         })).notice;
       }
-      const staleCheckpoints = projection.checkpoints.filter(
-        (candidate) =>
-          candidate.scopeId === scope.id &&
+      const staleCheckpoints = projection.checkpoints.filter((candidate) => {
+        if (candidate.status !== "ready") return false;
+        if (candidate.scopeId === scope.id) {
+          return candidate.appRunOrdinal !== null && candidate.appRunOrdinal > targetOrdinal;
+        }
+        // A rewind to before the thread moved also drops what the projects it
+        // moved to captured after the target, their baselines included.
+        const candidateScope = projection.checkpointScopes.find(
+          (other) => other.id === candidate.scopeId,
+        );
+        // A project's baseline stays: the files it holds are still there, and
+        // later turns in that project diff from it.
+        return (
+          candidateScope?.kind === "root_run" &&
           candidate.appRunOrdinal !== null &&
-          candidate.appRunOrdinal > targetOrdinal &&
-          candidate.status === "ready",
-      );
-      if (staleCheckpoints.length > 0) {
-        yield* checkpoints.deleteStaleRefs({ scope, checkpoints: staleCheckpoints });
+          scopeAssignmentOf(candidateScope, projection.checkpointScopes) > targetAssignment &&
+          checkpointRunOrdinal(candidate, candidateScope) > targetOrdinal
+        );
+      });
+      for (const staleScope of projection.checkpointScopes) {
+        const stale = staleCheckpoints.filter((candidate) => candidate.scopeId === staleScope.id);
+        if (stale.length === 0) continue;
+        const deleted = checkpoints.deleteStaleRefs({ scope: staleScope, checkpoints: stale });
+        // Refs of a project the thread left are only tidied: its folder may be gone.
+        yield* scopeAssignmentOf(staleScope, projection.checkpointScopes) ===
+        workspaceAssignmentOf(projection.thread)
+          ? deleted
+          : deleted.pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("could not delete the refs of an earlier project's checkpoints", {
+                  scopeId: staleScope.id,
+                  detail: error.message,
+                }),
+              ),
+            );
       }
 
       const events: Array<OrchestrationV2DomainEvent> = [];

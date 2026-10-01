@@ -63,6 +63,16 @@ export const trellisEnvironment = {
     label: "environment-data:trellis:resolve-preview-url",
     tag: WS_METHODS.trellisResolvePreviewUrl,
   }),
+  bases: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:bases",
+    tag: WS_METHODS.trellisListBases,
+    staleTimeMs: 30_000,
+    idleTtlMs: 60_000,
+  }),
+  graduate: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:graduate",
+    tag: WS_METHODS.trellisGraduate,
+  }),
 };
 
 /** The last Trellis status of an environment, for event handlers; null while unknown. */

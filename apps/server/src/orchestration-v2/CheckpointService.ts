@@ -25,7 +25,97 @@ import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import { IdAllocatorV2, type IdAllocatorV2Shape } from "./IdAllocator.ts";
 
 const CHECKPOINT_REFS_PREFIX = "refs/t3/orchestration-v2/checkpoints";
-const ROOT_CHECKPOINT_SCOPE_NAME = "root";
+
+/**
+ * The name of a thread's root checkpoint scope for its `assignment`-th
+ * workspace: "root" until the thread first moves with history, then
+ * "root:<n>". Scopes never change directory, so a moved thread's earlier
+ * checkpoints still resolve against the folder they were taken in.
+ */
+export function rootCheckpointScopeName(assignment: number): string {
+  return assignment === 0 ? "root" : `root:${assignment}`;
+}
+
+/** The thread's current workspace assignment (0 until it moves with history). */
+export function workspaceAssignmentOf(thread: {
+  readonly workspaceAssignment?: number | undefined;
+}): number {
+  return thread.workspaceAssignment ?? 0;
+}
+
+/** The workspace assignment `scope` belongs to, through its root scope. */
+export function scopeAssignmentOf(
+  scope: Pick<OrchestrationV2CheckpointScope, "parentScopeId" | "workspaceAssignment">,
+  scopes: ReadonlyArray<
+    Pick<OrchestrationV2CheckpointScope, "id" | "parentScopeId" | "workspaceAssignment">
+  >,
+): number {
+  let current = scope;
+  for (let depth = 0; current.parentScopeId !== null && depth < scopes.length; depth++) {
+    const parent = scopes.find((candidate) => candidate.id === current.parentScopeId);
+    if (parent === undefined) break;
+    current = parent;
+  }
+  return current.workspaceAssignment ?? 0;
+}
+
+/**
+ * The run ordinal a checkpoint stands for: its run's, or for a baseline of a
+ * root scope (ordinals there are run ordinals) the run before it.
+ */
+export function checkpointRunOrdinal(
+  checkpoint: Pick<OrchestrationV2Checkpoint, "appRunOrdinal" | "ordinalWithinScope">,
+  scope: Pick<OrchestrationV2CheckpointScope, "kind">,
+): number {
+  return (
+    checkpoint.appRunOrdinal ?? (scope.kind === "root_run" ? checkpoint.ordinalWithinScope : 0)
+  );
+}
+
+export const MOVE_BOUNDARY_RESTORE_MESSAGE =
+  "This turn ran before the thread moved to its current project, so its files are not here to restore. Rewind only the conversation instead.";
+
+/**
+ * What a file restore to `checkpoint` restores for a thread that may have
+ * moved: the checkpoint itself when it belongs to the thread's current
+ * workspace assignment; for an earlier assignment's checkpoint, the current
+ * root scope's checkpoint at the same run ordinal (the baseline taken when
+ * the thread first ran here holds the state it arrived with). Null when there
+ * is none: the files are across the move boundary.
+ */
+export function fileRestoreTargetOf<
+  C extends Pick<
+    OrchestrationV2Checkpoint,
+    "scopeId" | "status" | "ordinalWithinScope" | "appRunOrdinal"
+  >,
+  S extends Pick<
+    OrchestrationV2CheckpointScope,
+    "id" | "kind" | "parentScopeId" | "workspaceAssignment"
+  >,
+>(input: {
+  readonly thread: { readonly workspaceAssignment?: number | undefined };
+  readonly checkpoint: C;
+  readonly scope: S;
+  readonly checkpoints: ReadonlyArray<C>;
+  readonly scopes: ReadonlyArray<S>;
+}): { readonly checkpoint: C; readonly scope: S } | null {
+  const assignment = workspaceAssignmentOf(input.thread);
+  if (scopeAssignmentOf(input.scope, input.scopes) === assignment) {
+    return { checkpoint: input.checkpoint, scope: input.scope };
+  }
+  const ordinal = checkpointRunOrdinal(input.checkpoint, input.scope);
+  for (const scope of input.scopes) {
+    if (scope.kind !== "root_run" || (scope.workspaceAssignment ?? 0) !== assignment) continue;
+    const checkpoint = input.checkpoints.find(
+      (candidate) =>
+        candidate.scopeId === scope.id &&
+        candidate.status === "ready" &&
+        candidate.ordinalWithinScope === ordinal,
+    );
+    if (checkpoint !== undefined) return { checkpoint, scope };
+  }
+  return null;
+}
 
 export class CheckpointRootScopePrepareError extends Schema.TaggedError<CheckpointRootScopePrepareError>()(
   "CheckpointRootScopePrepareError",
@@ -138,6 +228,8 @@ export interface CheckpointServiceV2Shape {
     readonly providerThreadId: ProviderThreadId;
     readonly cwd: string;
     readonly createdAt: DateTime.Utc;
+    /** The thread's workspace assignment (`workspaceAssignmentOf`); absent: 0. */
+    readonly workspaceAssignment?: number;
   }) => Effect.Effect<OrchestrationV2CheckpointScope, CheckpointServiceV2Error>;
   readonly ensureScope: (
     scope: OrchestrationV2CheckpointScope,
@@ -215,11 +307,13 @@ function makeRootRunScope(input: {
   readonly providerThreadId: ProviderThreadId;
   readonly cwd: string;
   readonly createdAt: DateTime.Utc;
+  readonly workspaceAssignment?: number;
 }) {
   return Effect.gen(function* () {
+    const assignment = input.workspaceAssignment ?? 0;
     const scopeId = yield* input.idAllocator.allocate.checkpointScope({
       threadId: input.threadId,
-      name: ROOT_CHECKPOINT_SCOPE_NAME,
+      name: rootCheckpointScopeName(assignment),
     });
     return {
       id: scopeId,
@@ -233,6 +327,7 @@ function makeRootRunScope(input: {
       advancesAppRunCount: true,
       cwd: input.cwd,
       createdAt: input.createdAt,
+      ...(assignment === 0 ? {} : { workspaceAssignment: assignment }),
     } satisfies OrchestrationV2CheckpointScope;
   });
 }
@@ -327,6 +422,7 @@ export const layer: Layer.Layer<
           yield* checkpointStore.captureCheckpoint({
             cwd: input.scope.cwd,
             checkpointRef,
+            baseline: true,
           });
         }),
       ).pipe(

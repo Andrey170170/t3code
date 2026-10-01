@@ -211,6 +211,50 @@ describe("planCatalogSync", () => {
     ]);
   });
 
+  it("follows an idea graduated elsewhere: its active threads move, then it retires", () => {
+    const input = {
+      root: ROOT,
+      items: [
+        idea("idea-g", "Graduated", { graduated_to: "prj-g", updated_at: 100 }),
+        dedicated("prj-g", "Graduated", [workspace("ws-g")]),
+      ],
+      deletedWorkspaces: noDeletedWorkspaces,
+    };
+    const thread = (id: string, archived: boolean) => ({
+      id: ThreadId.make(id),
+      projectId: ProjectId.make("p-idea"),
+      archived,
+      updatedAtMs: EARLY_MS,
+    });
+    // The project is created in the same pass, before the threads move.
+    expect(
+      TrellisCatalog.planCatalogSync({
+        ...input,
+        projects: [project("p-idea", `${SCRATCH}/idea-g`)],
+        threads: [thread("t-active", false), thread("t-archived", true)],
+      }),
+    ).toEqual([
+      { type: "create", workspaceRoot: `${ROOT}/workspaces/ws-g/project`, title: "Graduated" },
+      {
+        type: "repoint",
+        projectId: ProjectId.make("p-idea"),
+        toRoot: `${ROOT}/workspaces/ws-g/project`,
+        threadIds: [ThreadId.make("t-active")],
+      },
+    ]);
+    // Once only archived threads are left, the idea retires and keeps them.
+    expect(
+      TrellisCatalog.planCatalogSync({
+        ...input,
+        projects: [
+          project("p-idea", `${SCRATCH}/idea-g`),
+          project("p-g", `${ROOT}/workspaces/ws-g/project`, "Graduated"),
+        ],
+        threads: [thread("t-archived", true)],
+      }),
+    ).toEqual([]);
+  });
+
   it("retires a trashed fork by archiving its threads, then leaves it alone", () => {
     const input = {
       root: ROOT,
@@ -885,6 +929,35 @@ describe("TrellisCatalog service", () => {
   };
 
   effectIt.layer(catalogLayer(state))("against V2", (it) => {
+    it.effect("moves the threads of an idea graduated from the CLI into its project", () =>
+      Effect.gen(function* () {
+        const catalog = yield* TrellisCatalog.TrellisCatalog;
+        const orchestrator = yield* OrchestratorV2;
+        state.items = [...state.items, idea("idea-cli", "Spike")];
+        yield* catalog.syncNow;
+        const ideaProject = (yield* projectIdAt(`${SCRATCH}/idea-cli`))!;
+        const threadId = yield* createThread("catalog-cli-graduated", ideaProject.projectId);
+
+        // `trellis graduate` on the host: the idea points at its new project.
+        state.items = [
+          ...state.items.map((item) =>
+            item.id === "idea-cli" ? { ...item, graduated_to: "prj-cli", updated_at: 100 } : item,
+          ),
+          dedicated("prj-cli", "Spike", [workspace("ws-cli")]),
+        ];
+        yield* catalog.syncNow;
+        const graduated = (yield* projectIdAt(`${ROOT}/workspaces/ws-cli/project`))!;
+        const shell = yield* orchestrator.getThreadShell(threadId);
+        assert.equal(shell?.projectId, graduated.projectId);
+        assert.isNull(shell?.archivedAt);
+        // No continuation: the thread continues when the user writes next.
+        assert.deepEqual((yield* orchestrator.getThreadProjection(threadId)).messages, []);
+        // Left without threads, the idea's project goes.
+        yield* catalog.syncNow;
+        assert.isUndefined(yield* projectIdAt(`${SCRATCH}/idea-cli`));
+      }),
+    );
+
     it.effect("creates, renames and retires projects, and trash and restore round-trip", () =>
       Effect.gen(function* () {
         const catalog = yield* TrellisCatalog.TrellisCatalog;

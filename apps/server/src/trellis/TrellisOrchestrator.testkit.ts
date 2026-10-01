@@ -242,6 +242,24 @@ export const sendMessage = (threadId: ThreadId, label: string) =>
     }),
   );
 
+/** Sends a message and settles its run as completed, as the provider would. */
+export const runToCompletion = (threadId: ThreadId, label: string) =>
+  Effect.gen(function* () {
+    yield* sendMessage(threadId, label);
+    const orchestrator = yield* OrchestratorV2;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+    yield* writeEvent({
+      id: EventId.make(`${threadId}:completed:${label}`),
+      type: "run.updated",
+      threadId,
+      runId: run.id,
+      providerInstanceId: run.providerInstanceId,
+      occurredAt: run.requestedAt,
+      payload: { ...run, status: "completed", completedAt: run.requestedAt },
+    });
+    return run;
+  });
+
 export const sessionIdOf = (threadId: ThreadId) =>
   Effect.flatMap(OrchestratorV2, (orchestrator) => orchestrator.getThreadProjection(threadId)).pipe(
     Effect.map((projection) => {

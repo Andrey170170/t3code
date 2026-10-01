@@ -9,6 +9,7 @@ import type {
   ScopedThreadRef,
   TrellisFindHit,
   OrchestrationV2AcknowledgedWork,
+  TrellisGraduateInput,
   TrellisNewProjectInput,
   TrellisRestoreConflictsInput,
   TrellisState,
@@ -309,6 +310,40 @@ export function useTrellisRestoreCheck() {
       return confirmed
         ? later.map((thread) => ({ threadId: thread.threadId, runId: thread.runId }))
         : null;
+    },
+    [run],
+  );
+}
+
+/**
+ * Graduates the idea behind a T3 project into its own Trellis project. Its
+ * threads move there (the sidebar follows the shell stream); returns the
+ * failure message for a dialog to show, or null once it graduated.
+ */
+export function useTrellisGraduate() {
+  const run = useAtomCommand(trellisEnvironment.graduate, { reportFailure: false });
+  return useCallback(
+    async (environmentId: EnvironmentId, input: TrellisGraduateInput): Promise<string | null> => {
+      const result = await run({ environmentId, input });
+      if (result._tag === "Failure") {
+        return isAtomCommandInterrupted(result)
+          ? "The graduation was interrupted; check the sidebar before trying again."
+          : failureMessage(squashAtomCommandFailure(result), "Trellis did not respond.");
+      }
+      // The idea's retired root hides its emptied project.
+      await loadTrellisStatus(appAtomRegistry, environmentId);
+      const { name, notMoved } = result.value;
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: `Graduated into "${name}"`,
+          description:
+            notMoved.length === 0
+              ? "Its threads moved into the new project."
+              : `${notMoved.map((title) => `"${title}"`).join(", ")} ${notMoved.length === 1 ? "moves" : "move"} once ${notMoved.length === 1 ? "its turn ends" : "their turns end"}.`,
+        }),
+      );
+      return null;
     },
     [run],
   );

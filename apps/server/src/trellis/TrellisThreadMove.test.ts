@@ -4,7 +4,6 @@ import {
   CommandId,
   ContextTransferId,
   EventId,
-  NodeId,
   ProjectId,
   ProviderDriverKind,
   ProviderThreadId,
@@ -14,6 +13,10 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 
+import {
+  checkpointRefForScopeOrdinal,
+  rootCheckpointScopeName,
+} from "../orchestration-v2/CheckpointService.ts";
 import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
 import { IdAllocatorV2 } from "../orchestration-v2/IdAllocator.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
@@ -25,6 +28,7 @@ import {
   modelSelection,
   move,
   rejection,
+  runToCompletion,
   sendMessage,
   sessionIdOf,
   TrellisOrchestratorTestLayer,
@@ -92,9 +96,12 @@ it.layer(TrellisOrchestratorTestLayer)("thread.project.move", (it) => {
           moved.storedEvents.map((stored) => stored.event.type),
           ["thread.project-moved", "provider-session.detached"],
         );
+        const effects = yield* outbox.listByCommandId(CommandId.make(`${threadId}:move:1`));
+        // Its terminals, in the old directory, close.
+        assert.isTrue(effects.some((effect) => effect.request.type === "terminal.cleanup"));
         // The detach unloads the thread from the old workspace's process by
         // the native ref it had there.
-        const [detach] = yield* outbox.listByCommandId(CommandId.make(`${threadId}:move:1`));
+        const detach = effects.find((effect) => effect.request.type === "provider-session.detach");
         assert.deepInclude(detach?.request, {
           type: "provider-session.detach",
           providerSessionId: sessionA,
@@ -138,7 +145,7 @@ it.layer(TrellisOrchestratorTestLayer)("thread.project.move", (it) => {
     }),
   );
 
-  it.effect("refuses a busy thread, a thread with history and an unforked fork", () =>
+  it.effect("refuses a busy thread and an unforked fork", () =>
     Effect.gen(function* () {
       const to = yield* createProject("move-refused-target", "/trellis/workspaces/ws-d/project");
       const now = yield* DateTime.now;
@@ -147,31 +154,7 @@ it.layer(TrellisOrchestratorTestLayer)("thread.project.move", (it) => {
       yield* sendMessage(busy.threadId, "first");
       assert.include(yield* rejection(move(busy.threadId, to, "busy")), "thread_busy");
 
-      const history = yield* createThread(
-        "move-history",
-        "/trellis/workspaces/ws-a/project/idea-4",
-      );
-      yield* writeEvent({
-        id: EventId.make("move-history:scope"),
-        type: "checkpoint-scope.created",
-        threadId: history.threadId,
-        occurredAt: now,
-        payload: {
-          id: CheckpointScopeId.make("checkpoint-scope:thread:move-history:name:root"),
-          threadId: history.threadId,
-          runId: null,
-          nodeId: NodeId.make("move-history:node"),
-          parentScopeId: null,
-          providerThreadId: null,
-          kind: "root_run",
-          ordinalWithinParent: 0,
-          advancesAppRunCount: true,
-          cwd: "/trellis/workspaces/ws-a/project/idea-4",
-          createdAt: now,
-        },
-      });
-      assert.include(yield* rejection(move(history.threadId, to, "history")), "thread_has_history");
-
+      const source = yield* createThread("move-source", "/trellis/workspaces/ws-a/project/idea-4");
       const fork = yield* createThread("move-fork", "/trellis/workspaces/ws-a/project/idea-5");
       yield* writeEvent({
         id: EventId.make("move-fork:transfer"),
@@ -181,9 +164,9 @@ it.layer(TrellisOrchestratorTestLayer)("thread.project.move", (it) => {
         payload: {
           id: ContextTransferId.make("move-fork:transfer"),
           type: "fork",
-          sourceThreadId: history.threadId,
+          sourceThreadId: source.threadId,
           targetThreadId: fork.threadId,
-          sourcePoint: { threadId: history.threadId },
+          sourcePoint: { threadId: source.threadId },
           basePoint: null,
           sourceProviderInstanceId: modelSelection.instanceId,
           targetProviderInstanceId: modelSelection.instanceId,
@@ -198,6 +181,136 @@ it.layer(TrellisOrchestratorTestLayer)("thread.project.move", (it) => {
         },
       });
       assert.include(yield* rejection(move(fork.threadId, to, "fork")), "thread_pending_fork");
+    }),
+  );
+
+  it.effect(
+    "a thread with history moves as the same thread and native session, into a new scope",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* OrchestratorV2;
+        const ideaPath = "/trellis/workspaces/ws-a/project/idea-history";
+        const projectPath = "/trellis/workspaces/ws-f/project";
+        const { threadId, projectId: from } = yield* createThread("move-history", ideaPath);
+        const to = yield* createProject("move-history-target", projectPath);
+        const first = yield* runToCompletion(threadId, "first");
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        const providerThread = before.providerThreads.find(
+          (candidate) => candidate.id === before.thread.activeProviderThreadId,
+        )!;
+        // The provider's own session, as resuming it records it.
+        const nativeThreadRef = {
+          driver,
+          nativeId: "native-move-history",
+          strength: "strong" as const,
+        };
+        yield* writeEvent({
+          id: EventId.make("move-history:native"),
+          type: "provider-thread.updated",
+          threadId,
+          driver,
+          occurredAt: first.requestedAt,
+          payload: { ...providerThread, nativeThreadRef },
+        });
+
+        yield* move(threadId, to, "history", from);
+        const moved = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(moved.thread.projectId, to);
+        assert.equal(moved.thread.workspaceAssignment, 1);
+
+        yield* sendMessage(threadId, "second");
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(after.thread.activeProviderThreadId, providerThread.id);
+        assert.deepEqual(
+          after.providerThreads.find((candidate) => candidate.id === providerThread.id)
+            ?.nativeThreadRef,
+          nativeThreadRef,
+        );
+        // Each project keeps its own root scope; the old one keeps its folder.
+        const ids = yield* IdAllocatorV2;
+        const scopeIdOf = (assignment: number) =>
+          ids.allocate.checkpointScope({ threadId, name: rootCheckpointScopeName(assignment) });
+        assert.deepEqual(
+          after.checkpointScopes.map((scope) => [scope.id, scope.cwd, scope.workspaceAssignment]),
+          [
+            [yield* scopeIdOf(0), ideaPath, undefined],
+            [yield* scopeIdOf(1), projectPath, 1],
+          ],
+        );
+        // The move shows in the thread as a notice, not a turn.
+        const notice = after.turnItems.find((item) => item.type === "system_notice");
+        assert.include(
+          notice?.type === "system_notice" ? notice.message : "",
+          `Moved to the project "move-history-target-project" (${projectPath})`,
+        );
+        assert.isNull(notice?.runId);
+        const second = after.runs.at(-1)!;
+        const rootNode = after.nodes.find((node) => node.id === second.rootNodeId);
+        assert.equal(rootNode?.checkpointScopeId, yield* scopeIdOf(1));
+      }),
+  );
+
+  it.effect("a file restore across the move is refused; a conversation rewind is allowed", () =>
+    Effect.gen(function* () {
+      const ids = yield* IdAllocatorV2;
+      const { threadId, projectId: from } = yield* createThread(
+        "move-boundary",
+        "/trellis/workspaces/ws-a/project/idea-boundary",
+      );
+      const to = yield* createProject("move-boundary-target", "/trellis/workspaces/ws-g/project");
+      const run = yield* runToCompletion(threadId, "first");
+      // The thread's start, captured in the idea before its first run.
+      const scopeId = CheckpointScopeId.make(`checkpoint-scope:thread:${threadId}:name:root`);
+      const checkpointId = yield* ids.allocate.checkpoint({
+        checkpointScopeId: scopeId,
+        name: "0",
+      });
+      yield* writeEvent({
+        id: EventId.make("move-boundary:baseline"),
+        type: "checkpoint.captured",
+        threadId,
+        occurredAt: run.requestedAt,
+        payload: {
+          id: checkpointId,
+          threadId,
+          scopeId,
+          runId: null,
+          nodeId: run.rootNodeId!,
+          parentCheckpointId: null,
+          ordinalWithinScope: 0,
+          appRunOrdinal: null,
+          ref: checkpointRefForScopeOrdinal({ scopeId, ordinalWithinScope: 0 }),
+          status: "ready",
+          files: [],
+          capturedAt: run.requestedAt,
+        },
+      });
+      yield* move(threadId, to, "boundary", from);
+
+      const rollback = (label: string, restoreFiles: boolean) =>
+        Effect.flatMap(OrchestratorV2, (orchestrator) =>
+          orchestrator.dispatch({
+            type: "checkpoint.rollback",
+            commandId: CommandId.make(`${threadId}:rollback:${label}`),
+            threadId,
+            scopeId,
+            checkpointId,
+            restoreFiles,
+          }),
+        );
+      assert.include(
+        yield* rejection(rollback("files", true)),
+        "before the thread moved to its current project",
+      );
+      const rewound = yield* rollback("conversation", false);
+      assert.isAtLeast(rewound.sequence, 1);
+      // While that revert is in flight the thread cannot move again: it would
+      // land after the move.
+      const elsewhere = yield* createProject(
+        "move-boundary-elsewhere",
+        "/trellis/workspaces/ws-h/project",
+      );
+      assert.include(yield* rejection(move(threadId, elsewhere, "during-revert")), "reverting");
     }),
   );
 
