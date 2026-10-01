@@ -29,6 +29,8 @@ import {
   type TrellisFindHit,
   type TrellisFindResult,
   type TrellisIdeaDraftTarget,
+  type TrellisRestoreConflicts,
+  type TrellisRestoreConflictsInput,
   type TrellisRestoreInput,
   type TrellisRestoreResult,
   type TrellisStatus,
@@ -49,6 +51,7 @@ import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import { pathsOverlap } from "@t3tools/shared/trellis";
 
 import { ServerConfig } from "../config.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
@@ -63,6 +66,7 @@ import {
   TrellisProjectView,
   type TrellisTrashView,
 } from "./Trellis.ts";
+import { restoreConflictsIn, restoreScopeOf, TrellisRestoreGate } from "./TrellisRestore.ts";
 
 const POLL_INTERVAL = "3 seconds";
 const encodeListing = Schema.encodeSync(Schema.fromJsonString(Schema.Array(TrellisProjectView)));
@@ -393,13 +397,6 @@ export function retiredRoots(
   return [...roots].filter((root) => !live.has(root)).toSorted();
 }
 
-/** True when one path is the other or contains it. */
-function pathsOverlap(left: string, right: string): boolean {
-  const inside = (path: string, root: string) =>
-    path === root || path.startsWith(root === "/" ? root : `${root}/`);
-  return inside(left, right) || inside(right, left);
-}
-
 export class TrellisCatalog extends Context.Service<
   TrellisCatalog,
   {
@@ -440,6 +437,10 @@ export class TrellisCatalog extends Context.Service<
       readonly base?: string | undefined;
     }) => Effect.Effect<TrellisCreateResult, TrellisError>;
     readonly find: (query: string) => Effect.Effect<TrellisFindResult, TrellisError>;
+    /** Who a file restore to a checkpoint would conflict with (see the contract). */
+    readonly restoreConflicts: (
+      input: TrellisRestoreConflictsInput,
+    ) => Effect.Effect<TrellisRestoreConflicts, TrellisError>;
     /**
      * Refuses removing only T3's entry for a live Trellis project (its
      * conversations would be deleted and the sync would bring the project
@@ -467,6 +468,8 @@ const errorMessage = (error: unknown) =>
 
 const make = Effect.gen(function* () {
   const trellis = yield* Trellis;
+  // Absent in tests that never trash; trash then only checks for busy threads.
+  const restoreGate = yield* Effect.serviceOption(TrellisRestoreGate);
   const orchestrator = yield* OrchestratorV2;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const projectService = yield* ProjectService;
@@ -888,23 +891,65 @@ const make = Effect.gen(function* () {
           : item.workspaces
               .filter((workspace) => workspace.deleted_at === null)
               .map((workspace) => workspace.path);
-    // Trashing moves the files away and stops the workspace, so running
-    // agents inside it would lose their work.
-    const busy = yield* busyThreadTitlesIn(scopes).pipe(Effect.orElseSucceed(() => []));
-    if (busy.length > 0) {
-      const one = busy.length === 1;
-      return yield* new TrellisError({
-        message: `${busy.map((title) => `"${title}"`).join(", ")} ${one ? "is" : "are"} still working in ${target.name}. Wait for ${one ? "it" : "them"} to finish or stop ${one ? "it" : "them"}, then try again.`,
-      });
-    }
-    if (target.kind === "project") yield* trellis.trashProject(target.id);
-    else yield* trellis.trashWorkspace(target.id);
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        // New turns there wait from before the busy check until the trash is
+        // done, so none starts in between.
+        if (Option.isSome(restoreGate)) yield* restoreGate.value.hold(scopes);
+        // Trashing moves the files away and stops the workspace, so running
+        // agents inside it would lose their work.
+        const busy = yield* busyThreadTitlesIn(scopes).pipe(Effect.orElseSucceed(() => []));
+        if (busy.length > 0) {
+          const one = busy.length === 1;
+          return yield* new TrellisError({
+            message: `${busy.map((title) => `"${title}"`).join(", ")} ${one ? "is" : "are"} still working in ${target.name}. Wait for ${one ? "it" : "them"} to finish or stop ${one ? "it" : "them"}, then try again.`,
+          });
+        }
+        if (target.kind === "project") yield* trellis.trashProject(target.id);
+        else yield* trellis.trashWorkspace(target.id);
+      }),
+    );
     // Archive the conversations here rather than through the sync's time
     // heuristic: a session ending as the workspace stops bumps a thread past
     // the deletion time, which would leave it active.
     yield* archiveThreadsIn(scopes);
     yield* syncNow;
     return { trashed: target.kind, name: target.name } satisfies TrellisTrashProjectResult;
+  });
+
+  const restoreConflicts = Effect.fn("TrellisCatalog.restoreConflicts")(function* (
+    input: TrellisRestoreConflictsInput,
+  ) {
+    const none: TrellisRestoreConflicts = { running: [], later: [] };
+    const projection = yield* orchestrator.getThreadProjection(input.threadId);
+    // The checkpoint a revert of this turn count restores, as clients pick it.
+    const checkpoint =
+      input.checkpointId !== undefined
+        ? projection.checkpoints.find((candidate) => candidate.id === input.checkpointId)
+        : projection.checkpoints.findLast((candidate) =>
+            input.turnCount === 0
+              ? candidate.ordinalWithinScope === 0 && candidate.appRunOrdinal === null
+              : candidate.appRunOrdinal === input.turnCount,
+          );
+    const scope = projection.checkpointScopes.find(
+      (candidate) => candidate.id === checkpoint?.scopeId,
+    );
+    if (checkpoint === undefined || scope === undefined) return none;
+    const restoreScope = yield* restoreScopeOf(trellis, scope.cwd);
+    if (restoreScope === null) return none;
+    return yield* restoreConflictsIn(
+      trellis,
+      {
+        shell: orchestrator.getShellSnapshot(),
+        records: (threadId) => orchestrator.getThreadProjection(threadId),
+        projectRoot: (projectId) =>
+          projectStore.get(projectId).pipe(
+            Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot),
+            Effect.orElseSucceed(() => undefined),
+          ),
+      },
+      { threadId: input.threadId, scopePath: restoreScope.path, since: checkpoint.capturedAt },
+    );
   });
 
   // Restoring also unarchives the conversations archived when the item went
@@ -1072,6 +1117,8 @@ const make = Effect.gen(function* () {
     restore: (input) => restore(input).pipe(asTrellisError("Could not restore it")),
     emptyTrash: requireReady.pipe(Effect.andThen(trellis.emptyTrash)),
     find: (query) => find(query).pipe(asTrellisError("Trellis find failed")),
+    restoreConflicts: (input) =>
+      restoreConflicts(input).pipe(asTrellisError("Could not check the restore")),
   });
 });
 

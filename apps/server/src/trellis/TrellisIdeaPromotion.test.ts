@@ -60,6 +60,7 @@ const FakeCatalog = Layer.effect(
       syncNow: Effect.die("unused"),
       status: Effect.die("unused"),
       newIdea: unused,
+      restoreConflicts: unused,
       prepareIdeaDraft: Effect.die("unused"),
       trashProject: unused,
       listTrash: Effect.die("unused"),

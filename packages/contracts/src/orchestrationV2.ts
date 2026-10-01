@@ -2760,6 +2760,11 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),
     restoreFiles: Schema.optional(Schema.Boolean),
+    /**
+     * Other threads whose later work in a shared workspace the user agreed to
+     * undo. A restore rule that names such threads refuses without them.
+     */
+    acknowledgeThreads: Schema.optional(Schema.Array(ThreadId)),
     commandId: CommandId,
     threadId: ThreadId,
     scopeId: CheckpointScopeId,

@@ -203,6 +203,8 @@ export interface DismissThreadUserInputInput extends ThreadCommandInput {
 
 export interface RevertThreadCheckpointInput extends ThreadCommandInput {
   readonly restoreFiles?: boolean;
+  /** Other threads whose later work the user agreed the file restore undoes. */
+  readonly acknowledgeThreads?: ReadonlyArray<ThreadId>;
   readonly checkpointId?: string;
   readonly scopeId?: string;
   readonly turnCount?: number;
@@ -860,6 +862,9 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
       return yield* dispatch({
         type: "checkpoint.rollback",
         ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
+        ...(input.acknowledgeThreads === undefined
+          ? {}
+          : { acknowledgeThreads: input.acknowledgeThreads }),
         commandId: yield* allocateCommandId(input),
         threadId: input.threadId,
         scopeId: CheckpointScopeId.make(input.scopeId),
@@ -889,6 +894,9 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
     return yield* dispatch({
       type: "checkpoint.rollback",
       ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
+      ...(input.acknowledgeThreads === undefined
+        ? {}
+        : { acknowledgeThreads: input.acknowledgeThreads }),
       commandId: yield* allocateCommandId(input),
       threadId: input.threadId,
       scopeId: checkpoint.scopeId,

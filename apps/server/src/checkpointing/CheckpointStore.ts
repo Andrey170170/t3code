@@ -17,8 +17,9 @@ import { VcsUnsupportedOperationError, type CheckpointRef } from "@t3tools/contr
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import type * as Scope from "effect/Scope";
 
-import type { CheckpointStoreError } from "./Errors.ts";
+import { CheckpointSnapshotUnavailableError, type CheckpointStoreError } from "./Errors.ts";
 import type { VcsCheckpointOps } from "../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 
@@ -42,6 +43,21 @@ export interface DiffCheckpointsInput {
   readonly format?: "patch" | "numstat";
 }
 
+export interface RestoreCheckpointResult {
+  readonly restored: boolean;
+  /** What the user should know about the restore, such as how to undo it. */
+  readonly notice?: string;
+}
+
+export interface CheckpointReservation {
+  /**
+   * A directory whose provider processes the restore ends (it replaces the
+   * whole environment), so their sessions must be released before it; null
+   * when the restore only rewrites files.
+   */
+  readonly endsSessionsIn: string | null;
+}
+
 export interface DeleteCheckpointRefsInput {
   readonly cwd: string;
   readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
@@ -53,6 +69,17 @@ export class CheckpointStore extends Context.Service<
   {
     /** Check whether cwd is inside a Git worktree. */
     readonly isGitRepository: (cwd: string) => Effect.Effect<boolean, CheckpointStoreError>;
+
+    /** Whether turns in cwd get checkpoints; for this store, a Git worktree. */
+    readonly isCheckpointable: (cwd: string) => Effect.Effect<boolean, CheckpointStoreError>;
+
+    /**
+     * Confirms a checkpoint can still be restored and keeps it that way until
+     * the surrounding scope closes. Fails when it is gone.
+     */
+    readonly reserve: (
+      input: Omit<RestoreCheckpointInput, "fallbackToHead">,
+    ) => Effect.Effect<CheckpointReservation, CheckpointStoreError, Scope.Scope>;
 
     /**
      * Capture a checkpoint commit and store it at the provided checkpoint ref.
@@ -69,13 +96,14 @@ export class CheckpointStore extends Context.Service<
     ) => Effect.Effect<boolean, CheckpointStoreError>;
 
     /**
-     * Restore workspace and staging state to a checkpoint.
+     * Restore workspace and staging state to a checkpoint. `restored` is false
+     * when the checkpoint is unavailable; `notice` is shown in the thread.
      *
      * Optionally falls back to current `HEAD` when the checkpoint ref is missing.
      */
     readonly restoreCheckpoint: (
       input: RestoreCheckpointInput,
-    ) => Effect.Effect<boolean, CheckpointStoreError>;
+    ) => Effect.Effect<RestoreCheckpointResult, CheckpointStoreError>;
 
     /**
      * Compute a diff between two checkpoint refs. Defaults to a full patch.
@@ -122,6 +150,17 @@ export const make = Effect.gen(function* () {
       .detect({ cwd, requestedKind: "git" })
       .pipe(Effect.map((repository) => repository !== null));
 
+  const reserve: CheckpointStore["Service"]["reserve"] = Effect.fn("reserve")(function* (input) {
+    const checkpoints = yield* resolveCheckpoints("CheckpointStore.reserve", input.cwd);
+    if (!(yield* checkpoints.hasCheckpointRef(input))) {
+      return yield* new CheckpointSnapshotUnavailableError({
+        checkpointRef: input.checkpointRef,
+        detail: "the checkpoint ref no longer exists.",
+      });
+    }
+    return { endsSessionsIn: null } satisfies CheckpointReservation;
+  });
+
   const captureCheckpoint: CheckpointStore["Service"]["captureCheckpoint"] = Effect.fn(
     "captureCheckpoint",
   )(function* (input) {
@@ -140,7 +179,7 @@ export const make = Effect.gen(function* () {
     "restoreCheckpoint",
   )(function* (input) {
     const checkpoints = yield* resolveCheckpoints("CheckpointStore.restoreCheckpoint", input.cwd);
-    return yield* checkpoints.restoreCheckpoint(input);
+    return { restored: yield* checkpoints.restoreCheckpoint(input) };
   });
 
   const diffCheckpoints: CheckpointStore["Service"]["diffCheckpoints"] = Effect.fn(
@@ -162,6 +201,8 @@ export const make = Effect.gen(function* () {
 
   return CheckpointStore.of({
     isGitRepository,
+    isCheckpointable: isGitRepository,
+    reserve,
     captureCheckpoint,
     hasCheckpointRef,
     restoreCheckpoint,

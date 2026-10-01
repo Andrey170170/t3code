@@ -189,7 +189,24 @@ export const make = Effect.gen(function* () {
           fallbackFromToHead: false,
           ignoreWhitespace,
         })
-        .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"));
+        .pipe(
+          // A checkpoint whose stored state is gone (a removed workspace
+          // snapshot) is unavailable like a missing ref.
+          Effect.catchTag("CheckpointSnapshotUnavailableError", (error) =>
+            Effect.fail(
+              new CheckpointRefUnavailableError({
+                operation,
+                threadId: input.threadId,
+                turnCount:
+                  error.checkpointRef === fromCheckpointRef
+                    ? input.fromTurnCount
+                    : input.toTurnCount,
+                checkpoint: error.checkpointRef === fromCheckpointRef ? "from" : "to",
+              }),
+            ),
+          ),
+          Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"),
+        );
 
       const turnDiff = buildTurnDiffResult(input, diff);
       if (!isTurnDiffResult(turnDiff)) {

@@ -7,9 +7,12 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -23,6 +26,7 @@ import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexA
 import { layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import { TurnAdmission } from "../orchestration-v2/TurnAdmission.ts";
 import type { ProviderAdapterV2Shape } from "../orchestration-v2/ProviderAdapter.ts";
 import {
   OrchestrationV2EventSinkLayerLive,
@@ -45,6 +49,14 @@ import {
   type TrellisWorkspaceView,
 } from "./Trellis.ts";
 import * as TrellisCatalog from "./TrellisCatalog.ts";
+import * as TrellisRestore from "./TrellisRestore.ts";
+
+interface CatalogState {
+  items: Array<TrellisProjectView>;
+  trashed: Array<string>;
+  readonly trashStarted?: Deferred.Deferred<void>;
+  readonly trashRelease?: Deferred.Deferred<void>;
+}
 
 const ROOT = "/trellis";
 const SCRATCH = `${ROOT}/workspaces/ws-scratch/project`;
@@ -535,8 +547,11 @@ describe("TrellisCatalog service", () => {
     }));
   };
 
-  /** A Trellis whose catalog is `state`; trash and restore edit it. */
-  const fakeTrellis = (state: { items: Array<TrellisProjectView>; trashed: Array<string> }) =>
+  /**
+   * A Trellis whose catalog is `state`; trash and restore edit it. A trash
+   * reports `trashStarted` and waits for `trashRelease` when they are given.
+   */
+  const fakeTrellis = (state: CatalogState) =>
     makeTestTrellis({
       env: { root: ROOT, bin: "trellis", shimDir: "/shims" },
       listProjects: ({ all }) =>
@@ -547,7 +562,10 @@ describe("TrellisCatalog service", () => {
         ),
       listWorkspaces: () => Effect.succeed([]),
       trashProject: (id) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
+          if (state.trashStarted !== undefined)
+            yield* Deferred.succeed(state.trashStarted, undefined);
+          if (state.trashRelease !== undefined) yield* Deferred.await(state.trashRelease);
           state.trashed.push(id);
           state.items = state.items.map((item) =>
             item.id === id ? { ...item, deleted_at: 0 } : item,
@@ -650,7 +668,7 @@ describe("TrellisCatalog service", () => {
     }),
   );
 
-  const catalogLayer = (state: { items: Array<TrellisProjectView>; trashed: Array<string> }) =>
+  const catalogLayer = (state: CatalogState) =>
     TrellisCatalog.layer.pipe(
       Layer.provideMerge(
         Layer.mergeAll(
@@ -661,7 +679,8 @@ describe("TrellisCatalog service", () => {
       ),
       Layer.provideMerge(projectCommandsLayer),
       Layer.provideMerge(ProjectStore.layer),
-      Layer.provide(Layer.succeed(Trellis, fakeTrellis(state))),
+      Layer.provideMerge(TrellisRestore.gateLayer),
+      Layer.provideMerge(Layer.succeed(Trellis, fakeTrellis(state))),
       Layer.provide(Layer.mock(OrchestrationEventStore)({})),
       Layer.provide(mcpSessionRegistryTestLayer),
       Layer.provide(SqlitePersistenceMemory),
@@ -825,6 +844,40 @@ describe("TrellisCatalog service", () => {
         yield* catalog.restore({ kind: "workspace", id: "ws-f" });
         assert.isNull(yield* archivedAt(inFork));
         assert.isNotNull(yield* archivedAt(inPrimary));
+      }),
+    );
+  });
+  const raceState: CatalogState = {
+    items: [dedicated("prj-race", "Race", [workspace("ws-race")])],
+    trashed: [],
+    trashStarted: Deferred.makeUnsafe<void>(),
+    trashRelease: Deferred.makeUnsafe<void>(),
+  };
+
+  effectIt.layer(catalogLayer(raceState))("trash against turn admission", (it) => {
+    it.effect("a turn starting during a trash waits until the trash is done", () =>
+      Effect.gen(function* () {
+        const catalog = yield* TrellisCatalog.TrellisCatalog;
+        yield* catalog.syncNow;
+        const project = (yield* projectIdAt(`${ROOT}/workspaces/ws-race/project`))!;
+        const trashing = yield* Effect.forkChild(catalog.trashProject(project.projectId));
+        // Past the busy check, before Trellis finished the trash.
+        yield* Deferred.await(raceState.trashStarted!);
+        const turn = yield* Effect.forkChild(
+          Effect.flatMap(TurnAdmission, (admission) =>
+            admission.start({
+              threadId: ThreadId.make("race-thread"),
+              runId: RunId.make("race-run"),
+              cwd: `${ROOT}/workspaces/ws-race/project/src`,
+            }),
+          ).pipe(Effect.provide(TrellisRestore.layer)),
+        );
+        yield* Effect.yieldNow;
+        assert.isUndefined(turn.pollUnsafe());
+        yield* Deferred.succeed(raceState.trashRelease!, undefined);
+        yield* Fiber.join(trashing);
+        assert.isTrue(yield* Fiber.join(turn));
+        assert.deepEqual(raceState.trashed, ["prj-race"]);
       }),
     );
   });

@@ -37,3 +37,12 @@ export function trellisWorkspaceIdOf(root: string, path: string): string | null 
 export function isTrellisManagedPath(root: string, path: string): boolean {
   return trellisWorkspaceIdOf(root, path) !== null;
 }
+
+/** True when one absolute path is the other or contains it (trailing slashes ignored). */
+export function pathsOverlap(left: string, right: string): boolean {
+  const trim = (path: string) => (path.length > 1 ? path.replace(/\/+$/, "") : path);
+  const inside = (path: string, root: string) =>
+    path === root || path.startsWith(root === "/" ? root : `${root}/`);
+  const [a, b] = [trim(left), trim(right)];
+  return inside(a, b) || inside(b, a);
+}

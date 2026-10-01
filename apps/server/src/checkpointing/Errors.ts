@@ -82,7 +82,39 @@ export class CheckpointRefUnavailableError extends Schema.TaggedError<Checkpoint
   }
 }
 
-export type CheckpointStoreError = VcsError;
+/**
+ * A checkpoint's stored state is gone (for example a workspace snapshot that
+ * retention removed), so it can no longer be read or restored.
+ */
+export class CheckpointSnapshotUnavailableError extends Schema.TaggedError<CheckpointSnapshotUnavailableError>()(
+  "CheckpointSnapshotUnavailableError",
+  {
+    checkpointRef: Schema.String,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Checkpoint ${this.checkpointRef} is unavailable: ${this.detail}`;
+  }
+}
+
+/** The service that keeps checkpoints outside Git (Trellis) failed an operation. */
+export class CheckpointBackendError extends Schema.TaggedError<CheckpointBackendError>()(
+  "CheckpointBackendError",
+  {
+    operation: Schema.String,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Checkpoint ${this.operation} failed: ${this.detail}`;
+  }
+}
+
+export type CheckpointStoreError =
+  | VcsError
+  | CheckpointSnapshotUnavailableError
+  | CheckpointBackendError;
 
 export type CheckpointServiceError =
   | CheckpointStoreError

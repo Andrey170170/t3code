@@ -8,6 +8,8 @@ import {
   TrellisIdeaDraftTarget,
   TrellisNewIdeaInput,
   TrellisNewProjectInput,
+  TrellisRestoreConflicts,
+  TrellisRestoreConflictsInput,
   TrellisRestoreInput,
   TrellisRestoreResult,
   TrellisStatus,
@@ -378,6 +380,7 @@ export const WS_METHODS = {
   trellisEmptyTrash: "trellis.emptyTrash",
   trellisNewProject: "trellis.newProject",
   trellisFind: "trellis.find",
+  trellisRestoreConflicts: "trellis.restoreConflicts",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1236,6 +1239,12 @@ const WsTrellisFindRpc = Rpc.make(WS_METHODS.trellisFind, {
   error: TrellisRpcError,
 });
 
+const WsTrellisRestoreConflictsRpc = Rpc.make(WS_METHODS.trellisRestoreConflicts, {
+  payload: TrellisRestoreConflictsInput,
+  success: TrellisRestoreConflicts,
+  error: TrellisRpcError,
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1857,6 +1866,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsTrellisEmptyTrashRpc,
   WsTrellisNewProjectRpc,
   WsTrellisFindRpc,
+  WsTrellisRestoreConflictsRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,

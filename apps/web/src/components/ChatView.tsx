@@ -48,6 +48,7 @@ import { useAttachmentUploadStore } from "../lib/attachmentUploadQueue";
 import {
   type AssistantCitation,
   type ChatFileAttachment,
+  CheckpointId,
   CommandId,
   DEFAULT_MODEL,
   isProviderNativeSubagentThread,
@@ -518,7 +519,7 @@ import {
   shouldRefocusComposerOnWindowFocus,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
-import { useTrellisRoot } from "~/hooks/useTrellis";
+import { useTrellisRestoreCheck, useTrellisRoot } from "~/hooks/useTrellis";
 import { isTrellisWorkspaceRoot } from "~/lib/trellis";
 import { useComposerHandleContext } from "../composerHandleContext";
 import {
@@ -1569,6 +1570,7 @@ export default function ChatView(props: ChatViewProps) {
   const dismissThreadUserInput = useAtomCommand(threadEnvironment.dismissUserInput, {
     reportFailure: false,
   });
+  const checkTrellisRestore = useTrellisRestoreCheck();
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
     reportFailure: false,
   });
@@ -7700,6 +7702,24 @@ export default function ChatView(props: ChatViewProps) {
         setPendingRevert({ turnCount, messageId, routeThreadKey });
         return;
       }
+      let acknowledgeThreads: ReadonlyArray<ThreadId> = [];
+      if (restoreFiles) {
+        try {
+          const acknowledged = await checkTrellisRestore(
+            environmentId,
+            { threadId: activeThread.id, turnCount },
+            (message) => localApi.dialogs.confirm(message),
+          );
+          if (acknowledged === null) return;
+          acknowledgeThreads = acknowledged;
+        } catch (error) {
+          setThreadError(
+            activeThread.id,
+            error instanceof Error ? error.message : "Failed to revert thread state.",
+          );
+          return;
+        }
+      }
 
       useComposerDraftStore.setState((store) => ({
         rewindingThreadKeys: new Set(store.rewindingThreadKeys).add(routeThreadKey),
@@ -7731,7 +7751,13 @@ export default function ChatView(props: ChatViewProps) {
         await waitForRevertedMessage(routeThreadRef, messageId, turnCount, commandId, async () => {
           const result = await revertThreadCheckpoint({
             environmentId,
-            input: { commandId, threadId: activeThread.id, turnCount, restoreFiles },
+            input: {
+              commandId,
+              threadId: activeThread.id,
+              turnCount,
+              restoreFiles,
+              ...(acknowledgeThreads.length === 0 ? {} : { acknowledgeThreads }),
+            },
           });
           if (result._tag === "Failure") throw squashAtomCommandFailure(result);
         });
@@ -7826,6 +7852,23 @@ export default function ChatView(props: ChatViewProps) {
               "Roll back this thread to the selected checkpoint?\nThis action cannot be undone.",
             );
       if (!confirmed) return;
+      let acknowledgeThreads: ReadonlyArray<ThreadId> = [];
+      try {
+        const acknowledged = await checkTrellisRestore(
+          environmentId,
+          { threadId: activeThread.id, checkpointId: CheckpointId.make(input.checkpointId) },
+          async (message) =>
+            localApi == null ? window.confirm(message) : localApi.dialogs.confirm(message),
+        );
+        if (acknowledged === null) return;
+        acknowledgeThreads = acknowledged;
+      } catch (error) {
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to revert thread state.",
+        );
+        return;
+      }
 
       useComposerDraftStore.setState((store) => ({
         rewindingThreadKeys: new Set(store.rewindingThreadKeys).add(routeThreadKey),
@@ -7837,6 +7880,7 @@ export default function ChatView(props: ChatViewProps) {
           threadId: activeThread.id,
           checkpointId: input.checkpointId,
           scopeId: input.scopeId,
+          ...(acknowledgeThreads.length === 0 ? {} : { acknowledgeThreads }),
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {

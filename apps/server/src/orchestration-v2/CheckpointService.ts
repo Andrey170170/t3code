@@ -17,6 +17,7 @@ import * as Encoding from "effect/Encoding";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 
 import { parseTurnDiffFilesFromNumstat } from "../checkpointing/Diffs.ts";
@@ -90,6 +91,19 @@ export class CheckpointRestoreError extends Schema.TaggedError<CheckpointRestore
   }
 }
 
+export class CheckpointReserveError extends Schema.TaggedError<CheckpointReserveError>()(
+  "CheckpointReserveError",
+  {
+    scopeId: CheckpointScopeId,
+    checkpointId: CheckpointId,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Checkpoint ${this.checkpointId} for scope ${this.scopeId} can no longer be restored.`;
+  }
+}
+
 export class CheckpointDeleteStaleRefsError extends Schema.TaggedError<CheckpointDeleteStaleRefsError>()(
   "CheckpointDeleteStaleRefsError",
   {
@@ -109,6 +123,7 @@ export const CheckpointServiceV2Error = Schema.Union([
   CheckpointBaselineCaptureError,
   CheckpointCaptureError,
   CheckpointRestoreError,
+  CheckpointReserveError,
   CheckpointDeleteStaleRefsError,
 ]);
 export type CheckpointServiceV2Error = typeof CheckpointServiceV2Error.Type;
@@ -143,10 +158,19 @@ export interface CheckpointServiceV2Shape {
     readonly appRunOrdinal: number | null;
     readonly capturedAt: DateTime.Utc;
   }) => Effect.Effect<OrchestrationV2Checkpoint, CheckpointServiceV2Error>;
+  /**
+   * Confirms the checkpoint can still be restored and keeps it so until the
+   * surrounding scope closes. Takes no lock: a rollback reserves before it
+   * rewinds the conversation, beneath its restore lease.
+   */
+  readonly reserve: (input: {
+    readonly scope: OrchestrationV2CheckpointScope;
+    readonly checkpoint: OrchestrationV2Checkpoint;
+  }) => Effect.Effect<CheckpointStore.CheckpointReservation, CheckpointReserveError, Scope.Scope>;
   readonly restore: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly checkpoint: OrchestrationV2Checkpoint;
-  }) => Effect.Effect<void, CheckpointServiceV2Error>;
+  }) => Effect.Effect<{ readonly notice: string | null }, CheckpointServiceV2Error>;
   readonly deleteStaleRefs: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly checkpoints: ReadonlyArray<OrchestrationV2Checkpoint>;
@@ -273,8 +297,8 @@ export const layer: Layer.Layer<
     const withWorkspaceLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
       Effect.flatMap(getWorkspaceSemaphore(cwd), (semaphore) => semaphore.withPermits(1)(effect));
 
-    const isGitCheckpointable = (cwd: string) =>
-      checkpointStore.isGitRepository(cwd).pipe(Effect.orElseSucceed(() => false));
+    const isCheckpointable = (cwd: string) =>
+      checkpointStore.isCheckpointable(cwd).pipe(Effect.orElseSucceed(() => false));
 
     const ensureScope: CheckpointServiceV2Shape["ensureScope"] = (scope) => Effect.succeed(scope);
 
@@ -282,7 +306,7 @@ export const layer: Layer.Layer<
       withWorkspaceLock(
         input.scope.cwd,
         Effect.gen(function* () {
-          if (!(yield* isGitCheckpointable(input.scope.cwd))) {
+          if (!(yield* isCheckpointable(input.scope.cwd))) {
             return;
           }
 
@@ -327,7 +351,7 @@ export const layer: Layer.Layer<
               scopeId: input.scope.id,
               ordinalWithinScope: input.ordinalWithinScope,
             });
-            const checkpointable = yield* isGitCheckpointable(input.scope.cwd);
+            const checkpointable = yield* isCheckpointable(input.scope.cwd);
             const available = checkpointable
               ? yield* checkpointStore
                   .hasCheckpointRef({
@@ -392,7 +416,7 @@ export const layer: Layer.Layer<
             ordinalWithinScope: Math.max(0, input.ordinalWithinScope - 1),
           });
 
-          if (!(yield* isGitCheckpointable(input.scope.cwd))) {
+          if (!(yield* isCheckpointable(input.scope.cwd))) {
             return makeCheckpoint({
               id: checkpointId,
               scope: input.scope,
@@ -519,18 +543,19 @@ export const layer: Layer.Layer<
             });
           }
 
-          const restored = yield* checkpointStore.restoreCheckpoint({
+          const result = yield* checkpointStore.restoreCheckpoint({
             cwd: input.scope.cwd,
             checkpointRef: input.checkpoint.ref,
             fallbackToHead: false,
           });
-          if (!restored) {
+          if (!result.restored) {
             return yield* new CheckpointRestoreError({
               scopeId: input.scope.id,
               checkpointId: input.checkpoint.id,
               cause: "Checkpoint ref is unavailable.",
             });
           }
+          return { notice: result.notice ?? null };
         }),
       ).pipe(
         Effect.mapError((cause) =>
@@ -541,6 +566,18 @@ export const layer: Layer.Layer<
                 checkpointId: input.checkpoint.id,
                 cause,
               }),
+        ),
+      );
+
+    const reserve: CheckpointServiceV2Shape["reserve"] = (input) =>
+      checkpointStore.reserve({ cwd: input.scope.cwd, checkpointRef: input.checkpoint.ref }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new CheckpointReserveError({
+              scopeId: input.scope.id,
+              checkpointId: input.checkpoint.id,
+              cause,
+            }),
         ),
       );
 
@@ -578,6 +615,7 @@ export const layer: Layer.Layer<
       captureBaseline,
       materializeBaselineCheckpoint,
       capture,
+      reserve,
       restore,
       deleteStaleRefs,
     } satisfies CheckpointServiceV2Shape);

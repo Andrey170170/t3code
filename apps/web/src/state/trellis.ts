@@ -51,6 +51,10 @@ export const trellisEnvironment = {
     label: "environment-data:trellis:restore",
     tag: WS_METHODS.trellisRestore,
   }),
+  restoreConflicts: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:restore-conflicts",
+    tag: WS_METHODS.trellisRestoreConflicts,
+  }),
   emptyTrash: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:empty-trash",
     tag: WS_METHODS.trellisEmptyTrash,

@@ -244,13 +244,17 @@ export class Trellis extends Context.Service<
     readonly listSnapshots: (
       target: string,
     ) => Effect.Effect<ReadonlyArray<TrellisSnapshot>, TrellisError>;
+    /** A `turn` snapshot of the target's workspace, tagged with `turn` (and `thread`). */
     readonly createSnapshot: (input: {
       readonly target: string;
-      readonly thread: string;
+      readonly thread?: string | undefined;
       readonly turn: string;
     }) => Effect.Effect<TrellisSnapshot, TrellisError>;
-    /** Pins a snapshot so thinning keeps it. */
-    readonly pinSnapshot: (id: string) => Effect.Effect<void, TrellisError>;
+    /** Pins or unpins a snapshot; thinning keeps pinned ones. Fails when it is gone. */
+    readonly setSnapshotPinned: (
+      id: string,
+      pinned: boolean,
+    ) => Effect.Effect<TrellisSnapshot, TrellisError>;
     /** Moves a project (with all its workspaces) to the trash. */
     readonly trashProject: (id: string) => Effect.Effect<void, TrellisError>;
     /** Moves one fork to the trash; the last one trashes its project. */
@@ -606,15 +610,15 @@ const make = Effect.gen(function* () {
       call(Schema.Array(TrellisSnapshot), "GET", `/v1/snapshots?${query({ target })}`),
     createSnapshot: ({ target, thread, turn }) =>
       call(TrellisSnapshot, "POST", "/v1/snapshots", {
-        body: { target, kind: "turn", thread, turn },
+        body: { target, kind: "turn", turn, ...(thread === undefined ? {} : { thread }) },
         // Btrfs snapshots take milliseconds; these run on the shared
         // checkpoint worker, so a hung Trellis must not stall other threads.
         timeoutMs: 15_000,
       }),
-    pinSnapshot: (id) =>
+    setSnapshotPinned: (id, pinned) =>
       call(TrellisSnapshot, "PATCH", `/v1/snapshots/${encodeURIComponent(id)}`, {
-        body: { pinned: true },
-      }).pipe(Effect.asVoid),
+        body: { pinned },
+      }),
     trashProject: (id) =>
       call(Schema.Unknown, "DELETE", `/v1/projects/${encodeURIComponent(id)}`).pipe(Effect.asVoid),
     trashWorkspace: (id) =>
@@ -747,7 +751,7 @@ export function makeTestTrellis(
     resolve: unused,
     listSnapshots: unused,
     createSnapshot: unused,
-    pinSnapshot: () => Effect.void,
+    setSnapshotPinned: unused,
     trashProject: unused,
     trashWorkspace: unused,
     restoreProject: unused,

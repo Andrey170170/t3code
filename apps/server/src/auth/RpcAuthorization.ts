@@ -151,6 +151,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.trellisEmptyTrash]: AuthOrchestrationOperateScope,
   [WS_METHODS.trellisNewProject]: AuthOrchestrationOperateScope,
   [WS_METHODS.trellisFind]: AuthOrchestrationReadScope,
+  [WS_METHODS.trellisRestoreConflicts]: AuthOrchestrationReadScope,
   [WS_METHODS.assetsCreateUrl]: AuthOrchestrationReadScope,
   [WS_METHODS.assetsPersistChatAttachments]: AuthOrchestrationOperateScope,
   [WS_METHODS.attachmentsCreateUploadUrl]: AuthOrchestrationOperateScope,

@@ -20,7 +20,7 @@ export interface RestoreLeaseShape {
  * `CheckpointServiceV2.restore` takes the per-cwd checkpoint semaphore itself
  * beneath it, so reusing that semaphore here would deadlock every rollback.
  */
-function makeCwdRestoreLease(): RestoreLeaseShape {
+export function makeCwdRestoreLease(): RestoreLeaseShape {
   const gates = new Map<string, { readonly gate: Semaphore.Semaphore; holders: number }>();
   return {
     acquire: (scope) =>
