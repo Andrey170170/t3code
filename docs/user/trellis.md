@@ -57,8 +57,8 @@ but not restore its files. A thread that is working, or a fork that has not run 
 
 **Graduate idea** in the command palette, or **Graduate** in an idea's project settings, turns an
 idea into a project with its own Trellis workspace, from a base you pick, starting with a copy of the
-idea's folder. Every active thread of the idea moves there with its conversation and is told where it
-now works. Packages installed while it was an idea do not come along; `trellis changes --graduation`
+idea's folder. Every active thread of the idea moves there with its conversation; the thread shows the
+move, and a thread whose turn the graduation ended continues there on its own. Packages installed while it was an idea do not come along; `trellis changes --graduation`
 in the project lists them. Graduating is refused while a thread of the idea is working; an agent can
 graduate its own idea with the `trellis_graduate` tool, which ends its turn and continues it in the
 new project. An idea graduated with `trellis graduate` on the command line has its threads moved

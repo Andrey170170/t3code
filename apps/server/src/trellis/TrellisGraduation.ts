@@ -18,8 +18,9 @@
  * 4. create the new project's T3 project and move each of the idea's active
  *    threads there; a thread that started a turn after all is left to the
  *    catalog, which moves it once that turn has ended;
- * 5. continue each moved thread with where it now is (the placeholders get
- *    the outcome) and resume the queues.
+ * 5. continue the threads whose turns it ended with where they now are (the
+ *    placeholders get the outcome) and resume the queues. Idle threads only
+ *    move: the move's notice in the thread says where, and no turn starts.
  *
  * A graduation from the CLI (`trellis graduate`) is followed by the catalog
  * sync instead, without continuations.
@@ -118,11 +119,6 @@ function workerContinuation(lead: string, outcome: Outcome): string {
   return outcome.ok
     ? `[trellis_graduate] Your turn was ended because "${lead}" graduated this idea into the project "${outcome.project.name}"; this thread moved there and now works in ${outcome.project.workspaceRoot}. ${ENVIRONMENT_NOTE} Continue where you left off.`
     : `[trellis_graduate] Your turn was ended because "${lead}" was graduating this idea, which did not happen; nothing moved. Continue where you left off.`;
-}
-
-/** The note to a thread of the idea that was idle when it moved. */
-function movedNote(project: TrellisCreateResult): string {
-  return `[trellis_graduate] This idea graduated into the project "${project.name}", its own Trellis workspace; this thread moved there and now works in ${project.workspaceRoot}. ${ENVIRONMENT_NOTE} Nothing else is needed now; reply briefly and wait for the next message.`;
 }
 
 const STOPPED: Outcome = { ok: false, error: "the graduation stopped unexpectedly" };
@@ -350,7 +346,6 @@ const make = Effect.gen(function* () {
       const moveThreads = (to: ProjectId) =>
         Effect.gen(function* () {
           const current = yield* threads.getShellSnapshot({ location: "active" });
-          const moved: Array<OrchestrationV2ThreadShell> = [];
           const notMoved: Array<string> = [];
           for (const thread of current.threads) {
             if (thread.projectId !== input.ideaProjectId) continue;
@@ -368,10 +363,7 @@ const make = Effect.gen(function* () {
               result._tag === "Success" ||
               (yield* threads.getThreadShell(thread.id).pipe(Effect.orElseSucceed(() => null)))
                 ?.projectId === to;
-            if (there) {
-              moved.push(thread);
-              continue;
-            }
+            if (there) continue;
             yield* Effect.logWarning("trellis graduation left a thread for the catalog", {
               threadId: thread.id,
               detail:
@@ -381,7 +373,7 @@ const make = Effect.gen(function* () {
             });
             notMoved.push(thread.title);
           }
-          return { moved, notMoved };
+          return notMoved;
         });
 
       const run = Effect.gen(function* () {
@@ -443,7 +435,6 @@ const make = Effect.gen(function* () {
                 ),
               );
         let outcome: Outcome;
-        let moved: ReadonlyArray<OrchestrationV2ThreadShell> = [];
         if (!graduated.ok) {
           let reason = graduated.error;
           for (const [id, title] of titles) reason = reason.replaceAll(id, `"${title}"`);
@@ -458,18 +449,15 @@ const make = Effect.gen(function* () {
               error: `the idea graduated, but its T3 project could not be created yet (${created.failure.message}); its threads move there shortly`,
             };
           } else {
-            const result = yield* moveThreads(created.success.projectId);
-            moved = result.moved;
-            outcome = { ok: true, project: created.success, notMoved: result.notMoved };
+            const notMoved = yield* moveThreads(created.success.projectId);
+            outcome = { ok: true, project: created.success, notMoved };
           }
         }
 
         // A run whose interrupt did not land settles shortly.
         yield* awaitEnded;
         const callerText = callerContinuation(outcome, interrupted.map(nameOf));
-        const continued = new Set<ThreadId>();
         for (const threadId of new Set(ending.map((entry) => entry.threadId))) {
-          continued.add(threadId);
           const text =
             threadId === caller?.id
               ? callerText
@@ -499,15 +487,6 @@ const make = Effect.gen(function* () {
             failedQuietly("write the outcome into the continuation", threadId),
           );
           yield* resumeQueue(threadId).pipe(failedQuietly("resume the queue", threadId));
-        }
-        // The idea's other threads learn where they are now.
-        if (outcome.ok) {
-          for (const thread of moved) {
-            if (continued.has(thread.id)) continue;
-            yield* send(thread.id, outcome.project.projectId, movedNote(outcome.project)).pipe(
-              failedQuietly("tell a moved thread where it is", thread.id),
-            );
-          }
         }
         return outcome;
       }).pipe(

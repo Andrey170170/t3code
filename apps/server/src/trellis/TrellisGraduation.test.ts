@@ -218,7 +218,16 @@ it.effect("a tool call graduates the idea and continues each thread in the proje
     assert.include(leadText, 'graduated into the project "Demo"');
     assert.include(leadText, `now works in ${PROJECT}`);
     assert.include(leadText, "trellis changes --graduation");
-    assert.include(yield* continuationOf(idle), "this thread moved there");
+    // An idle thread only moves: no message, no turn.
+    const idleProjection = yield* projectionOf(idle);
+    assert.deepEqual(idleProjection.messages, []);
+    assert.deepEqual(idleProjection.runs, []);
+    // The moved thread with history shows the move without a turn.
+    assert.isTrue(
+      leadProjection.turnItems.some(
+        (item) => item.type === "system_notice" && item.message.startsWith("Moved to the project"),
+      ),
+    );
     // The caller's continuation runs next, in the project.
     assert.deepEqual(
       leadProjection.runs.map((candidate) => candidate.status),
@@ -319,7 +328,7 @@ it.effect("a graduation Trellis refuses continues the caller where it was, with 
   }).pipe(Effect.provide(graduationLayer(fake)));
 });
 
-it.effect("the Graduate action moves the idea's idle threads and names the project", () => {
+it.effect("the Graduate action moves the idea's idle threads without turns", () => {
   const fake = makeGraduationTrellis();
   return Effect.gen(function* () {
     const graduation = yield* TrellisGraduation.TrellisGraduation;
@@ -335,7 +344,8 @@ it.effect("the Graduate action moves the idea's idle threads and names the proje
     assert.deepEqual(fake.graduations, [{ base: "dev", thread: undefined }]);
     for (const threadId of [first.threadId, second]) {
       assert.equal((yield* projectionOf(threadId)).thread.projectId, NEW_PROJECT);
-      assert.include(yield* continuationOf(threadId), "this thread moved there");
+      // Idle threads only move: no turn is started for them.
+      assert.deepEqual((yield* projectionOf(threadId)).runs, []);
     }
     // A running thread refuses the action by name instead.
     const busy = yield* createThread("busy", IDEA);

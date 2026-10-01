@@ -44,6 +44,7 @@ import {
   RunId,
   ThreadLinkedPullRequest,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -3316,6 +3317,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             : { workspaceAssignment: workspaceAssignmentOf(thread) + 1 }),
         },
       });
+      // A thread with history shows where it went, without starting a turn.
+      if (projection.checkpointScopes.length > 0) {
+        yield* emitEvent({
+          type: "turn-item.updated",
+          threadId: command.threadId,
+          providerInstanceId: thread.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`turn-item:project-move:${command.commandId}`),
+            type: "system_notice",
+            message: `Moved to the project "${project.value.title}" (${project.value.workspaceRoot}). Earlier turns' files stay in the previous project: reverting them rewinds only the conversation.`,
+            threadId: command.threadId,
+            runId: null,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: yield* nextTurnItemOrdinal(projection),
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+          },
+        });
+      }
       const detail = "Project changed.";
       for (const session of projection.providerSessions) {
         if (session.status === "stopped" || session.status === "error") continue;

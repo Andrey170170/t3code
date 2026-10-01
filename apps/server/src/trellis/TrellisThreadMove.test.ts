@@ -234,6 +234,13 @@ it.layer(TrellisOrchestratorTestLayer)("thread.project.move", (it) => {
             [yield* scopeIdOf(1), projectPath, 1],
           ],
         );
+        // The move shows in the thread as a notice, not a turn.
+        const notice = after.turnItems.find((item) => item.type === "system_notice");
+        assert.include(
+          notice?.type === "system_notice" ? notice.message : "",
+          `Moved to the project "move-history-target-project" (${projectPath})`,
+        );
+        assert.isNull(notice?.runId);
         const second = after.runs.at(-1)!;
         const rootNode = after.nodes.find((node) => node.id === second.rootNodeId);
         assert.equal(rootNode?.checkpointScopeId, yield* scopeIdOf(1));

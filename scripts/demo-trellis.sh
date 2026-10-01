@@ -18,7 +18,7 @@
 set -uo pipefail
 
 die() { echo "error: $*" >&2; exit 1; }
-REPO=$(cd "$(dirname "$0")/.." && pwd)
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 OUT_BASE=$(realpath -m "${1:-/tmp/trellis-demo}")
 TRELLIS_DEV_ROOT=${TRELLIS_DEV_ROOT:-/trellis/dev-t3}
 TRELLIS_REPO=${TRELLIS_REPO:-$HOME/projects/trellis}
@@ -76,7 +76,7 @@ CURRENT_STEP=setup
 step() { CURRENT_STEP=$1; log "step $1: $2"; }
 print_checklist() {
   {
-    echo "Trellis parity demo, run $RUN_ID ($(git -C "$REPO" rev-parse --short HEAD)), Trellis $TRELLIS_DEV_ROOT"
+    echo "${DEMO_TITLE:-Trellis parity demo}, run $RUN_ID ($(git -C "$REPO" rev-parse --short HEAD)), Trellis $TRELLIS_DEV_ROOT"
     echo "Models: Claude steps $CLAUDE_MODEL_LABEL; Codex steps $CODEX_MODEL_LABEL (Codex default)"
     echo
     printf '%s\n' "${CHECKS[@]}"
@@ -247,6 +247,9 @@ item_at() { tr_ --json ls | jq -c --arg p "$1" '.[] | select(.path==$p)'; }
 last_reply() { sql "select json_extract(payload_json,'\$.text') from orchestration_v2_projection_messages where thread_id='$1' and role='assistant' order by created_at desc limit 1"; }
 provider_log() { cat "$HOME_DIR"/userdata/logs/provider/events."$1".log 2>/dev/null; }
 page_text() { pwc <<<'async page => await page.locator("body").innerText()' | jq -r .; }
+
+# Sourced for its helpers (scripts/demo-graduation.sh): stop before the steps.
+[[ ${DEMO_TRELLIS_HELPERS_ONLY:-} == 1 ]] && return 0
 
 # ---- start --------------------------------------------------------------
 log "out $OUT, work $WORK, Trellis $TRELLIS_DEV_ROOT"
