@@ -190,7 +190,8 @@ export class Trellis extends Context.Service<
     /**
      * `path` with symlinks resolved, so an alias of a workspace path is
      * classified as the workspace path it is; `path` itself when it cannot be
-     * resolved.
+     * resolved. A path inside a Trellis root is named under that root as
+     * Trellis names it, so a symlinked root still matches its paths.
      */
     readonly canonicalPath: (path: string) => Effect.Effect<string>;
     /** Whether the `trellis.enabled` setting is on. */
@@ -530,6 +531,23 @@ const make = Effect.gen(function* () {
     return [...new Set(roots)];
   });
 
+  const realPathOr = (path: string) =>
+    fileSystem.realPath(path).pipe(Effect.orElseSucceed(() => path));
+  // Resolved, then named under the first expected root that holds it as
+  // that root is named, so a symlinked root and its paths stay aligned.
+  const canonicalPath = (path: string) =>
+    Effect.gen(function* () {
+      const real = yield* realPathOr(path);
+      for (const root of yield* expectedRoots) {
+        const relative = NodePath.relative(yield* realPathOr(root), real);
+        if (relative === "") return root;
+        if (relative !== ".." && !relative.startsWith("../") && !NodePath.isAbsolute(relative)) {
+          return NodePath.join(root, relative);
+        }
+      }
+      return real;
+    });
+
   const connection = Effect.gen(function* () {
     const on = yield* enabled;
     const env = on ? yield* Ref.get(state) : null;
@@ -547,7 +565,7 @@ const make = Effect.gen(function* () {
     }),
     refresh,
     discover,
-    canonicalPath: (path) => fileSystem.realPath(path).pipe(Effect.orElseSucceed(() => path)),
+    canonicalPath,
     enabled,
     connection,
     expectedRoots,

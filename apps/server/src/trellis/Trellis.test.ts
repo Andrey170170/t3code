@@ -71,6 +71,8 @@ describe("Trellis client", () => {
       );
     return {
       requests,
+      dir,
+      layer,
       socketPath,
       bin,
       missingLayer: layer(NodePath.join(dir, "missing.sock")),
@@ -147,6 +149,40 @@ describe("Trellis client", () => {
       expect(harness.requests.map((request) => request.url)).toEqual(["/v1/status"]);
       expect(result.canonical).toBe(NodeFS.realpathSync(workspace));
       expect(result.missing).toBe(`${alias}-missing`);
+    }),
+  );
+
+  it.effect("names paths under a symlinked Trellis root as that root", () =>
+    Effect.gen(function* () {
+      const harness = setup(() => ({ body: {} }));
+      // `link` is the configured root; it points at the real one.
+      const link = `${harness.dir}-link`;
+      NodeFS.symlinkSync(harness.dir, link);
+      cleanup.push(() => NodeFS.rmSync(link, { force: true }));
+      const project = NodePath.join(harness.dir, "workspaces", "ws-1", "project");
+      NodeFS.mkdirSync(project, { recursive: true });
+      const alias = NodePath.join(harness.dir, "alias");
+      NodeFS.symlinkSync(project, alias);
+      const host = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-trellis-host-"));
+      cleanup.push(() => NodeFS.rmSync(host, { recursive: true, force: true }));
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        return {
+          real: yield* trellis.canonicalPath(project),
+          alias: yield* trellis.canonicalPath(alias),
+          host: yield* trellis.canonicalPath(host),
+          refused: yield* Trellis.refuseWorktreeIn(
+            Option.some(trellis),
+            alias,
+            (detail) => detail,
+          ).pipe(Effect.flip),
+        };
+      }).pipe(Effect.provide(harness.layer(NodePath.join(link, "state", "api.sock"), false)));
+      const linked = NodePath.join(link, "workspaces", "ws-1", "project");
+      expect(result.real).toBe(linked);
+      expect(result.alias).toBe(linked);
+      expect(result.host).toBe(NodeFS.realpathSync(host));
+      expect(result.refused).toBe(Trellis.TRELLIS_WORKTREE_REFUSAL);
     }),
   );
 
