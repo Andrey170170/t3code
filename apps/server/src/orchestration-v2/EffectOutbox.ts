@@ -3,6 +3,7 @@ import {
   CheckpointScopeId,
   CommandId,
   MessageId,
+  OrchestrationV2ProviderRef,
   ProviderSessionId,
   RunAttemptId,
   ProviderApprovalDecision,
@@ -34,6 +35,19 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     detail: Schema.optional(Schema.String),
     /** Set on terminal detaches (thread archive/delete): revoke the thread's MCP credentials. */
     revokeMcpCredential: Schema.optional(Schema.Boolean),
+    /**
+     * Provider threads the thread moved off this session, with the native
+     * refs they had on it, captured at dispatch: their rows already name the
+     * new session when the detach runs, yet they are unloaded from this one.
+     */
+    unloadProviderThreads: Schema.optional(
+      Schema.Array(
+        Schema.Struct({
+          providerThreadId: ProviderThreadId,
+          nativeThreadRef: OrchestrationV2ProviderRef,
+        }),
+      ),
+    ),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.start"),
