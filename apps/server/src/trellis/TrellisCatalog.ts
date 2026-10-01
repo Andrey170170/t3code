@@ -40,6 +40,7 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -359,12 +360,12 @@ export function trashItems(view: TrellisTrashView): ReadonlyArray<TrellisTrashIt
 /**
  * T3 project roots whose Trellis item is gone (trashed or graduated), from a
  * listing with `all`: every path of a non-live item, trashed forks of live
- * items, and workspaces Trellis reports as deleted. Clients hide such
- * projects once nothing in them is active.
+ * items, and `goneRoots` (workspaces Trellis reports as deleted, roots of
+ * purged items). Clients hide such projects once nothing in them is active.
  */
 export function retiredRoots(
   items: ReadonlyArray<TrellisProjectView>,
-  deletedWorkspaceRoots: ReadonlyArray<string>,
+  goneRoots: ReadonlyArray<string>,
 ): ReadonlyArray<string> {
   const live = new Set(
     desiredProjects(
@@ -388,7 +389,7 @@ export function retiredRoots(
       }
     }
   }
-  for (const root of deletedWorkspaceRoots) roots.add(normalizeRoot(root));
+  for (const root of goneRoots) roots.add(normalizeRoot(root));
   return [...roots].filter((root) => !live.has(root)).toSorted();
 }
 
@@ -442,6 +443,8 @@ export class TrellisCatalog extends Context.Service<
   }
 >()("t3/trellis/TrellisCatalog") {}
 
+const isTrellisError = Schema.is(TrellisError);
+
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
 
@@ -453,6 +456,7 @@ const make = Effect.gen(function* () {
   const applicationEvents = yield* OrchestrationEventStore;
   const crypto = yield* Crypto.Crypto;
   const serverConfig = yield* ServerConfig;
+  const fileSystem = yield* FileSystem.FileSystem;
   // An empty directory owned by T3, outside every Trellis path, so nothing
   // treats the landing pad as a workspace. No thread ever runs there.
   const landingPadRoot = NodePath.join(serverConfig.stateDir, "trellis-landing-pad");
@@ -569,6 +573,18 @@ const make = Effect.gen(function* () {
       threads: t3.threads,
       deletedWorkspaces,
     });
+    // A T3 project kept for its conversations outlives its Trellis item: once
+    // the trash is purged the item leaves the listing and its files are gone.
+    // Such roots stay retired, so clients keep hiding the project.
+    const live = new Set(desiredProjects(items).map((entry) => entry.workspaceRoot));
+    const purgedRoots: Array<string> = [];
+    for (const project of t3.projects) {
+      const root = normalizeRoot(project.workspaceRoot);
+      if (live.has(root) || !isTrellisManagedPath(env.root, root)) continue;
+      if (!(yield* fileSystem.exists(root).pipe(Effect.orElseSucceed(() => true)))) {
+        purgedRoots.push(root);
+      }
+    }
     let failed = false;
     for (const action of actions) {
       const created = yield* apply(action).pipe(
@@ -590,12 +606,12 @@ const make = Effect.gen(function* () {
       fingerprint,
       items,
       ids,
-      retiredRoots: retiredRoots(
-        items,
-        [...deletedWorkspaces.keys()].map((id) =>
+      retiredRoots: retiredRoots(items, [
+        ...[...deletedWorkspaces.keys()].map((id) =>
           NodePath.posix.join(env.root, "workspaces", id, "project"),
         ),
-      ),
+        ...purgedRoots,
+      ]),
     });
     return ids as ReadonlyMap<string, ProjectId>;
   });
@@ -694,7 +710,7 @@ const make = Effect.gen(function* () {
 
   const asTrellisError = (prefix: string) =>
     Effect.mapError((error: unknown) =>
-      Schema.is(TrellisError)(error)
+      isTrellisError(error)
         ? error
         : new TrellisError({ message: `${prefix}: ${errorMessage(error)}` }),
     );
@@ -884,7 +900,8 @@ const make = Effect.gen(function* () {
       let root: string;
       // Every T3 project the restore brings back. A project restores the
       // workspaces of its deletion; a fork whose project is trashed brings
-      // the project back first. Workspaces still trashed stay archived.
+      // the project back first, a fork of a live project only itself.
+      // Workspaces still trashed stay archived.
       let roots: ReadonlyArray<string>;
       if (input.kind === "workspace") {
         yield* trellis.restoreWorkspace(input.id);
@@ -892,7 +909,9 @@ const make = Effect.gen(function* () {
         const owner = (yield* trellis.listProjects({ all: false })).find((item) =>
           item.workspaces.some((workspace) => workspace.id === input.id),
         );
-        roots = owner === undefined ? [root] : liveRoots(owner);
+        const ownerWasTrashed =
+          owner !== undefined && trash.projects.some((entry) => entry.id === owner.id);
+        roots = ownerWasTrashed ? liveRoots(owner) : [root];
       } else {
         const restored = yield* trellis.restoreProject(input.id);
         root = restored.path;

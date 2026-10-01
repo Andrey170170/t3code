@@ -38,7 +38,6 @@ import { SourceControlProviderRegistry } from "../sourceControl/SourceControlPro
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import {
-  isTrellisManagedPath,
   makeTestTrellis,
   Trellis,
   type TrellisProjectView,
@@ -523,6 +522,19 @@ describe("TrellisCatalog service", () => {
     prefix: "t3-trellis-catalog-",
   });
 
+  const setWorkspaceDeletedAt = (
+    state: { items: Array<TrellisProjectView> },
+    id: string,
+    deletedAt: number | null,
+  ) => {
+    state.items = state.items.map((item) => ({
+      ...item,
+      workspaces: item.workspaces.map((entry) =>
+        entry.id === id ? { ...entry, deleted_at: deletedAt } : entry,
+      ),
+    }));
+  };
+
   /** A Trellis whose catalog is `state`; trash and restore edit it. */
   const fakeTrellis = (state: { items: Array<TrellisProjectView>; trashed: Array<string> }) =>
     makeTestTrellis({
@@ -548,6 +560,8 @@ describe("TrellisCatalog service", () => {
           );
           return state.items.find((item) => item.id === id)!;
         }),
+      trashWorkspace: (id) => Effect.sync(() => setWorkspaceDeletedAt(state, id, 0)),
+      restoreWorkspace: (id) => Effect.sync(() => setWorkspaceDeletedAt(state, id, null)),
       listTrash: Effect.sync((): TrellisTrashView => ({
         projects: state.items
           .filter((item) => item.deleted_at !== null)
@@ -557,7 +571,17 @@ describe("TrellisCatalog service", () => {
             name: item.name,
             deleted_at: item.deleted_at,
           })),
-        workspaces: [],
+        workspaces: state.items.flatMap((item) =>
+          item.workspaces
+            .filter((entry) => entry.deleted_at !== null)
+            .map((entry) => ({
+              id: entry.id,
+              kind: entry.kind,
+              name: entry.name,
+              project_id: item.id,
+              deleted_at: entry.deleted_at,
+            })),
+        ),
       })),
     });
 
@@ -756,6 +780,45 @@ describe("TrellisCatalog service", () => {
         const restored = yield* catalog.restore({ kind: "idea", id: "idea-a" });
         assert.equal(restored.projectId, a!.projectId);
         assert.isNull(yield* archivedAt(kept));
+
+        // Once the trash is purged, a project kept for its conversations
+        // stays retired.
+        state.items = state.items.filter((item) => item.id !== "idea-c");
+        yield* catalog.syncNow;
+        assert.include((yield* catalog.status).retiredRoots ?? [], `${SCRATCH}/idea-c`);
+      }),
+    );
+
+    it.effect("restoring a fork of a live project unarchives only the fork's conversations", () =>
+      Effect.gen(function* () {
+        const catalog = yield* TrellisCatalog.TrellisCatalog;
+        const orchestrator = yield* OrchestratorV2;
+        state.items = state.items.map((item) =>
+          item.id === "prj-b"
+            ? { ...item, workspaces: [workspace("ws-b"), workspace("ws-f", "fork")] }
+            : item,
+        );
+        yield* catalog.syncNow;
+        const primary = (yield* projectIdAt(`${ROOT}/workspaces/ws-b/project`))!;
+        const fork = (yield* projectIdAt(`${ROOT}/workspaces/ws-f/project`))!;
+        const inPrimary = yield* createThread("catalog-primary", primary.projectId);
+        const inFork = yield* createThread("catalog-fork", fork.projectId);
+
+        assert.deepEqual(yield* catalog.trashProject(fork.projectId), {
+          trashed: "workspace",
+          name: "Engine v2 · fork",
+        });
+        assert.isNotNull(yield* archivedAt(inFork));
+        // Archived by hand after the fork went to the trash.
+        yield* orchestrator.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.make("catalog-primary:archive"),
+          threadId: inPrimary,
+        });
+
+        yield* catalog.restore({ kind: "workspace", id: "ws-f" });
+        assert.isNull(yield* archivedAt(inFork));
+        assert.isNotNull(yield* archivedAt(inPrimary));
       }),
     );
   });

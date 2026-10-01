@@ -22,7 +22,7 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import { layer as mcpSessionRegistryTestLayer } from "../mcp/McpSessionRegistry.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
-import { IdAllocatorV2, layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
+import { layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import type { ProviderAdapterV2Shape } from "../orchestration-v2/ProviderAdapter.ts";

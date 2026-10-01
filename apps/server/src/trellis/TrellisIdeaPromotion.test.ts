@@ -191,31 +191,48 @@ it.layer(TestLayer)("TrellisIdeaPromotion", (it) => {
     }),
   );
 
-  it.effect("finishes the send when the request is interrupted mid-way", () =>
-    Effect.gen(function* () {
-      yield* reset;
-      const promotion = yield* TrellisIdeaPromotion.TrellisIdeaPromotion;
-      const threadId = ThreadId.make("idea-interrupted");
-      const gate = yield* Deferred.make<void>();
-      const settled = yield* Deferred.make<void>();
-      const request = yield* Effect.forkChild(
-        promotion.launch({
-          threadId,
-          projectId: TRELLIS_LANDING_PAD_PROJECT_ID,
-          launch: (projectId) =>
-            Deferred.await(gate).pipe(
-              Effect.andThen(createIn(threadId, projectId)),
-              Effect.ensuring(Deferred.succeed(settled, undefined)),
-            ),
-        }),
-      );
-      yield* Effect.yieldNow;
-      yield* Fiber.interrupt(request);
-      yield* Deferred.succeed(gate, undefined);
-      yield* Deferred.await(settled);
-      assert.equal(yield* projectOf(threadId), ProjectId.make("idea-1-project"));
-      assert.deepEqual(ideas.discarded, []);
-    }),
+  it.effect(
+    "finishes the send when the request is interrupted mid-way, and a retry waits for it",
+    () =>
+      Effect.gen(function* () {
+        yield* reset;
+        const promotion = yield* TrellisIdeaPromotion.TrellisIdeaPromotion;
+        const threadId = ThreadId.make("idea-interrupted");
+        const gate = yield* Deferred.make<void>();
+        const settled = yield* Deferred.make<void>();
+        const request = yield* Effect.forkChild(
+          promotion.launch({
+            threadId,
+            projectId: TRELLIS_LANDING_PAD_PROJECT_ID,
+            launch: (projectId) =>
+              Deferred.await(gate).pipe(
+                Effect.andThen(createIn(threadId, projectId)),
+                Effect.ensuring(Deferred.succeed(settled, undefined)),
+              ),
+          }),
+        );
+        yield* Effect.yieldNow;
+        yield* Fiber.interrupt(request);
+        // A retry while the interrupted promotion is still pending must not
+        // create a second idea.
+        const retry = yield* Effect.forkChild(
+          promotion
+            .launch({
+              threadId,
+              projectId: TRELLIS_LANDING_PAD_PROJECT_ID,
+              launch: (projectId) => createIn(threadId, projectId),
+            })
+            .pipe(Effect.result),
+        );
+        // Lets the retry run as far as it can before the first launch resumes.
+        yield* Effect.repeat(Effect.yieldNow, { times: 20 });
+        yield* Deferred.succeed(gate, undefined);
+        yield* Deferred.await(settled);
+        yield* Fiber.join(retry);
+        assert.equal(yield* projectOf(threadId), ProjectId.make("idea-1-project"));
+        assert.deepEqual(ideas.created, ["idea-1"]);
+        assert.deepEqual(ideas.discarded, []);
+      }),
   );
 
   it.effect("moves a landing-pad thread into its idea before the first message", () =>

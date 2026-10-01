@@ -58,6 +58,8 @@ const promoteIdeaDraft = <A, E, R>(input: {
   readonly deps: IdeaPromotionDeps;
   readonly send: (projectId: ProjectId, existing: ProjectId | null) => Effect.Effect<A, E, R>;
   readonly ideaError: (error: TrellisError) => E;
+  /** Serializes the thread's promotions; held by the detached run, not the request. */
+  readonly serialize: <X, Y, Z>(effect: Effect.Effect<X, Y, Z>) => Effect.Effect<X, Y, Z>;
 }): Effect.Effect<A, E, R> => {
   const { deps } = input;
   const program = Effect.gen(function* () {
@@ -88,7 +90,9 @@ const promoteIdeaDraft = <A, E, R>(input: {
       ),
     );
   });
-  return Effect.forkDetach(program).pipe(Effect.flatMap(Fiber.join));
+  // Detached so an interrupted request still finishes (or cleans up) its
+  // promotion; the lock lives inside, so a retry waits for that to end.
+  return Effect.forkDetach(input.serialize(program)).pipe(Effect.flatMap(Fiber.join));
 };
 
 export class TrellisIdeaPromotion extends Context.Service<
@@ -168,15 +172,13 @@ const make = Effect.gen(function* () {
           new TrellisError({ message: "A new idea's first message needs a thread id." }),
         );
       }
-      return threadLocks.withLock(
+      return promoteIdeaDraft<A, E | TrellisError, R>({
         threadId,
-        promoteIdeaDraft<A, E | TrellisError, R>({
-          threadId,
-          deps,
-          send: (projectId) => input.launch(projectId),
-          ideaError,
-        }),
-      );
+        deps,
+        send: (projectId) => input.launch(projectId),
+        ideaError,
+        serialize: (effect) => threadLocks.withLock(threadId, effect),
+      });
     },
     dispatchMessage: <A, E, R>(input: {
       readonly threadId: ThreadId;
@@ -187,23 +189,21 @@ const make = Effect.gen(function* () {
         Effect.flatMap((current) =>
           current === null || !isTrellisLandingPad(current)
             ? input.dispatch
-            : threadLocks.withLock(
-                input.threadId,
-                promoteIdeaDraft<A, E | TrellisError, R>({
-                  threadId: input.threadId,
-                  deps,
-                  send: (projectId, existing) =>
-                    existing === null || existing === projectId
-                      ? input.dispatch
-                      : moveThread({
-                          commandId: input.commandId,
-                          threadId: input.threadId,
-                          from: existing,
-                          to: projectId,
-                        }).pipe(Effect.andThen(input.dispatch)),
-                  ideaError,
-                }),
-              ),
+            : promoteIdeaDraft<A, E | TrellisError, R>({
+                threadId: input.threadId,
+                deps,
+                send: (projectId, existing) =>
+                  existing === null || existing === projectId
+                    ? input.dispatch
+                    : moveThread({
+                        commandId: input.commandId,
+                        threadId: input.threadId,
+                        from: existing,
+                        to: projectId,
+                      }).pipe(Effect.andThen(input.dispatch)),
+                ideaError,
+                serialize: (effect) => threadLocks.withLock(input.threadId, effect),
+              }),
         ),
       ),
   });
