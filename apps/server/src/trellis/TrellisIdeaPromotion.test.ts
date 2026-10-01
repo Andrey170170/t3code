@@ -16,6 +16,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { TrellisCatalog } from "./TrellisCatalog.ts";
 import * as TrellisIdeaPromotion from "./TrellisIdeaPromotion.ts";
 import {
@@ -38,7 +39,8 @@ const ideas = {
 /** Each idea gets its own project at `/trellis/workspaces/ws-scratch/project/<id>`. */
 const FakeCatalog = Layer.effect(
   TrellisCatalog,
-  Effect.sync(() => {
+  Effect.gen(function* () {
+    const store = yield* ProjectStore.ProjectStoreV2;
     const unused = () => Effect.die("unused catalog operation");
     return TrellisCatalog.of({
       createIdeaForDraft: Effect.gen(function* () {
@@ -47,7 +49,10 @@ const FakeCatalog = Layer.effect(
         // Lets concurrent sends interleave here if they are not serialized.
         yield* Effect.yieldNow;
         const workspaceRoot = `/trellis/workspaces/ws-scratch/project/${trellisId}`;
-        const projectId = yield* createProject(trellisId, workspaceRoot).pipe(Effect.orDie);
+        const projectId = yield* createProject(trellisId, workspaceRoot).pipe(
+          Effect.provideService(ProjectStore.ProjectStoreV2, store),
+          Effect.orDie,
+        );
         return { projectId, workspaceRoot, name: trellisId, trellisId };
       }),
       discardIdea: (trellisId) => Effect.sync(() => void ideas.discarded.push(trellisId)),

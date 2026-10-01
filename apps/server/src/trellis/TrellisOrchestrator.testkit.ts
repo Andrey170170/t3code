@@ -210,13 +210,13 @@ export const move = (
     }),
   );
 
-/** The rejection text of a failed move, from the dispatch error's cause. */
-export const rejection = (
-  effect: Effect.Effect<unknown, { readonly cause?: unknown; readonly message: string }>,
-) =>
+/** The rejection text of a failed dispatch: its cause when that is text, else its message. */
+export const rejection = <A, E extends Error, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.flip,
-    Effect.map((error) => (typeof error.cause === "string" ? error.cause : error.message)),
+    Effect.map((error) =>
+      "cause" in error && typeof error.cause === "string" ? error.cause : error.message,
+    ),
   );
 
 export const writeEvent = (
