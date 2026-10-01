@@ -20,7 +20,6 @@
  * @module trellis/TrellisRestore
  */
 import type {
-  OrchestrationV2AppThread,
   OrchestrationV2Run,
   OrchestrationV2ThreadShellSnapshot,
   ProjectId,
@@ -42,6 +41,7 @@ import {
   type CheckpointRestoreRuleShape,
   isolatedWorktreeRestoreRule,
 } from "../orchestration-v2/CheckpointRestoreSafety.ts";
+import { rollbackInFlight } from "../orchestration-v2/CheckpointRollbackService.ts";
 import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
 import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
@@ -303,23 +303,6 @@ function restoreRefusal(
  */
 const ROLLBACK_POLL_INTERVAL = "250 millis";
 
-/**
- * Whether the thread's latest rollback is accepted but neither done nor
- * failed for good. Servers that predate completion records never set it.
- */
-function isRollbackPending(
-  thread: Pick<
-    OrchestrationV2AppThread,
-    "rollbackRequestId" | "rollbackCompletedRequestId" | "rollbackFailure"
-  >,
-): boolean {
-  return (
-    thread.rollbackRequestId !== undefined &&
-    thread.rollbackCompletedRequestId === null &&
-    thread.rollbackFailure?.requestId !== thread.rollbackRequestId
-  );
-}
-
 export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | ProjectionStoreV2> =
   Layer.effectContext(
     Effect.gen(function* () {
@@ -332,7 +315,7 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | 
       const held = new Set<RunId>();
       const rollbackPendingIn = (threadId: ThreadId) =>
         projections.getThread(threadId).pipe(
-          Effect.map(isRollbackPending),
+          Effect.flatMap((thread) => rollbackInFlight(thread, Option.some(outbox))),
           // A thread without a projection has no rollback; any other failure
           // to read counts as pending, so the turn waits for the next read.
           Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.succeed(false)),

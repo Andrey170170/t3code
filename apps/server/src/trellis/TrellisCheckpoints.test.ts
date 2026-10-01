@@ -878,6 +878,8 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
   // The main thread's rollback bookkeeping, as the orchestrator records it.
   const rollbackState: {
     readFails?: boolean;
+    /** The rollback effect's state in the outbox. */
+    effectStatus?: "pending" | "running" | "failed";
     rollbackRequestId?: string;
     rollbackCompletedRequestId?: string | null;
   } = {};
@@ -908,6 +910,17 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
     ),
     Layer.provide(
       Layer.mock(EffectOutboxV2)({
+        listByCommandId: () =>
+          Effect.succeed(
+            rollbackState.effectStatus === undefined
+              ? []
+              : [
+                  {
+                    request: { type: "provider-thread.rollback" },
+                    status: rollbackState.effectStatus,
+                  } as never,
+                ],
+          ),
         get: (effectId) =>
           Effect.succeed(
             (other?.capturing === true && effectId === "effect:checkpoint.capture:run-other") ||
@@ -1218,6 +1231,7 @@ it.effect("a turn in a thread whose revert is between attempts waits, without bl
     yield* harness.captureBaseline;
     harness.rollbackState.rollbackRequestId = "rollback-1";
     harness.rollbackState.rollbackCompletedRequestId = null;
+    harness.rollbackState.effectStatus = "pending";
     const turn = yield* Effect.forkChild(
       admission.start({ threadId, runId: RunId.make("run-2"), cwd: scope.cwd }),
     );
@@ -1400,6 +1414,22 @@ it.effect(
     }).pipe(Effect.provide(storeLayer(fake)));
   },
 );
+
+it.effect("a turn is not held by a revert that failed for good without its receipt", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const scope = ideaScope(fake);
+  const harness = rollbackHarness(fake, { scope });
+  return Effect.gen(function* () {
+    const admission = yield* TurnAdmission;
+    // The thread never recorded the failure, but the outbox settled it.
+    harness.rollbackState.rollbackRequestId = "rollback-1";
+    harness.rollbackState.rollbackCompletedRequestId = null;
+    harness.rollbackState.effectStatus = "failed";
+    assert.isFalse(
+      yield* admission.start({ threadId, runId: RunId.make("run-2"), cwd: scope.cwd }),
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect("a turn waits while whether its thread's revert is pending cannot be read", () => {
   const fake = makeFakeTrellis(tempRoot());

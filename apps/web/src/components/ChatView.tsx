@@ -2213,6 +2213,9 @@ export default function ChatView(props: ChatViewProps) {
   );
   const diffOpen = activeRightPanelKind === "diff";
   const explicitDiffOpenRef = useRef<ScopedThreadRef | null>(null);
+  // Where a generic opening lands when the checkout has no working-tree diff
+  // (a Trellis project without git): its latest turn. Set below.
+  const genericDiffTurnRef = useRef<RunId | null>(null);
   useLayoutEffect(() => {
     const explicitThreadRef = explicitDiffOpenRef.current;
     explicitDiffOpenRef.current = null;
@@ -2226,7 +2229,9 @@ export default function ChatView(props: ChatViewProps) {
       (explicitThreadRef === null ||
         scopedThreadKey(explicitThreadRef) !== scopedThreadKey(activeThreadRef))
     ) {
-      useDiffPanelStore.getState().selectGitScope(activeThreadRef, "unstaged");
+      const latestTurn = genericDiffTurnRef.current;
+      if (latestTurn !== null) useDiffPanelStore.getState().selectTurn(activeThreadRef, latestTurn);
+      else useDiffPanelStore.getState().selectGitScope(activeThreadRef, "unstaged");
     }
   }, [activeThreadRef, diffOpen]);
   const rightPanelState = useRightPanelStore((state) =>
@@ -4062,6 +4067,15 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [environmentId, gitStatusCwd, liveIsGitRepo]);
   const isGitRepo = liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true;
+  // Trellis checkpoints are snapshots, so turn diffs need no git there.
+  const checkoutTrellisRoot = useTrellisRoot(activeThread?.environmentId ?? null);
+  const hasTurnDiffs =
+    isGitRepo ||
+    (gitStatusCwd !== null && isTrellisWorkspaceRoot(gitStatusCwd, checkoutTrellisRoot));
+  const genericDiffTurn = isGitRepo ? null : (turnDiffSummaries.at(-1)?.runId ?? null);
+  useLayoutEffect(() => {
+    genericDiffTurnRef.current = genericDiffTurn;
+  }, [genericDiffTurn]);
   // When context is enabled, keep a hidden, off-flow strip mounted so the composer
   // can measure whether its relocated controls fit. The visible chrome remains
   // content-driven: Git/environment context or controls that actually fit.
@@ -5009,11 +5023,13 @@ export default function ChatView(props: ChatViewProps) {
     [activeThreadRef, openPreview],
   );
   const addDiffSurface = useCallback(() => {
-    if (!activeThreadRef || !isServerThread || !isGitRepo) return;
-    useDiffPanelStore.getState().selectGitScope(activeThreadRef, "unstaged");
+    if (!activeThreadRef || !isServerThread || !hasTurnDiffs) return;
+    const latestTurn = genericDiffTurnRef.current;
+    if (latestTurn !== null) useDiffPanelStore.getState().selectTurn(activeThreadRef, latestTurn);
+    else useDiffPanelStore.getState().selectGitScope(activeThreadRef, "unstaged");
     useRightPanelStore.getState().open(activeThreadRef, "diff");
     onDiffPanelOpen?.();
-  }, [activeThreadRef, isGitRepo, isServerThread, onDiffPanelOpen]);
+  }, [activeThreadRef, hasTurnDiffs, isServerThread, onDiffPanelOpen]);
   const openChangesFromThreadPanel = useCallback(() => {
     addDiffSurface();
   }, [addDiffSurface]);
@@ -10476,7 +10492,7 @@ export default function ChatView(props: ChatViewProps) {
       ? { onCheckoutPullRequestRequest: openPullRequestDialog }
       : {}),
     onComposerFocusRequest: scheduleComposerFocus,
-    ...(isServerThread && isGitRepo ? { onOpenChanges: openChangesFromThreadPanel } : {}),
+    ...(isServerThread && hasTurnDiffs ? { onOpenChanges: openChangesFromThreadPanel } : {}),
     versionMismatch:
       showVersionMismatchBanner && versionMismatch
         ? {
@@ -11237,7 +11253,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddDevice={addDeviceSurface}
           browserAvailable={isPreviewSupportedInRuntime()}
           terminalAvailable={activeProject !== null}
-          diffAvailable={isServerThread && isGitRepo}
+          diffAvailable={isServerThread && hasTurnDiffs}
           filesAvailable={activeProject !== null}
           pullRequestAvailable={pullRequestSurfaceAvailable}
           pullRequestsAvailable={pullRequestsSurfaceAvailable}
@@ -11291,7 +11307,7 @@ export default function ChatView(props: ChatViewProps) {
             onAddDevice={addDeviceSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             terminalAvailable={activeProject !== null}
-            diffAvailable={isServerThread && isGitRepo}
+            diffAvailable={isServerThread && hasTurnDiffs}
             filesAvailable={activeProject !== null}
             pullRequestAvailable={pullRequestSurfaceAvailable}
             pullRequestsAvailable={pullRequestsSurfaceAvailable}
