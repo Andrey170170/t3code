@@ -1187,10 +1187,25 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+/**
+ * The optional Trellis workspace service on this environment. Off by default:
+ * while off, the server never talks to Trellis, but it still keeps agents and
+ * terminals of existing Trellis workspaces off the host. The socket and binary
+ * come from `TRELLIS_SOCKET` and `TRELLIS_BIN`, which the `trellis` CLI that
+ * runs providers inside workspaces reads as well.
+ */
+export const TrellisSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+});
+export type TrellisSettings = typeof TrellisSettings.Type;
+
 export const ServerSettings = Schema.Struct({
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
+  ),
+  trellis: TrellisSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(TrellisSettings)({}))),
   ),
   responseStreamingMode: ResponseStreamingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
@@ -1585,6 +1600,11 @@ export const ServerSettingsPatch = Schema.Struct({
       worktreeUnchanged: Schema.optionalKey(Schema.Boolean),
       browserArtifactsAfterDays: Schema.optionalKey(StorageRetentionDays),
       logsAfterDays: Schema.optionalKey(StorageRetentionDays),
+    }),
+  ),
+  trellis: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
     }),
   ),
   // Server settings
