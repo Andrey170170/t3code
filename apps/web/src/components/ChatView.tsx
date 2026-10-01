@@ -2218,7 +2218,14 @@ export default function ChatView(props: ChatViewProps) {
     explicitDiffOpenRef.current = null;
     // Generic openings always show the checkout, including tab fallbacks and thread changes.
     // A timeline click instead opens the specific turn/file the user requested.
-    if (diffOpen && activeThreadRef && explicitThreadRef !== activeThreadRef) {
+    // Compared by key: the ref object is rebuilt whenever the thread updates,
+    // which can happen between the click and this effect.
+    if (
+      diffOpen &&
+      activeThreadRef &&
+      (explicitThreadRef === null ||
+        scopedThreadKey(explicitThreadRef) !== scopedThreadKey(activeThreadRef))
+    ) {
       useDiffPanelStore.getState().selectGitScope(activeThreadRef, "unstaged");
     }
   }, [activeThreadRef, diffOpen]);

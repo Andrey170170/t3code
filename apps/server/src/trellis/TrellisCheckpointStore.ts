@@ -23,8 +23,9 @@
  */
 import * as NodePath from "node:path";
 
-import type { CheckpointRef } from "@t3tools/contracts";
+import type { CheckpointRef, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -41,6 +42,8 @@ import {
   CheckpointBackendError,
   CheckpointSnapshotUnavailableError,
 } from "../checkpointing/Errors.ts";
+import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointService.ts";
+import { IdAllocatorV2, layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { Trellis, type TrellisSnapshot, trellisRootOf, trellisWorkspaceOf } from "./Trellis.ts";
 import { restoreScopeOf } from "./TrellisRestore.ts";
@@ -93,19 +96,44 @@ function normalizeNoIndexPatch(output: string): string {
   return output.replace(/^diff --git [ab]\/(.*) [ab]\/(.*)$/gm, "diff --git a/$1 b/$2");
 }
 
+export interface TrellisCheckpointPinsShape {
+  /**
+   * Releases what the store keeps for threads that no longer exist (absent
+   * from `liveThreadIds`, which was read at `readAt`): their baselines' pins
+   * and ref mappings. Also releases read pins a crash left behind. Never
+   * fails; what cannot be released now is tried again on the next call.
+   */
+  readonly reconcile: (input: {
+    readonly liveThreadIds: ReadonlyArray<ThreadId>;
+    readonly readAt: DateTime.Utc;
+  }) => Effect.Effect<void>;
+}
+
+/** The lifecycle of the snapshot pins `TrellisCheckpointStore` takes. */
+export class TrellisCheckpointPins extends Context.Service<
+  TrellisCheckpointPins,
+  TrellisCheckpointPinsShape
+>()("t3/trellis/TrellisCheckpointStore/TrellisCheckpointPins") {}
+
+/** The part of a checkpoint ref naming its scope. */
+const scopeKeyOfRef = (ref: string) => ref.slice(0, ref.lastIndexOf("/ordinal/"));
+
 export const layer: Layer.Layer<
-  CheckpointStore,
+  CheckpointStore | TrellisCheckpointPins,
   never,
   | CheckpointStore
   | SqlClient.SqlClient
   | FileSystem.FileSystem
   | ChildProcessSpawner.ChildProcessSpawner
-> = Layer.effect(
-  CheckpointStore,
+> = Layer.effectContext(
   Effect.gen(function* () {
     const base = yield* CheckpointStore;
     const trellisOption = yield* Effect.serviceOption(Trellis);
-    if (Option.isNone(trellisOption)) return base;
+    if (Option.isNone(trellisOption)) {
+      return Context.make(CheckpointStore, base).pipe(
+        Context.add(TrellisCheckpointPins, { reconcile: () => Effect.void }),
+      );
+    }
     const trellis = trellisOption.value;
     const sql = yield* SqlClient.SqlClient;
     const fileSystem = yield* FileSystem.FileSystem;
@@ -121,6 +149,14 @@ export const layer: Layer.Layer<
         snapshot_id TEXT,
         captured_at TEXT NOT NULL,
         retired_snapshot_ids TEXT NOT NULL DEFAULT '[]'
+      )
+    `.pipe(Effect.orDie);
+    // Pins taken for a read, recorded before they are taken, so a crash
+    // mid-read cannot leave a snapshot pinned for good.
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS trellis_read_pins (
+        snapshot_id TEXT PRIMARY KEY,
+        target TEXT NOT NULL
       )
     `.pipe(Effect.orDie);
 
@@ -152,6 +188,22 @@ export const layer: Layer.Layer<
     // unless it already was, the last unpins what it pinned.
     const protections = new Map<string, { count: number; pinnedHere: boolean }>();
     const protectionLock = yield* Semaphore.make(1);
+    const forgetReadPin = (snapshotId: string) =>
+      sql`DELETE FROM trellis_read_pins WHERE snapshot_id = ${snapshotId}`.pipe(
+        Effect.mapError(backendError("unpin")),
+      );
+    // Unpins a snapshot; one already gone counts as unpinned.
+    const unpin = (target: string, snapshotId: string) =>
+      trellis.setSnapshotPinned(snapshotId, false).pipe(
+        Effect.asVoid,
+        Effect.catch((error) =>
+          snapshotOf(target, snapshotId).pipe(
+            Effect.flatMap((still) =>
+              still === null ? Effect.void : Effect.fail(backendError("unpin")(error)),
+            ),
+          ),
+        ),
+      );
     const protect = (
       ref: string,
       target: string,
@@ -178,6 +230,10 @@ export const layer: Layer.Layer<
           // Pinning happens under the workspace's lock, so once it returns,
           // thinning can no longer remove the snapshot.
           if (pinnedHere) {
+            yield* sql`
+              INSERT OR REPLACE INTO trellis_read_pins (snapshot_id, target)
+              VALUES (${snapshotId}, ${target})
+            `.pipe(Effect.mapError(backendError("protect")));
             // A failed pin means it is gone only when Trellis no longer lists it.
             yield* trellis
               .setSnapshotPinned(snapshotId, true)
@@ -202,6 +258,7 @@ export const layer: Layer.Layer<
             protections.delete(snapshotId);
             if (held.pinnedHere && !isBaselineRef(ref)) {
               yield* trellis.setSnapshotPinned(snapshotId, false).pipe(
+                Effect.andThen(forgetReadPin(snapshotId)),
                 Effect.catch((error) =>
                   Effect.logWarning("could not unpin a Trellis checkpoint snapshot", {
                     snapshotId,
@@ -209,6 +266,8 @@ export const layer: Layer.Layer<
                   }),
                 ),
               );
+            } else if (held.pinnedHere) {
+              yield* forgetReadPin(snapshotId).pipe(Effect.ignore);
             }
           }).pipe(protectionLock.withPermits(1)),
       );
@@ -479,98 +538,172 @@ export const layer: Layer.Layer<
           : normalizeNoIndexPatch(output.stdout);
       }).pipe(Effect.scoped);
 
-    return CheckpointStore.of({
-      isGitRepository: base.isGitRepository,
-      isCheckpointable: (cwd) =>
-        Effect.flatMap(isTrellisPath(cwd), (trellisPath) =>
-          trellisPath ? Effect.succeed(true) : base.isCheckpointable(cwd),
-        ),
-      hasCheckpointRef: (input) =>
-        Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
-          trellisPath
-            ? backendOf(input.cwd, input.checkpointRef).pipe(Effect.map((kind) => kind !== "none"))
-            : base.hasCheckpointRef(input),
-        ),
-      captureCheckpoint: (input) =>
-        Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
-          trellisPath
-            ? capture(input.cwd, input.checkpointRef).pipe(
-                // As v0 did: a busy or restarting Trellis gets two more tries.
-                Effect.retry({ times: 2, schedule: Schedule.spaced("1 second") }),
-              )
-            : base.captureCheckpoint(input),
-        ),
-      reserve: (input) =>
-        Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
-          trellisPath
-            ? Effect.gen(function* () {
-                if ((yield* backendOf(input.cwd, input.checkpointRef)) === "git") {
-                  return yield* base.reserve(input);
-                }
-                yield* protectedSnapshot(input.checkpointRef);
-                const scope = yield* restoreScopeOf(trellis, input.cwd);
-                return { endsSessionsIn: scope?.restartsWorkspace ? scope.path : null };
-              })
-            : base.reserve(input),
-        ),
-      restoreCheckpoint: (input) =>
-        Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
-          trellisPath
-            ? Effect.gen(function* () {
-                if ((yield* backendOf(input.cwd, input.checkpointRef)) === "git") {
-                  return yield* base.restoreCheckpoint(input);
-                }
-                const row = yield* readRow(input.checkpointRef);
-                if (row?.snapshot_id == null) return { restored: false };
-                const snapshotId = row.snapshot_id;
-                const { undoSnapshot } = yield* trellis
-                  .rollback({ target: input.cwd, snapshot: snapshotId })
-                  .pipe(Effect.mapError(backendError("restore")));
-                return {
-                  restored: true,
-                  notice:
-                    undoSnapshot === null
-                      ? `Restored the files from Trellis snapshot ${snapshotId}.`
-                      : `Restored the files from Trellis snapshot ${snapshotId}. To undo, run \`trellis rollback --target ${input.cwd} ${undoSnapshot}\`.`,
-                };
-              })
-            : base.restoreCheckpoint(input),
-        ),
-      diffCheckpoints: (input) =>
-        Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
-          Effect.gen(function* () {
-            if (!trellisPath) return yield* base.diffCheckpoints(input);
-            // Git projects keep diffing through the hidden refs, so ignore
-            // rules apply as without Trellis.
-            if (yield* base.isGitRepository(input.cwd).pipe(Effect.orElseSucceed(() => false))) {
-              yield* ensureGitRef(input.cwd, input.fromCheckpointRef);
-              yield* ensureGitRef(input.cwd, input.toCheckpointRef);
-              return yield* base.diffCheckpoints(input);
+    const reconcile: TrellisCheckpointPinsShape["reconcile"] = (input) =>
+      Effect.gen(function* () {
+        const readPins = yield* sql<{ readonly snapshot_id: string; readonly target: string }>`
+          SELECT snapshot_id, target FROM trellis_read_pins
+        `.pipe(Effect.mapError(backendError("reconcile")));
+        // Under the protection lock, so a read taking its pin now is either
+        // already recorded in memory or not yet pinned.
+        yield* Effect.forEach(
+          readPins.filter((pin) => !protections.has(pin.snapshot_id)),
+          (pin) =>
+            unpin(pin.target, pin.snapshot_id).pipe(
+              Effect.andThen(forgetReadPin(pin.snapshot_id)),
+              Effect.catch((error) =>
+                Effect.logWarning("could not release a stale Trellis read pin", {
+                  snapshotId: pin.snapshot_id,
+                  detail: error.message,
+                }),
+              ),
+            ),
+          { discard: true },
+        ).pipe(protectionLock.withPermits(1));
+
+        const ids = yield* IdAllocatorV2;
+        const live = new Set<string>();
+        for (const threadId of input.liveThreadIds) {
+          const scopeId = yield* ids.allocate.checkpointScope({ threadId, name: "root" });
+          live.add(scopeKeyOfRef(checkpointRefForScopeOrdinal({ scopeId, ordinalWithinScope: 0 })));
+        }
+        // Rows captured after the thread list was read may belong to a
+        // thread it does not know yet.
+        const rows = yield* sql<{
+          readonly ref: string;
+          readonly target: string;
+          readonly snapshot_id: string | null;
+        }>`
+          SELECT ref, target, snapshot_id FROM trellis_checkpoint_refs
+          WHERE captured_at < ${DateTime.formatIso(input.readAt)}
+        `.pipe(Effect.mapError(backendError("reconcile")));
+        for (const row of rows) {
+          if (live.has(scopeKeyOfRef(row.ref))) continue;
+          yield* Effect.gen(function* () {
+            if (row.snapshot_id !== null && isBaselineRef(row.ref)) {
+              yield* unpin(row.target, row.snapshot_id);
             }
-            return yield* trellisDiff(input);
-          }),
+            yield* sql`DELETE FROM trellis_checkpoint_refs WHERE ref = ${row.ref}`.pipe(
+              Effect.mapError(backendError("reconcile")),
+            );
+          }).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("could not release a deleted thread's Trellis checkpoint", {
+                ref: row.ref,
+                detail: error.message,
+              }),
+            ),
+          );
+        }
+      }).pipe(
+        Effect.provide(idAllocatorLayer),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("could not reconcile Trellis checkpoint pins", { cause }),
         ),
-      deleteCheckpointRefs: (input) =>
-        Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
-          Effect.gen(function* () {
-            if (!trellisPath) return yield* base.deleteCheckpointRefs(input);
-            if (yield* base.isGitRepository(input.cwd).pipe(Effect.orElseSucceed(() => false))) {
-              yield* base.deleteCheckpointRefs(input);
-            }
-            // The snapshots stay to Trellis retention.
-            for (const ref of input.checkpointRefs) {
-              const row = yield* readRow(ref);
-              if (row?.snapshot_id == null) continue;
-              const retired = [...parseRetired(row.retired_snapshot_ids), row.snapshot_id];
-              const retiredText = encodeRetired(retired);
-              yield* sql`
+      );
+
+    return Context.make(TrellisCheckpointPins, { reconcile }).pipe(
+      Context.add(
+        CheckpointStore,
+        CheckpointStore.of({
+          isGitRepository: base.isGitRepository,
+          isCheckpointable: (cwd) =>
+            Effect.flatMap(isTrellisPath(cwd), (trellisPath) =>
+              trellisPath ? Effect.succeed(true) : base.isCheckpointable(cwd),
+            ),
+          hasCheckpointRef: (input) =>
+            Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
+              trellisPath
+                ? backendOf(input.cwd, input.checkpointRef).pipe(
+                    Effect.map((kind) => kind !== "none"),
+                  )
+                : base.hasCheckpointRef(input),
+            ),
+          captureCheckpoint: (input) =>
+            Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
+              trellisPath
+                ? capture(input.cwd, input.checkpointRef).pipe(
+                    // As v0 did: a busy or restarting Trellis gets two more tries.
+                    Effect.retry({ times: 2, schedule: Schedule.spaced("1 second") }),
+                  )
+                : base.captureCheckpoint(input),
+            ),
+          reserve: (input) =>
+            Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
+              trellisPath
+                ? Effect.gen(function* () {
+                    if ((yield* backendOf(input.cwd, input.checkpointRef)) === "git") {
+                      return yield* base.reserve(input);
+                    }
+                    yield* protectedSnapshot(input.checkpointRef);
+                    const scope = yield* restoreScopeOf(trellis, input.cwd);
+                    return { endsSessionsIn: scope?.restartsWorkspace ? scope.path : null };
+                  })
+                : base.reserve(input),
+            ),
+          restoreCheckpoint: (input) =>
+            Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
+              trellisPath
+                ? Effect.gen(function* () {
+                    if ((yield* backendOf(input.cwd, input.checkpointRef)) === "git") {
+                      return yield* base.restoreCheckpoint(input);
+                    }
+                    const row = yield* readRow(input.checkpointRef);
+                    if (row?.snapshot_id == null) return { restored: false };
+                    const snapshotId = row.snapshot_id;
+                    const { undoSnapshot } = yield* trellis
+                      .rollback({ target: input.cwd, snapshot: snapshotId })
+                      .pipe(Effect.mapError(backendError("restore")));
+                    return {
+                      restored: true,
+                      notice:
+                        undoSnapshot === null
+                          ? `Restored the files from Trellis snapshot ${snapshotId}.`
+                          : `Restored the files from Trellis snapshot ${snapshotId}. To undo, run \`trellis rollback --target ${input.cwd} ${undoSnapshot}\`.`,
+                    };
+                  })
+                : base.restoreCheckpoint(input),
+            ),
+          diffCheckpoints: (input) =>
+            Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
+              Effect.gen(function* () {
+                if (!trellisPath) return yield* base.diffCheckpoints(input);
+                // Git projects keep diffing through the hidden refs, so ignore
+                // rules apply as without Trellis.
+                if (
+                  yield* base.isGitRepository(input.cwd).pipe(Effect.orElseSucceed(() => false))
+                ) {
+                  yield* ensureGitRef(input.cwd, input.fromCheckpointRef);
+                  yield* ensureGitRef(input.cwd, input.toCheckpointRef);
+                  return yield* base.diffCheckpoints(input);
+                }
+                return yield* trellisDiff(input);
+              }),
+            ),
+          deleteCheckpointRefs: (input) =>
+            Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
+              Effect.gen(function* () {
+                if (!trellisPath) return yield* base.deleteCheckpointRefs(input);
+                if (
+                  yield* base.isGitRepository(input.cwd).pipe(Effect.orElseSucceed(() => false))
+                ) {
+                  yield* base.deleteCheckpointRefs(input);
+                }
+                // The snapshots stay to Trellis retention.
+                for (const ref of input.checkpointRefs) {
+                  const row = yield* readRow(ref);
+                  if (row?.snapshot_id == null) continue;
+                  const retired = [...parseRetired(row.retired_snapshot_ids), row.snapshot_id];
+                  const retiredText = encodeRetired(retired);
+                  yield* sql`
                 UPDATE trellis_checkpoint_refs
                 SET snapshot_id = NULL, retired_snapshot_ids = ${retiredText}
                 WHERE ref = ${ref}
               `.pipe(Effect.mapError(backendError("delete")));
-            }
-          }),
-        ),
-    });
+                }
+              }),
+            ),
+        }),
+      ),
+    );
   }),
 ).pipe(Layer.provide(ProcessRunner.layer));

@@ -28,6 +28,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import {
   CheckpointDiffQuery,
@@ -48,7 +49,7 @@ import {
   layer as checkpointServiceLayer,
 } from "../orchestration-v2/CheckpointService.ts";
 import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
-import { layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
+import { IdAllocatorV2, layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
 import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
@@ -239,6 +240,8 @@ const storeLayer = (fake: ReturnType<typeof makeFakeTrellis>) => {
   return Layer.mergeAll(
     store,
     checkpointServiceLayer.pipe(Layer.provide(idAllocatorLayer), Layer.provide(store)),
+    // The store's own database (the same layer, so the same instance).
+    SqlitePersistenceMemory,
   );
 };
 
@@ -529,6 +532,85 @@ it.effect("a checkpoint taken by Git before Trellis checkpoints stays a Git chec
     assert.isTrue(restored.restored);
     assert.equal(NodeFS.readFileSync(`${project}/main.py`, "utf8"), "print(1)\n");
     assert.lengthOf(fake.snapshots, 0);
+  }).pipe(Effect.provide(storeLayer(fake)));
+});
+
+const rootScopeOf = (cwd: string, thread: string): OrchestrationV2CheckpointScope => ({
+  ...scopeAt(cwd, thread),
+  id: CheckpointScopeId.make(`checkpoint-scope:thread:${thread}:name:root`),
+  threadId: ThreadId.make(thread),
+});
+
+it.effect("a deleted thread's baseline pin and mappings are released, a live one's kept", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+  const kept = rootScopeOf(idea, "thread-kept");
+  const deleted = rootScopeOf(idea, "thread-deleted");
+  return Effect.gen(function* () {
+    const store = yield* CheckpointStore.CheckpointStore;
+    const pins = yield* TrellisCheckpointStore.TrellisCheckpointPins;
+    // The ids V2 gives root scopes, which the reconcile maps threads to.
+    assert.equal(
+      yield* Effect.flatMap(IdAllocatorV2, (ids) =>
+        ids.allocate.checkpointScope({ threadId: kept.threadId, name: "root" }),
+      ).pipe(Effect.provide(idAllocatorLayer)),
+      kept.id,
+    );
+    for (const scope of [kept, deleted]) {
+      yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 0) });
+      yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1) });
+    }
+    const baselineOf = (scope: OrchestrationV2CheckpointScope) =>
+      fake.snapshots.find((snapshot) => snapshot.turn === refOf(scope, 0))!;
+    // Real file captures stamp the wall clock; read later than all of them.
+    const readAt = DateTime.makeUnsafe("2999-01-01T00:00:00.000Z");
+
+    // A capture newer than the thread list is left alone.
+    yield* pins.reconcile({ liveThreadIds: [kept.threadId], readAt: DateTime.makeUnsafe(0) });
+    assert.isTrue(baselineOf(deleted).pinned);
+
+    yield* pins.reconcile({ liveThreadIds: [kept.threadId], readAt });
+    assert.isTrue(baselineOf(kept).pinned);
+    assert.isFalse(baselineOf(deleted).pinned);
+    assert.isTrue(yield* store.hasCheckpointRef({ cwd: idea, checkpointRef: refOf(kept, 1) }));
+    assert.isFalse(yield* store.hasCheckpointRef({ cwd: idea, checkpointRef: refOf(deleted, 0) }));
+    assert.isFalse(yield* store.hasCheckpointRef({ cwd: idea, checkpointRef: refOf(deleted, 1) }));
+
+    // At startup, a thread deleted meanwhile whose snapshot is already gone.
+    fake.remove(baselineOf(kept).id);
+    yield* pins.reconcile({ liveThreadIds: [], readAt });
+    assert.isFalse(yield* store.hasCheckpointRef({ cwd: idea, checkpointRef: refOf(kept, 0) }));
+  }).pipe(Effect.provide(storeLayer(fake)));
+});
+
+it.effect("a read pin left by a crash is released, and a read in progress keeps its own", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+  const scope = scopeAt(idea, "read-pins");
+  return Effect.gen(function* () {
+    const store = yield* CheckpointStore.CheckpointStore;
+    const pins = yield* TrellisCheckpointStore.TrellisCheckpointPins;
+    const sql = yield* SqlClient.SqlClient;
+    yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1) });
+    yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 2) });
+    const [crashed, reading] = [1, 2].map((ordinal) =>
+      fake.snapshots.find((snapshot) => snapshot.turn === refOf(scope, ordinal))!,
+    );
+    // A previous process recorded and took this pin, then died mid-read.
+    yield* sql`INSERT INTO trellis_read_pins (snapshot_id, target) VALUES (${crashed!.id}, ${idea})`;
+    yield* fake.trellis.setSnapshotPinned(crashed!.id, true);
+    const readAt = DateTime.makeUnsafe(0);
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* store.reserve({ cwd: idea, checkpointRef: refOf(scope, 2) });
+        assert.isTrue(reading!.pinned);
+        yield* pins.reconcile({ liveThreadIds: [], readAt });
+        assert.isFalse(crashed!.pinned);
+        assert.isTrue(reading!.pinned);
+      }),
+    );
+    assert.isFalse(reading!.pinned);
+    assert.deepEqual(yield* sql`SELECT snapshot_id FROM trellis_read_pins`, []);
   }).pipe(Effect.provide(storeLayer(fake)));
 });
 

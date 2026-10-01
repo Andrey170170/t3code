@@ -67,9 +67,11 @@ import {
   TrellisProjectView,
   type TrellisTrashView,
 } from "./Trellis.ts";
+import { TrellisCheckpointPins } from "./TrellisCheckpointStore.ts";
 import { restoreConflictsIn, restoreScopeOf, TrellisRestoreGate } from "./TrellisRestore.ts";
 
 const POLL_INTERVAL = "3 seconds";
+const PIN_RECONCILE_INTERVAL = "10 minutes";
 const encodeListing = Schema.encodeSync(Schema.fromJsonString(Schema.Array(TrellisProjectView)));
 const SYNC_COMMAND_PREFIX = "server:trellis-sync:";
 
@@ -501,6 +503,7 @@ const make = Effect.gen(function* () {
   const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
   // Absent in tests that never trash; trash then only checks for busy threads.
   const restoreGate = yield* Effect.serviceOption(TrellisRestoreGate);
+  const checkpointPins = yield* Effect.serviceOption(TrellisCheckpointPins);
   const orchestrator = yield* OrchestratorV2;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const projectService = yield* ProjectService;
@@ -730,6 +733,22 @@ const make = Effect.gen(function* () {
         : Effect.logWarning(label, { cause: Cause.pretty(cause) }),
     );
 
+  // Releases the checkpoint pins of threads that no longer exist (archived
+  // threads keep theirs: they can be unarchived and reverted).
+  const reconcilePins = Effect.gen(function* () {
+    if (Option.isNone(checkpointPins) || (yield* trellis.current) === null) return;
+    const readAt = yield* DateTime.now;
+    const shell = yield* projectionStore.getShellSnapshot();
+    const liveThreadIds = [...shell.threads, ...shell.archivedThreads]
+      .filter((thread) => thread.deletedAt === null)
+      .map((thread) => thread.id);
+    yield* checkpointPins.value.reconcile({ liveThreadIds, readAt });
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("could not read threads to reconcile Trellis pins", { cause }),
+    ),
+  );
+
   const start: TrellisCatalog["Service"]["start"] = Effect.fn("TrellisCatalog.start")(function* () {
     const fromSequence = yield* applicationEvents.latestApplicationSequence.pipe(
       Effect.orElseSucceed(() => 0),
@@ -740,10 +759,14 @@ const make = Effect.gen(function* () {
         (stored) => {
           if (!("aggregateKind" in stored)) {
             switch (stored.event.type) {
+              case "thread.deleted":
+                return Ref.set(dirty, true).pipe(
+                  Effect.andThen(Effect.forkDetach(reconcilePins)),
+                  Effect.asVoid,
+                );
               case "thread.created":
               case "thread.archived":
               case "thread.unarchived":
-              case "thread.deleted":
               case "thread.project-moved":
                 return Ref.set(dirty, true);
               default:
@@ -774,6 +797,11 @@ const make = Effect.gen(function* () {
         Effect.repeat(Schedule.spaced(POLL_INTERVAL)),
         Effect.asVoid,
       ),
+    );
+    // At startup, then now and then: pins of threads deleted while the
+    // server was down or Trellis unreachable, and pins left by a crash.
+    yield* forkParked(
+      reconcilePins.pipe(Effect.repeat(Schedule.spaced(PIN_RECONCILE_INTERVAL)), Effect.asVoid),
     );
   });
 
