@@ -354,6 +354,7 @@ export const executorLayer: Layer.Layer<
                 ...(effect.request.acknowledgeThreads === undefined
                   ? {}
                   : { acknowledgeThreads: effect.request.acknowledgeThreads }),
+                requestId: effect.commandId,
               })
               .pipe(
                 // The last failed attempt tells waiting clients it failed,

@@ -23,6 +23,7 @@ import type {
   OrchestrationV2Run,
   OrchestrationV2ThreadShellSnapshot,
   ProjectId,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import { pathsOverlap } from "@t3tools/shared/trellis";
@@ -40,6 +41,7 @@ import {
   type CheckpointRestoreRuleShape,
   isolatedWorktreeRestoreRule,
 } from "../orchestration-v2/CheckpointRestoreSafety.ts";
+import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
 import {
   makeCwdRestoreLease,
@@ -163,8 +165,27 @@ const ENDED_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
   "cancelled",
 ]);
 
+type ConflictRun = Pick<
+  OrchestrationV2Run,
+  "id" | "ordinal" | "status" | "completedAt" | "rollbackRestoredFiles"
+>;
+
+/**
+ * Whether `run` may have left file changes made after `since`: an ended run,
+ * or a rolled-back one whose rollback did not restore files (a
+ * conversation-only rewind keeps them).
+ */
+const leftChangesSince = (run: ConflictRun, since: DateTime.Utc) =>
+  (ENDED_RUN_STATUSES.has(run.status) ||
+    (run.status === "rolled_back" && run.rollbackRestoredFiles !== true)) &&
+  run.completedAt !== null &&
+  DateTime.isGreaterThan(run.completedAt, since);
+
 export interface TrellisRestoreConflicts {
-  /** Other threads with an active or queued run in the scope. */
+  /**
+   * Threads with an active or queued run in the scope, or a stopped run whose
+   * checkpoint is still being captured; the requesting thread included.
+   */
   readonly running: ReadonlyArray<{ readonly threadId: ThreadId; readonly title: string }>;
   /** Other threads with runs in the scope that ended after the checkpoint. */
   readonly later: ReadonlyArray<{ readonly threadId: ThreadId; readonly title: string }>;
@@ -173,13 +194,15 @@ export interface TrellisRestoreConflicts {
 /** What restore conflicts are computed from, so both the rule and the RPC can share it. */
 export interface TrellisRestoreConflictReads<E> {
   readonly shell: Effect.Effect<OrchestrationV2ThreadShellSnapshot, E>;
-  readonly records: (threadId: ThreadId) => Effect.Effect<
-    {
-      readonly runs: ReadonlyArray<Pick<OrchestrationV2Run, "status" | "completedAt">>;
-    },
-    E
-  >;
+  readonly records: (
+    threadId: ThreadId,
+  ) => Effect.Effect<{ readonly runs: ReadonlyArray<ConflictRun> }, E>;
   readonly projectRoot: (projectId: ProjectId) => Effect.Effect<string | undefined>;
+  /**
+   * Whether `runId`'s checkpoint capture is still queued or running. A
+   * restore before it would make that checkpoint record the restored files.
+   */
+  readonly captureOutstanding?: (runId: RunId) => Effect.Effect<boolean>;
 }
 
 /**
@@ -201,7 +224,8 @@ export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")
   const running: Array<{ threadId: ThreadId; title: string }> = [];
   const later: Array<{ threadId: ThreadId; title: string }> = [];
   for (const thread of [...shell.threads, ...shell.archivedThreads]) {
-    if (thread.id === input.threadId || thread.deletedAt !== null) continue;
+    if (thread.deletedAt !== null) continue;
+    const requesting = thread.id === input.threadId;
     // A thread works in its worktree or project folder (its checkpoint
     // scopes lie there), so other projects' records are never read.
     const paths = [thread.worktreePath, yield* reads.projectRoot(thread.projectId)].filter(
@@ -214,22 +238,29 @@ export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")
         break;
       }
     }
-    if (!inScope) continue;
+    // The requesting thread works where it restores, whatever its folder.
+    if (!inScope && !requesting) continue;
     const records = yield* reads.records(thread.id);
     const entry = { threadId: thread.id, title: thread.title };
+    // Captures run in order per thread, so only the latest stopped run's
+    // can still be outstanding.
+    const latestStopped = records.runs
+      .filter((run) => ENDED_RUN_STATUSES.has(run.status))
+      .reduce<ConflictRun | undefined>(
+        (latest, run) => (latest === undefined || run.ordinal > latest.ordinal ? run : latest),
+        undefined,
+      );
+    const capturing =
+      latestStopped !== undefined && reads.captureOutstanding !== undefined
+        ? yield* reads.captureOutstanding(latestStopped.id)
+        : false;
     if (
-      !archived.has(thread.id) &&
-      records.runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status))
+      (!archived.has(thread.id) &&
+        records.runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status))) ||
+      capturing
     ) {
       running.push(entry);
-    } else if (
-      records.runs.some(
-        (run) =>
-          ENDED_RUN_STATUSES.has(run.status) &&
-          run.completedAt !== null &&
-          DateTime.isGreaterThan(run.completedAt, input.since),
-      )
-    ) {
+    } else if (!requesting && records.runs.some((run) => leftChangesSince(run, input.since))) {
       later.push(entry);
     }
   }
@@ -260,74 +291,88 @@ function restoreRefusal(
  * the gate by restore scope, and the rule reports conflicts instead of
  * requiring an isolated worktree. Paths outside Trellis keep V2's defaults.
  */
-export const layer: Layer.Layer<never, never, ProjectStoreV2> = Layer.effectContext(
-  Effect.gen(function* () {
-    const trellisOption = yield* Effect.serviceOption(Trellis);
-    const gateOption = yield* Effect.serviceOption(TrellisRestoreGate);
-    const projects = yield* ProjectStoreV2;
-    const cwdLease = makeCwdRestoreLease();
-    const seams = (
-      lease: RestoreLeaseShape,
-      admission: TurnAdmissionShape,
-      rule: CheckpointRestoreRuleShape,
-      // References: their keys carry no service type.
-    ): Context.Context<never> =>
-      Context.make(RestoreLease, lease).pipe(
-        Context.add(TurnAdmission, admission),
-        Context.add(CheckpointRestoreRule, rule),
-      );
-    if (Option.isNone(trellisOption) || Option.isNone(gateOption)) {
-      return seams(cwdLease, { start: () => Effect.succeed(false) }, isolatedWorktreeRestoreRule);
-    }
-    const trellis = trellisOption.value;
-    const gate = gateOption.value;
-    const projectRoot = (projectId: ProjectId) =>
-      projects.get(projectId).pipe(
-        Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot),
-        Effect.orElseSucceed(() => undefined),
-      );
+export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2> =
+  Layer.effectContext(
+    Effect.gen(function* () {
+      const trellisOption = yield* Effect.serviceOption(Trellis);
+      const gateOption = yield* Effect.serviceOption(TrellisRestoreGate);
+      const projects = yield* ProjectStoreV2;
+      const outbox = yield* EffectOutboxV2;
+      // The capture effect of a run has a fixed id (see RunExecutionService);
+      // an unreadable outbox counts as outstanding.
+      const captureOutstanding = (runId: RunId) =>
+        outbox.get(`effect:checkpoint.capture:${runId}`).pipe(
+          Effect.map(
+            (effect) =>
+              Option.isSome(effect) &&
+              (effect.value.status === "pending" || effect.value.status === "running"),
+          ),
+          Effect.orElseSucceed(() => true),
+        );
+      const cwdLease = makeCwdRestoreLease();
+      const seams = (
+        lease: RestoreLeaseShape,
+        admission: TurnAdmissionShape,
+        rule: CheckpointRestoreRuleShape,
+        // References: their keys carry no service type.
+      ): Context.Context<never> =>
+        Context.make(RestoreLease, lease).pipe(
+          Context.add(TurnAdmission, admission),
+          Context.add(CheckpointRestoreRule, rule),
+        );
+      if (Option.isNone(trellisOption) || Option.isNone(gateOption)) {
+        return seams(cwdLease, { start: () => Effect.succeed(false) }, isolatedWorktreeRestoreRule);
+      }
+      const trellis = trellisOption.value;
+      const gate = gateOption.value;
+      const projectRoot = (projectId: ProjectId) =>
+        projects.get(projectId).pipe(
+          Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot),
+          Effect.orElseSucceed(() => undefined),
+        );
 
-    return seams(
-      {
-        acquire: (scope) =>
-          Effect.gen(function* () {
-            const restoreScope = yield* restoreScopeOf(trellis, scope.cwd);
-            if (restoreScope === null) return yield* cwdLease.acquire(scope);
-            yield* gate.hold([restoreScope.path]);
-          }),
-      },
-      {
-        start: ({ cwd }) =>
-          Effect.gen(function* () {
-            const path = yield* trellis.canonicalPath(cwd);
-            if (trellisRootOf(yield* trellis.expectedRoots, path) === null) return false;
-            return yield* gate.waitFree(path);
-          }),
-      },
-      {
-        check: (input, dependencies) =>
-          Effect.gen(function* () {
-            const restoreScope = yield* restoreScopeOf(trellis, input.scope.cwd);
-            if (restoreScope === null) {
-              return yield* isolatedWorktreeRestoreRule.check(input, dependencies);
-            }
-            const conflicts = yield* restoreConflictsIn(
-              trellis,
-              {
-                shell: dependencies.projections.getShellSnapshot(),
-                records: (threadId) =>
-                  dependencies.projections.getThreadRecords(threadId, ["runs", "checkpointScopes"]),
-                projectRoot,
-              },
-              {
-                threadId: input.thread.id,
-                scopePath: restoreScope.path,
-                since: input.checkpoint.capturedAt,
-              },
-            ).pipe(Effect.mapError((cause) => new CheckpointRestoreRuleError({ cause })));
-            return restoreRefusal(conflicts, input.acknowledgeThreads);
-          }),
-      },
-    );
-  }),
-);
+      return seams(
+        {
+          acquire: (scope) =>
+            Effect.gen(function* () {
+              const restoreScope = yield* restoreScopeOf(trellis, scope.cwd);
+              if (restoreScope === null) return yield* cwdLease.acquire(scope);
+              yield* gate.hold([restoreScope.path]);
+            }),
+        },
+        {
+          start: ({ cwd }) =>
+            Effect.gen(function* () {
+              const path = yield* trellis.canonicalPath(cwd);
+              if (trellisRootOf(yield* trellis.expectedRoots, path) === null) return false;
+              return yield* gate.waitFree(path);
+            }),
+        },
+        {
+          check: (input, dependencies) =>
+            Effect.gen(function* () {
+              const restoreScope = yield* restoreScopeOf(trellis, input.scope.cwd);
+              if (restoreScope === null) {
+                return yield* isolatedWorktreeRestoreRule.check(input, dependencies);
+              }
+              const conflicts = yield* restoreConflictsIn(
+                trellis,
+                {
+                  shell: dependencies.projections.getShellSnapshot(),
+                  records: (threadId) =>
+                    dependencies.projections.getThreadRecords(threadId, ["runs"]),
+                  projectRoot,
+                  captureOutstanding,
+                },
+                {
+                  threadId: input.thread.id,
+                  scopePath: restoreScope.path,
+                  since: input.checkpoint.capturedAt,
+                },
+              ).pipe(Effect.mapError((cause) => new CheckpointRestoreRuleError({ cause })));
+              return restoreRefusal(conflicts, input.acknowledgeThreads);
+            }),
+        },
+      );
+    }),
+  );

@@ -547,6 +547,12 @@ export const OrchestrationV2Run = Schema.Struct({
     }),
   ),
   delegatedCompletion: Schema.optional(OrchestrationV2DelegatedCompletionCohort),
+  /**
+   * On a `rolled_back` run: true once the rollback that removed it also
+   * restored the files to before it. Absent means its file changes may
+   * remain (a conversation-only rewind, or files not restored yet).
+   */
+  rollbackRestoredFiles: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
 

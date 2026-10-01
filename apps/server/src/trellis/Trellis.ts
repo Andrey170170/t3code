@@ -87,6 +87,14 @@ export const TrellisSnapshot = Schema.Struct({
 });
 export type TrellisSnapshot = typeof TrellisSnapshot.Type;
 
+/** `at` is Unix seconds; `data` depends on `kind`. */
+export const TrellisActivity = Schema.Struct({
+  at: Schema.Finite,
+  kind: Schema.String,
+  data: Schema.Unknown,
+});
+export type TrellisActivity = typeof TrellisActivity.Type;
+
 export const TrellisFindHitView = Schema.Struct({
   project: TrellisProjectView,
   matches: Schema.Array(Schema.Struct({ path: Schema.String, snippet: Schema.String })),
@@ -244,6 +252,12 @@ export class Trellis extends Context.Service<
     readonly listSnapshots: (
       target: string,
     ) => Effect.Effect<ReadonlyArray<TrellisSnapshot>, TrellisError>;
+    /** Activity recorded in the target's workspace, newest first. */
+    readonly listActivities: (input: {
+      readonly target: string;
+      readonly kind: string;
+      readonly limit?: number;
+    }) => Effect.Effect<ReadonlyArray<TrellisActivity>, TrellisError>;
     /** A `turn` snapshot of the target's workspace, tagged with `turn` (and `thread`). */
     readonly createSnapshot: (input: {
       readonly target: string;
@@ -646,6 +660,12 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.map((view) => ({ ignored: view.ignored ?? view.ignored_pinned ?? [] }))),
     find: (text) => call(Schema.Array(TrellisFindHitView), "GET", `/v1/find?${query({ q: text })}`),
     resolve: (target) => call(TrellisResolved, "GET", `/v1/resolve?${query({ target })}`),
+    listActivities: ({ target, kind, limit = 50 }) =>
+      call(
+        Schema.Array(TrellisActivity),
+        "GET",
+        `/v1/activities?${query({ target, kind, limit: String(limit) })}`,
+      ),
     listSnapshots: (target) =>
       call(Schema.Array(TrellisSnapshot), "GET", `/v1/snapshots?${query({ target })}`),
     createSnapshot: ({ target, thread, turn }) =>
@@ -792,6 +812,7 @@ export function makeTestTrellis(
     find: unused,
     resolve: unused,
     listSnapshots: unused,
+    listActivities: unused,
     createSnapshot: unused,
     setSnapshotPinned: unused,
     trashProject: unused,

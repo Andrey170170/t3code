@@ -24,12 +24,14 @@
 import * as NodePath from "node:path";
 
 import type { CheckpointRef, ThreadId } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
@@ -151,14 +153,27 @@ export const layer: Layer.Layer<
         retired_snapshot_ids TEXT NOT NULL DEFAULT '[]'
       )
     `.pipe(Effect.orDie);
-    // Baseline pins of captures not yet mapped, recorded before they are
-    // taken; the mapping in `trellis_checkpoint_refs` owns them once it exists.
+    // Baseline captures not yet mapped, recorded before the snapshot is
+    // taken. Trellis creates snapshots unpinned, so a crash before the pin
+    // leaves one thinning could remove; the reconcile finds it by its tag
+    // and pins it (or releases it with its thread). The mapping in
+    // `trellis_checkpoint_refs` owns the pin once it exists.
+    yield* sql`DROP TABLE IF EXISTS trellis_pending_pins`.pipe(Effect.orDie);
     yield* sql`
-      CREATE TABLE IF NOT EXISTS trellis_pending_pins (
+      CREATE TABLE IF NOT EXISTS trellis_baseline_intents (
         ref TEXT PRIMARY KEY,
-        snapshot_id TEXT NOT NULL,
         target TEXT NOT NULL,
         recorded_at TEXT NOT NULL
+      )
+    `.pipe(Effect.orDie);
+    // One row per requested restore: its intent, then its undo snapshot
+    // ('' when Trellis named none) once the rollback answered.
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS trellis_restores (
+        request_id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        undo_snapshot TEXT
       )
     `.pipe(Effect.orDie);
     // Pins taken for a read, recorded before they are taken, so a crash
@@ -429,19 +444,19 @@ export const layer: Layer.Layer<
             ),
           ),
         );
+        if (isBaselineRef(ref)) {
+          const recordedAt = DateTime.formatIso(yield* DateTime.now);
+          yield* sql`
+            INSERT OR IGNORE INTO trellis_baseline_intents (ref, target, recorded_at)
+            VALUES (${ref}, ${cwd}, ${recordedAt})
+          `.pipe(Effect.mapError(backendError("capture")));
+        }
         const snapshot: TrellisSnapshot =
           tagged ??
           (yield* trellis
             .createSnapshot({ target: cwd, turn: ref })
             .pipe(Effect.mapError(backendError("capture"))));
         if (isBaselineRef(ref) && snapshot.pinned !== true) {
-          // Owned before it is taken, so a capture that never finishes still
-          // leaves a pin the reconcile can release.
-          const recordedAt = DateTime.formatIso(yield* DateTime.now);
-          yield* sql`
-            INSERT OR REPLACE INTO trellis_pending_pins (ref, snapshot_id, target, recorded_at)
-            VALUES (${ref}, ${snapshot.id}, ${cwd}, ${recordedAt})
-          `.pipe(Effect.mapError(backendError("capture")));
           yield* trellis
             .setSnapshotPinned(snapshot.id, true)
             .pipe(Effect.mapError(backendError("capture")));
@@ -461,10 +476,62 @@ export const layer: Layer.Layer<
             captured_at = excluded.captured_at
         `.pipe(Effect.mapError(backendError("capture")));
         // The mapping owns the baseline's pin from here.
-        yield* sql`DELETE FROM trellis_pending_pins WHERE ref = ${ref}`.pipe(
+        yield* sql`DELETE FROM trellis_baseline_intents WHERE ref = ${ref}`.pipe(
           Effect.mapError(backendError("capture")),
         );
       });
+
+    // A rollback snapshots the files first, so repeating one after it took
+    // effect would make the undo return to the restored state. Each request
+    // records its intent; a retry reuses the result, or finds the rollback in
+    // Trellis' activity when the answer was lost.
+    const rollbackOnce = (cwd: string, snapshotId: string, requestId: string | undefined) =>
+      Effect.gen(function* () {
+        const rollback = trellis
+          .rollback({ target: cwd, snapshot: snapshotId })
+          .pipe(Effect.mapError(backendError("restore")));
+        if (requestId === undefined) return (yield* rollback).undoSnapshot;
+        const prior = (yield* sql<{
+          readonly snapshot_id: string;
+          readonly started_at: number;
+          readonly undo_snapshot: string | null;
+        }>`
+          SELECT snapshot_id, started_at, undo_snapshot FROM trellis_restores
+          WHERE request_id = ${requestId}
+        `.pipe(Effect.mapError(backendError("restore"))))[0];
+        if (prior !== undefined && prior.snapshot_id === snapshotId) {
+          if (prior.undo_snapshot !== null) return prior.undo_snapshot || null;
+          const activities = yield* trellis
+            .listActivities({ target: cwd, kind: "rollback" })
+            .pipe(Effect.mapError(backendError("restore")));
+          const done = activities.find(
+            (activity) =>
+              activity.at >= prior.started_at &&
+              Predicate.hasProperty(activity.data, "snapshot") &&
+              activity.data.snapshot === snapshotId,
+          );
+          if (done !== undefined) {
+            const undo =
+              Predicate.hasProperty(done.data, "undo") && typeof done.data.undo === "string"
+                ? done.data.undo
+                : null;
+            yield* recordRestoreResult(requestId, undo);
+            return undo;
+          }
+        }
+        const startedAt = Math.floor((yield* Clock.currentTimeMillis) / 1000);
+        yield* sql`
+          INSERT OR REPLACE INTO trellis_restores (request_id, snapshot_id, started_at, undo_snapshot)
+          VALUES (${requestId}, ${snapshotId}, ${startedAt}, NULL)
+        `.pipe(Effect.mapError(backendError("restore")));
+        const { undoSnapshot } = yield* rollback;
+        yield* recordRestoreResult(requestId, undoSnapshot);
+        return undoSnapshot;
+      });
+    const recordRestoreResult = (requestId: string, undo: string | null) =>
+      sql`
+        UPDATE trellis_restores SET undo_snapshot = ${undo ?? ""} WHERE request_id = ${requestId}
+      `.pipe(Effect.mapError(backendError("restore")));
 
     /**
      * Where `ref` lives: a mapped Trellis snapshot, only a Git ref (taken
@@ -599,25 +666,35 @@ export const layer: Layer.Layer<
           SELECT ref, target, snapshot_id FROM trellis_checkpoint_refs
           WHERE captured_at < ${DateTime.formatIso(input.readAt)}
         `.pipe(Effect.mapError(backendError("reconcile")));
-        const pending = yield* sql<{
-          readonly ref: string;
-          readonly target: string;
-          readonly snapshot_id: string;
-        }>`
-          SELECT ref, target, snapshot_id FROM trellis_pending_pins
+        const intents = yield* sql<{ readonly ref: string; readonly target: string }>`
+          SELECT ref, target FROM trellis_baseline_intents
           WHERE recorded_at < ${DateTime.formatIso(input.readAt)}
         `.pipe(Effect.mapError(backendError("reconcile")));
-        for (const pin of pending) {
-          if (live.has(scopeKeyOfRef(pin.ref))) continue;
-          yield* unpin(pin.target, pin.snapshot_id).pipe(
-            Effect.andThen(
-              sql`DELETE FROM trellis_pending_pins WHERE ref = ${pin.ref}`.pipe(
+        for (const intent of intents) {
+          const alive = live.has(scopeKeyOfRef(intent.ref));
+          yield* Effect.gen(function* () {
+            const tagged = (yield* trellis
+              .listSnapshots(intent.target)
+              .pipe(Effect.mapError(backendError("reconcile")))).findLast(
+              (snapshot) => snapshot.turn === intent.ref,
+            );
+            // A live thread's unfinished baseline is kept for its capture to
+            // adopt; a deleted thread's is let go.
+            if (tagged !== undefined && alive && tagged.pinned !== true) {
+              yield* trellis
+                .setSnapshotPinned(tagged.id, true)
+                .pipe(Effect.mapError(backendError("reconcile")));
+            }
+            if (!alive) {
+              if (tagged?.pinned === true) yield* unpin(intent.target, tagged.id);
+              yield* sql`DELETE FROM trellis_baseline_intents WHERE ref = ${intent.ref}`.pipe(
                 Effect.mapError(backendError("reconcile")),
-              ),
-            ),
+              );
+            }
+          }).pipe(
             Effect.catch((error) =>
-              Effect.logWarning("could not release an unfinished Trellis baseline pin", {
-                ref: pin.ref,
+              Effect.logWarning("could not reconcile an unfinished Trellis baseline", {
+                ref: intent.ref,
                 detail: error.message,
               }),
             ),
@@ -697,9 +774,11 @@ export const layer: Layer.Layer<
                     const row = yield* readRow(input.checkpointRef);
                     if (row?.snapshot_id == null) return { restored: false };
                     const snapshotId = row.snapshot_id;
-                    const { undoSnapshot } = yield* trellis
-                      .rollback({ target: input.cwd, snapshot: snapshotId })
-                      .pipe(Effect.mapError(backendError("restore")));
+                    const undoSnapshot = yield* rollbackOnce(
+                      input.cwd,
+                      snapshotId,
+                      input.requestId,
+                    );
                     return {
                       restored: true,
                       notice:

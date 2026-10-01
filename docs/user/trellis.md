@@ -68,7 +68,8 @@ project restores its whole workspace, packages included, and restarts it, so age
 start again on their next turn. While another thread is running or has a queued turn in the same idea
 or workspace, the restore is refused and names that thread; try again once it finishes. If other
 threads did later work there, T3 Code names them and asks you to confirm before their changes are
-undone. New turns in that idea or workspace wait until the restore finishes. The thread then shows
+undone. New turns in that idea or workspace wait until the restore finishes, and the reverted
+thread takes no new message until its revert is done. The thread then shows
 the `trellis rollback` command that undoes the restore. A turn whose snapshot could not be taken
 shows its checkpoint as failed, and one whose snapshot has since expired is marked missing when you
 try; neither can have its files restored. Reverting without restoring files only rewinds the

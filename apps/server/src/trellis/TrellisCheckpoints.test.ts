@@ -51,6 +51,7 @@ import {
 import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
 import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
+import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import { RestoreLease } from "../orchestration-v2/RestoreLease.ts";
@@ -77,6 +78,7 @@ function makeFakeTrellis(root: string) {
   const calls: Array<string> = [];
   let seq = 0;
   const failures = { create: 0, list: 0 };
+  const activities: Array<{ at: number; kind: string; data: unknown }> = [];
   /** Runs right after a turn snapshot is taken, as a process still writing would. */
   const hooks: {
     afterCreate?: () => void;
@@ -84,6 +86,8 @@ function makeFakeTrellis(root: string) {
     whilePinning?: () => Effect.Effect<void>;
     /** Pins are taken, but the answer reports a failure. */
     pinAnswerLost?: boolean;
+    /** Rollbacks take effect, but the answer reports a failure. */
+    rollbackAnswerLost?: boolean;
   } = {};
   const workspacePath = (ws: string) => NodePath.join(root, "workspaces", ws, "project");
   for (const path of [
@@ -194,8 +198,10 @@ function makeFakeTrellis(root: string) {
                 },
         };
       }),
+    listActivities: ({ kind }) =>
+      Effect.sync(() => activities.filter((activity) => activity.kind === kind).toReversed()),
     rollback: ({ target, snapshot: id }) =>
-      Effect.sync(() => {
+      Effect.suspend(() => {
         calls.push(`rollback ${target} ${id}`);
         const ws = workspaceOf(target);
         const undo = take(target, "pre-rollback", null);
@@ -206,7 +212,14 @@ function makeFakeTrellis(root: string) {
         NodeFS.cpSync(NodePath.join(root, "snapshots", ws, id, relative), destination, {
           recursive: true,
         });
-        return { undoSnapshot: undo.id };
+        activities.push({
+          at: seq,
+          kind: "rollback",
+          data: { snapshot: id, undo: undo.id },
+        });
+        return hooks.rollbackAnswerLost
+          ? Effect.fail({ _tag: "TrellisError", message: "connection reset" } as never)
+          : Effect.succeed({ undoSnapshot: undo.id });
       }),
   });
   return {
@@ -712,7 +725,12 @@ interface RollbackFixture {
     readonly cwd: string;
     readonly runStatus: OrchestrationV2ThreadProjection["runs"][number]["status"];
     readonly completedAt?: string;
+    readonly rollbackRestoredFiles?: boolean;
+    /** Its run's checkpoint capture is still queued. */
+    readonly capturing?: boolean;
   };
+  /** A run of the requesting thread itself, besides its completed run 1. */
+  readonly ownRunStatus?: OrchestrationV2ThreadProjection["runs"][number]["status"];
   readonly sessions?: ReadonlyArray<{ readonly id: string; readonly cwd: string }>;
   /** Runs inside the file restore, before Trellis rolls back. */
   readonly beforeRestore?: () => Effect.Effect<void, CheckpointBackendError>;
@@ -731,12 +749,27 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
     {
       id: RunId.make("run-1"),
       ordinal: 1,
-      status: "completed",
+      status: "completed" as OrchestrationV2ThreadProjection["runs"][number]["status"],
       rootNodeId: null,
       activeAttemptId: null,
       providerInstanceId: instanceId,
-      completedAt: DateTime.makeUnsafe("2026-10-01T00:01:00.000Z"),
+      completedAt: DateTime.makeUnsafe("2026-10-01T00:01:00.000Z") as DateTime.Utc | null,
+      rollbackRestoredFiles: undefined as boolean | undefined,
     },
+    ...(fixture.ownRunStatus === undefined
+      ? []
+      : [
+          {
+            id: RunId.make("run-2"),
+            ordinal: 2,
+            status: fixture.ownRunStatus,
+            rootNodeId: null,
+            activeAttemptId: null,
+            providerInstanceId: instanceId,
+            completedAt: null as DateTime.Utc | null,
+            rollbackRestoredFiles: undefined as boolean | undefined,
+          },
+        ]),
   ];
   const checkpoint = {
     id: CheckpointId.make("checkpoint-baseline"),
@@ -782,9 +815,14 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
         ? []
         : [
             {
+              id: RunId.make("run-other"),
+              ordinal: 1,
               status: other.runStatus,
               completedAt:
                 other.completedAt === undefined ? null : DateTime.makeUnsafe(other.completedAt),
+              ...(other.rollbackRestoredFiles === undefined
+                ? {}
+                : { rollbackRestoredFiles: other.rollbackRestoredFiles }),
             },
           ],
     checkpointScopes: other === undefined ? [] : [{ cwd: other.cwd }],
@@ -802,6 +840,16 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
             other === undefined
               ? Option.none()
               : Option.some({ workspaceRoot: other.cwd } as never),
+          ),
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(EffectOutboxV2)({
+        get: (effectId) =>
+          Effect.succeed(
+            other?.capturing === true && effectId === "effect:checkpoint.capture:run-other"
+              ? Option.some({ status: "pending" } as never)
+              : Option.none(),
           ),
       }),
     ),
@@ -840,7 +888,7 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
               for (const event of input.events) {
                 if (event.type !== "run.updated") continue;
                 const run = runs.find((candidate) => candidate.id === event.payload.id);
-                if (run !== undefined) run.status = event.payload.status;
+                if (run !== undefined) Object.assign(run, event.payload);
               }
               return [];
             }),
@@ -1080,6 +1128,139 @@ it.effect("a revert is refused while another thread runs in the same idea, not i
   }),
 );
 
+it.effect("a revert is refused while its own thread has a run going", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  // Another client started a turn after the revert was sent.
+  const harness = rollbackHarness(fake, { scope: ideaScope(fake), ownRunStatus: "running" });
+  return Effect.gen(function* () {
+    yield* harness.captureBaseline;
+    const refused = yield* Effect.flip(harness.execute());
+    assert.equal(refused.reason, "shared-workspace");
+    assert.include(refused.message, '"Main" is still working');
+    assert.deepEqual(harness.log, []);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("a revert waits for another thread's stopped run to finish its checkpoint", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const scope = ideaScope(fake);
+  const harness = rollbackHarness(fake, {
+    scope,
+    other: {
+      cwd: scope.cwd,
+      runStatus: "interrupted",
+      completedAt: "2026-10-01T00:05:00.000Z",
+      capturing: true,
+    },
+  });
+  return Effect.gen(function* () {
+    yield* harness.captureBaseline;
+    // Acknowledging its work is not enough while its capture is queued.
+    const refused = yield* Effect.flip(harness.execute([otherThreadId]));
+    assert.include(refused.message, '"Other" is still working');
+    assert.deepEqual(harness.log, []);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect.each([
+  { restored: undefined, needsAcknowledgement: true },
+  { restored: true, needsAcknowledgement: false },
+] as const)(
+  "another thread's rolled-back run counts as later work unless its files were restored ($restored)",
+  ({ restored, needsAcknowledgement }) => {
+    const fake = makeFakeTrellis(tempRoot());
+    const scope = ideaScope(fake);
+    const harness = rollbackHarness(fake, {
+      scope,
+      other: {
+        cwd: scope.cwd,
+        runStatus: "rolled_back",
+        completedAt: "2026-10-01T00:05:00.000Z",
+        ...(restored === undefined ? {} : { rollbackRestoredFiles: restored }),
+      },
+    });
+    return Effect.gen(function* () {
+      yield* harness.captureBaseline;
+      const result = yield* Effect.exit(harness.execute());
+      assert.equal(result._tag === "Failure", needsAcknowledgement);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect("a revert with files marks the runs it removed as restored", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const harness = rollbackHarness(fake, { scope: ideaScope(fake) });
+  return Effect.gen(function* () {
+    yield* harness.captureBaseline;
+    yield* harness.execute();
+    assert.equal(harness.runs[0]!.status, "rolled_back");
+    assert.isTrue(harness.runs[0]!.rollbackRestoredFiles);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("a retried restore never rolls Trellis back twice", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+  const scope = scopeAt(idea, "once");
+  return Effect.gen(function* () {
+    const store = yield* CheckpointStore.CheckpointStore;
+    yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1) });
+    const rollbacks = () => fake.calls.filter((call) => call.startsWith("rollback")).length;
+    const restore = (requestId: string) =>
+      store.restoreCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 1), requestId });
+
+    // Done, then the effect failed later and runs again.
+    const first = yield* restore("request-1");
+    const again = yield* restore("request-1");
+    assert.equal(rollbacks(), 1);
+    assert.equal(again.notice, first.notice);
+
+    // The rollback took effect but its answer was lost.
+    fake.hooks.rollbackAnswerLost = true;
+    yield* Effect.flip(restore("request-2"));
+    fake.hooks.rollbackAnswerLost = false;
+    const recovered = yield* restore("request-2");
+    assert.equal(rollbacks(), 2);
+    assert.include(recovered.notice ?? "", fake.snapshots.at(-1)!.id);
+
+    // A new request rolls back again.
+    yield* restore("request-3");
+    assert.equal(rollbacks(), 3);
+  }).pipe(Effect.provide(storeLayer(fake)));
+});
+
+it.effect("a baseline taken but not yet pinned when T3 stopped is pinned on recovery", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+  const kept = rootScopeOf(idea, "thread-alive");
+  const gone = rootScopeOf(idea, "thread-gone");
+  return Effect.gen(function* () {
+    const store = yield* CheckpointStore.CheckpointStore;
+    const pins = yield* TrellisCheckpointStore.TrellisCheckpointPins;
+    // Both captures stop right after Trellis took the snapshot.
+    fake.hooks.afterCreate = () => {
+      throw new Error("T3 stopped");
+    };
+    for (const scope of [kept, gone]) {
+      yield* Effect.exit(
+        Effect.suspend(() =>
+          store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 0) }),
+        ).pipe(Effect.catchDefect(() => Effect.void)),
+      );
+    }
+    delete fake.hooks.afterCreate;
+    const baselineOf = (scope: OrchestrationV2CheckpointScope) =>
+      fake.snapshots.find((snapshot) => snapshot.turn === refOf(scope, 0))!;
+    assert.isFalse(baselineOf(kept).pinned);
+    yield* pins.reconcile({
+      liveThreadIds: [kept.threadId],
+      readAt: DateTime.makeUnsafe("2999-01-01T00:00:00.000Z"),
+    });
+    assert.isTrue(baselineOf(kept).pinned);
+    assert.isFalse(baselineOf(gone).pinned);
+  }).pipe(Effect.provide(storeLayer(fake)));
+});
+
 it.effect("a run admitted during a restore starts after it", () => {
   const fake = makeFakeTrellis(tempRoot());
   const scope = ideaScope(fake);
@@ -1146,6 +1327,7 @@ it.effect("outside Trellis the seams are V2's: the cwd lease and the isolated-wo
       Layer.mergeAll(
         TrellisRestore.layer.pipe(
           Layer.provide(Layer.mock(ProjectStoreV2)({})),
+          Layer.provide(Layer.mock(EffectOutboxV2)({})),
           Layer.provide(TrellisRestore.gateLayer),
           Layer.provide(Layer.succeed(Trellis, makeFakeTrellis(tempRoot()).trellis)),
         ),

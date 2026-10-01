@@ -170,6 +170,8 @@ export interface CheckpointServiceV2Shape {
   readonly restore: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly checkpoint: OrchestrationV2Checkpoint;
+    /** The rollback request, the same on every retry. */
+    readonly requestId?: string;
   }) => Effect.Effect<{ readonly notice: string | null }, CheckpointServiceV2Error>;
   readonly deleteStaleRefs: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
@@ -547,6 +549,7 @@ export const layer: Layer.Layer<
             cwd: input.scope.cwd,
             checkpointRef: input.checkpoint.ref,
             fallbackToHead: false,
+            ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
           });
           if (!result.restored) {
             return yield* new CheckpointRestoreError({

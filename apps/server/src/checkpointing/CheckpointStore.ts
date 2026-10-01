@@ -32,6 +32,11 @@ export interface RestoreCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
   readonly fallbackToHead?: boolean;
+  /**
+   * Identifies one requested restore across retries, so a store whose
+   * restore is not idempotent performs it at most once.
+   */
+  readonly requestId?: string;
 }
 
 export interface DiffCheckpointsInput {

@@ -27,6 +27,7 @@ import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexA
 import { layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
 import { OrchestratorProjectionError, OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
 import { TurnAdmission } from "../orchestration-v2/TurnAdmission.ts";
 import type { ProviderAdapterV2Shape } from "../orchestration-v2/ProviderAdapter.ts";
 import {
@@ -1060,7 +1061,11 @@ describe("TrellisCatalog service", () => {
               runId: RunId.make("race-run"),
               cwd: `${ROOT}/workspaces/ws-race/project/src`,
             }),
-          ).pipe(Effect.provide(TrellisRestore.layer)),
+          ).pipe(
+            Effect.provide(
+              TrellisRestore.layer.pipe(Layer.provide(Layer.mock(EffectOutboxV2)({}))),
+            ),
+          ),
         );
         yield* Effect.yieldNow;
         assert.isUndefined(turn.pollUnsafe());

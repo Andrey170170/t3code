@@ -460,8 +460,9 @@ it.effect.each([
     yield* service.execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles });
     assert.deepEqual(
       calls,
-      // The rewind is recorded before the files are restored.
-      restoreFiles ? ["provider", "projection", "files"] : ["provider", "projection"],
+      // The rewind is recorded before the files are restored, and the runs
+      // are marked as having their files restored after.
+      restoreFiles ? ["provider", "projection", "files", "projection"] : ["provider", "projection"],
     );
   }).pipe(Effect.provide(testLayer));
 });

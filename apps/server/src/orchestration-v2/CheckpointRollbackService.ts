@@ -100,6 +100,8 @@ export interface CheckpointRollbackServiceV2Shape {
     readonly scopeId: CheckpointScopeId;
     readonly restoreFiles?: boolean;
     readonly acknowledgeThreads?: ReadonlyArray<ThreadId>;
+    /** The rollback command, the same on every retry of its effect. */
+    readonly requestId?: string;
   }) => Effect.Effect<void, CheckpointRollbackExecutionError>;
 }
 
@@ -159,6 +161,7 @@ export const layer: Layer.Layer<
       readonly scopeId: CheckpointScopeId;
       readonly restoreFiles?: boolean;
       readonly acknowledgeThreads?: ReadonlyArray<ThreadId>;
+      readonly requestId?: string;
     }) {
       const projection = yield* projections.getThreadRecords(input.threadId, [
         "providerThreads",
@@ -418,7 +421,11 @@ export const layer: Layer.Layer<
         if (reservation.endsSessionsIn !== null) {
           yield* releaseSessionsWithin(reservation.endsSessionsIn);
         }
-        notice = (yield* checkpoints.restore({ scope, checkpoint })).notice;
+        notice = (yield* checkpoints.restore({
+          scope,
+          checkpoint,
+          ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
+        })).notice;
       }
       const staleCheckpoints = projection.checkpoints.filter(
         (candidate) =>
@@ -432,6 +439,30 @@ export const layer: Layer.Layer<
       }
 
       const events: Array<OrchestrationV2DomainEvent> = [];
+      // The files are back to before every later run, including runs an
+      // earlier conversation-only rewind removed; their changes are gone.
+      if (reservation !== null) {
+        const rewoundIds = new Set(runsToRollback.map((run) => run.id));
+        for (const run of projection.runs) {
+          if (run.ordinal <= targetOrdinal || run.rollbackRestoredFiles === true) continue;
+          if (!rewoundIds.has(run.id) && run.status !== "rolled_back") continue;
+          events.push(
+            yield* makeEvent({
+              type: "run.updated",
+              threadId: input.threadId,
+              runId: run.id,
+              providerInstanceId: run.providerInstanceId,
+              occurredAt: now,
+              payload: {
+                ...run,
+                status: "rolled_back",
+                completedAt: rewoundIds.has(run.id) ? now : run.completedAt,
+                rollbackRestoredFiles: true,
+              },
+            }),
+          );
+        }
+      }
       for (const staleCheckpoint of staleCheckpoints) {
         events.push(
           yield* makeEvent({

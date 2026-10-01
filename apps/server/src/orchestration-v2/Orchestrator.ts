@@ -9259,6 +9259,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             threadId: command.threadId,
           });
         }
+        // A rollback holds its restore only while an attempt runs; between
+        // retries a new turn would start on files about to be replaced.
+        if (command.createdBy === "user" && isRollbackPending(thread)) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: ROLLBACK_PENDING_MESSAGE,
+          });
+        }
         yield* dispatchMessage(command, events, effects);
         break;
       }
@@ -9788,6 +9797,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ),
   });
 });
+
+export const ROLLBACK_PENDING_MESSAGE =
+  "This thread is still being reverted. Send your message once the revert finishes.";
+
+/**
+ * Whether the thread's latest rollback is accepted but neither done nor
+ * failed for good. Servers that predate completion records never set it.
+ */
+function isRollbackPending(thread: OrchestrationV2AppThread): boolean {
+  return (
+    thread.rollbackRequestId !== undefined &&
+    thread.rollbackCompletedRequestId === null &&
+    thread.rollbackFailure?.requestId !== thread.rollbackRequestId
+  );
+}
 
 export const layer: Layer.Layer<
   OrchestratorV2,
