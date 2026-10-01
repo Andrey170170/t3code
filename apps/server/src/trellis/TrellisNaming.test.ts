@@ -25,6 +25,7 @@ function makeHarness(input: { readonly workspaceRoot?: string } = {}) {
   const messages: Array<Message> = [];
   const generated: Array<{ message: string; previousName?: string | undefined }> = [];
   const described: Array<Parameters<Trellis["Service"]["describe"]>[0]> = [];
+  const historyReads = { count: 0 };
   let item: TrellisProjectView = {
     id: "idea-1",
     kind: "idea",
@@ -77,11 +78,16 @@ function makeHarness(input: { readonly workspaceRoot?: string } = {}) {
     ),
     Layer.provide(
       Layer.mock(OrchestratorV2)({
+        getThreadShell: () =>
+          Effect.succeed({ id: threadId, projectId, worktreePath: null } as never),
         getThreadRecords: () =>
-          Effect.sync(() => ({
-            thread: { id: threadId, projectId, worktreePath: null },
-            messages: messages.map((message) => ({ ...message, streaming: false })),
-          })) as never,
+          Effect.sync(() => {
+            historyReads.count += 1;
+            return {
+              thread: { id: threadId, projectId, worktreePath: null },
+              messages: messages.map((message) => ({ ...message, streaming: false })),
+            };
+          }) as never,
       }),
     ),
     Layer.provide(
@@ -92,7 +98,7 @@ function makeHarness(input: { readonly workspaceRoot?: string } = {}) {
     ),
     Layer.provide(ServerSettings.layerTest()),
   );
-  return { layer, messages, generated, described };
+  return { layer, messages, generated, described, historyReads };
 }
 
 const userMessage = {
@@ -134,6 +140,12 @@ describe("TrellisNaming", () => {
       expect(harness.described[0]).toMatchObject({ target: IDEA_PATH, name: "Weather Plots" });
       expect(harness.generated[1]?.previousName).toBe("Weather Plots");
       expect(harness.generated[1]?.message).toContain("and wind");
+      expect(harness.generated).toHaveLength(2);
+
+      // A refined name is final: later turns do not even read the conversation.
+      const reads = harness.historyReads.count;
+      yield* turn("and hail", 5);
+      expect(harness.historyReads.count).toBe(reads);
       expect(harness.generated).toHaveLength(2);
     }).pipe(Effect.provide(harness.layer));
   });

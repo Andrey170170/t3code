@@ -87,10 +87,10 @@ const make = Effect.gen(function* () {
   ) {
     const env = yield* trellis.current;
     if (env === null) return;
-    const records = yield* orchestrator.getThreadRecords(request.threadId, ["messages"], {
-      messageRoles: ["user", "assistant"],
-    });
-    const thread = records.thread;
+    // Cheap checks first: the thread's folder and the item's name source end
+    // most requests before any conversation is read.
+    const thread = yield* orchestrator.getThreadShell(request.threadId);
+    if (thread === null) return;
     const path =
       thread.worktreePath ??
       Option.getOrNull(yield* projects.getById(thread.projectId))?.workspaceRoot ??
@@ -98,14 +98,16 @@ const make = Effect.gen(function* () {
     if (path === null) return;
     const cwd = yield* trellis.canonicalPath(path);
     if (!isTrellisManagedPath(env.root, cwd)) return;
+    const item = (yield* trellis.resolve(cwd)).project;
+    if (item === null || !mayGenerateName(request.stage, item.name_source)) return;
 
+    const records = yield* orchestrator.getThreadRecords(request.threadId, ["messages"], {
+      messageRoles: request.stage === "initial" ? ["user"] : ["user", "assistant"],
+    });
     const messages = records.messages.filter((message) => !message.streaming);
     const userMessages = messages.filter((message) => message.role === "user");
     if (request.stage === "initial" && userMessages.length !== 1) return;
     if (request.stage === "refine" && userMessages.length < TRELLIS_NAME_REFINE_TURN) return;
-
-    const item = (yield* trellis.resolve(cwd)).project;
-    if (item === null || !mayGenerateName(request.stage, item.name_source)) return;
 
     const message =
       request.stage === "initial"

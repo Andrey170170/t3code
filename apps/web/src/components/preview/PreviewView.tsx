@@ -35,7 +35,8 @@ import {
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
-import { trellisEnvironment } from "~/state/trellis";
+import { readTrellisStatus, trellisEnvironment } from "~/state/trellis";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { isLoopbackPreviewUrl } from "~/lib/trellis";
 import { useAtomCommand } from "~/state/use-atom-command";
 import {
@@ -194,30 +195,47 @@ export function PreviewView({
     // threadKey stands in for threadRef, whose identity churns on every thread update.
   }, [environmentHostname, latestHistoryUrl, navTitle, navUrl, threadKey]);
 
+  /**
+   * `url` as the browser should load it in this thread: `localhost` in a
+   * Trellis thread means its workspace, which the server maps to a published
+   * port. Null when that mapping failed; the URL must then not load at all.
+   * Servers without Trellis (no status, or never used) get the URL unchanged.
+   */
+  const mapTrellisUrl = useCallback(
+    async (url: string): Promise<string | null> => {
+      if (!isLoopbackPreviewUrl(url)) return url;
+      const status = readTrellisStatus(appAtomRegistry, threadRef.environmentId);
+      if (status === null || (status.state === "disabled" && status.knownRoots.length === 0)) {
+        return url;
+      }
+      const result = await resolveTrellisPreviewUrl({
+        environmentId: threadRef.environmentId,
+        input: { threadId: threadRef.threadId, url },
+      });
+      if (result._tag === "Success") return result.value.url;
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add({
+          type: "error",
+          title: "Unable to open workspace port",
+          description: isPreviewTrellisError(error)
+            ? error.message
+            : "Could not ask the server where this port is. Try again.",
+        });
+      }
+      return null;
+    },
+    [resolveTrellisPreviewUrl, threadRef],
+  );
+
   const navigateToResolvedUrl = useCallback(
     async (requestedUrl: string) => {
-      // Opens are mapped by the server; an in-place navigation must ask it
-      // first, because `localhost` in a Trellis thread means its workspace.
+      // Opens are mapped by the server; an in-place navigation must ask it first.
       let resolvedUrl = requestedUrl;
-      if (runtimeTabId && previewBridge && isLoopbackPreviewUrl(requestedUrl)) {
-        const result = await resolveTrellisPreviewUrl({
-          environmentId: threadRef.environmentId,
-          input: { threadId: threadRef.threadId, url: requestedUrl },
-        });
-        if (result._tag === "Success") {
-          resolvedUrl = result.value.url;
-        } else if (!isAtomCommandInterrupted(result)) {
-          const error = squashAtomCommandFailure(result);
-          // Servers without Trellis support load the URL as before.
-          if (isPreviewTrellisError(error)) {
-            toastManager.add({
-              type: "error",
-              title: "Unable to open workspace port",
-              description: error.message,
-            });
-            return false;
-          }
-        }
+      if (runtimeTabId && previewBridge) {
+        const mapped = await mapTrellisUrl(requestedUrl);
+        if (mapped === null) return false;
+        resolvedUrl = mapped;
       }
       if (runtimeTabId && previewBridge) {
         // The bridge mirrors the resolved URL back to the server.
@@ -238,7 +256,7 @@ export function PreviewView({
       }
       return result._tag === "Success";
     },
-    [open, resolveTrellisPreviewUrl, runtimeTabId, threadRef],
+    [mapTrellisUrl, open, runtimeTabId, threadRef],
   );
 
   const handleSubmitUrl = useCallback(
@@ -258,7 +276,15 @@ export function PreviewView({
   const handleOpenServerUrl = useCallback(
     async (next: string) => {
       try {
-        const resolved = resolveDiscoveredServerUrl(threadRef.environmentId, next);
+        // A workspace port is mapped before the remote-environment host
+        // rewrite, which would hide that the URL meant `localhost`.
+        const normalized = normalizePreviewUrl(next);
+        const mapped = await mapTrellisUrl(normalized);
+        if (mapped === null) return;
+        const resolved =
+          mapped === normalized
+            ? resolveDiscoveredServerUrl(threadRef.environmentId, next)
+            : mapped;
         if (await navigateToResolvedUrl(resolved)) {
           recordVisitForThread(threadRef, next);
         }
@@ -266,7 +292,7 @@ export function PreviewView({
         // Server-side `failed` event renders the unreachable view.
       }
     },
-    [navigateToResolvedUrl, threadRef],
+    [mapTrellisUrl, navigateToResolvedUrl, threadRef],
   );
 
   const handleRefresh = useCallback(() => {
