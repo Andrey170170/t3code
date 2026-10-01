@@ -683,7 +683,7 @@ export const make = Effect.gen(function* () {
   });
 
   const requireReady = Effect.gen(function* () {
-    const env = (yield* trellis.current) ?? (yield* trellis.refresh);
+    const env = yield* trellis.discover;
     if (env === null) {
       return yield* new TrellisError({
         message: (yield* trellis.enabled)

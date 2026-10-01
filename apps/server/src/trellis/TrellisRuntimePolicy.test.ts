@@ -51,6 +51,8 @@ const resolve = (input: {
   /** Roots known without asking Trellis; Trellis reports `trellisEnv` when asked. */
   readonly knownRoots?: ReadonlyArray<string>;
   readonly notAskedYet?: boolean;
+  /** Symlinks: alias → target. */
+  readonly aliases?: Readonly<Record<string, string>>;
   readonly providerInstances?: Parameters<typeof ServerSettingsService.layerTest>[0];
 }) => {
   const projectId = "project-trellis-policy";
@@ -92,6 +94,7 @@ const resolve = (input: {
           env: input.trellisEnv === undefined ? env : input.trellisEnv,
           expectedRoots: Effect.succeed(input.knownRoots ?? ["/trellis"]),
           ...(input.notAskedYet === true ? { current: Effect.succeed(null) } : {}),
+          canonicalPath: (path) => Effect.succeed(input.aliases?.[path] ?? path),
           primer: (target) =>
             Effect.sync(() => {
               primerTargets.push(target);
@@ -153,6 +156,28 @@ describe("TrellisRuntimePolicy", () => {
         notAskedYet: true,
       });
       assert.equal(policy.launch?.sessionKey, "ws-1");
+    }),
+  );
+
+  it.effect("classifies a symlink to a workspace by its target and starts there", () =>
+    Effect.gen(function* () {
+      const { policy } = yield* resolve({
+        instance: "codex",
+        projectRoot: "/home/me/idea",
+        aliases: { "/home/me/idea": idea },
+      });
+      assert.equal(policy.cwd, idea);
+      assert.equal(policy.launch?.sessionKey, "ws-1");
+    }),
+  );
+
+  it.effect("refuses a launch the shim would run on the host because of TRELLIS_WORKSPACE", () =>
+    Effect.gen(function* () {
+      vi.stubEnv("TRELLIS_WORKSPACE", "");
+      const message = yield* refusal(resolve({ instance: "codex", projectRoot: idea })).pipe(
+        Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())),
+      );
+      assert.equal(message, TrellisRuntimePolicy.TRELLIS_NESTED_WORKSPACE_MESSAGE);
     }),
   );
 

@@ -64,6 +64,9 @@ export const TRELLIS_LANDING_PAD_MESSAGE =
 export const TRELLIS_CUSTOM_HOME_MESSAGE =
   "Trellis workspaces mount only the default ~/.claude and ~/.codex, so a provider instance with a custom home or config directory cannot run inside them yet. Use an instance with the default home for this project.";
 
+export const TRELLIS_NESTED_WORKSPACE_MESSAGE =
+  "TRELLIS_WORKSPACE is set in this server's or provider's environment (is T3 itself running inside a Trellis workspace?), so the Trellis shim would run the provider on the host. Unset it for this server or provider instance.";
+
 export const TRELLIS_MANAGED_CODEX_MESSAGE =
   "Managed ChatGPT connections are not supported inside Trellis workspaces yet. Use a Codex CLI login for this project.";
 
@@ -164,9 +167,10 @@ const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
  * Why a provider instance cannot run inside a workspace, or null. The
  * container mounts only the default provider homes at their host paths, so a
  * home set in the instance settings, the instance environment or the
- * environment the server inherited is refused.
+ * environment the server inherited is refused; so is an inherited
+ * `TRELLIS_WORKSPACE`, which makes the shim fall back to the host.
  */
-function instanceHomeRefusal(
+function instanceLaunchRefusal(
   driverKind: string,
   instance: ProviderInstanceConfig | undefined,
   homeDir: string,
@@ -180,6 +184,10 @@ function instanceHomeRefusal(
   const environmentValue = (name: string) =>
     instance?.environment?.find((variable) => variable.name === name)?.value ??
     hostEnvironment[name];
+  // The shim runs the host binary whenever this is set, even empty.
+  if (environmentValue("TRELLIS_WORKSPACE") !== undefined) {
+    return TRELLIS_NESTED_WORKSPACE_MESSAGE;
+  }
   if (driverKind === "codex") {
     const config = decodeCodexSettings(instance?.config ?? {});
     if (Option.isSome(config) && config.value.setupMode === "managed") {
@@ -235,15 +243,19 @@ export const layer: Layer.Layer<
         if (isTrellisLandingPad(input.thread.projectId)) {
           return yield* refuse(TRELLIS_LANDING_PAD_MESSAGE);
         }
+        const canonical = (path: string | null | undefined) =>
+          path == null ? Effect.succeed(undefined) : trellis.canonicalPath(path);
+        // Classified by realpath: a symlink to a workspace path is that path.
         const projectRoot = yield* projects.get(input.thread.projectId).pipe(
           Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot),
           Effect.orElseSucceed(() => undefined),
+          Effect.flatMap(canonical),
         );
-        const cwd = policy.cwd ?? undefined;
-        // Ask an enabled Trellis that is not known to be up first: its live
-        // root may be the only one that marks this path as a workspace.
+        const cwd = yield* canonical(policy.cwd);
+        // Ask an enabled Trellis that is not known to be up first (once per
+        // interval): its live root may be the only one marking this path.
         const enabled = yield* trellis.enabled;
-        const env = enabled ? ((yield* trellis.current) ?? (yield* trellis.refresh)) : null;
+        const env = yield* trellis.discover;
         const roots = yield* trellis.expectedRoots;
         const involved = [cwd, projectRoot].some(
           (path) =>
@@ -268,7 +280,7 @@ export const layer: Layer.Layer<
         const settings = yield* serverSettings.getSettings.pipe(
           Effect.mapError((error) => refuse(error.message)),
         );
-        const homeRefusal = instanceHomeRefusal(
+        const homeRefusal = instanceLaunchRefusal(
           driverKind,
           deriveProviderInstanceConfigMap(settings)[input.modelSelection.instanceId],
           NodeOS.homedir(),
@@ -294,7 +306,8 @@ export const layer: Layer.Layer<
           sessionKey: decision.workspaceId,
           loopbackHost: TRELLIS_LOOPBACK_HOST,
         };
-        return ProviderAdapterV2RuntimePolicy.make({ ...policy, launch });
+        // The provider starts in the canonical path, which exists in the container.
+        return ProviderAdapterV2RuntimePolicy.make({ ...policy, cwd: cwd ?? policy.cwd, launch });
       },
     );
     return RuntimePolicyV2.of({ resolve });

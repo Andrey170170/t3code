@@ -699,6 +699,19 @@ describe("CodexAdapterV2 process spawning", () => {
         },
       });
       assert.equal(params.config.developer_instructions, "You are in a Trellis workspace.");
+      assert.equal(
+        codexThreadRuntimeParams({
+          threadId,
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/trellis/workspaces/ws-1/project",
+            launch: { executable: "/t3/trellis-shims/codex", instructions: "Primer." },
+          },
+          configuredDeveloperInstructions: "The user's own instructions.",
+        }).config.developer_instructions,
+        "The user's own instructions.\n\nPrimer.",
+      );
       assert.deepEqual(params.config.mcp_servers, {
         "t3-code": {
           url: "http://host.containers.internal:43123/mcp",
