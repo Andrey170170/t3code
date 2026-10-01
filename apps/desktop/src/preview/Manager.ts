@@ -21,6 +21,7 @@ import type {
   PreviewAnnotationSubmissionResult,
   DesktopPreviewRecordingArtifact,
   DesktopPreviewRecordingFrame,
+  DesktopPreviewNavigationRequest,
   DesktopPreviewRecordingInputEvent,
   DesktopPreviewScreenshotArtifact,
   DesktopPreviewTabDefaults,
@@ -37,6 +38,7 @@ import type {
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
+import { guestNavigationNeedsMapping } from "./guestNavigation.ts";
 import {
   BrowserWindow,
   ClipboardItem,
@@ -502,6 +504,8 @@ type RecordingInputListener = (event: DesktopPreviewRecordingInputEvent) => Effe
 
 type PointerEventListener = (event: DesktopPreviewPointerEvent) => Effect.Effect<void>;
 
+type NavigationRequestListener = (request: DesktopPreviewNavigationRequest) => Effect.Effect<void>;
+
 interface ExpectedAgentInput {
   readonly signal: PreviewInputSignal;
   readonly expiresAt: number;
@@ -652,6 +656,9 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   const listenersRef = yield* Ref.make<ReadonlySet<Listener>>(new Set());
   const pointerEventListenersRef = yield* Ref.make<ReadonlySet<PointerEventListener>>(new Set());
   const recordingInputListenersRef = yield* Ref.make<ReadonlySet<RecordingInputListener>>(
+    new Set(),
+  );
+  const navigationRequestListenersRef = yield* Ref.make<ReadonlySet<NavigationRequestListener>>(
     new Set(),
   );
   const recordingFrameListenersRef = yield* Ref.make<ReadonlySet<RecordingFrameListener>>(
@@ -937,7 +944,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   });
 
   const deliverEvent = (
-    eventKind: "state-change" | "recording-frame" | "recording-input" | "pointer-event",
+    eventKind:
+      | "state-change"
+      | "recording-frame"
+      | "recording-input"
+      | "pointer-event"
+      | "navigation-request",
     tabId: string,
     delivery: () => Effect.Effect<void>,
   ) =>
@@ -1996,6 +2008,25 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         syncMenuShortcuts(window.webContents, input);
       });
     };
+    // Loopback targets the page navigates to on its own wait for the renderer
+    // to map them for the tab's thread; it calls `navigate` with the result.
+    const requestNavigation = (url: string): void => {
+      runFork(
+        Effect.gen(function* () {
+          const listeners = yield* Ref.get(navigationRequestListenersRef);
+          yield* Effect.forEach(
+            listeners,
+            (listener) => deliverEvent("navigation-request", tabId, () => listener({ tabId, url })),
+            { discard: true },
+          );
+        }),
+      );
+    };
+    const willNavigate = (event: Electron.Event, url: string): void => {
+      if (!guestNavigationNeedsMapping(wc.getURL(), url)) return;
+      event.preventDefault();
+      requestNavigation(url);
+    };
     const beforeInput = (event: Electron.Event, input: Electron.Input): void => {
       syncMenuShortcuts(wc, input);
       if (isPreviewRefreshShortcut(input)) {
@@ -2024,6 +2055,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.off("audio-state-changed", audioStateChanged);
         wc.off("did-create-window", windowCreated);
         wc.off("before-input-event", beforeInput);
+        wc.off("will-navigate", willNavigate);
         wc.ipc.off(HUMAN_INPUT_CHANNEL, humanInput);
         wc.ipc.off(RECORDING_INPUT_CHANNEL, recordingInput);
         wc.ipc.off(MOUSE_NAVIGATE_CHANNEL, mouseNavigate);
@@ -2051,6 +2083,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           if (previewWindowOpenAction(details) === "popup") {
             return { action: "allow", overrideBrowserWindowOptions: POPUP_WINDOW_OPTIONS };
           }
+          if (guestNavigationNeedsMapping(wc.getURL(), details.url)) {
+            requestNavigation(details.url);
+            return { action: "deny" };
+          }
           runFork(
             attemptPromise({ operation: "openPreviewWindow", tabId, webContentsId: wc.id }, () =>
               wc.loadURL(details.url),
@@ -2060,6 +2096,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         });
         wc.on("did-create-window", windowCreated);
         wc.on("before-input-event", beforeInput);
+        wc.on("will-navigate", willNavigate);
       });
       yield* Ref.update(attachedRef, (attached) =>
         replaceMap(attached, (copy) => {
@@ -4600,6 +4637,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         Ref.set(pointerEventListenersRef, new Set()),
         Ref.set(recordingFrameListenersRef, new Set()),
         Ref.set(recordingInputListenersRef, new Set()),
+        Ref.set(navigationRequestListenersRef, new Set()),
       ],
       { discard: true },
     );
@@ -4648,6 +4686,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     subscribeRecordingFrames: (listener: RecordingFrameListener) =>
       subscribe(recordingFrameListenersRef, listener),
     subscribeStateChanges: (listener: Listener) => subscribe(listenersRef, listener),
+    subscribeNavigationRequests: (listener: NavigationRequestListener) =>
+      subscribe(navigationRequestListenersRef, listener),
     zoomIn: (tabId: string) => applyZoom(tabId, (current) => nextZoomLevel(current, "in")),
     zoomOut: (tabId: string) => applyZoom(tabId, (current) => nextZoomLevel(current, "out")),
   };
@@ -5050,6 +5090,9 @@ export class PreviewManager extends Context.Service<
       input: PreviewAutomationWaitForInput,
     ) => Effect.Effect<void, PreviewManagerError>;
     readonly subscribeStateChanges: (listener: Listener) => Effect.Effect<void, never, Scope.Scope>;
+    readonly subscribeNavigationRequests: (
+      listener: NavigationRequestListener,
+    ) => Effect.Effect<void, never, Scope.Scope>;
     readonly subscribePointerEvents: (
       listener: PointerEventListener,
     ) => Effect.Effect<void, never, Scope.Scope>;
@@ -5147,6 +5190,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     automationEvaluate: operations.automationEvaluate,
     automationWaitFor: operations.automationWaitFor,
     subscribeStateChanges: operations.subscribeStateChanges,
+    subscribeNavigationRequests: operations.subscribeNavigationRequests,
     subscribePointerEvents: operations.subscribePointerEvents,
     subscribeRecordingFrames: operations.subscribeRecordingFrames,
     subscribeRecordingInputs: operations.subscribeRecordingInputs,

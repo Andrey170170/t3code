@@ -366,6 +366,26 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         self.assertNotIn("npm", self.commands())
         self.assertNotIn("systemctl", self.commands())
 
+    def test_install_readiness_brackets_an_ipv6_host(self) -> None:
+        # Readiness succeeds only at the bracketed URL; log what was asked.
+        self._write_executable(
+            self.bin / "curl",
+            """#!/usr/bin/env bash
+url=${@: -1}
+printf 'curl %s\\n' "$url" >> "$MOCK_LOG"
+[[ $url == 'http://[::1]:3773/' ]]
+""",
+        )
+        artifact = Path(self.temp.name) / "ipv6.tgz"
+        artifact.write_bytes(b"ipv6")
+
+        result = self.run_install(
+            "--package", str(artifact), "--build-id", "git-ipv6", T3CODE_HOST="::1"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("curl http://[::1]:3773/", self.commands())
+
 
 if __name__ == "__main__":
     unittest.main()

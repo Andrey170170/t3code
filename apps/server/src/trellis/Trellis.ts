@@ -276,8 +276,10 @@ export class Trellis extends Context.Service<
       readonly target: string;
       readonly port: number;
     }) => Effect.Effect<{ readonly hostPort: number; readonly url: string }, TrellisError>;
-    /** Every published workspace port: its browser `url`, in any workspace. */
-    readonly listPreviews: Effect.Effect<ReadonlyArray<{ readonly url: string }>, TrellisError>;
+    /** The published ports of `target`'s workspace, each with its browser `url`. */
+    readonly listPreviews: (
+      target: string,
+    ) => Effect.Effect<ReadonlyArray<{ readonly url: string }>, TrellisError>;
     /** Short agent orientation for sessions started in `target`. */
     readonly primer: (target: string) => Effect.Effect<string, TrellisError>;
   }
@@ -691,7 +693,8 @@ const make = Effect.gen(function* () {
       call(TrellisPreviewView, "POST", "/v1/previews", { body: { target, port } }).pipe(
         Effect.map((view) => ({ hostPort: view.host_port, url: view.url })),
       ),
-    listPreviews: call(Schema.Array(TrellisPreviewView), "GET", "/v1/previews"),
+    listPreviews: (target) =>
+      call(Schema.Array(TrellisPreviewView), "GET", `/v1/previews?${query({ target })}`),
     primer: (target) =>
       call(TrellisPrimerView, "GET", `/v1/primer?${query({ target })}`, { timeoutMs: 5_000 }).pipe(
         Effect.map((view) => view.primer),
@@ -795,7 +798,7 @@ export function makeTestTrellis(
     emptyTrash: Effect.die(new Error("unused Trellis operation")),
     rollback: unused,
     preview: unused,
-    listPreviews: Effect.die(new Error("unused Trellis operation")),
+    listPreviews: unused,
     primer: unused,
     ...rest,
   });

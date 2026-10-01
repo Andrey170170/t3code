@@ -20,6 +20,7 @@ import * as TrellisPreview from "./TrellisPreview.ts";
 
 const ROOT = "/trellis";
 const IDEA = `${ROOT}/workspaces/ws-1/project/idea-1`;
+const OTHER = `${ROOT}/workspaces/ws-2/project`;
 const threadId = ThreadId.make("thread-1");
 
 describe("loopbackPort", () => {
@@ -77,8 +78,8 @@ describe("TrellisPreview service", () => {
     readonly readFails?: boolean;
     readonly missingThread?: boolean;
     readonly published: Array<{ target: string; port: number }>;
-    /** Addresses Trellis has already published, in any workspace. */
-    readonly previews?: ReadonlyArray<string>;
+    /** Addresses Trellis has already published, by target. */
+    readonly previews?: Readonly<Record<string, ReadonlyArray<string>>>;
   }) =>
     TrellisPreview.layer.pipe(
       Layer.provide(
@@ -92,7 +93,8 @@ describe("TrellisPreview service", () => {
                     input.published.push(request);
                     return { hostPort: 21001, url: "http://node.tailnet.ts.net:21001/" };
                   }),
-            listPreviews: Effect.succeed((input.previews ?? []).map((url) => ({ url }))),
+            listPreviews: (target) =>
+              Effect.succeed((input.previews?.[target] ?? []).map((url) => ({ url }))),
           }),
         ),
       ),
@@ -189,11 +191,16 @@ describe("TrellisPreview service", () => {
       const layer = makeLayer({
         workspaceRoot: IDEA,
         published,
-        previews: ["http://127.0.0.1:21001/"],
+        previews: { [IDEA]: ["http://127.0.0.1:21001/"], [OTHER]: ["http://127.0.0.1:21002/"] },
       });
       expect(yield* resolve("http://127.0.0.1:21001/x", layer)).toBe("http://127.0.0.1:21001/x");
       expect(yield* resolve("http://localhost:21001/", layer)).toBe("http://localhost:21001/");
       expect(published).toEqual([]);
+      // Another workspace's published port is this workspace's own port 21002.
+      expect(yield* resolve("http://localhost:21002/", layer)).toBe(
+        "http://node.tailnet.ts.net:21001/",
+      );
+      expect(published).toEqual([{ target: IDEA, port: 21002 }]);
       // Another port of the workspace is still mapped.
       expect(yield* resolve("http://localhost:8000/", layer)).toBe(
         "http://node.tailnet.ts.net:21001/",

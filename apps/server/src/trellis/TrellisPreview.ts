@@ -10,7 +10,8 @@
  * server HMR) pass through. Threads outside Trellis are unchanged, and a
  * failed mapping is an error rather than a silent fall back to the host.
  *
- * A URL is mapped exactly once: an address Trellis already published, and
+ * A URL is mapped exactly once: an address Trellis already published for
+ * the thread's own workspace, and
  * T3's own signed asset URLs (local file previews), load as given.
  *
  * Hooks: the `preview.open`/`preview.navigate` WS handlers, the
@@ -128,9 +129,9 @@ const make = Effect.gen(function* () {
     return trellisRootOf(roots, cwd) !== null ? cwd : null;
   });
 
-  // Mapped already: an address Trellis published (any workspace) for this port.
-  const isPublished = (url: URL) =>
-    trellis.listPreviews.pipe(
+  // Mapped already: an address Trellis published for this workspace's ports.
+  const isPublished = (cwd: string, url: URL) =>
+    trellis.listPreviews(cwd).pipe(
       Effect.map((previews) =>
         previews.some((preview) => {
           try {
@@ -160,7 +161,7 @@ const make = Effect.gen(function* () {
     }
     const cwd = yield* trellisCwdOf(threadId);
     if (cwd === null) return url;
-    if (yield* isPublished(new URL(normalizePreviewUrl(url)))) return url;
+    if (yield* isPublished(cwd, new URL(normalizePreviewUrl(url)))) return url;
     const published = yield* publish(cwd, port);
     return rewriteToPreview(url, published.url);
   });
