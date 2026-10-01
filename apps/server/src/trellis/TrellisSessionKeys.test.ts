@@ -311,6 +311,15 @@ it.layer(TestLayer)("Trellis provider session keys", (it) => {
         }),
       );
       assert.equal(yield* sessionIdOf(staying.threadId), sessionA);
+      // The moved thread left the old process; the other thread keeps it.
+      const sessionsOf = (threadId: ThreadId) =>
+        orchestrator
+          .getThreadProjection(threadId)
+          .pipe(
+            Effect.map((projection) => projection.providerSessions.map((session) => session.id)),
+          );
+      assert.notInclude(yield* sessionsOf(moved.threadId), sessionA);
+      assert.include(yield* sessionsOf(staying.threadId), sessionA);
     }),
   );
 });
