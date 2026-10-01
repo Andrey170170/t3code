@@ -293,10 +293,11 @@ export function isLoopbackPreviewUrl(url: string): boolean {
 
 /**
  * Whether the sidebar hides a project as a worker fork: Trellis reports its
- * root as a fork a thread spawned (`workerRoots`), or it is a Trellis project
- * whose only active threads are delegated workers (a fork spawned before the
- * status caught up). A lead or a draft there shows it again. Worker forks are
- * listed with their project's workspaces in its settings instead.
+ * root as a fork a thread spawned (`workerRoots`), or its only active threads
+ * are workers whose leads work in another project, which only a fork spawn
+ * does (a fork spawned before the status caught up). A lead or a draft there
+ * shows it again. Worker forks are listed with their project's workspaces in
+ * its settings instead.
  */
 export function isHiddenWorkerProject(
   project: { readonly workspaceRoot: string },
@@ -304,17 +305,17 @@ export function isHiddenWorkerProject(
     readonly root?: string | null | undefined;
     readonly workerRoots?: ReadonlyArray<string> | undefined;
   } | null,
-  threads: { readonly leads: number; readonly workers: number },
+  threads: {
+    readonly leads: number;
+    /** Active workers whose lead works in another project. */
+    readonly forkWorkers: number;
+  },
   hasDraft: boolean,
 ): boolean {
   if (status === null || threads.leads > 0 || hasDraft) return false;
   const root = trimTrailingSlashes(project.workspaceRoot);
   if (status.workerRoots?.includes(root)) return true;
-  return (
-    threads.workers > 0 &&
-    isTrellisWorkspaceRoot(root, status.root) &&
-    !isTrellisIdeaPath(root, status.root ?? "")
-  );
+  return threads.forkWorkers > 0 && isTrellisWorkspaceRoot(root, status.root);
 }
 
 export type TrellisWorkspaceFilter = "all" | "leads" | "workers" | "discarded";

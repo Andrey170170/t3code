@@ -1,4 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodePath from "node:path";
+
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -13,10 +17,15 @@ import {
   TrellisError,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
+import * as FileSystem from "effect/FileSystem";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
+import { ServerConfig } from "../config.ts";
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
@@ -218,10 +227,18 @@ const codexProvider: ServerProvider = {
   skills: [],
 };
 
-function testLayer(fake: ReturnType<typeof makeForkTrellis>) {
+function testLayer(
+  fake: ReturnType<typeof makeForkTrellis>,
+  events: Layer.Layer<OrchestrationEventStore> = Layer.mock(OrchestrationEventStore)({}),
+) {
   const workers = TrellisWorkers.layer.pipe(
     Layer.provide(fakeCatalog(fake)),
-    Layer.provide(Layer.mock(OrchestrationEventStore)({})),
+    Layer.provide(events),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-trellis-workers-" }).pipe(
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    ),
   );
   return OrchestratorMcpService.layer.pipe(
     Layer.provideMerge(workers),
@@ -495,18 +512,23 @@ it.effect("retries a summary Trellis could not take until it is posted", () => {
       (candidate) => candidate.childThreadId === forked.childThreadId,
     )!;
     fake.state.failActivities = 2;
-    yield* workers.handle({
-      type: "subagent.updated",
-      threadId: lead.threadId,
-      payload: { ...task, status: "completed", result: "Done.", completedAt: yield* DateTime.now },
-    } as unknown as OrchestrationV2DomainEvent);
+    const handling = yield* workers
+      .handle({
+        type: "subagent.updated",
+        threadId: lead.threadId,
+        payload: {
+          ...task,
+          status: "completed",
+          result: "Done.",
+          completedAt: yield* DateTime.now,
+        },
+      } as unknown as OrchestrationV2DomainEvent)
+      .pipe(Effect.forkChild);
+    // Two retries 30 s apart (on the test clock); the second one is written.
+    yield* TestClock.adjust("30 seconds");
     assert.deepEqual(fake.state.activities, []);
-    assert.equal(fake.state.failActivities, 1, "first write attempted");
-    // Two retries 30 s apart (on the test clock); the second write succeeds.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      yield* TestClock.adjust("30 seconds");
-      yield* Effect.yieldNow;
-    }
+    yield* TestClock.adjust("30 seconds");
+    yield* Fiber.join(handling);
     assert.deepEqual(
       fake.state.activities.map((activity) => activity.data),
       [{ text: "Done.", thread: forked.childThreadId }],
@@ -658,6 +680,73 @@ it.effect("discarding a fork is refused while its worker runs, then files a purg
       .discardFork(scopeOf(lead.threadId), { fork: LEAD_WS })
       .pipe(Effect.flip);
     assert.equal(own.code, "fork_not_found");
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
+it.effect("resumes after the saved event cursor, so a restart misses no completion", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  const replayed = Deferred.makeUnsafe<void>();
+  // What the store serves: events from `afterSequence` on, then the stream ends.
+  const stored: Array<{ sequence: number; event: OrchestrationV2DomainEvent }> = [];
+  const events = Layer.mock(OrchestrationEventStore)({
+    latestApplicationSequence: Effect.sync(() => stored.at(-1)?.sequence ?? 0),
+    streamApplicationEvents: (input) =>
+      Stream.fromIterable(
+        stored
+          .filter((entry) => entry.sequence > (input?.afterSequence ?? 0))
+          .map((entry) => ({ ...entry, commandId: null }) as never),
+      ).pipe(Stream.ensuring(Deferred.succeed(replayed, undefined))),
+  });
+  return Effect.gen(function* () {
+    const workers = yield* TrellisWorkers.TrellisWorkers;
+    const config = yield* ServerConfig;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const lead = yield* startLead;
+    const first = yield* delegate(lead.threadId, { fork: { from: "latest", name: "one" } });
+    const second = yield* delegate(lead.threadId, { fork: { from: "latest", name: "two" } });
+    const completion = (childThreadId: ThreadId, text: string) =>
+      Effect.map(threadOf(lead.threadId), (projection) => {
+        const task = projection.subagents.find(
+          (candidate) => candidate.childThreadId === childThreadId,
+        )!;
+        return {
+          type: "subagent.updated",
+          threadId: lead.threadId,
+          payload: { ...task, status: "completed", result: text, completedAt: task.startedAt },
+        } as unknown as OrchestrationV2DomainEvent;
+      });
+    // T3 handled event 7 before it stopped; 8 arrived while it was down.
+    stored.push({ sequence: 7, event: yield* completion(first.childThreadId, "One.") });
+    stored.push({ sequence: 8, event: yield* completion(second.childThreadId, "Two.") });
+    const cursor = NodePath.join(config.stateDir, "trellis-workers-cursor");
+    yield* fileSystem.writeFileString(cursor, "7\n");
+    yield* Effect.scoped(workers.start().pipe(Effect.andThen(Deferred.await(replayed))));
+    assert.deepEqual(
+      fake.state.activities.map((activity) => activity.data),
+      [{ text: "Two.", thread: second.childThreadId }],
+    );
+    assert.equal((yield* fileSystem.readFileString(cursor)).trim(), "8");
+  }).pipe(Effect.provide(testLayer(fake, events)));
+});
+
+it.effect("an exact fork id wins over another fork named like it", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const workers = yield* TrellisWorkers.TrellisWorkers;
+    const lead = yield* startLead;
+    yield* delegate(lead.threadId, { fork: { from: "latest", name: "first" } });
+    // A live fork whose name is the first fork's id, which is already discarded.
+    yield* delegate(lead.threadId, { fork: { from: "latest", name: "ws-fork1" } });
+    yield* fake.trellis.trashWorkspace("ws-fork1");
+    const result = yield* workers.discardFork(scopeOf(lead.threadId), {
+      fork: "ws-fork1",
+      requestPurge: true,
+    });
+    assert.equal(result.workspaceId, "ws-fork1");
+    assert.isFalse(result.discarded);
+    assert.isNull(
+      fake.state.workspaces.find((workspace) => workspace.id === "ws-fork2")!.deleted_at,
+    );
   }).pipe(Effect.provide(testLayer(fake)));
 });
 

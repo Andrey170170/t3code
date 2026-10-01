@@ -11,7 +11,7 @@ import { isHiddenRetiredProject, isHiddenWorkerProject } from "~/lib/trellis";
 import { useProjects, useThreadShells } from "~/state/entities";
 import { trellisEnvironment } from "~/state/trellis";
 
-const NO_THREADS = { leads: 0, workers: 0 } as const;
+const NO_THREADS = { leads: 0, workers: 0, forkWorkers: 0 } as const;
 
 /**
  * The projects the sidebars list: every project, minus Trellis projects whose
@@ -42,15 +42,23 @@ export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
     [environmentKey],
   );
   const statuses = useAtomValue(statusAtom);
-  // Active lead and worker threads per project.
+  // Active lead and worker threads per project; a fork worker's lead is in another project.
   const activeThreads = useMemo(() => {
-    const counts = new Map<string, { leads: number; workers: number }>();
+    const projectOf = new Map(
+      threads.map((thread) => [`${thread.environmentId}:${thread.id}`, thread.projectId]),
+    );
+    const counts = new Map<string, { leads: number; workers: number; forkWorkers: number }>();
     for (const thread of threads) {
       if (thread.archivedAt !== null) continue;
       const key = `${thread.environmentId}:${thread.projectId}`;
-      const entry = counts.get(key) ?? { leads: 0, workers: 0 };
-      if (thread.lineage.relationshipToParent === "subagent") entry.workers += 1;
-      else entry.leads += 1;
+      const entry = counts.get(key) ?? { leads: 0, workers: 0, forkWorkers: 0 };
+      if (thread.lineage.relationshipToParent === "subagent") {
+        entry.workers += 1;
+        const parent = thread.lineage.parentThreadId;
+        const leadProject =
+          parent === null ? undefined : projectOf.get(`${thread.environmentId}:${parent}`);
+        if (leadProject !== undefined && leadProject !== thread.projectId) entry.forkWorkers += 1;
+      } else entry.leads += 1;
       counts.set(key, entry);
     }
     return counts;

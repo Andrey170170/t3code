@@ -348,22 +348,22 @@ describe("worker forks", () => {
 
   it("hides a worker fork from the sidebar unless a lead or a draft is there", () => {
     const project = { workspaceRoot: fork };
-    expect(isHiddenWorkerProject(project, status, { leads: 0, workers: 1 }, false)).toBe(true);
-    expect(isHiddenWorkerProject(project, status, { leads: 0, workers: 0 }, false)).toBe(true);
-    expect(isHiddenWorkerProject(project, status, { leads: 1, workers: 1 }, false)).toBe(false);
-    expect(isHiddenWorkerProject(project, status, { leads: 0, workers: 1 }, true)).toBe(false);
-    expect(isHiddenWorkerProject(project, null, { leads: 0, workers: 1 }, false)).toBe(false);
+    const workers = { leads: 0, forkWorkers: 1 };
+    expect(isHiddenWorkerProject(project, status, workers, false)).toBe(true);
+    expect(isHiddenWorkerProject(project, status, { leads: 0, forkWorkers: 0 }, false)).toBe(true);
+    expect(isHiddenWorkerProject(project, status, { leads: 1, forkWorkers: 1 }, false)).toBe(false);
+    expect(isHiddenWorkerProject(project, status, workers, true)).toBe(false);
+    expect(isHiddenWorkerProject(project, null, workers, false)).toBe(false);
   });
 
-  it("hides a fork whose only threads are workers before the status lists it", () => {
+  it("hides a fork whose workers' leads work elsewhere before the status lists it", () => {
     const fresh = { workspaceRoot: `${root}/workspaces/ws-new/project` };
-    expect(isHiddenWorkerProject(fresh, { root }, { leads: 0, workers: 1 }, false)).toBe(true);
-    // A fork the user made, still empty, stays visible; so do ideas and host folders.
-    expect(isHiddenWorkerProject(fresh, { root }, { leads: 0, workers: 0 }, false)).toBe(false);
-    const idea = { workspaceRoot: `${root}/workspaces/ws-s/project/idea-a` };
-    expect(isHiddenWorkerProject(idea, { root }, { leads: 0, workers: 1 }, false)).toBe(false);
+    expect(isHiddenWorkerProject(fresh, { root }, { leads: 0, forkWorkers: 1 }, false)).toBe(true);
+    // A workspace whose only threads are its own lead's workers (an archived lead) stays,
+    // as do an empty fork the user made and host folders.
+    expect(isHiddenWorkerProject(fresh, { root }, { leads: 0, forkWorkers: 0 }, false)).toBe(false);
     const host = { workspaceRoot: "/home/me/code" };
-    expect(isHiddenWorkerProject(host, { root }, { leads: 0, workers: 1 }, false)).toBe(false);
+    expect(isHiddenWorkerProject(host, { root }, { leads: 0, forkWorkers: 1 }, false)).toBe(false);
   });
 
   const entry = (

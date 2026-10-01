@@ -37,6 +37,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -45,6 +46,7 @@ import * as Stream from "effect/Stream";
 
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
+import { ServerConfig } from "../config.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import { OrchestrationEventStore } from "../persistence/Services/OrchestrationEventStore.ts";
 import { forkParked } from "../serverActivation.ts";
@@ -170,8 +172,12 @@ const normalizeRoot = (root: string) => NodePath.posix.normalize(root).replace(/
 
 /** How many summaries posted are remembered against duplicate events. */
 const MAX_POSTED = 2_000;
-/** A failed summary write is retried every 30 s for half an hour (Trellis restarting, say). */
-const SUMMARY_RETRY = { times: 60, schedule: Schedule.spaced("30 seconds") } as const;
+/**
+ * A failed summary write is retried every 30 s for five minutes (Trellis
+ * restarting, say). Events are handled in order, so this bounds how long an
+ * archive cascade can wait behind it.
+ */
+const SUMMARY_RETRY = { times: 10, schedule: Schedule.spaced("30 seconds") } as const;
 
 const make = Effect.gen(function* () {
   const trellis = yield* Trellis;
@@ -180,7 +186,10 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectStoreV2;
   const applicationEvents = yield* OrchestrationEventStore;
   const crypto = yield* Crypto.Crypto;
-  const scope = yield* Effect.scope;
+  const fileSystem = yield* FileSystem.FileSystem;
+  // The sequence of the last event handled, so a restart resumes after it
+  // instead of skipping what arrived (or was retrying) while T3 was down.
+  const cursorPath = NodePath.join((yield* ServerConfig).stateDir, "trellis-workers-cursor");
 
   const commandId = (operation: string) =>
     crypto.randomUUIDv4.pipe(
@@ -371,12 +380,12 @@ const make = Effect.gen(function* () {
       .listWorkspaces({ all: true })
       .pipe(Effect.mapError(unavailable));
     const ofProject = workspaces.filter((workspace) => workspace.project_id === project.id);
-    // An id, else a name; a live fork wins over trashed ones of the same name.
-    const matches = ofProject.filter(
-      (workspace) => workspace.id === input.fork || workspace.name === input.fork,
-    );
+    // An exact id first; else a name, where a live fork wins over trashed ones.
+    const named = ofProject.filter((workspace) => workspace.name === input.fork);
     const fork: TrellisWorkspaceView | undefined =
-      matches.find((workspace) => workspace.deleted_at === null) ?? matches.at(-1);
+      ofProject.find((workspace) => workspace.id === input.fork) ??
+      named.find((workspace) => workspace.deleted_at === null) ??
+      named.at(-1);
     if (fork === undefined) {
       const names = ofProject
         .filter((workspace) => workspace.id !== project.workspace_id)
@@ -446,8 +455,10 @@ const make = Effect.gen(function* () {
   const posted = new Set<string>();
 
   /** Posts a finished worker's result as its fork's `summary` activity. */
-  // Summaries being posted, so a repeated event does not post one twice.
-  const posting = new Set<string>();
+  /**
+   * Posts a finished worker's result as its fork's `summary` activity,
+   * retrying while Trellis is unreachable (the merge brief needs it).
+   */
   const postSummary = (input: {
     readonly key: string;
     readonly parentThreadId: ThreadId;
@@ -455,7 +466,7 @@ const make = Effect.gen(function* () {
     readonly text: string;
   }) =>
     Effect.gen(function* () {
-      if (posted.has(input.key) || posting.has(input.key)) return;
+      if (posted.has(input.key)) return;
       const [parent, child] = yield* Effect.all([
         threads.getThreadShell(input.parentThreadId),
         threads.getThreadShell(input.childThreadId),
@@ -464,38 +475,26 @@ const make = Effect.gen(function* () {
       if (parent == null || child == null || parent.projectId === child.projectId) return;
       const folder = yield* folderOf(child);
       if (folder === undefined) return;
-      const write = trellis.recordActivity({
-        target: folder,
-        kind: "summary",
-        data: { text: input.text, thread: input.childThreadId },
-      });
-      const markPosted = Effect.sync(() => {
-        posted.add(input.key);
-        if (posted.size > MAX_POSTED) posted.delete(posted.values().next().value!);
-      });
-      const first = yield* Effect.result(write);
-      if (first._tag === "Success") return yield* markPosted;
-      // Retried in the background while Trellis is unreachable: the merge brief needs it.
-      posting.add(input.key);
-      yield* Effect.logWarning("could not post a worker's summary to its Trellis fork; retrying", {
-        childThreadId: input.childThreadId,
-        detail: first.failure.message,
-      });
-      yield* write.pipe(
-        Effect.retry(SUMMARY_RETRY),
-        Effect.andThen(markPosted),
-        Effect.catchCause((cause) =>
-          Effect.logWarning("gave up posting a worker's summary to its Trellis fork", {
-            childThreadId: input.childThreadId,
-            cause: Cause.pretty(cause),
-          }),
-        ),
-        Effect.ensuring(Effect.sync(() => posting.delete(input.key))),
-        Effect.forkIn(scope),
-      );
+      yield* trellis
+        .recordActivity({
+          target: folder,
+          kind: "summary",
+          data: { text: input.text, thread: input.childThreadId },
+        })
+        .pipe(
+          Effect.tapError((error) =>
+            Effect.logWarning("could not post a worker's summary to its Trellis fork; retrying", {
+              childThreadId: input.childThreadId,
+              detail: error.message,
+            }),
+          ),
+          Effect.retry(SUMMARY_RETRY),
+        );
+      posted.add(input.key);
+      if (posted.size > MAX_POSTED) posted.delete(posted.values().next().value!);
     }).pipe(
       Effect.catchCause((cause) =>
-        Effect.logWarning("could not read a finished worker to post its summary", {
+        Effect.logWarning("could not post a worker's summary to its Trellis fork", {
           childThreadId: input.childThreadId,
           cause: Cause.pretty(cause),
         }),
@@ -574,14 +573,49 @@ const make = Effect.gen(function* () {
     });
   };
 
+  /** Whether `handle` acts on the event; only those move the cursor. */
+  const relevant = (event: OrchestrationV2DomainEvent) =>
+    event.type === "thread.archived" ||
+    (event.type === "subagent.updated" && event.payload.status === "completed");
+
+  const saveCursor = (sequence: number) =>
+    fileSystem
+      .writeFileString(cursorPath, `${sequence}\n`)
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("could not save the Trellis workers' event cursor", { cause }),
+        ),
+      );
+
   const start: TrellisWorkers["Service"]["start"] = Effect.fn("TrellisWorkers.start")(function* () {
-    const from = yield* applicationEvents.latestApplicationSequence.pipe(
+    const latest = yield* applicationEvents.latestApplicationSequence.pipe(
       Effect.orElseSucceed(() => 0),
     );
+    const saved = yield* fileSystem.readFileString(cursorPath).pipe(
+      Effect.map((text) => Number.parseInt(text.trim(), 10)),
+      Effect.orElseSucceed(() => Number.NaN),
+    );
+    const follow = (from: number) =>
+      applicationEvents
+        .streamApplicationEvents({ afterSequence: from })
+        .pipe(
+          Stream.runForEach((stored) =>
+            "aggregateKind" in stored || !relevant(stored.event)
+              ? Effect.void
+              : handle(stored.event).pipe(Effect.andThen(saveCursor(stored.sequence))),
+          ),
+        );
+    // The first start begins now; later ones resume after the saved cursor
+    // (from now if those events are no longer retained).
+    const from = Number.isSafeInteger(saved) && saved <= latest ? saved : latest;
     yield* forkParked(
-      applicationEvents.streamApplicationEvents({ afterSequence: from }).pipe(
-        Stream.runForEach((stored) =>
-          "aggregateKind" in stored ? Effect.void : handle(stored.event),
+      follow(from).pipe(
+        Effect.catchCause((cause) =>
+          from === latest
+            ? Effect.failCause(cause)
+            : Effect.logWarning("Trellis workers could not replay missed events", {
+                cause: Cause.pretty(cause),
+              }).pipe(Effect.andThen(follow(latest))),
         ),
         Effect.catchCause((cause) =>
           Effect.logWarning("Trellis workers stopped following orchestration events", {
