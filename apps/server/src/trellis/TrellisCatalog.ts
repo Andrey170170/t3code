@@ -181,6 +181,11 @@ export function planCatalogSync(input: {
    * seconds; see `unlistedWorkspaceIds`.
    */
   readonly deletedWorkspaces: ReadonlyMap<string, number>;
+  /**
+   * Managed roots that are in no listing and gone from disk (purged before
+   * T3 saw them trashed), with when that was first seen, in Unix seconds.
+   */
+  readonly missingRoots?: ReadonlyMap<string, number>;
 }): ReadonlyArray<CatalogSyncAction> {
   const actions: Array<CatalogSyncAction> = [];
   const projectsByRoot = new Map<string, CatalogProject>();
@@ -220,7 +225,8 @@ export function planCatalogSync(input: {
     const workspaceId = workspaceIdOfRoot(input.root, root);
     const at =
       retiredAt.get(root) ??
-      (workspaceId === null ? undefined : input.deletedWorkspaces.get(workspaceId));
+      (workspaceId === null ? undefined : input.deletedWorkspaces.get(workspaceId)) ??
+      input.missingRoots?.get(root);
     if (at === undefined) continue;
     const threads = input.threads.filter((thread) => thread.projectId === project.id);
     // Only threads untouched since the retirement: one the user unarchived
@@ -511,6 +517,9 @@ const make = Effect.gen(function* () {
     readonly retiredRoots: ReadonlyArray<string>;
   } | null>(null);
   const dirty = yield* Ref.make(true);
+  // When each purged root was first found missing (see `syncOnce`), so a
+  // conversation unarchived afterwards is not archived again.
+  const missingSince = new Map<string, number>();
 
   const commandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(
@@ -583,10 +592,9 @@ const make = Effect.gen(function* () {
 
   const syncOnce = Effect.gen(function* () {
     const env = yield* trellis.refresh;
-    if (env === null) {
-      yield* Ref.set(lastApplied, null);
-      return new Map<string, ProjectId>();
-    }
+    // Unreachable or off: the last applied catalog stays, so retired
+    // projects stay hidden; `status` reports the connection on its own.
+    if (env === null) return new Map<string, ProjectId>();
     const items = yield* trellis.listProjects({ all: true });
     const fingerprint = encodeListing(items);
     const previous = yield* Ref.get(lastApplied);
@@ -606,25 +614,46 @@ const make = Effect.gen(function* () {
         }
       }
     }
+    // A purged item leaves the listing and its files are gone. Its project
+    // stays retired (clients keep hiding it), and when T3 never saw it
+    // trashed its conversations are archived as for a trashed one. Only a
+    // root positively absent counts: in no listing, and missing from disk
+    // (an unreadable path counts as present).
+    const listedRoots = new Set<string>();
+    for (const item of items) {
+      listedRoots.add(normalizeRoot(item.path));
+      for (const workspace of item.workspaces) listedRoots.add(normalizeRoot(workspace.path));
+    }
+    const purgedRoots: Array<string> = [];
+    for (const project of t3.projects) {
+      const root = normalizeRoot(project.workspaceRoot);
+      const workspaceId = workspaceIdOfRoot(env.root, root);
+      if (
+        listedRoots.has(root) ||
+        !isTrellisManagedPath(env.root, root) ||
+        (workspaceId !== null && deletedWorkspaces.has(workspaceId))
+      ) {
+        continue;
+      }
+      if (!(yield* fileSystem.exists(root).pipe(Effect.orElseSucceed(() => true)))) {
+        purgedRoots.push(root);
+      }
+    }
+    const nowSeconds = Math.floor(DateTime.toEpochMillis(yield* DateTime.now) / 1000);
+    for (const root of purgedRoots) {
+      if (!missingSince.has(root)) missingSince.set(root, nowSeconds);
+    }
+    for (const root of missingSince.keys()) {
+      if (!purgedRoots.includes(root)) missingSince.delete(root);
+    }
     const actions = planCatalogSync({
       root: env.root,
       items,
       projects: t3.projects,
       threads: t3.threads,
       deletedWorkspaces,
+      missingRoots: missingSince,
     });
-    // A T3 project kept for its conversations outlives its Trellis item: once
-    // the trash is purged the item leaves the listing and its files are gone.
-    // Such roots stay retired, so clients keep hiding the project.
-    const live = new Set(desiredProjects(items).map((entry) => entry.workspaceRoot));
-    const purgedRoots: Array<string> = [];
-    for (const project of t3.projects) {
-      const root = normalizeRoot(project.workspaceRoot);
-      if (live.has(root) || !isTrellisManagedPath(env.root, root)) continue;
-      if (!(yield* fileSystem.exists(root).pipe(Effect.orElseSucceed(() => true)))) {
-        purgedRoots.push(root);
-      }
-    }
     let failed = false;
     for (const action of actions) {
       const created = yield* apply(action).pipe(
@@ -656,18 +685,19 @@ const make = Effect.gen(function* () {
     return ids as ReadonlyMap<string, ProjectId>;
   });
 
-  const syncNow = lock
-    .withPermits(1)(syncOnce)
-    .pipe(
-      Effect.catchCause((cause) =>
-        Cause.hasInterruptsOnly(cause)
-          ? Effect.interrupt
-          : Effect.logWarning("Trellis catalog sync failed", { cause: Cause.pretty(cause) }).pipe(
-              Effect.andThen(Ref.get(lastApplied)),
-              Effect.map((applied) => applied?.ids ?? new Map<string, ProjectId>()),
-            ),
-      ),
-    );
+  /** One sync pass whose failures propagate, for callers that must not act on stale ids. */
+  const syncStrict = lock.withPermits(1)(syncOnce);
+
+  const syncNow = syncStrict.pipe(
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.interrupt
+        : Effect.logWarning("Trellis catalog sync failed", { cause: Cause.pretty(cause) }).pipe(
+            Effect.andThen(Ref.get(lastApplied)),
+            Effect.map((applied) => applied?.ids ?? new Map<string, ProjectId>()),
+          ),
+    ),
+  );
 
   // A user rename of a Trellis-managed project in T3 is pushed to Trellis,
   // which pins the name. Fork titles are derived, so renaming one is not pushed.
@@ -1028,13 +1058,16 @@ const make = Effect.gen(function* () {
       if (!trashed) yield* updatePendingRestores((all) => all.filter((r) => r.id !== record.id));
       return;
     }
-    const ids = yield* syncNow;
-    const restoredProjectIds = new Set(
-      roots.flatMap((entry) => {
-        const id = ids.get(normalizeRoot(entry));
-        return id === undefined ? [] : [id];
-      }),
-    );
+    // The record goes only once every restored root has its project and
+    // every unarchive succeeded; anything less fails and keeps it.
+    const ids = yield* syncStrict;
+    const unresolved = roots.filter((entry) => !ids.has(normalizeRoot(entry)));
+    if (unresolved.length > 0) {
+      return yield* new TrellisError({
+        message: `The restored ${unresolved.join(", ")} has no T3 project yet; its conversations will be unarchived on the next sync.`,
+      });
+    }
+    const restoredProjectIds = new Set(roots.map((entry) => ids.get(normalizeRoot(entry))!));
     const archived = (yield* orchestrator.getShellSnapshot({ location: "archive" }))
       .archivedThreads;
     for (const thread of archived) {
@@ -1176,7 +1209,8 @@ const make = Effect.gen(function* () {
         ...(connection.root === null ? {} : { root: connection.root }),
         knownRoots: yield* trellis.expectedRoots,
         socketPath: connection.socketPath,
-        ...(connection.state !== "ready" || applied === null
+        // Kept while Trellis is off or down, so retired projects stay hidden.
+        ...(applied === null
           ? {}
           : {
               retiredRoots: applied.retiredRoots,
