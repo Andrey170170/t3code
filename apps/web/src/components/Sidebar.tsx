@@ -132,6 +132,12 @@ import {
 } from "../threadSelectionStore";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useSidebarProjects } from "../hooks/useSidebarProjects";
+import {
+  useMoveThreadToProject,
+  useTrellisCreate,
+  useTrellisEnvironment,
+} from "../hooks/useTrellis";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
@@ -146,11 +152,14 @@ import {
   usePrimaryEnvironmentId,
 } from "../state/environments";
 import {
+  readProjects,
   readThreadShell,
   useAllEnvironmentProjectSnapshotsReady,
-  useProjects,
   useThreadShells,
 } from "../state/entities";
+import { readTrellisStatus } from "../state/trellis";
+import { appAtomRegistry } from "../rpc/atomRegistry";
+import { trellisMoveMenu } from "../lib/trellis";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
@@ -168,6 +177,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cn } from "~/lib/utils";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
+import { TrellisWorkspaceBadge } from "./trellis/TrellisWorkspaceBadge";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
 import {
   animateSidebarLayoutChanges,
@@ -2242,12 +2252,15 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 });
 
 export default function Sidebar() {
-  const projects = useProjects();
+  const projects = useSidebarProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const threads = useThreadShells();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+  const trellis = useTrellisEnvironment();
+  const { newIdea: newTrellisIdea } = useTrellisCreate();
+  const moveThreadToProject = useMoveThreadToProject();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
@@ -4176,9 +4189,15 @@ export default function Sidebar() {
                 projectRef.projectId === thread.projectId,
             ),
           ) ?? null;
+        const moveMenu = trellisMoveMenu(
+          thread,
+          readProjects(),
+          readTrellisStatus(appAtomRegistry, thread.environmentId),
+        );
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
+              moveToProject: moveMenu,
               branch: thread.branch ?? null,
               projectFilter: threadProjectGroup
                 ? {
@@ -4212,6 +4231,19 @@ export default function Sidebar() {
               ? await requestCustomSnooze()
               : snoozePresets.find((candidate) => `snooze:${candidate.id}` === clicked.value);
           if (preset) attemptSnooze(threadRef, preset);
+          return;
+        }
+        if (clicked.value?.startsWith("move-to-project:")) {
+          const target = moveMenu?.targets.find(
+            (candidate) => `move-to-project:${candidate.projectId}` === clicked.value,
+          );
+          if (target) {
+            await moveThreadToProject(threadRef, {
+              fromProjectId: thread.projectId,
+              toProjectId: target.projectId,
+              toProjectTitle: target.label,
+            });
+          }
           return;
         }
         switch (clicked.value) {
@@ -4406,6 +4438,7 @@ export default function Sidebar() {
       deleteThread,
       handleMultiSelectContextMenu,
       markThreadUnread,
+      moveThreadToProject,
       openProjectSettings,
       projectScopeKey,
       projectByKey,
@@ -4657,6 +4690,7 @@ export default function Sidebar() {
                                 machineByEnvironmentId={environmentMachineById}
                               />
                             ) : null}
+                            {project ? <TrellisWorkspaceBadge group={project} /> : null}
                             {project ? (
                               <Button
                                 size="icon-xs"
@@ -4681,6 +4715,15 @@ export default function Sidebar() {
                 </Combobox>
               }
               onNewProject={openAddProjectCommandPalette}
+              onNewIdea={
+                trellis === null
+                  ? undefined
+                  : () => {
+                      if (isMobile) setOpenMobile(false);
+                      void newTrellisIdea(trellis.environmentId);
+                    }
+              }
+              newIdeaEnvironmentLabel={trellis?.label}
               onNewThread={handleNewThreadClick}
               newThreadDisabled={projects.length === 0}
               newThreadShortcutLabel={newThreadShortcutLabel}

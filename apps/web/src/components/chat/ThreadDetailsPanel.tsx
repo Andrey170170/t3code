@@ -36,6 +36,8 @@ export interface ThreadDetailsPanelProps extends Pick<
   "anchor" | "handle" | "onPresentationChange"
 > {
   forceNewWorktree?: boolean;
+  /** Pins the workspace to the project folder, e.g. in a Trellis project. */
+  worktreesUnavailable?: boolean;
   environmentId: EnvironmentId;
   threadId: ThreadId;
   draftId?: DraftId;
@@ -95,6 +97,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
       : {}),
     envLocked: props.envLocked,
     forceNewWorktree: props.forceNewWorktree ?? false,
+    worktreesUnavailable: props.worktreesUnavailable ?? false,
     onComposerFocusRequest: props.onComposerFocusRequest,
     ...(props.onCheckoutPullRequestRequest
       ? { onCheckoutPullRequestRequest: props.onCheckoutPullRequestRequest }

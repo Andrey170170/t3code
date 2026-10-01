@@ -70,6 +70,8 @@ interface BranchToolbarProps {
   layout?: "composer" | "panel";
   panelSection?: "all" | "workspace" | "branch";
   forceNewWorktree?: boolean;
+  /** Pins the workspace to the project folder, e.g. in a Trellis project. */
+  worktreesUnavailable?: boolean;
   ref?: Ref<BranchToolbarHandle>;
   environmentId: EnvironmentId;
   threadId: ThreadId;
@@ -502,6 +504,7 @@ export const BranchToolbar = memo(function BranchToolbar({
   layout = "composer",
   panelSection = "all",
   forceNewWorktree = false,
+  worktreesUnavailable = false,
   ref,
   environmentId,
   threadId,
@@ -543,8 +546,9 @@ export const BranchToolbar = memo(function BranchToolbar({
   const activeWorktreePath = forceNewWorktree
     ? null
     : (serverThread?.worktreePath ?? draftThread?.worktreePath ?? null);
-  const effectiveEnvMode = forceNewWorktree ? "worktree" : envMode;
-  const envModeLocked = envLocked || (serverThread !== null && activeWorktreePath !== null);
+  const effectiveEnvMode = worktreesUnavailable ? "local" : forceNewWorktree ? "worktree" : envMode;
+  const envModeLocked =
+    envLocked || worktreesUnavailable || (serverThread !== null && activeWorktreePath !== null);
 
   // "Previous worktree" hops a draft into the most recently active worktree
   // of this project — the "keep going where I just was" follow-up flow. Only

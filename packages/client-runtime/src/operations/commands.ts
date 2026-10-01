@@ -223,6 +223,13 @@ export interface MergeThreadBackInput extends CommandMetadata {
   readonly runId: RunId;
 }
 
+export interface MoveThreadToProjectInput extends ThreadCommandInput {
+  readonly projectId: ProjectId;
+  /** The project the caller saw the thread in; the server refuses if it moved since. */
+  readonly expectedProjectId?: ProjectId;
+  readonly continuationPrompt?: string;
+}
+
 export interface ReorderQueuedRunInput extends ThreadCommandInput {
   readonly runId: RunId;
   readonly beforeRunId: RunId | null;
@@ -934,6 +941,23 @@ export const mergeThreadBack = Effect.fn("EnvironmentCommands.mergeThreadBack")(
     sourceThreadId: input.sourceThreadId,
     targetThreadId: input.targetThreadId,
     sourcePoint: { type: "run", runId: input.runId },
+  });
+});
+
+/** Moves a thread without history to another project of the same environment. */
+export const moveThreadToProject = Effect.fn("EnvironmentCommands.moveThreadToProject")(function* (
+  input: MoveThreadToProjectInput,
+) {
+  return yield* request(ORCHESTRATION_V2_WS_METHODS.moveThreadToProject, {
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    projectId: input.projectId,
+    ...(input.expectedProjectId === undefined
+      ? {}
+      : { expectedProjectId: input.expectedProjectId }),
+    ...(input.continuationPrompt === undefined
+      ? {}
+      : { continuationPrompt: input.continuationPrompt }),
   });
 });
 

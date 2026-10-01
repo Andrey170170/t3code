@@ -27,7 +27,7 @@ import {
   latestExecutedRun,
   latestRootProviderFailure,
 } from "@t3tools/shared/orchestrationV2ThreadError";
-import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import { isTrellisLandingPad, type UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import {
   collectProviderUsageLimits,
   hasProviderUsageLimits,
@@ -518,6 +518,8 @@ import {
   shouldRefocusComposerOnWindowFocus,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
+import { useTrellisRoot } from "~/hooks/useTrellis";
+import { isTrellisWorkspaceRoot } from "~/lib/trellis";
 import { useComposerHandleContext } from "../composerHandleContext";
 import {
   awaitAttachmentUploads,
@@ -3915,12 +3917,15 @@ export default function ChatView(props: ChatViewProps) {
       : JSON.stringify([itemId, latestCheckpointCompletedAt]);
   }, [serverVisibleTurnItems, turnDiffSummaries]);
 
-  const gitCwd = activeProject
-    ? projectScriptCwd({
-        project: { cwd: activeProject.workspaceRoot },
-        worktreePath: activeThread?.worktreePath ?? null,
-      })
-    : null;
+  // A new-idea draft has no repository until its idea exists: no git chrome.
+  const isIdeaDraft = activeProject !== null && isTrellisLandingPad(activeProject.id);
+  const gitCwd =
+    activeProject && !isIdeaDraft
+      ? projectScriptCwd({
+          project: { cwd: activeProject.workspaceRoot },
+          worktreePath: activeThread?.worktreePath ?? null,
+        })
+      : null;
   const gitStatusCwd = activeThread?.worktreePath ?? gitCwd;
   const gitStatusQuery = useEnvironmentQuery(
     gitStatusCwd === null
@@ -6402,6 +6407,13 @@ export default function ChatView(props: ChatViewProps) {
   }, []);
 
   const activeWorktreePath = activeThread?.worktreePath ?? null;
+  const trellisRoot = useTrellisRoot(activeThread?.environmentId ?? null);
+  // Trellis projects never get git worktrees (those would run on the host); a
+  // new-idea draft (the landing pad) becomes a Trellis idea on its first send.
+  const activeIsTrellisProject =
+    activeProject !== null &&
+    (isTrellisLandingPad(activeProject.id) ||
+      isTrellisWorkspaceRoot(activeProject.workspaceRoot, trellisRoot));
   const derivedEnvMode: DraftThreadEnvMode = resolveEffectiveEnvMode({
     activeWorktreePath,
     hasServerThread: isServerThread,
@@ -6415,9 +6427,11 @@ export default function ChatView(props: ChatViewProps) {
     activeThread.worktreePath === null &&
     !envLocked,
   );
-  const envMode: DraftThreadEnvMode = canOverrideServerThreadEnvMode
-    ? (pendingServerThreadEnvMode ?? draftThread?.envMode ?? derivedEnvMode)
-    : derivedEnvMode;
+  const envMode: DraftThreadEnvMode = activeIsTrellisProject
+    ? "local"
+    : canOverrideServerThreadEnvMode
+      ? (pendingServerThreadEnvMode ?? draftThread?.envMode ?? derivedEnvMode)
+      : derivedEnvMode;
   const activeThreadBranch =
     canOverrideServerThreadEnvMode && pendingServerThreadBranch !== undefined
       ? pendingServerThreadBranch
@@ -8136,6 +8150,13 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const multipleModelSelections = sendCtx.multipleModelSelections;
+    if (multipleModelSelections !== null && activeIsTrellisProject) {
+      setThreadError(
+        activeThread.id,
+        "Sending to several models needs git worktrees, which Trellis projects don't use. Pick one model.",
+      );
+      return;
+    }
     if (
       multipleModelSelections !== null &&
       serverConfig?.environment.capabilities.requiredWorktreeBootstrap !== true
@@ -10367,7 +10388,8 @@ export default function ChatView(props: ChatViewProps) {
     anchor: threadPanelPopoverAnchorRef,
     handle: threadPanelPopoverHandle,
     onPresentationChange: setThreadPanelPresentation,
-    forceNewWorktree: multipleModelSelections !== null,
+    forceNewWorktree: multipleModelSelections !== null && !activeIsTrellisProject,
+    worktreesUnavailable: activeIsTrellisProject,
     environmentId: activeThread.environmentId,
     threadId: activeThread.id,
     ...(draftId ? { draftId } : {}),
@@ -10803,7 +10825,7 @@ export default function ChatView(props: ChatViewProps) {
                               multipleModelSelections={multipleModelSelections}
                               supportsMultipleModels={
                                 serverConfig?.environment.capabilities.requiredWorktreeBootstrap ===
-                                true
+                                  true && !activeIsTrellisProject
                               }
                               onMultipleModelSelectionsChange={setMultipleModelSelections}
                               composerRef={composerRef}
@@ -10997,7 +11019,10 @@ export default function ChatView(props: ChatViewProps) {
                           {mountComposerContextStrip && (
                             <div className="pointer-events-auto">
                               <BranchToolbar
-                                forceNewWorktree={multipleModelSelections !== null}
+                                forceNewWorktree={
+                                  multipleModelSelections !== null && !activeIsTrellisProject
+                                }
+                                worktreesUnavailable={activeIsTrellisProject}
                                 ref={branchToolbarRef}
                                 environmentId={activeThread.environmentId}
                                 threadId={activeThread.id}
