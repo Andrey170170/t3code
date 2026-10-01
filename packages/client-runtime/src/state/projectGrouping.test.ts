@@ -190,6 +190,26 @@ describe("buildProjectGroups", () => {
     ]);
   });
 
+  it("keeps projects marked separate apart, even against a grouping override", () => {
+    const host = makeProject("click", "/work/click");
+    const first = makeProject("trellis-a", "/trellis/workspaces/ws-a/project", { title: "click" });
+    const second = makeProject("trellis-b", "/trellis/workspaces/ws-b/project", { title: "click" });
+    const groups = buildProjectGroups({
+      projects: [host, first, second],
+      settings: {
+        ...settings("repository", { [derivePhysicalProjectKey(second)]: "repository" }),
+        keepSeparate: (project) => project.workspaceRoot.startsWith("/trellis/"),
+      },
+    });
+
+    expect(groups.map((group) => group.members.map((member) => member.project.id))).toEqual([
+      ["click"],
+      ["trellis-a"],
+      ["trellis-b"],
+    ]);
+    expect(groups.map((group) => group.label)).toEqual(["click", "click", "click"]);
+  });
+
   it("dedupes stale registrations at one physical path using the freshest project", () => {
     const stale = makeProject("stale", "/work/t3code", {
       repositoryIdentity: null,

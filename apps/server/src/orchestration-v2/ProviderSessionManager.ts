@@ -159,6 +159,14 @@ export interface ProviderSessionManagerV2Shape {
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
+  /**
+   * The sessions with a live runtime and the directory each runs in, whether
+   * or not a thread is still attached (an idle runtime outlives its threads
+   * until the idle release).
+   */
+  readonly listLive: Effect.Effect<
+    ReadonlyArray<{ readonly providerSessionId: ProviderSessionId; readonly cwd: string }>
+  >;
   /** Closes every live runtime owned by one provider instance. */
   readonly closeInstance: (
     instanceId: ProviderInstanceId,
@@ -1764,6 +1772,14 @@ export const layerWithOptions = (
               return exposedRuntime;
             }),
           ),
+        listLive: Ref.get(sessions).pipe(
+          Effect.map((entries) =>
+            [...entries.values()].map((entry) => ({
+              providerSessionId: entry.runtime.providerSession.id,
+              cwd: entry.runtime.providerSession.cwd,
+            })),
+          ),
+        ),
         get: (providerSessionId) =>
           Effect.gen(function* () {
             const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));

@@ -56,6 +56,7 @@ import { pathsOverlap } from "@t3tools/shared/trellis";
 import { ServerConfig } from "../config.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
+import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { OrchestrationEventStore } from "../persistence/Services/OrchestrationEventStore.ts";
@@ -300,6 +301,30 @@ export function trashTargetOf(
 }
 
 /**
+ * The provider sessions a trash ends. Trashing a project or fork stops its
+ * workspace and the provider processes running in it, so the sessions working
+ * there are released and the next turn there (after a restore) opens a new
+ * process instead of reusing the dead one. An idea's folder lives in the
+ * shared scratch workspace, which keeps running, so trashing one ends none.
+ */
+export function sessionsEndedByTrash<Id extends string>(input: {
+  readonly dedicated: boolean;
+  readonly roots: ReadonlyArray<string>;
+  readonly live: ReadonlyArray<{ readonly providerSessionId: Id; readonly cwd: string }>;
+}): ReadonlyArray<Id> {
+  if (!input.dedicated) return [];
+  const roots = input.roots.map(normalizeRoot);
+  const within = (cwd: string) => roots.some((root) => cwd === root || cwd.startsWith(`${root}/`));
+  return [
+    ...new Set(
+      input.live
+        .filter((session) => within(normalizeRoot(session.cwd)))
+        .map((session) => session.providerSessionId),
+    ),
+  ];
+}
+
+/**
  * Splits find hits per workspace: Trellis groups a project's matches, but a
  * match in a fork must open that fork's T3 project, not the primary one.
  * Returns one entry per T3 project root, in hit order.
@@ -512,6 +537,7 @@ const make = Effect.gen(function* () {
   // Absent in tests that never trash; trash then only checks for busy threads.
   const restoreGate = yield* Effect.serviceOption(TrellisRestoreGate);
   const checkpointPins = yield* Effect.serviceOption(TrellisCheckpointPins);
+  const providerSessions = yield* ProviderSessionManagerV2;
   const orchestrator = yield* OrchestratorV2;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const projectService = yield* ProjectService;
@@ -966,6 +992,42 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  // Releases each live runtime in the trashed roots on its own, so one
+  // failure does not leave the others running against a stopped workspace.
+  // Live runtimes come from the session manager, not thread bindings: a
+  // runtime outlives its archived threads until its idle release. Returns the
+  // sessions that could not be released.
+  const releaseSessionsEndedByTrash = (input: {
+    readonly dedicated: boolean;
+    readonly roots: ReadonlyArray<string>;
+  }) =>
+    Effect.gen(function* () {
+      const ended = sessionsEndedByTrash({ ...input, live: yield* providerSessions.listLive });
+      if (ended.length === 0) return [];
+      yield* Effect.logInfo("releasing the provider sessions of a trashed Trellis workspace", {
+        roots: input.roots,
+        sessions: ended,
+      });
+      const failed: Array<(typeof ended)[number]> = [];
+      for (const providerSessionId of ended) {
+        const released = yield* providerSessions
+          .release({
+            providerSessionId,
+            reason: "manual_shutdown",
+            detail: "The workspace was moved to the Trellis trash.",
+          })
+          .pipe(Effect.result);
+        if (released._tag === "Failure") {
+          yield* Effect.logWarning("could not release a session of a trashed Trellis workspace", {
+            providerSessionId,
+            detail: errorMessage(released.failure),
+          });
+          failed.push(providerSessionId);
+        }
+      }
+      return failed;
+    });
+
   const trashProject: TrellisCatalog["Service"]["trashProject"] = Effect.fn(
     "TrellisCatalog.trashProject",
   )(function* (projectId) {
@@ -996,10 +1058,11 @@ const make = Effect.gen(function* () {
           : item.workspaces
               .filter((workspace) => workspace.deleted_at === null)
               .map((workspace) => workspace.path);
-    yield* Effect.scoped(
+    const { unreleased, archived } = yield* Effect.scoped(
       Effect.gen(function* () {
-        // New turns there wait from before the busy check until the trash is
-        // done, so none starts in between.
+        // New turns there wait from before the busy check until the trash,
+        // the session release, the archive and the sync are done, so none
+        // starts in between or is shut down by the release.
         if (Option.isSome(restoreGate)) yield* restoreGate.value.hold(scopes);
         // Trashing moves the files away and stops the workspace, so running
         // agents inside it would lose their work.
@@ -1020,18 +1083,29 @@ const make = Effect.gen(function* () {
         }
         if (target.kind === "project") yield* trellis.trashProject(target.id);
         else yield* trellis.trashWorkspace(target.id);
+        const unreleased = yield* releaseSessionsEndedByTrash({
+          dedicated: target.kind === "workspace" || (item !== undefined && item.kind !== "idea"),
+          roots: scopes,
+        });
+        // Archive the conversations here rather than through the sync's time
+        // heuristic: a session ending as the workspace stops bumps a thread past
+        // the deletion time, which would leave it active.
+        // Already in the trash: a failure here leaves conversations active
+        // against removed files, so it is reported rather than swallowed.
+        const archived = yield* archiveThreadsIn(scopes).pipe(Effect.result);
+        yield* syncNow;
+        return { unreleased, archived };
       }),
     );
-    // Archive the conversations here rather than through the sync's time
-    // heuristic: a session ending as the workspace stops bumps a thread past
-    // the deletion time, which would leave it active.
-    // Already in the trash: a failure here leaves conversations active
-    // against removed files, so it is reported rather than swallowed.
-    const archived = yield* archiveThreadsIn(scopes).pipe(Effect.result);
-    yield* syncNow;
     if (archived._tag === "Failure") {
       return yield* new TrellisError({
         message: `${target.name} is in the Trellis trash, but ${archived.failure.message} Archive them by hand, or restore it from Settings → Trellis.`,
+      });
+    }
+    if (unreleased.length > 0) {
+      const one = unreleased.length === 1;
+      return yield* new TrellisError({
+        message: `${target.name} is in the Trellis trash, but ${unreleased.length} agent ${one ? "session" : "sessions"} running in it could not be stopped, so the next turn there may fail until T3 restarts.`,
       });
     }
     return { trashed: target.kind, name: target.name } satisfies TrellisTrashProjectResult;

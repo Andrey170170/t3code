@@ -247,6 +247,19 @@ describe("showContextMenuFallback", () => {
     await expect(selectionPromise).resolves.toBe("rename");
   });
 
+  it("shows an item's detail under its label and names the item with both", async () => {
+    const selectionPromise = showContextMenuFallback([
+      { id: "a", label: "click", detail: "Project · ws-1" },
+      { id: "b", label: "click", detail: "Project · ws-2" },
+    ]);
+
+    const button = findButton("clickProject · ws-2");
+    expect(button?.attributes.get("aria-label")).toBe("click (Project · ws-2)");
+    button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await expect(selectionPromise).resolves.toBe("b");
+  });
+
   it("ignores a click from the gesture that opened the menu", async () => {
     let enablePointerSelection: ((time: number) => void) | undefined;
     vi.stubGlobal("requestAnimationFrame", (callback: (time: number) => void) => {

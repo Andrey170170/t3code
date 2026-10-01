@@ -153,8 +153,8 @@ vi.mock("../lib/utils", () => ({
 vi.mock("../logicalProject", () => ({
   deriveLogicalProjectKeyFromSettings: () => "remote-project",
   getProjectOrderKey: () => "remote-project",
-  selectProjectGroupingSettings: () => ({}),
 }));
+vi.mock("./useProjectGroupingSettings", () => ({ useProjectGroupingSettings: () => ({}) }));
 vi.mock("../state/entities", () => ({
   readProjects: () => [
     {

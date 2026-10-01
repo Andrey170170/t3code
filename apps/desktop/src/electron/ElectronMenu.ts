@@ -77,6 +77,7 @@ function normalizeContextMenuItems(source: readonly ContextMenuItem[]): ContextM
     const normalizedItem: ContextMenuItem = {
       id: sourceItem.id,
       label: sourceItem.label,
+      ...(typeof sourceItem.detail === "string" ? { detail: sourceItem.detail } : {}),
       destructive: sourceItem.destructive === true,
       disabled: sourceItem.disabled === true,
       ...(sourceItem.separatorBefore === true ? { separatorBefore: true } : {}),
@@ -167,7 +168,12 @@ export const make = Effect.gen(function* () {
       }
 
       const itemOption: Electron.MenuItemConstructorOptions = {
-        label: item.label,
+        // Only macOS shows a sublabel, so elsewhere the detail joins the label.
+        label:
+          item.detail === undefined || platform === "darwin"
+            ? item.label
+            : `${item.label} — ${item.detail}`,
+        ...(item.detail === undefined || platform !== "darwin" ? {} : { sublabel: item.detail }),
         enabled: !item.disabled,
         ...(typeof item.checked === "boolean" ? { type: "checkbox", checked: item.checked } : {}),
       };

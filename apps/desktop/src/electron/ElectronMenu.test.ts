@@ -85,6 +85,41 @@ describe("ElectronMenu", () => {
     }).pipe(Effect.provide(TestLayer)),
   );
 
+  it.effect("shows an item's detail as a sublabel on macOS and beside the label elsewhere", () =>
+    Effect.gen(function* () {
+      const labels: Array<[string | undefined, string | undefined]> = [];
+      buildFromTemplateMock.mockImplementation(
+        (template: Electron.MenuItemConstructorOptions[]) => ({
+          popup: (options: Electron.PopupOptions) => {
+            const item = template[0]!;
+            labels.push([item.label, item.sublabel]);
+            options.callback?.();
+          },
+        }),
+      );
+      const items = [{ id: "move", label: "click", detail: "Project · ws-1" }];
+      for (const platform of ["linux", "darwin"] as const) {
+        yield* Effect.gen(function* () {
+          const electronMenu = yield* ElectronMenu.ElectronMenu;
+          yield* electronMenu.showContextMenu({
+            window: makeWindow(),
+            items,
+            position: Option.none(),
+          });
+        }).pipe(
+          Effect.provide(
+            ElectronMenu.layer.pipe(Layer.provide(Layer.succeed(HostProcessPlatform, platform))),
+          ),
+        );
+      }
+
+      assert.deepEqual(labels, [
+        ["click — Project · ws-1", undefined],
+        ["click", "Project · ws-1"],
+      ]);
+    }),
+  );
+
   it.effect("resolves with none when the menu closes without a click", () =>
     Effect.gen(function* () {
       let popupOptions: Electron.PopupOptions | undefined;

@@ -55,7 +55,6 @@ import { PlanAgentSelectionHeal } from "../planAgentSelectionHeal";
 import {
   deriveLogicalProjectKeyFromSettings,
   derivePhysicalProjectKeyFromPath,
-  selectProjectGroupingSettings,
 } from "../logicalProject";
 import { useUiStateStore } from "../uiStateStore";
 import { syncBrowserChromeTheme } from "../hooks/useTheme";
@@ -81,6 +80,7 @@ import {
 import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
 import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
+import { useProjectGroupingSettings } from "../hooks/useProjectGroupingSettings";
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
@@ -489,7 +489,7 @@ function EventRouter({
 }) {
   const navigate = useNavigate();
   const pathname = useLocation({ select: (loc) => loc.pathname });
-  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const projectGroupingSettings = useProjectGroupingSettings();
   const primaryEnvironment = usePrimaryEnvironment();
   const openInEditor = useAtomCommand(shellEnvironment.openInEditor, {
     reportFailure: false,

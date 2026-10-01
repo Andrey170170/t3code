@@ -5,11 +5,10 @@ import { useEffect, useMemo } from "react";
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { ThreadRouteView } from "../components/ThreadRouteView";
 import { resolveThreadRouteTarget } from "../threadRoutes";
-import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
+import { useLegacySidebarEnabled } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
 import { useProjects } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
-import { selectProjectGroupingSettings } from "../logicalProject";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
@@ -27,6 +26,7 @@ import { useThreadSelectionStore } from "../threadSelectionStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { NewTrellisProjectDialogHost } from "../components/trellis/NewTrellisProjectDialog";
+import { useProjectGroupingSettings } from "../hooks/useProjectGroupingSettings";
 
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
@@ -35,7 +35,7 @@ function ChatRouteGlobalShortcuts() {
     useHandleNewThread();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const legacySidebarEnabled = useLegacySidebarEnabled();
-  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const projectGroupingSettings = useProjectGroupingSettings();
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const projectGroupCount = useMemo(

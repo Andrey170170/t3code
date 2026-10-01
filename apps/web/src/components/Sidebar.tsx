@@ -119,7 +119,7 @@ import { isMacPlatform } from "~/lib/utils";
 import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { readLocalApi } from "../localApi";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
-import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
+import { getProjectOrderKey } from "../logicalProject";
 import {
   buildSidebarProjectSnapshots,
   projectGroupsSpanEnvironments,
@@ -280,6 +280,7 @@ import {
   type ComposerThreadDraftState,
   type DraftSessionState,
 } from "../composerDraftStore";
+import { useProjectGroupingSettings } from "../hooks/useProjectGroupingSettings";
 
 // Settled-tail paging: recent history is the common lookup; the deep tail
 // stays behind an explicit Show more.
@@ -2265,7 +2266,7 @@ export default function Sidebar() {
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
   const sidebarProjectSortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
-  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const projectGroupingSettings = useProjectGroupingSettings();
   const {
     settleThread,
     unsettleThread,

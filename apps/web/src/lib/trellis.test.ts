@@ -16,7 +16,10 @@ import {
   pickTrellisEnvironment,
   threadMoveBlocker,
   trellisFindHitSummary,
+  trellisItemDetail,
   trellisItemKind,
+  trellisKeepSeparate,
+  trellisMoveMenu,
   trellisMoveTargets,
   trellisRemovalOf,
   trellisTrashConfirmation,
@@ -267,5 +270,68 @@ describe("isLoopbackPreviewUrl", () => {
     expect(isLoopbackPreviewUrl("http://[::ffff:127.0.0.1]:8000/")).toBe(true);
     expect(isLoopbackPreviewUrl("https://example.com")).toBe(false);
     expect(isLoopbackPreviewUrl("http://node.ts.net:21001/")).toBe(false);
+  });
+});
+
+describe("same-named Trellis items", () => {
+  const env = EnvironmentId.make("env-1");
+  const status = {
+    state: "ready" as TrellisState,
+    root: "/srv/trellis",
+    forkRoots: ["/srv/trellis/workspaces/w3/project"],
+  };
+  const project = (id: string, title: string, workspaceRoot: string) => ({
+    environmentId: env,
+    id: ProjectId.make(id),
+    title,
+    workspaceRoot,
+  });
+
+  it("moves list each target with its kind and idea folder or workspace", () => {
+    const menu = trellisMoveMenu(
+      {
+        environmentId: env,
+        projectId: ProjectId.make("here"),
+        latestRun: null,
+        runtime: null,
+        forkedFrom: null,
+      },
+      [
+        project("here", "Here", "/srv/trellis/workspaces/w0/project"),
+        project("c1", "click", "/srv/trellis/workspaces/w1/project"),
+        project("c2", "click", "/srv/trellis/workspaces/w2/project/"),
+        project("f", "click", "/srv/trellis/workspaces/w3/project"),
+        project("i", "Idea", "/srv/trellis/workspaces/ws/project/idea-x4jh"),
+      ],
+      status,
+    );
+    expect(menu?.targets.map((target) => [target.label, target.detail])).toEqual([
+      ["click", "Project · w1"],
+      ["click", "Project · w2"],
+      ["click", "Fork · w3"],
+      ["Idea", "Idea · idea-x4jh"],
+    ]);
+  });
+
+  it("has no detail outside the Trellis root", () => {
+    expect(trellisItemDetail("/home/me/click", status)).toBeNull();
+    expect(trellisItemDetail("/srv/trellis/workspaces/w1/project", { root: null })).toBeNull();
+  });
+
+  it("keeps a project apart only in a Trellis workspace of its own environment", () => {
+    const keepSeparate = trellisKeepSeparate(new Map([[env, ["/srv/trellis", "/old/trellis"]]]));
+    expect(
+      keepSeparate({ environmentId: env, workspaceRoot: "/srv/trellis/workspaces/w1/project" }),
+    ).toBe(true);
+    expect(
+      keepSeparate({ environmentId: env, workspaceRoot: "/old/trellis/workspaces/w9/project" }),
+    ).toBe(true);
+    expect(keepSeparate({ environmentId: env, workspaceRoot: "/home/me/click" })).toBe(false);
+    expect(
+      keepSeparate({
+        environmentId: EnvironmentId.make("env-2"),
+        workspaceRoot: "/srv/trellis/workspaces/w1/project",
+      }),
+    ).toBe(false);
   });
 });
