@@ -8,7 +8,9 @@ import type {
   ProjectId,
   ScopedThreadRef,
   TrellisFindHit,
+  OrchestrationV2AcknowledgedWork,
   TrellisNewProjectInput,
+  TrellisRestoreConflictsInput,
   TrellisState,
 } from "@t3tools/contracts";
 import { useParams } from "@tanstack/react-router";
@@ -73,6 +75,20 @@ export function useTrellisStatusFor(
  */
 export function useTrellisRoot(environmentId: EnvironmentId | null): string | null {
   return useTrellisStatusFor(environmentId)?.root ?? null;
+}
+
+/**
+ * Every root an environment's Trellis project paths may live under, the
+ * current one and earlier ones, so projects of an earlier root still count.
+ */
+export function useTrellisKnownRoots(environmentId: EnvironmentId | null): ReadonlyArray<string> {
+  const status = useTrellisStatusFor(environmentId);
+  const root = status?.root ?? null;
+  const knownRoots = status?.knownRoots ?? NO_ROOTS;
+  return useMemo(
+    () => [...new Set([...(root === null ? [] : [root]), ...knownRoots])],
+    [root, knownRoots],
+  );
 }
 
 /** Environment of the routed thread or draft, if any. */
@@ -254,6 +270,45 @@ export function useTrellisTrash() {
         }),
       );
       return "trashed";
+    },
+    [run],
+  );
+}
+
+/**
+ * Checks a file restore in a Trellis project before it is sent: fails with
+ * the reason while another thread works in the same idea or workspace, and
+ * asks the user to confirm undoing other threads' later work there. Resolves
+ * to the threads to acknowledge in the rollback, or null when the user
+ * declined. Outside Trellis it resolves to none; when the check itself
+ * fails, the server checks again and refuses with its reason.
+ */
+export function useTrellisRestoreCheck() {
+  const run = useAtomCommand(trellisEnvironment.restoreConflicts, { reportFailure: false });
+  return useCallback(
+    async (
+      environmentId: EnvironmentId,
+      input: TrellisRestoreConflictsInput,
+      confirm: (message: string) => Promise<boolean>,
+    ): Promise<ReadonlyArray<OrchestrationV2AcknowledgedWork> | null> => {
+      const result = await run({ environmentId, input });
+      if (result._tag === "Failure") return [];
+      const { running, later } = result.value;
+      const names = (threads: ReadonlyArray<{ readonly title: string }>) =>
+        threads.map((thread) => `"${thread.title}"`).join(", ");
+      if (running.length > 0) {
+        const one = running.length === 1;
+        throw new Error(
+          `${names(running)} ${one ? "is" : "are"} still working in this Trellis workspace, and restoring its files would undo that work. Wait for ${one ? "it" : "them"} to finish or stop ${one ? "it" : "them"}, then try again.`,
+        );
+      }
+      if (later.length === 0) return [];
+      const confirmed = await confirm(
+        `Restoring the files also undoes the later work of ${names(later)} in the same Trellis workspace.\nRestore anyway?`,
+      );
+      return confirmed
+        ? later.map((thread) => ({ threadId: thread.threadId, runId: thread.runId }))
+        : null;
     },
     [run],
   );

@@ -50,6 +50,7 @@ import {
   RunExecutionServiceV2,
   selectInheritedBackgroundTurnItems,
 } from "./RunExecutionService.ts";
+import { TurnAdmission } from "./TurnAdmission.ts";
 import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
 import {
   isRestartNoteContinuation,
@@ -113,6 +114,7 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicyV2;
+    const turnAdmission = yield* TurnAdmission;
 
     // These callbacks outlive startup while a run drains background work. Build
     // them outside start's scope so they cannot retain its full thread history.
@@ -221,7 +223,23 @@ export const layer: Layer.Layer<
       readonly willRetry?: boolean;
     }) {
       const { runId } = input;
-      const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
+      const admissionRead = yield* projectionStore.getTurnStartContext(input.threadId, runId);
+      // Admitted before the policy resolves or a session opens; a turn held
+      // back (by a checkpoint restore) rereads what the wait may have changed.
+      const admissionRun = admissionRead.runs.find((candidate) => candidate.id === runId);
+      const admissionCwd = admissionRead.checkpointScopes.find(
+        (scope) =>
+          scope.id ===
+          admissionRead.nodes.find((node) => node.id === admissionRun?.rootNodeId)
+            ?.checkpointScopeId,
+      )?.cwd;
+      const held =
+        admissionRun?.status === "starting" && admissionCwd !== undefined
+          ? yield* turnAdmission.start({ threadId: input.threadId, runId, cwd: admissionCwd })
+          : false;
+      const projection = held
+        ? yield* projectionStore.getTurnStartContext(input.threadId, runId)
+        : admissionRead;
       const run = projection.runs.find((candidate) => candidate.id === runId);
       if (run === undefined) {
         return yield* new ProviderTurnStartError({ runId, cause: `Run ${runId} was not found.` });

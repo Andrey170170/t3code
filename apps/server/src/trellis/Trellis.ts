@@ -87,6 +87,14 @@ export const TrellisSnapshot = Schema.Struct({
 });
 export type TrellisSnapshot = typeof TrellisSnapshot.Type;
 
+/** `at` is Unix seconds; `data` depends on `kind`. */
+export const TrellisActivity = Schema.Struct({
+  at: Schema.Finite,
+  kind: Schema.String,
+  data: Schema.Unknown,
+});
+export type TrellisActivity = typeof TrellisActivity.Type;
+
 export const TrellisFindHitView = Schema.Struct({
   project: TrellisProjectView,
   matches: Schema.Array(Schema.Struct({ path: Schema.String, snippet: Schema.String })),
@@ -244,13 +252,28 @@ export class Trellis extends Context.Service<
     readonly listSnapshots: (
       target: string,
     ) => Effect.Effect<ReadonlyArray<TrellisSnapshot>, TrellisError>;
+    /** Activity recorded in the target's workspace, newest first. */
+    readonly listActivities: (input: {
+      readonly target: string;
+      readonly kind: string;
+      readonly limit?: number;
+    }) => Effect.Effect<ReadonlyArray<TrellisActivity>, TrellisError>;
+    /**
+     * A `turn` snapshot of the target's workspace, tagged with `turn` (and
+     * `thread`). `pinned` pins it as it is created; Trellis versions before
+     * that ignore it and create it unpinned.
+     */
     readonly createSnapshot: (input: {
       readonly target: string;
-      readonly thread: string;
+      readonly thread?: string | undefined;
       readonly turn: string;
+      readonly pinned?: boolean;
     }) => Effect.Effect<TrellisSnapshot, TrellisError>;
-    /** Pins a snapshot so thinning keeps it. */
-    readonly pinSnapshot: (id: string) => Effect.Effect<void, TrellisError>;
+    /** Pins or unpins a snapshot; thinning keeps pinned ones. Fails when it is gone. */
+    readonly setSnapshotPinned: (
+      id: string,
+      pinned: boolean,
+    ) => Effect.Effect<TrellisSnapshot, TrellisError>;
     /** Moves a project (with all its workspaces) to the trash. */
     readonly trashProject: (id: string) => Effect.Effect<void, TrellisError>;
     /** Moves one fork to the trash; the last one trashes its project. */
@@ -337,12 +360,38 @@ function requestOverSocket(input: {
   });
 }
 
-const decodeJson = <S extends Schema.Top>(schema: S, text: string) =>
+const decodeJson = <S extends Schema.Top>(schema: S, text: string, status: number) =>
   Schema.decodeUnknownEffect(Schema.fromJsonString(schema))(text).pipe(
     Effect.mapError(
-      (error) => new TrellisError({ message: `Unexpected Trellis response: ${error.message}` }),
+      (error) =>
+        new TrellisError({
+          message: `Unexpected Trellis response (HTTP ${status}): ${error.message}`,
+        }),
     ),
   );
+
+/**
+ * Routes newer than the Trellis T3 first ran against, with the first Trellis
+ * that serves them. An older Trellis answers 404 or 405 without an error body.
+ */
+const ROUTE_MINIMUM: ReadonlyArray<{ readonly route: string; readonly since: string }> = [
+  {
+    route: "GET /v1/activities",
+    since: "main at or after PR #15 (core/checkpoint, d949d28)",
+  },
+];
+
+/** The error for a failed response whose body is not Trellis' `{error}`. */
+function trellisStatusError(method: string, path: string, status: number): TrellisError {
+  const route = `${method} ${path.split("?")[0]}`;
+  if (status === 404 || status === 405) {
+    const minimum = ROUTE_MINIMUM.find((entry) => entry.route === route);
+    return new TrellisError({
+      message: `This Trellis does not support ${route}, which T3 needs here. Update Trellis to ${minimum?.since ?? "a newer version"}.`,
+    });
+  }
+  return new TrellisError({ message: `Trellis answered ${route} with HTTP ${status}.` });
+}
 
 const query = (params: Record<string, string>) => new URLSearchParams(params).toString();
 
@@ -455,10 +504,12 @@ const make = Effect.gen(function* () {
     }).pipe(
       Effect.flatMap((response) =>
         response.status >= 400
-          ? decodeJson(TrellisErrorBody, response.body).pipe(
+          ? // Trellis' own refusals carry `{error}`; a missing route does not.
+            decodeJson(TrellisErrorBody, response.body, response.status).pipe(
+              Effect.mapError(() => trellisStatusError(method, path, response.status)),
               Effect.flatMap((body) => Effect.fail(new TrellisError({ message: body.error }))),
             )
-          : decodeJson(schema, response.body),
+          : decodeJson(schema, response.body, response.status),
       ),
     );
 
@@ -642,19 +693,31 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.map((view) => ({ ignored: view.ignored ?? view.ignored_pinned ?? [] }))),
     find: (text) => call(Schema.Array(TrellisFindHitView), "GET", `/v1/find?${query({ q: text })}`),
     resolve: (target) => call(TrellisResolved, "GET", `/v1/resolve?${query({ target })}`),
+    listActivities: ({ target, kind, limit = 50 }) =>
+      call(
+        Schema.Array(TrellisActivity),
+        "GET",
+        `/v1/activities?${query({ target, kind, limit: String(limit) })}`,
+      ),
     listSnapshots: (target) =>
       call(Schema.Array(TrellisSnapshot), "GET", `/v1/snapshots?${query({ target })}`),
-    createSnapshot: ({ target, thread, turn }) =>
+    createSnapshot: ({ target, thread, turn, pinned }) =>
       call(TrellisSnapshot, "POST", "/v1/snapshots", {
-        body: { target, kind: "turn", thread, turn },
+        body: {
+          target,
+          kind: "turn",
+          turn,
+          ...(thread === undefined ? {} : { thread }),
+          ...(pinned === undefined ? {} : { pinned }),
+        },
         // Btrfs snapshots take milliseconds; these run on the shared
         // checkpoint worker, so a hung Trellis must not stall other threads.
         timeoutMs: 15_000,
       }),
-    pinSnapshot: (id) =>
+    setSnapshotPinned: (id, pinned) =>
       call(TrellisSnapshot, "PATCH", `/v1/snapshots/${encodeURIComponent(id)}`, {
-        body: { pinned: true },
-      }).pipe(Effect.asVoid),
+        body: { pinned },
+      }),
     trashProject: (id) =>
       call(Schema.Unknown, "DELETE", `/v1/projects/${encodeURIComponent(id)}`).pipe(Effect.asVoid),
     trashWorkspace: (id) =>
@@ -788,8 +851,9 @@ export function makeTestTrellis(
     find: unused,
     resolve: unused,
     listSnapshots: unused,
+    listActivities: unused,
     createSnapshot: unused,
-    pinSnapshot: () => Effect.void,
+    setSnapshotPinned: unused,
     trashProject: unused,
     trashWorkspace: unused,
     restoreProject: unused,

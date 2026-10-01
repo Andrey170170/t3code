@@ -351,11 +351,16 @@ export const executorLayer: Layer.Layer<
                 ...(effect.request.restoreFiles === undefined
                   ? {}
                   : { restoreFiles: effect.request.restoreFiles }),
+                ...(effect.request.acknowledgeWork === undefined
+                  ? {}
+                  : { acknowledgeWork: effect.request.acknowledgeWork }),
+                requestId: effect.commandId,
               })
               .pipe(
                 // The last failed attempt tells waiting clients it failed,
                 // instead of leaving them to time out. Clients get a fixed
-                // message; the worker logs the full cause for each attempt.
+                // message unless the failure carries one meant for them; the
+                // worker logs the full cause for each attempt.
                 Effect.tapCause((cause) =>
                   willRetry || Cause.hasInterruptsOnly(cause)
                     ? Effect.void
@@ -365,7 +370,7 @@ export const executorLayer: Layer.Layer<
                           commandId: CommandId.make(`${effect.commandId}:rollback-failed`),
                           threadId: effect.threadId,
                           requestId: effect.commandId,
-                          message: CheckpointRollbackService.ROLLBACK_FAILED_MESSAGE,
+                          message: CheckpointRollbackService.rollbackFailureMessage(cause),
                         })
                         .pipe(
                           Effect.catchCause((recordCause) =>
@@ -375,6 +380,16 @@ export const executorLayer: Layer.Layer<
                             }),
                           ),
                         ),
+                ),
+                // Rollbacks record the rewind before restoring files, so
+                // waiting clients stop on this, after the files too.
+                Effect.andThen(
+                  threads.dispatch({
+                    type: "checkpoint.rollback.complete",
+                    commandId: CommandId.make(`${effect.commandId}:rollback-completed`),
+                    threadId: effect.threadId,
+                    requestId: effect.commandId,
+                  }),
                 ),
                 Effect.mapError(
                   (cause) =>

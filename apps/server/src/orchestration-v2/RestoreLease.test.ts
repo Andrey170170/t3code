@@ -71,10 +71,11 @@ const rollbackLayer = (calls: Array<string>) =>
           Layer.provide(idAllocatorLayer),
           Layer.provide(
             Layer.mock(CheckpointStore.CheckpointStore)({
+              reserve: () => Effect.succeed({ endsSessionsIn: null }),
               restoreCheckpoint: () =>
                 Effect.sync(() => {
                   calls.push("restore");
-                  return true;
+                  return { restored: true };
                 }),
             }),
           ),

@@ -48,6 +48,7 @@ import { useAttachmentUploadStore } from "../lib/attachmentUploadQueue";
 import {
   type AssistantCitation,
   type ChatFileAttachment,
+  CheckpointId,
   CommandId,
   DEFAULT_MODEL,
   isProviderNativeSubagentThread,
@@ -63,6 +64,7 @@ import {
   type ServerProvider,
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
+  type OrchestrationV2AcknowledgedWork,
   type ThreadId,
   type ThreadLinkedPullRequest,
   type RunId,
@@ -518,8 +520,8 @@ import {
   shouldRefocusComposerOnWindowFocus,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
-import { useTrellisRoot } from "~/hooks/useTrellis";
-import { isTrellisWorkspaceRoot } from "~/lib/trellis";
+import { useTrellisKnownRoots, useTrellisRestoreCheck, useTrellisRoot } from "~/hooks/useTrellis";
+import { isTrellisWorkspaceRoot, isUnderTrellisRoots } from "~/lib/trellis";
 import { useComposerHandleContext } from "../composerHandleContext";
 import {
   awaitAttachmentUploads,
@@ -1569,6 +1571,7 @@ export default function ChatView(props: ChatViewProps) {
   const dismissThreadUserInput = useAtomCommand(threadEnvironment.dismissUserInput, {
     reportFailure: false,
   });
+  const checkTrellisRestore = useTrellisRestoreCheck();
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
     reportFailure: false,
   });
@@ -2211,13 +2214,25 @@ export default function ChatView(props: ChatViewProps) {
   );
   const diffOpen = activeRightPanelKind === "diff";
   const explicitDiffOpenRef = useRef<ScopedThreadRef | null>(null);
+  // Where a generic opening lands when the checkout has no working-tree diff
+  // (a Trellis project without git): its latest turn. Set below.
+  const genericDiffTurnRef = useRef<RunId | null>(null);
   useLayoutEffect(() => {
     const explicitThreadRef = explicitDiffOpenRef.current;
     explicitDiffOpenRef.current = null;
     // Generic openings always show the checkout, including tab fallbacks and thread changes.
     // A timeline click instead opens the specific turn/file the user requested.
-    if (diffOpen && activeThreadRef && explicitThreadRef !== activeThreadRef) {
-      useDiffPanelStore.getState().selectGitScope(activeThreadRef, "unstaged");
+    // Compared by key: the ref object is rebuilt whenever the thread updates,
+    // which can happen between the click and this effect.
+    if (
+      diffOpen &&
+      activeThreadRef &&
+      (explicitThreadRef === null ||
+        scopedThreadKey(explicitThreadRef) !== scopedThreadKey(activeThreadRef))
+    ) {
+      const latestTurn = genericDiffTurnRef.current;
+      if (latestTurn !== null) useDiffPanelStore.getState().selectTurn(activeThreadRef, latestTurn);
+      else useDiffPanelStore.getState().selectGitScope(activeThreadRef, "unstaged");
     }
   }, [activeThreadRef, diffOpen]);
   const rightPanelState = useRightPanelStore((state) =>
@@ -4053,6 +4068,14 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [environmentId, gitStatusCwd, liveIsGitRepo]);
   const isGitRepo = liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true;
+  // Trellis checkpoints are snapshots, so turn diffs need no git there.
+  const checkoutTrellisRoots = useTrellisKnownRoots(activeThread?.environmentId ?? null);
+  const hasTurnDiffs =
+    isGitRepo || (gitStatusCwd !== null && isUnderTrellisRoots(gitStatusCwd, checkoutTrellisRoots));
+  const genericDiffTurn = isGitRepo ? null : (turnDiffSummaries.at(-1)?.runId ?? null);
+  useLayoutEffect(() => {
+    genericDiffTurnRef.current = genericDiffTurn;
+  }, [genericDiffTurn]);
   // When context is enabled, keep a hidden, off-flow strip mounted so the composer
   // can measure whether its relocated controls fit. The visible chrome remains
   // content-driven: Git/environment context or controls that actually fit.
@@ -5000,11 +5023,13 @@ export default function ChatView(props: ChatViewProps) {
     [activeThreadRef, openPreview],
   );
   const addDiffSurface = useCallback(() => {
-    if (!activeThreadRef || !isServerThread || !isGitRepo) return;
-    useDiffPanelStore.getState().selectGitScope(activeThreadRef, "unstaged");
+    if (!activeThreadRef || !isServerThread || !hasTurnDiffs) return;
+    const latestTurn = genericDiffTurnRef.current;
+    if (latestTurn !== null) useDiffPanelStore.getState().selectTurn(activeThreadRef, latestTurn);
+    else useDiffPanelStore.getState().selectGitScope(activeThreadRef, "unstaged");
     useRightPanelStore.getState().open(activeThreadRef, "diff");
     onDiffPanelOpen?.();
-  }, [activeThreadRef, isGitRepo, isServerThread, onDiffPanelOpen]);
+  }, [activeThreadRef, hasTurnDiffs, isServerThread, onDiffPanelOpen]);
   const openChangesFromThreadPanel = useCallback(() => {
     addDiffSurface();
   }, [addDiffSurface]);
@@ -7700,6 +7725,24 @@ export default function ChatView(props: ChatViewProps) {
         setPendingRevert({ turnCount, messageId, routeThreadKey });
         return;
       }
+      let acknowledgeWork: ReadonlyArray<OrchestrationV2AcknowledgedWork> = [];
+      if (restoreFiles) {
+        try {
+          const acknowledged = await checkTrellisRestore(
+            environmentId,
+            { threadId: activeThread.id, turnCount },
+            (message) => localApi.dialogs.confirm(message),
+          );
+          if (acknowledged === null) return;
+          acknowledgeWork = acknowledged;
+        } catch (error) {
+          setThreadError(
+            activeThread.id,
+            error instanceof Error ? error.message : "Failed to revert thread state.",
+          );
+          return;
+        }
+      }
 
       useComposerDraftStore.setState((store) => ({
         rewindingThreadKeys: new Set(store.rewindingThreadKeys).add(routeThreadKey),
@@ -7731,7 +7774,13 @@ export default function ChatView(props: ChatViewProps) {
         await waitForRevertedMessage(routeThreadRef, messageId, turnCount, commandId, async () => {
           const result = await revertThreadCheckpoint({
             environmentId,
-            input: { commandId, threadId: activeThread.id, turnCount, restoreFiles },
+            input: {
+              commandId,
+              threadId: activeThread.id,
+              turnCount,
+              restoreFiles,
+              ...(acknowledgeWork.length === 0 ? {} : { acknowledgeWork }),
+            },
           });
           if (result._tag === "Failure") throw squashAtomCommandFailure(result);
         });
@@ -7826,6 +7875,23 @@ export default function ChatView(props: ChatViewProps) {
               "Roll back this thread to the selected checkpoint?\nThis action cannot be undone.",
             );
       if (!confirmed) return;
+      let acknowledgeWork: ReadonlyArray<OrchestrationV2AcknowledgedWork> = [];
+      try {
+        const acknowledged = await checkTrellisRestore(
+          environmentId,
+          { threadId: activeThread.id, checkpointId: CheckpointId.make(input.checkpointId) },
+          async (message) =>
+            localApi == null ? window.confirm(message) : localApi.dialogs.confirm(message),
+        );
+        if (acknowledged === null) return;
+        acknowledgeWork = acknowledged;
+      } catch (error) {
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to revert thread state.",
+        );
+        return;
+      }
 
       useComposerDraftStore.setState((store) => ({
         rewindingThreadKeys: new Set(store.rewindingThreadKeys).add(routeThreadKey),
@@ -7837,6 +7903,7 @@ export default function ChatView(props: ChatViewProps) {
           threadId: activeThread.id,
           checkpointId: input.checkpointId,
           scopeId: input.scopeId,
+          ...(acknowledgeWork.length === 0 ? {} : { acknowledgeWork }),
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -10425,7 +10492,7 @@ export default function ChatView(props: ChatViewProps) {
       ? { onCheckoutPullRequestRequest: openPullRequestDialog }
       : {}),
     onComposerFocusRequest: scheduleComposerFocus,
-    ...(isServerThread && isGitRepo ? { onOpenChanges: openChangesFromThreadPanel } : {}),
+    ...(isServerThread && hasTurnDiffs ? { onOpenChanges: openChangesFromThreadPanel } : {}),
     versionMismatch:
       showVersionMismatchBanner && versionMismatch
         ? {
@@ -11186,7 +11253,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddDevice={addDeviceSurface}
           browserAvailable={isPreviewSupportedInRuntime()}
           terminalAvailable={activeProject !== null}
-          diffAvailable={isServerThread && isGitRepo}
+          diffAvailable={isServerThread && hasTurnDiffs}
           filesAvailable={activeProject !== null}
           pullRequestAvailable={pullRequestSurfaceAvailable}
           pullRequestsAvailable={pullRequestsSurfaceAvailable}
@@ -11240,7 +11307,7 @@ export default function ChatView(props: ChatViewProps) {
             onAddDevice={addDeviceSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             terminalAvailable={activeProject !== null}
-            diffAvailable={isServerThread && isGitRepo}
+            diffAvailable={isServerThread && hasTurnDiffs}
             filesAvailable={activeProject !== null}
             pullRequestAvailable={pullRequestSurfaceAvailable}
             pullRequestsAvailable={pullRequestsSurfaceAvailable}

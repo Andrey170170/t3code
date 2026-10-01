@@ -418,6 +418,11 @@ export const OrchestrationV2AppThread = Schema.Struct({
   ),
   /** Latest accepted rollback. Only its failure is recorded in `rollbackFailure`. */
   rollbackRequestId: Schema.optional(CommandId),
+  /**
+   * Latest rollback whose conversation and files are both restored; null
+   * while the latest one runs. Absent from servers that predate it.
+   */
+  rollbackCompletedRequestId: Schema.optional(Schema.NullOr(CommandId)),
   /** Latest rollback that failed after every retry; cleared when the next rollback starts. */
   rollbackFailure: Schema.optional(
     Schema.NullOr(
@@ -542,6 +547,12 @@ export const OrchestrationV2Run = Schema.Struct({
     }),
   ),
   delegatedCompletion: Schema.optional(OrchestrationV2DelegatedCompletionCohort),
+  /**
+   * On a `rolled_back` run: true once the rollback that removed it also
+   * restored the files to before it. Absent means its file changes may
+   * remain (a conversation-only rewind, or files not restored yet).
+   */
+  rollbackRestoredFiles: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
 
@@ -2420,6 +2431,17 @@ export const OrchestrationV2StoredEventJson = Schema.Struct({
 });
 export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJson.Type;
 
+/**
+ * Another thread's later work a file restore would undo, as the user saw it
+ * when agreeing: the thread and its latest run then. A newer run there is
+ * not covered.
+ */
+export const OrchestrationV2AcknowledgedWork = Schema.Struct({
+  threadId: ThreadId,
+  runId: RunId,
+});
+export type OrchestrationV2AcknowledgedWork = typeof OrchestrationV2AcknowledgedWork.Type;
+
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("thread.create"),
@@ -2760,6 +2782,11 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),
     restoreFiles: Schema.optional(Schema.Boolean),
+    /**
+     * Other threads' later work in a shared workspace the user agreed to
+     * undo. A restore rule that names such work refuses without it.
+     */
+    acknowledgeWork: Schema.optional(Schema.Array(OrchestrationV2AcknowledgedWork)),
     commandId: CommandId,
     threadId: ThreadId,
     scopeId: CheckpointScopeId,
@@ -2852,6 +2879,13 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     requestId: CommandId,
     message: TrimmedNonEmptyString,
+  }),
+  /** Records that the rollback `requestId` restored the conversation and the files. */
+  Schema.Struct({
+    type: Schema.Literal("checkpoint.rollback.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
   }),
   /**
    * Moves a thread to another project. Only a thread without history (no

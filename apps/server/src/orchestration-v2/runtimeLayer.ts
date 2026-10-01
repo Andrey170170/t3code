@@ -43,6 +43,7 @@ import { layer as runExecutionServiceLayer } from "./RunExecutionService.ts";
 import { layer as runFinalizationServiceLayer } from "./RunFinalizationService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as TrellisRuntimePolicy from "../trellis/TrellisRuntimePolicy.ts";
+import * as TrellisRestore from "../trellis/TrellisRestore.ts";
 import { layer as runtimeRequestServiceLayer } from "./RuntimeRequestService.ts";
 import { layerWithLegacyImporter as threadManagementServiceLayer } from "./ThreadManagementService.ts";
 import { layer as threadLaunchServiceLayer } from "./ThreadLaunchService.ts";
@@ -62,6 +63,12 @@ export const OrchestrationEventInfrastructureLayerLive = Layer.mergeAll(
 const runtimePolicyProvided = TrellisRuntimePolicy.layer.pipe(
   Layer.provide(RuntimePolicy.layerFromProjectStore),
   Layer.provide(ProjectStore.layer),
+);
+
+// Restores, turn admission and the restore rule follow Trellis restore scopes
+// in Trellis projects; without the Trellis service they are V2's defaults.
+const restoreSeamsProvided = TrellisRestore.layer.pipe(
+  Layer.provide(Layer.mergeAll(ProjectStore.layer, effectOutboxLayer, projectionStoreLayer)),
 );
 
 const eventStoreProvided = eventStoreLayer.pipe(
@@ -152,6 +159,7 @@ const providerTurnStartServiceProvided = providerTurnStartServiceLayer.pipe(
       providerAuthServiceProvided,
       runExecutionServiceProvided,
       runtimePolicyProvided,
+      restoreSeamsProvided,
     ),
   ),
 );
@@ -171,6 +179,7 @@ const checkpointRollbackServiceProvided = checkpointRollbackServiceLayer.pipe(
       projectionStoreLayer,
       providerSessionManagerProvided,
       runtimePolicyProvided,
+      restoreSeamsProvided,
     ),
   ),
 );
@@ -209,6 +218,7 @@ const orchestratorProvided = orchestratorLayer.pipe(
       providerSwitchServiceProvided,
       runExecutionServiceProvided,
       threadForkServiceLayer,
+      restoreSeamsProvided,
     ),
   ),
 );

@@ -1,5 +1,12 @@
 import * as Schema from "effect/Schema";
-import { ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  CheckpointId,
+  NonNegativeInt,
+  ProjectId,
+  RunId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 
 /**
  * Trellis is an optional local workspace service. These contracts cover the
@@ -150,6 +157,35 @@ export const TrellisFindResult = Schema.Struct({
   hits: Schema.Array(TrellisFindHit),
 });
 export type TrellisFindResult = typeof TrellisFindResult.Type;
+
+/** The checkpoint a file restore would return to: by id, or by its turn count. */
+export const TrellisRestoreConflictsInput = Schema.Struct({
+  threadId: ThreadId,
+  checkpointId: Schema.optionalKey(CheckpointId),
+  turnCount: Schema.optionalKey(NonNegativeInt),
+});
+export type TrellisRestoreConflictsInput = typeof TrellisRestoreConflictsInput.Type;
+
+const TrellisRestoreConflictThread = Schema.Struct({ threadId: ThreadId, title: Schema.String });
+const TrellisRestoreLaterWork = Schema.Struct({
+  threadId: ThreadId,
+  title: Schema.String,
+  /** Its latest run with changes; the rollback acknowledges exactly this. */
+  runId: RunId,
+});
+
+/**
+ * Other threads in the same Trellis restore scope (an idea's folder or a
+ * whole workspace). A restore is refused while any is `running`; `later`
+ * threads did work there after the checkpoint, which the restore undoes, so
+ * the rollback must name them, with their run, in `acknowledgeWork`. Both are empty
+ * outside Trellis projects.
+ */
+export const TrellisRestoreConflicts = Schema.Struct({
+  running: Schema.Array(TrellisRestoreConflictThread),
+  later: Schema.Array(TrellisRestoreLaterWork),
+});
+export type TrellisRestoreConflicts = typeof TrellisRestoreConflicts.Type;
 
 /**
  * Maps a loopback preview URL (`localhost:PORT`) of a thread in a Trellis

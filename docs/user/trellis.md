@@ -62,10 +62,17 @@ running. Deleting a conversation only deletes the conversation.
 ## Restoring files from a turn
 
 Reverting a turn in a Trellis project can restore its files from Trellis' snapshot of that turn. An
-idea restores only its folder; a project restores its whole workspace and restarts it, so agents
-working there start again on their next turn. While another thread is running or has a queued turn
-in the same idea or workspace, the restore is refused and names that thread; try again once it
-finishes. If other threads did later work there, T3 Code names them and asks you to confirm before
-their changes are undone. The thread then notes the snapshot Trellis took of the files just before
-the restore, so the restore itself can be undone. A turn whose snapshot is missing or has expired
-cannot have its files restored. Reverting without restoring files only rewinds the conversation.
+idea restores only its folder, so anything installed outside it (for example with `pip install
+--user`) stays; install into the idea folder, such as a `.venv` there, to have it restored too. A
+project restores its whole workspace, packages included, and restarts it, so agents working there
+start again on their next turn. While another thread is running or has a queued turn in the same idea
+or workspace, the restore is refused and names that thread; try again once it finishes. If other
+threads did later work there, T3 Code names them and asks you to confirm before their changes are
+undone. New turns in that idea or workspace wait until the restore finishes, and a new turn in the reverted thread waits until its revert is done. The thread then shows
+the `trellis rollback` command that undoes the restore. A turn whose snapshot could not be taken
+shows its checkpoint as failed, and one whose snapshot has since expired is marked missing when you
+try; neither can have its files restored. Reverting without restoring files only rewinds the
+conversation.
+
+Turn diffs work in Trellis projects that are not git repositories too; they compare the two turns'
+snapshots. In a git repository they come from git, so ignored files are left out.

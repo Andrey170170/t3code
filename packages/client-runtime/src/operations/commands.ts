@@ -22,6 +22,7 @@ import {
   type RunId,
   type RuntimeMode,
   type RuntimeRequestId,
+  type OrchestrationV2AcknowledgedWork,
   type ThreadId,
   type ThreadEnvMode,
   type UploadChatAttachment,
@@ -203,6 +204,8 @@ export interface DismissThreadUserInputInput extends ThreadCommandInput {
 
 export interface RevertThreadCheckpointInput extends ThreadCommandInput {
   readonly restoreFiles?: boolean;
+  /** Other threads whose later work the user agreed the file restore undoes. */
+  readonly acknowledgeWork?: ReadonlyArray<OrchestrationV2AcknowledgedWork>;
   readonly checkpointId?: string;
   readonly scopeId?: string;
   readonly turnCount?: number;
@@ -860,6 +863,7 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
       return yield* dispatch({
         type: "checkpoint.rollback",
         ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
+        ...(input.acknowledgeWork === undefined ? {} : { acknowledgeWork: input.acknowledgeWork }),
         commandId: yield* allocateCommandId(input),
         threadId: input.threadId,
         scopeId: CheckpointScopeId.make(input.scopeId),
@@ -889,6 +893,7 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
     return yield* dispatch({
       type: "checkpoint.rollback",
       ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
+      ...(input.acknowledgeWork === undefined ? {} : { acknowledgeWork: input.acknowledgeWork }),
       commandId: yield* allocateCommandId(input),
       threadId: input.threadId,
       scopeId: checkpoint.scopeId,

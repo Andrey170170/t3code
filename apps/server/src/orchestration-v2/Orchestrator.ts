@@ -58,10 +58,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ProjectStore from "./ProjectStore.ts";
-import {
-  isCheckpointRestoreIsolated,
-  SHARED_WORKSPACE_RESTORE_MESSAGE,
-} from "./CheckpointRestoreSafety.ts";
+import { CheckpointRestoreRule } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
 import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
@@ -356,6 +353,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.user-input.dismiss":
     case "checkpoint.rollback":
     case "checkpoint.rollback.fail":
+    case "checkpoint.rollback.complete":
     case "provider.switch":
     case "thread.project.move":
       return command.threadId;
@@ -666,6 +664,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
   const fileSystem = yield* FileSystem.FileSystem;
+  const restoreRule = yield* CheckpointRestoreRule;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
   const continuationRequests = yield* ProviderContinuationRequests;
   const providerSessions = yield* ProviderSessionManagerV2;
@@ -8204,24 +8203,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       if (command.restoreFiles !== false) {
-        const isolated = yield* isCheckpointRestoreIsolated(projection.thread, targetScope, {
-          fileSystem,
-          projections: projectionStore,
-        }).pipe(
-          Effect.mapError(
-            (cause) =>
-              new OrchestratorDispatchError({
-                commandId: command.commandId,
-                commandType: command.type,
-                cause,
-              }),
-          ),
-        );
-        if (!isolated)
+        const refusal = yield* restoreRule
+          .check(
+            {
+              thread: projection.thread,
+              scope: targetScope,
+              checkpoint: targetCheckpoint,
+              acknowledgeWork: command.acknowledgeWork ?? [],
+            },
+            { fileSystem, projections: projectionStore },
+          )
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause,
+                }),
+            ),
+          );
+        if (refusal !== null)
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause: SHARED_WORKSPACE_RESTORE_MESSAGE,
+            cause: refusal,
           });
       }
 
@@ -8259,6 +8265,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: {
           ...projection.thread,
           rollbackRequestId: command.commandId,
+          rollbackCompletedRequestId: null,
           rollbackFailure: null,
           updatedAt: now,
         },
@@ -8286,6 +8293,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           request: {
             type: "provider-thread.rollback",
             ...(command.restoreFiles === undefined ? {} : { restoreFiles: command.restoreFiles }),
+            ...(command.acknowledgeWork === undefined
+              ? {}
+              : { acknowledgeWork: command.acknowledgeWork }),
             providerThreadId: providerThread.id,
             checkpointId: targetCheckpoint.id,
             scopeId: targetScope.id,
@@ -8329,6 +8339,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           rollbackFailure: { requestId: command.requestId, message: command.message },
           updatedAt: now,
         },
+      });
+    });
+
+  /**
+   * Records that a rollback finished, files included, so clients waiting on
+   * it stop only then. A completion of a superseded rollback is ignored.
+   */
+  const dispatchCheckpointRollbackComplete = (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "checkpoint.rollback.complete" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) =>
+    Effect.gen(function* () {
+      const thread = yield* projectionStore
+        .getThread(command.threadId)
+        .pipe(mapDispatchError(command));
+      if (thread.deletedAt !== null || thread.rollbackRequestId !== command.requestId) return;
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: command.threadId,
+        providerInstanceId: thread.providerInstanceId,
+        occurredAt: now,
+        payload: { ...thread, rollbackCompletedRequestId: command.requestId, updatedAt: now },
       });
     });
 
@@ -9318,6 +9357,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "checkpoint.rollback.fail":
         yield* dispatchCheckpointRollbackFail(command, events);
+        break;
+      case "checkpoint.rollback.complete":
+        yield* dispatchCheckpointRollbackComplete(command, events);
         break;
       case "thread.fork":
         yield* dispatchThreadFork(command, events);

@@ -27,6 +27,8 @@ describe("Trellis client", () => {
     handler: (request: { method: string; url: string; body: string }) => {
       readonly status?: number;
       readonly body: unknown;
+      /** Sent as is instead of `body` as JSON. */
+      readonly raw?: string;
     },
   ) {
     const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-trellis-client-"));
@@ -46,7 +48,7 @@ describe("Trellis client", () => {
         requests.push(entry);
         const result = handler(entry);
         response.writeHead(result.status ?? 200, { "content-type": "application/json" });
-        response.end(JSON.stringify(result.body));
+        response.end(result.raw ?? JSON.stringify(result.body));
       });
     });
     // A stand-in for `trellis shims --dir <dir>`.
@@ -224,6 +226,31 @@ describe("Trellis client", () => {
       expect(harness.requests[2]?.body).toBe(
         '{"target":"/x","name":"Name","source":"user","pin":true}',
       );
+    }),
+  );
+
+  it.effect("names a route an older Trellis lacks, and the status of other bare failures", () =>
+    Effect.gen(function* () {
+      const harness = setup(({ url }) => {
+        if (url === "/v1/status") return { body: { root: "/trellis", role: "user" } };
+        // Older Trellis: the route takes POST only, so GET is a bare 405.
+        if (url.startsWith("/v1/activities")) return { status: 405, body: null, raw: "" };
+        return { status: 502, body: null, raw: "Bad Gateway" };
+      });
+      const layer = yield* Effect.promise(() => harness.listen());
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        yield* trellis.refresh;
+        const missing = yield* trellis
+          .listActivities({ target: "/x", kind: "rollback" })
+          .pipe(Effect.flip);
+        const failed = yield* trellis.listProjects({ all: false }).pipe(Effect.flip);
+        return { missing, failed };
+      }).pipe(Effect.provide(layer));
+      expect(result.missing.message).toBe(
+        "This Trellis does not support GET /v1/activities, which T3 needs here. Update Trellis to main at or after PR #15 (core/checkpoint, d949d28).",
+      );
+      expect(result.failed.message).toBe("Trellis answered GET /v1/projects with HTTP 502.");
     }),
   );
 });

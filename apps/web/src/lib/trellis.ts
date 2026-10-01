@@ -20,6 +20,11 @@ export function isTrellisWorkspaceRoot(
   return trellisRoot ? isTrellisManagedPath(trellisRoot, workspaceRoot) : false;
 }
 
+/** Whether `path` is a Trellis project path under any of `roots`. */
+export function isUnderTrellisRoots(path: string, roots: ReadonlyArray<string>): boolean {
+  return roots.some((root) => isTrellisManagedPath(root, path));
+}
+
 /**
  * What deleting a T3 project does to its Trellis item: `trash` moves it to
  * the Trellis trash (the project is Trellis-managed and Trellis is ready),

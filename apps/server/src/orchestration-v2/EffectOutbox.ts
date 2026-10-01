@@ -1,4 +1,5 @@
 import {
+  OrchestrationV2AcknowledgedWork,
   CheckpointId,
   CheckpointScopeId,
   CommandId,
@@ -93,6 +94,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("provider-thread.rollback"),
     restoreFiles: Schema.optional(Schema.Boolean),
+    acknowledgeWork: Schema.optional(Schema.Array(OrchestrationV2AcknowledgedWork)),
     providerThreadId: ProviderThreadId,
     checkpointId: CheckpointId,
     scopeId: CheckpointScopeId,

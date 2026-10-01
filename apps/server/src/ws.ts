@@ -3150,6 +3150,12 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.trellisNewProject, trellisCatalog.newProject(input), {
             "rpc.aggregate": "trellis",
           }),
+        [WS_METHODS.trellisRestoreConflicts]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisRestoreConflicts,
+            trellisCatalog.restoreConflicts(input),
+            { "rpc.aggregate": "trellis" },
+          ),
         [WS_METHODS.trellisResolvePreviewUrl]: (input) =>
           observeRpcEffect(
             WS_METHODS.trellisResolvePreviewUrl,

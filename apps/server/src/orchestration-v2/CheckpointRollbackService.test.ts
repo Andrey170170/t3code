@@ -284,7 +284,10 @@ it.effect("reports a missing provider turn as a structured rollback failure", ()
   const testLayer = checkpointRollbackServiceLayer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        Layer.mock(CheckpointServiceV2)({ restore }),
+        Layer.mock(CheckpointServiceV2)({
+          restore,
+          reserve: () => Effect.succeed({ endsSessionsIn: null }),
+        }),
         Layer.mock(EventSinkV2)({}),
         idAllocatorLayer,
         Layer.mock(ProjectionStoreV2)({
@@ -383,9 +386,11 @@ it.effect.each([
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(CheckpointServiceV2)({
+          reserve: () => Effect.succeed({ endsSessionsIn: null }),
           restore: () =>
             Effect.sync(() => {
               calls.push("files");
+              return { notice: null };
             }),
         }),
         Layer.mock(EventSinkV2)({
@@ -455,7 +460,9 @@ it.effect.each([
     yield* service.execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles });
     assert.deepEqual(
       calls,
-      restoreFiles ? ["provider", "files", "projection"] : ["provider", "projection"],
+      // The rewind is recorded before the files are restored, and the runs
+      // are marked as having their files restored after.
+      restoreFiles ? ["provider", "projection", "files", "projection"] : ["provider", "projection"],
     );
   }).pipe(Effect.provide(testLayer));
 });

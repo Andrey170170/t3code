@@ -40,10 +40,12 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
 import * as Trellis from "./trellis/Trellis.ts";
 import * as TrellisCatalog from "./trellis/TrellisCatalog.ts";
+import * as TrellisCheckpointStore from "./trellis/TrellisCheckpointStore.ts";
 import * as TrellisIdeaPromotion from "./trellis/TrellisIdeaPromotion.ts";
 import * as TrellisNaming from "./trellis/TrellisNaming.ts";
 import * as TrellisPreview from "./trellis/TrellisPreview.ts";
 import * as TrellisPtyAdapter from "./trellis/TrellisPtyAdapter.ts";
+import * as TrellisRestore from "./trellis/TrellisRestore.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -390,8 +392,9 @@ const VcsLayerLive = Layer.empty.pipe(
   ),
 );
 
-const CheckpointStoreLayerLive = CheckpointStore.layer.pipe(
-  Layer.provide(VcsDriverRegistryLayerLive),
+// Trellis project paths are checkpointed by Trellis snapshots, the rest by Git.
+const CheckpointStoreLayerLive = TrellisCheckpointStore.layer.pipe(
+  Layer.provide(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistryLayerLive))),
 );
 
 const PortScannerLayerLive = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
@@ -583,6 +586,8 @@ const RuntimeCoreDependenciesLive = RuntimeCoreDependenciesBaseLive.pipe(
   // The optional Trellis workspace service, off until enabled in settings.
   // Runtime policy, terminals and worktree creation consult it when present.
   Layer.provideMerge(Trellis.layer.pipe(Layer.provide(ServerSettingsLayerLive))),
+  // Orders Trellis restores and trash against each other and new turns.
+  Layer.provideMerge(TrellisRestore.gateLayer),
   // Search, prepare, status inspection, and turn launch share one registry
   // cache so every client and provider instance sees the same prepared agents.
   Layer.provideMerge(AcpRegistryCatalogLive),

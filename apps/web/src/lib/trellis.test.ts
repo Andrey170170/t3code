@@ -12,6 +12,7 @@ import {
   isLoopbackPreviewUrl,
   isTrellisIdeaPath,
   isTrellisWorkspaceRoot,
+  isUnderTrellisRoots,
   pickTrellisEnvironment,
   threadMoveBlocker,
   trellisFindHitSummary,
@@ -41,6 +42,15 @@ describe("isTrellisWorkspaceRoot", () => {
     expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/project", undefined)).toBe(false);
     expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/project", null)).toBe(false);
     expect(isTrellisWorkspaceRoot("/srv/trellis/workspaces/w1/project", "")).toBe(false);
+  });
+});
+
+describe("isUnderTrellisRoots", () => {
+  it("recognizes project paths under an earlier root too", () => {
+    const roots = ["/trellis", "/old-trellis"];
+    expect(isUnderTrellisRoots("/old-trellis/workspaces/ws-1/project/idea-a", roots)).toBe(true);
+    expect(isUnderTrellisRoots("/trellis/workspaces/ws-2/project", roots)).toBe(true);
+    expect(isUnderTrellisRoots("/home/me/code", roots)).toBe(false);
   });
 });
 
