@@ -73,6 +73,8 @@ export class TrellisWorkersEventError extends Schema.TaggedError<TrellisWorkersE
   { message: Schema.String },
 ) {}
 
+const isWorkersEventError = Schema.is(TrellisWorkersEventError);
+
 export interface TrellisWorkerFork {
   /** The fork's T3 project, for the child thread. */
   readonly projectId: ProjectId;
@@ -623,7 +625,7 @@ const make = Effect.gen(function* () {
       }
     }).pipe(
       Effect.mapError((error) =>
-        Schema.is(TrellisWorkersEventError)(error)
+        isWorkersEventError(error)
           ? error
           : new TrellisWorkersEventError({ message: String(error) }),
       ),
