@@ -100,10 +100,12 @@ export const layer = Layer.effect(
     return PtyAdapter.PtyAdapter.of({
       spawn: Effect.fn("TrellisPtyAdapter.spawn")(function* (input) {
         const roots = yield* trellis.expectedRoots;
-        const root = trellisRootOf(roots, input.cwd);
+        // Classified by realpath: a symlink to a workspace path is that path.
+        const cwd = yield* trellis.canonicalPath(input.cwd);
+        const root = trellisRootOf(roots, cwd);
         if (root === null) {
-          const main = yield* worktreeMainCheckout(input.cwd);
-          if (main !== null && trellisRootOf(roots, main) !== null) {
+          const main = yield* worktreeMainCheckout(cwd);
+          if (main !== null && trellisRootOf(roots, yield* trellis.canonicalPath(main)) !== null) {
             return yield* new TrellisTerminalRefusedError({
               adapter: "trellis",
               shell: input.shell,
@@ -116,7 +118,11 @@ export const layer = Layer.effect(
             shell: input.shell,
           });
         }
-        return yield* host.spawn(trellisTerminalSpawnInput({ root, bin: trellis.bin }, input));
+        return yield* host.spawn(
+          root === null
+            ? input
+            : trellisTerminalSpawnInput({ root, bin: trellis.bin }, { ...input, cwd }),
+        );
       }),
     });
   }),

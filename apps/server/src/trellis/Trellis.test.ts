@@ -119,6 +119,34 @@ describe("Trellis client", () => {
     }),
   );
 
+  it.effect("probes an unavailable Trellis once per interval and resolves symlinks", () =>
+    Effect.gen(function* () {
+      const harness = setup(() => ({ status: 503, body: { error: "starting" } }));
+      const layer = yield* Effect.promise(() => harness.listen());
+      const workspace = NodePath.join(NodePath.dirname(harness.bin), "workspace");
+      const alias = NodePath.join(NodePath.dirname(harness.bin), "alias");
+      NodeFS.mkdirSync(workspace);
+      NodeFS.symlinkSync(workspace, alias);
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        const first = yield* trellis.discover;
+        yield* trellis.expectedRoots;
+        const second = yield* trellis.discover;
+        return {
+          first,
+          second,
+          canonical: yield* trellis.canonicalPath(alias),
+          missing: yield* trellis.canonicalPath(`${alias}-missing`),
+        };
+      }).pipe(Effect.provide(layer));
+      expect(result.first).toBeNull();
+      expect(result.second).toBeNull();
+      expect(harness.requests.map((request) => request.url)).toEqual(["/v1/status"]);
+      expect(result.canonical).toBe(NodeFS.realpathSync(workspace));
+      expect(result.missing).toBe(`${alias}-missing`);
+    }),
+  );
+
   it.effect("reads status, creates shims and decodes responses and errors", () =>
     Effect.gen(function* () {
       const harness = setup(({ url }) => {

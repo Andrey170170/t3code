@@ -42,6 +42,9 @@ import { ServerSettingsService } from "../serverSettings.ts";
 
 const DEFAULT_TRELLIS_SOCKET = "/trellis/state/api.sock";
 
+/** How long a failed implicit probe of Trellis is not repeated. */
+const DISCOVERY_RETRY_MS = 10_000;
+
 export const TrellisWorkspaceView = Schema.Struct({
   id: Schema.String,
   kind: Schema.String,
@@ -178,6 +181,18 @@ export class Trellis extends Context.Service<
      * Null without touching the socket while the integration is off.
      */
     readonly refresh: Effect.Effect<TrellisEnv | null>;
+    /**
+     * `current`, or a refresh when the integration is on but Trellis is not
+     * known to be up. A failed probe is not repeated for a short while, so an
+     * unresponsive socket delays at most one caller per interval.
+     */
+    readonly discover: Effect.Effect<TrellisEnv | null>;
+    /**
+     * `path` with symlinks resolved, so an alias of a workspace path is
+     * classified as the workspace path it is; `path` itself when it cannot be
+     * resolved.
+     */
+    readonly canonicalPath: (path: string) => Effect.Effect<string>;
     /** Whether the `trellis.enabled` setting is on. */
     readonly enabled: Effect.Effect<boolean>;
     /** Disabled, unavailable or ready, from the setting and the last refresh. */
@@ -436,6 +451,8 @@ const make = Effect.gen(function* () {
 
   // Serialized so concurrent refreshes never run `trellis shims` twice or
   // let a slower refresh overwrite a newer result.
+  // When an implicit probe last found Trellis unreachable.
+  let lastFailedProbeMs = Number.NEGATIVE_INFINITY;
   const refreshLock = yield* Semaphore.make(1);
   const refresh = Effect.gen(function* () {
     const previous = yield* Ref.get(state);
@@ -448,6 +465,7 @@ const make = Effect.gen(function* () {
       Effect.option,
     );
     if (status._tag === "None") {
+      lastFailedProbeMs = yield* Clock.currentTimeMillis;
       if (previous !== null) yield* Effect.logInfo("Trellis became unavailable");
       yield* Ref.set(state, null);
       return null;
@@ -485,9 +503,16 @@ const make = Effect.gen(function* () {
   }).pipe(refreshLock.withPermits(1));
 
   const socketRoot = rootFromSocketPath(socketPath);
+  const discover = Effect.gen(function* () {
+    if (!(yield* enabled)) return null;
+    const known = yield* Ref.get(state);
+    if (known !== null) return known;
+    const now = yield* Clock.currentTimeMillis;
+    return now - lastFailedProbeMs < DISCOVERY_RETRY_MS ? null : yield* refresh;
+  });
+
   const expectedRoots = Effect.gen(function* () {
-    const live =
-      (yield* Ref.get(state))?.root ?? ((yield* enabled) ? ((yield* refresh)?.root ?? null) : null);
+    const live = (yield* discover)?.root ?? null;
     const roots = [live, ...(yield* Ref.get(knownRoots)), envRoot, socketRoot].filter(
       (root): root is string => root !== null,
     );
@@ -510,6 +535,8 @@ const make = Effect.gen(function* () {
       return (yield* enabled) ? yield* Ref.get(state) : null;
     }),
     refresh,
+    discover,
+    canonicalPath: (path) => fileSystem.realPath(path).pipe(Effect.orElseSucceed(() => path)),
     enabled,
     connection,
     expectedRoots,
@@ -615,7 +642,7 @@ const isTrellisPath = Effect.fn("Trellis.isTrellisPath")(function* (
   cwd: string | undefined,
 ) {
   if (cwd === undefined) return false;
-  return trellisRootOf(yield* trellis.expectedRoots, cwd) !== null;
+  return trellisRootOf(yield* trellis.expectedRoots, yield* trellis.canonicalPath(cwd)) !== null;
 });
 
 /** The root among `roots` that manages `path`, or null for an ordinary host path. */
@@ -672,6 +699,8 @@ export function makeTestTrellis(
   return Trellis.of({
     current: Effect.succeed(env),
     refresh: Effect.succeed(env),
+    discover: Effect.succeed(env),
+    canonicalPath: (path) => Effect.succeed(path),
     enabled: Effect.succeed(env !== null),
     connection: Effect.succeed({
       state: env === null ? "disabled" : "ready",
