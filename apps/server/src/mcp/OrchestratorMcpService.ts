@@ -840,9 +840,10 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       let current = threadId;
       for (let depth = 0; depth < 32; depth++) {
+        // Any failure to read the lineage leaves the thread out of reach.
         const shell = yield* threadManagement
           .getThreadShell(current)
-          .pipe(Effect.orElseSucceed(() => null));
+          .pipe(Effect.catchCause(() => Effect.succeed(null)));
         const parentId = shell?.lineage.parentThreadId ?? null;
         if (
           shell == null ||

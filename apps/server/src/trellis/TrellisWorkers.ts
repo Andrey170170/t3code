@@ -11,10 +11,11 @@
  * - `discardFork`: the `trellis_discard_fork` tool. Moves a fork of the
  *   caller's project to the trash (refused while its threads work) and can
  *   file a purge request, which only the user confirms.
- * - `start`: follows orchestration events. A worker in another project that
- *   completes posts its result as the fork's `summary` activity (what
- *   `trellis merge-brief` shows the lead); archiving a thread cancels and
- *   archives its workers, transitively. Their forks stay.
+ * - `start`: follows orchestration events, resuming after the last one it
+ *   handled. A worker in another project that completes posts its result as
+ *   the fork's `summary` activity (what `trellis merge-brief` shows the
+ *   lead), kept in a file until Trellis takes it; archiving a thread cancels
+ *   and archives its workers, transitively. Their forks stay.
  *
  * @module trellis/TrellisWorkers
  */
@@ -41,6 +42,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
@@ -96,6 +98,8 @@ export class TrellisWorkers extends Context.Service<
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
     /** Handles one orchestration event as `start` does (tests feed it directly). Never fails. */
     readonly handle: (event: OrchestrationV2DomainEvent) => Effect.Effect<void>;
+    /** Posts the summaries Trellis could not take yet; `start` runs it every 30 s. */
+    readonly flushSummaries: Effect.Effect<void>;
   }
 >()("t3/trellis/TrellisWorkers") {}
 
@@ -170,14 +174,25 @@ const isUnreachable = (message: string) =>
 
 const normalizeRoot = (root: string) => NodePath.posix.normalize(root).replace(/(.)\/+$/, "$1");
 
-/** How many summaries posted are remembered against duplicate events. */
-const MAX_POSTED = 2_000;
-/**
- * A failed summary write is retried every 30 s for five minutes (Trellis
- * restarting, say). Events are handled in order, so this bounds how long an
- * archive cascade can wait behind it.
- */
-const SUMMARY_RETRY = { times: 10, schedule: Schedule.spaced("30 seconds") } as const;
+/** How often summaries Trellis could not take are retried, and for how long. */
+const SUMMARY_RETRY_INTERVAL = "30 seconds";
+const PENDING_SUMMARY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** A worker's result owed to its fork as a `summary` activity. */
+const PendingSummary = Schema.Struct({
+  /** The task and its completion, against repeated events. */
+  key: Schema.String,
+  parentThreadId: Schema.String,
+  childThreadId: Schema.String,
+  text: Schema.String,
+  /** Epoch milliseconds when it was queued. */
+  at: Schema.Finite,
+});
+type PendingSummary = typeof PendingSummary.Type;
+const decodePending = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(PendingSummary)),
+);
+const encodePending = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(PendingSummary)));
 
 const make = Effect.gen(function* () {
   const trellis = yield* Trellis;
@@ -189,7 +204,9 @@ const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   // The sequence of the last event handled, so a restart resumes after it
   // instead of skipping what arrived (or was retrying) while T3 was down.
-  const cursorPath = NodePath.join((yield* ServerConfig).stateDir, "trellis-workers-cursor");
+  const stateDir = (yield* ServerConfig).stateDir;
+  const cursorPath = NodePath.join(stateDir, "trellis-workers-cursor");
+  const pendingPath = NodePath.join(stateDir, "trellis-pending-summaries.json");
 
   const commandId = (operation: string) =>
     crypto.randomUUIDv4.pipe(
@@ -451,54 +468,86 @@ const make = Effect.gen(function* () {
     } satisfies TrellisDiscardForkMcpResult;
   });
 
-  // Summaries already posted, by task and completion, against repeated events.
+  // Summaries not yet in Trellis, kept in a file until written, so neither a
+  // Trellis outage nor a T3 restart loses one (the merge brief needs it).
+  const pendingLock = yield* Semaphore.make(1);
+  // Keys written in this run, against an event handled again (a resubscription).
   const posted = new Set<string>();
-
-  /** Posts a finished worker's result as its fork's `summary` activity. */
-  /**
-   * Posts a finished worker's result as its fork's `summary` activity,
-   * retrying while Trellis is unreachable (the merge brief needs it).
-   */
-  const postSummary = (input: {
-    readonly key: string;
-    readonly parentThreadId: ThreadId;
-    readonly childThreadId: ThreadId;
-    readonly text: string;
-  }) =>
+  const markPosted = (key: string) => {
+    posted.add(key);
+    if (posted.size > 2_000) posted.delete(posted.values().next().value!);
+  };
+  const readPending = fileSystem.readFileString(pendingPath).pipe(
+    Effect.flatMap(decodePending),
+    Effect.orElseSucceed((): ReadonlyArray<PendingSummary> => []),
+  );
+  const writePending = (entries: ReadonlyArray<PendingSummary>) =>
     Effect.gen(function* () {
-      if (posted.has(input.key)) return;
+      const partial = `${pendingPath}.partial`;
+      yield* fileSystem.writeFileString(partial, yield* encodePending(entries));
+      yield* fileSystem.rename(partial, pendingPath);
+    });
+
+  /** Writes one summary to its worker's fork; true once written or not owed. */
+  const writeSummary = (entry: PendingSummary) =>
+    Effect.gen(function* () {
       const [parent, child] = yield* Effect.all([
-        threads.getThreadShell(input.parentThreadId),
-        threads.getThreadShell(input.childThreadId),
+        threads.getThreadShell(ThreadId.make(entry.parentThreadId)),
+        threads.getThreadShell(ThreadId.make(entry.childThreadId)),
       ]);
       // Only a worker in a project of its own (its fork), never one sharing its lead's folder.
-      if (parent == null || child == null || parent.projectId === child.projectId) return;
+      if (parent == null || child == null || parent.projectId === child.projectId) return true;
       const folder = yield* folderOf(child);
-      if (folder === undefined) return;
-      yield* trellis
-        .recordActivity({
-          target: folder,
-          kind: "summary",
-          data: { text: input.text, thread: input.childThreadId },
-        })
-        .pipe(
-          Effect.tapError((error) =>
-            Effect.logWarning("could not post a worker's summary to its Trellis fork; retrying", {
-              childThreadId: input.childThreadId,
-              detail: error.message,
-            }),
-          ),
-          Effect.retry(SUMMARY_RETRY),
-        );
-      posted.add(input.key);
-      if (posted.size > MAX_POSTED) posted.delete(posted.values().next().value!);
+      if (folder === undefined) return true;
+      yield* trellis.recordActivity({
+        target: folder,
+        kind: "summary",
+        data: { text: entry.text, thread: entry.childThreadId },
+      });
+      return true;
     }).pipe(
       Effect.catchCause((cause) =>
-        Effect.logWarning("could not post a worker's summary to its Trellis fork", {
-          childThreadId: input.childThreadId,
+        Effect.logWarning("could not post a worker's summary to its Trellis fork; will retry", {
+          childThreadId: entry.childThreadId,
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as(false)),
+      ),
+    );
+
+  /** Writes the pending summaries Trellis takes; keeps the others (up to a week). */
+  const flushSummaries = pendingLock.withPermits(1)(
+    Effect.gen(function* () {
+      const pending = yield* readPending;
+      if (pending.length === 0) return;
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      const kept: Array<PendingSummary> = [];
+      for (const entry of pending) {
+        if (yield* writeSummary(entry)) {
+          markPosted(entry.key);
+          continue;
+        }
+        if (now - entry.at < PENDING_SUMMARY_MAX_AGE_MS) kept.push(entry);
+        else yield* Effect.logWarning("dropped a worker summary Trellis never took", entry);
+      }
+      if (kept.length !== pending.length) yield* writePending(kept);
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("could not post the pending worker summaries", {
           cause: Cause.pretty(cause),
         }),
       ),
+    ),
+  );
+
+  const queueSummary = (entry: PendingSummary) =>
+    pendingLock.withPermits(1)(
+      Effect.gen(function* () {
+        const pending = yield* readPending;
+        if (posted.has(entry.key) || pending.some((candidate) => candidate.key === entry.key)) {
+          return;
+        }
+        yield* writePending([...pending, entry]);
+      }),
     );
 
   /** Cancels and archives the workers below an archived thread; their forks stay. */
@@ -565,12 +614,25 @@ const make = Effect.gen(function* () {
     ) {
       return Effect.void;
     }
-    return postSummary({
-      key: `${task.id}:${task.completedAt === null ? "" : DateTime.toEpochMillis(task.completedAt)}`,
-      parentThreadId: task.threadId,
-      childThreadId: task.childThreadId,
-      text: task.result,
-    });
+    const childThreadId = task.childThreadId;
+    const text = task.result;
+    return Effect.gen(function* () {
+      yield* queueSummary({
+        key: `${task.id}:${task.completedAt === null ? "" : DateTime.toEpochMillis(task.completedAt)}`,
+        parentThreadId: task.threadId,
+        childThreadId,
+        text,
+        at: DateTime.toEpochMillis(yield* DateTime.now),
+      });
+      yield* flushSummaries;
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("could not queue a worker's summary", {
+          childThreadId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
   };
 
   /** Whether `handle` acts on the event; only those move the cursor. */
@@ -595,38 +657,58 @@ const make = Effect.gen(function* () {
       Effect.map((text) => Number.parseInt(text.trim(), 10)),
       Effect.orElseSucceed(() => Number.NaN),
     );
-    const follow = (from: number) =>
-      applicationEvents
-        .streamApplicationEvents({ afterSequence: from })
-        .pipe(
-          Stream.runForEach((stored) =>
-            "aggregateKind" in stored || !relevant(stored.event)
-              ? Effect.void
-              : handle(stored.event).pipe(Effect.andThen(saveCursor(stored.sequence))),
-          ),
-        );
-    // The first start begins now; later ones resume after the saved cursor
-    // (from now if those events are no longer retained).
-    const from = Number.isSafeInteger(saved) && saved <= latest ? saved : latest;
-    yield* forkParked(
-      follow(from).pipe(
-        Effect.catchCause((cause) =>
-          from === latest
-            ? Effect.failCause(cause)
-            : Effect.logWarning("Trellis workers could not replay missed events", {
-                cause: Cause.pretty(cause),
-              }).pipe(Effect.andThen(follow(latest))),
-        ),
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Trellis workers stopped following orchestration events", {
-            cause: Cause.pretty(cause),
+    // The first start begins now (saved at once, so a restart replays from
+    // here); later ones resume after the last event handled.
+    let cursor = Number.isSafeInteger(saved) && saved <= latest ? saved : latest;
+    if (cursor !== saved) yield* saveCursor(cursor);
+    let failures = 0;
+    const follow = Effect.suspend(() =>
+      applicationEvents.streamApplicationEvents({ afterSequence: cursor }).pipe(
+        Stream.runForEach((stored) =>
+          Effect.gen(function* () {
+            failures = 0;
+            if ("aggregateKind" in stored || !relevant(stored.event)) return;
+            yield* handle(stored.event);
+            cursor = stored.sequence;
+            yield* saveCursor(cursor);
           }),
         ),
       ),
+    ).pipe(
+      // A dropped subscription resumes after the last event handled; one that
+      // keeps failing (events no longer retained) skips to now.
+      Effect.tapCause((cause) =>
+        Effect.gen(function* () {
+          failures += 1;
+          yield* Effect.logWarning("Trellis workers lost the orchestration event stream", {
+            cause: Cause.pretty(cause),
+          });
+          if (failures >= 5) {
+            cursor = yield* applicationEvents.latestApplicationSequence.pipe(
+              Effect.orElseSucceed(() => cursor),
+            );
+            failures = 0;
+          }
+        }),
+      ),
+      Effect.retry({ schedule: Schedule.spaced("5 seconds") }),
+    );
+    yield* forkParked(follow);
+    // Summaries Trellis could not take yet.
+    yield* forkParked(
+      flushSummaries.pipe(Effect.repeat(Schedule.spaced(SUMMARY_RETRY_INTERVAL)), Effect.asVoid),
     );
   });
 
-  return TrellisWorkers.of({ spawnFork, abandonFork, forkOf, discardFork, start, handle });
+  return TrellisWorkers.of({
+    spawnFork,
+    abandonFork,
+    forkOf,
+    discardFork,
+    start,
+    handle,
+    flushSummaries,
+  });
 });
 
 export const layer = Layer.effect(TrellisWorkers, make);

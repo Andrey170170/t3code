@@ -20,10 +20,8 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as FileSystem from "effect/FileSystem";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
-import * as TestClock from "effect/testing/TestClock";
 
 import { ServerConfig } from "../config.ts";
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
@@ -504,7 +502,7 @@ it.effect("posts a completed worker's result as its fork's summary", () => {
   }).pipe(Effect.provide(testLayer(fake)));
 });
 
-it.effect("retries a summary Trellis could not take until it is posted", () => {
+it.effect("keeps a summary Trellis could not take and posts it on a later flush", () => {
   const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
   return Effect.gen(function* () {
     const workers = yield* TrellisWorkers.TrellisWorkers;
@@ -514,23 +512,20 @@ it.effect("retries a summary Trellis could not take until it is posted", () => {
       (candidate) => candidate.childThreadId === forked.childThreadId,
     )!;
     fake.state.failActivities = 2;
-    const handling = yield* workers
-      .handle({
-        type: "subagent.updated",
-        threadId: lead.threadId,
-        payload: {
-          ...task,
-          status: "completed",
-          result: "Done.",
-          completedAt: yield* DateTime.now,
-        },
-      } as unknown as OrchestrationV2DomainEvent)
-      .pipe(Effect.forkChild);
-    // Two retries 30 s apart (on the test clock); the second one is written.
-    yield* TestClock.adjust("30 seconds");
+    yield* workers.handle({
+      type: "subagent.updated",
+      threadId: lead.threadId,
+      payload: { ...task, status: "completed", result: "Done.", completedAt: yield* DateTime.now },
+    } as unknown as OrchestrationV2DomainEvent);
+    // Kept in the pending file, retried by each flush (start runs one every 30 s).
+    const config = yield* ServerConfig;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const pendingFile = NodePath.join(config.stateDir, "trellis-pending-summaries.json");
+    assert.include(yield* fileSystem.readFileString(pendingFile), "Done.");
+    yield* workers.flushSummaries;
     assert.deepEqual(fake.state.activities, []);
-    yield* TestClock.adjust("30 seconds");
-    yield* Fiber.join(handling);
+    yield* workers.flushSummaries;
+    assert.equal(yield* fileSystem.readFileString(pendingFile), "[]");
     assert.deepEqual(
       fake.state.activities.map((activity) => activity.data),
       [{ text: "Done.", thread: forked.childThreadId }],
