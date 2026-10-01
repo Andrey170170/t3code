@@ -461,24 +461,27 @@ it.effect("a git project diffs through refs built from the snapshot, not the liv
   git(project, "config", "user.name", "T");
   NodeFS.writeFileSync(`${project}/.gitignore`, "build/\n");
   NodeFS.writeFileSync(`${project}/main.py`, "print(1)\n");
+  NodeFS.mkdirSync(`${project}/build`);
+  NodeFS.writeFileSync(`${project}/build/kept.txt`, "tracked v1\n");
   git(project, "add", ".");
+  git(project, "add", "-f", "build/kept.txt");
   git(project, "commit", "-qm", "init");
   const scope = scopeAt(project, "git");
   return Effect.gen(function* () {
     yield* runTurn(scope, 1, () => {
       NodeFS.writeFileSync(`${project}/main.py`, "print(2)\n");
-      NodeFS.mkdirSync(`${project}/build`);
       NodeFS.writeFileSync(`${project}/build/out.bin`, "ignored\n");
     });
     // A process still writing after the snapshot: the ref holds the snapshot.
     fake.hooks.afterCreate = () => NodeFS.writeFileSync(`${project}/main.py`, "print(4)\n");
     const capture = yield* runTurn(scope, 2, () => {
       NodeFS.writeFileSync(`${project}/main.py`, "print(3)\n");
+      NodeFS.writeFileSync(`${project}/build/kept.txt`, "tracked v2\n");
     });
     assert.equal(git(project, "show", `${refOf(scope, 2)}:main.py`), "print(3)");
     assert.deepEqual(
       capture.files.map((file) => file.path),
-      ["main.py"],
+      ["build/kept.txt", "main.py"],
     );
     const diff = yield* (yield* CheckpointDiffQuery).getTurnDiff({
       threadId: scope.threadId,
@@ -486,18 +489,47 @@ it.effect("a git project diffs through refs built from the snapshot, not the liv
       toTurnCount: 2,
     });
     assert.include(diff.diff, "-print(2)\n+print(3)");
-    assert.notInclude(diff.diff, "build/");
+    assert.include(diff.diff, "+tracked v2");
+    assert.notInclude(diff.diff, "out.bin");
 
     // Restoring a folder brings back its `.git` from the snapshot, which
-    // lacks the refs built after it; a diff builds them again.
+    // lacks the refs built after it; a diff builds them again from the
+    // snapshot's own tracked files, whatever the live index says now.
     git(project, "update-ref", "-d", refOf(scope, 2));
+    git(project, "rm", "-q", "--cached", "build/kept.txt");
+    git(project, "commit", "-qm", "untrack");
     const again = yield* (yield* CheckpointDiffQuery).getTurnDiff({
       threadId: scope.threadId,
       fromTurnCount: 1,
       toTurnCount: 2,
     });
     assert.include(again.diff, "-print(2)\n+print(3)");
+    assert.include(again.diff, "+tracked v2");
   }).pipe(Effect.provide(diffLayer(fake, scope)));
+});
+
+it.effect("a checkpoint taken by Git before Trellis checkpoints stays a Git checkpoint", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const project = fake.workspacePath("ws-d");
+  git(project, "init", "-q");
+  NodeFS.writeFileSync(`${project}/main.py`, "print(1)\n");
+  const scope = scopeAt(project, "legacy");
+  return Effect.gen(function* () {
+    const store = yield* CheckpointStore.CheckpointStore;
+    // As V2's Git store captured it before this store existed.
+    const gitStore = yield* Effect.provide(CheckpointStore.CheckpointStore, gitStoreLayer);
+    yield* gitStore.captureCheckpoint({ cwd: project, checkpointRef: refOf(scope, 1) });
+    assert.isTrue(yield* store.hasCheckpointRef({ cwd: project, checkpointRef: refOf(scope, 1) }));
+    yield* Effect.scoped(store.reserve({ cwd: project, checkpointRef: refOf(scope, 1) }));
+    NodeFS.writeFileSync(`${project}/main.py`, "print(2)\n");
+    const restored = yield* store.restoreCheckpoint({
+      cwd: project,
+      checkpointRef: refOf(scope, 1),
+    });
+    assert.isTrue(restored.restored);
+    assert.equal(NodeFS.readFileSync(`${project}/main.py`, "utf8"), "print(1)\n");
+    assert.lengthOf(fake.snapshots, 0);
+  }).pipe(Effect.provide(storeLayer(fake)));
 });
 
 // ---- rollback
@@ -597,7 +629,17 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
     ({ id, title, deletedAt: null, worktreePath: null, projectId: "p" }) as never;
   const trellisLayer = Layer.succeed(Trellis, fake.trellis);
   const seams = TrellisRestore.layer.pipe(
-    Layer.provide(Layer.mock(ProjectStoreV2)({ get: () => Effect.succeed(Option.none()) })),
+    // The other thread's project is its folder.
+    Layer.provide(
+      Layer.mock(ProjectStoreV2)({
+        get: () =>
+          Effect.succeed(
+            other === undefined
+              ? Option.none()
+              : Option.some({ workspaceRoot: other.cwd } as never),
+          ),
+      }),
+    ),
     Layer.provide(TrellisRestore.gateLayer),
     Layer.provide(trellisLayer),
   );

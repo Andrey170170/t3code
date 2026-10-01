@@ -177,7 +177,6 @@ export interface TrellisRestoreConflictReads<E> {
   readonly records: (threadId: ThreadId) => Effect.Effect<
     {
       readonly runs: ReadonlyArray<Pick<OrchestrationV2Run, "status" | "completedAt">>;
-      readonly checkpointScopes: ReadonlyArray<Pick<OrchestrationV2CheckpointScope, "cwd">>;
     },
     E
   >;
@@ -185,9 +184,9 @@ export interface TrellisRestoreConflictReads<E> {
 }
 
 /**
- * Other threads that work in `scopePath` (by worktree, project folder or any
- * checkpoint scope): those still running there, and those whose runs there
- * ended after `since`. Archived threads count as idle.
+ * Other threads that work in `scopePath` (by worktree or project folder):
+ * those still running there, and those whose runs there ended after
+ * `since`. Archived threads count as idle.
  */
 export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")(function* <E>(
   trellis: Trellis["Service"],
@@ -204,12 +203,11 @@ export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")
   const later: Array<{ threadId: ThreadId; title: string }> = [];
   for (const thread of [...shell.threads, ...shell.archivedThreads]) {
     if (thread.id === input.threadId || thread.deletedAt !== null) continue;
-    const records = yield* reads.records(thread.id);
-    const paths = [
-      thread.worktreePath,
-      yield* reads.projectRoot(thread.projectId),
-      ...records.checkpointScopes.map((scope) => scope.cwd),
-    ].filter((path): path is string => path != null);
+    // A thread works in its worktree or project folder (its checkpoint
+    // scopes lie there), so other projects' records are never read.
+    const paths = [thread.worktreePath, yield* reads.projectRoot(thread.projectId)].filter(
+      (path): path is string => path != null,
+    );
     let inScope = false;
     for (const path of paths) {
       if (pathsOverlap(input.scopePath, yield* trellis.canonicalPath(path))) {
@@ -218,6 +216,7 @@ export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")
       }
     }
     if (!inScope) continue;
+    const records = yield* reads.records(thread.id);
     const entry = { threadId: thread.id, title: thread.title };
     if (
       !archived.has(thread.id) &&

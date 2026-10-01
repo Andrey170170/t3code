@@ -55,6 +55,7 @@ import { pathsOverlap } from "@t3tools/shared/trellis";
 
 import { ServerConfig } from "../config.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { OrchestrationEventStore } from "../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectService } from "../project/ProjectService.ts";
@@ -497,6 +498,7 @@ const errorMessage = (error: unknown) =>
 
 const make = Effect.gen(function* () {
   const trellis = yield* Trellis;
+  const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
   // Absent in tests that never trash; trash then only checks for busy threads.
   const restoreGate = yield* Effect.serviceOption(TrellisRestoreGate);
   const orchestrator = yield* OrchestratorV2;
@@ -1022,8 +1024,8 @@ const make = Effect.gen(function* () {
     return yield* restoreConflictsIn(
       trellis,
       {
-        shell: orchestrator.getShellSnapshot(),
-        records: (threadId) => orchestrator.getThreadProjection(threadId),
+        shell: projectionStore.getShellSnapshot(),
+        records: (threadId) => projectionStore.getThreadRecords(threadId, ["runs"]),
         projectRoot: (projectId) =>
           projectStore.get(projectId).pipe(
             Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot),
@@ -1292,4 +1294,4 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(TrellisCatalog, make);
+export const layer = Layer.effect(TrellisCatalog, make).pipe(Layer.provide(ProjectionStore.layer));

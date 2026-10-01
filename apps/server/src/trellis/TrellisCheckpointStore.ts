@@ -296,16 +296,50 @@ export const layer: Layer.Layer<
             { command: "git", args: ["-c", "core.fsmonitor=false", ...args], cwd: workTree, env },
             okCodes,
           );
-        const head = yield* git(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], [0, 1]);
-        const headCommit = head.code === 0 ? head.stdout.trim() : null;
-        // Tracked files stay in the tree even when ignore rules match them.
-        if (headCommit !== null) yield* git(["read-tree", headCommit]);
+        // Every file the snapshot's own index tracks stays in the tree even
+        // when ignore rules match it, as in a commit; read from the snapshot,
+        // not the live repository, which a restore may have moved back.
+        const tracked = yield* run(
+          "git ref",
+          {
+            command: "git",
+            args: ["--git-dir", NodePath.join(workTree, ".git"), "ls-files", "-z"],
+            cwd: workTree,
+          },
+          [0, 128],
+        );
         yield* git(["add", "-A", "--", "."]);
+        const presentTracked: Array<string> = [];
+        for (const path of tracked.code === 0 ? tracked.stdout.split("\0") : []) {
+          if (path.length === 0) continue;
+          if (
+            yield* fileSystem
+              .exists(NodePath.join(workTree, path))
+              .pipe(Effect.orElseSucceed(() => false))
+          ) {
+            presentTracked.push(path);
+          }
+        }
+        if (presentTracked.length > 0) {
+          yield* run("git ref", {
+            command: "git",
+            args: [
+              "-c",
+              "core.fsmonitor=false",
+              "add",
+              "-f",
+              "--pathspec-from-file=-",
+              "--pathspec-file-nul",
+            ],
+            cwd: workTree,
+            env,
+            stdin: `${presentTracked.join("\0")}\0`,
+          });
+        }
         const tree = (yield* git(["write-tree"])).stdout.trim();
         const commit = (yield* git([
           "commit-tree",
           tree,
-          ...(headCommit === null ? [] : ["-p", headCommit]),
           "-m",
           "T3 Code checkpoint (Trellis snapshot)",
         ])).stdout.trim();
@@ -350,6 +384,29 @@ export const layer: Layer.Layer<
             snapshot_id = excluded.snapshot_id,
             captured_at = excluded.captured_at
         `.pipe(Effect.mapError(backendError("capture")));
+      });
+
+    /**
+     * Where `ref` lives: a mapped Trellis snapshot, only a Git ref (taken
+     * before this store, or by a capture interrupted before mapping, which
+     * is finished here), or nowhere.
+     */
+    const backendOf = (cwd: string, ref: CheckpointRef) =>
+      Effect.gen(function* () {
+        const row = yield* readRow(ref);
+        if (row?.snapshot_id != null) return "trellis" as const;
+        if (row !== null) return "none" as const;
+        const isGit = yield* base.isGitRepository(cwd).pipe(Effect.orElseSucceed(() => false));
+        if (!isGit || !(yield* base.hasCheckpointRef({ cwd, checkpointRef: ref }))) {
+          return "none" as const;
+        }
+        const tagged = yield* trellis.listSnapshots(cwd).pipe(
+          Effect.mapError(backendError("lookup")),
+          Effect.map((snapshots) => snapshots.some((snapshot) => snapshot.turn === ref)),
+        );
+        if (!tagged) return "git" as const;
+        yield* capture(cwd, ref);
+        return "trellis" as const;
       });
 
     /** The mapped snapshot of `ref`, protected until the scope closes. */
@@ -431,7 +488,7 @@ export const layer: Layer.Layer<
       hasCheckpointRef: (input) =>
         Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
           trellisPath
-            ? readRow(input.checkpointRef).pipe(Effect.map((row) => row?.snapshot_id != null))
+            ? backendOf(input.cwd, input.checkpointRef).pipe(Effect.map((kind) => kind !== "none"))
             : base.hasCheckpointRef(input),
         ),
       captureCheckpoint: (input) =>
@@ -447,6 +504,9 @@ export const layer: Layer.Layer<
         Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
           trellisPath
             ? Effect.gen(function* () {
+                if ((yield* backendOf(input.cwd, input.checkpointRef)) === "git") {
+                  return yield* base.reserve(input);
+                }
                 yield* protectedSnapshot(input.checkpointRef);
                 const scope = yield* restoreScopeOf(trellis, input.cwd);
                 return { endsSessionsIn: scope?.restartsWorkspace ? scope.path : null };
@@ -457,6 +517,9 @@ export const layer: Layer.Layer<
         Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
           trellisPath
             ? Effect.gen(function* () {
+                if ((yield* backendOf(input.cwd, input.checkpointRef)) === "git") {
+                  return yield* base.restoreCheckpoint(input);
+                }
                 const row = yield* readRow(input.checkpointRef);
                 if (row?.snapshot_id == null) return { restored: false };
                 const snapshotId = row.snapshot_id;
