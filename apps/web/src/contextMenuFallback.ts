@@ -378,6 +378,22 @@ export function showContextMenuFallback<T extends string>(
         const label = document.createElement("span");
         label.className = "min-w-0 flex-1 truncate";
         label.textContent = item.label;
+        if (typeof item.detail === "string") {
+          // Two lines: the label, and under it the detail in muted text.
+          label.style.cssText = "display:flex;flex-direction:column;min-width:0;";
+          label.textContent = "";
+          const title = document.createElement("span");
+          title.className = "truncate";
+          title.textContent = item.label;
+          const detail = document.createElement("span");
+          detail.className = "truncate text-muted-foreground text-xs";
+          detail.style.cssText =
+            "color:var(--contrast-muted-foreground);font-size:0.75rem;line-height:1rem;";
+          detail.textContent = item.detail;
+          label.appendChild(title);
+          label.appendChild(detail);
+          button.setAttribute("aria-label", `${item.label} (${item.detail})`);
+        }
         button.appendChild(label);
 
         if (hasChildren) {

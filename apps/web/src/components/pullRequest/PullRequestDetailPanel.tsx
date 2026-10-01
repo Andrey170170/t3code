@@ -64,11 +64,7 @@ import {
 } from "~/keybindings";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { useClientSettings } from "~/hooks/useSettings";
-import {
-  deriveLogicalProjectKeyFromSettings,
-  derivePhysicalProjectKey,
-  selectProjectGroupingSettings,
-} from "~/logicalProject";
+import { deriveLogicalProjectKeyFromSettings, derivePhysicalProjectKey } from "~/logicalProject";
 import { changeRequestRepositoryUrl, gitHubPullRequestBrowserUrl } from "~/lib/openPullRequestLink";
 import { usePreparePullRequestThreadAction } from "~/lib/sourceControlActions";
 import { cn } from "~/lib/utils";
@@ -182,6 +178,7 @@ import {
   summarizePullRequestChecks,
 } from "./pullRequestPresentation";
 import { PullRequestGlyph } from "./pullRequestIcons";
+import { useProjectGroupingSettings } from "~/hooks/useProjectGroupingSettings";
 
 type DetailTab = "summary" | "timeline" | "code";
 
@@ -569,7 +566,7 @@ export function PullRequestDetailPanel({
   const legacyMergeMethodOverrides = useClientSettings(
     (settings) => settings.pullRequestMergeMethodOverrides,
   );
-  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const projectGroupingSettings = useProjectGroupingSettings();
   const projectDefaultMergeMethod =
     resolveProjectSettings(
       environmentConfigs.get(environmentId)?.settings ?? DEFAULT_SERVER_SETTINGS,

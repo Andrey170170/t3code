@@ -203,7 +203,7 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { ComposerHandleContext, useComposerHandleContext } from "../composerHandleContext";
 import type { ChatComposerHandle } from "./chat/ChatComposer";
-import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
+import { getProjectOrderKey } from "../logicalProject";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import {
   buildSidebarProjectPickerEntries,
@@ -212,6 +212,7 @@ import {
 import type { Project } from "../types";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { readPullRequestListPreferences } from "~/components/pullRequest/pullRequestListPreferences";
+import { useProjectGroupingSettings } from "../hooks/useProjectGroupingSettings";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
 /** Marks the Find in Trellis view, whose results come from the server. */
@@ -863,10 +864,7 @@ function OpenCommandPaletteDialog(props: {
   const cloneLookupGeneration = useRef(0);
   const [isRemoteProjectLookingUp, setIsRemoteProjectLookingUp] = useState(false);
   const [isRemoteProjectCloning, setIsRemoteProjectCloning] = useState(false);
-  const projectGroupingSettings = useMemo(
-    () => selectProjectGroupingSettings(clientSettings),
-    [clientSettings],
-  );
+  const projectGroupingSettings = useProjectGroupingSettings();
 
   const environmentLabelById = useMemo(
     () =>
@@ -2013,8 +2011,9 @@ function OpenCommandPaletteDialog(props: {
               items: moveTargets.map((target): CommandPaletteActionItem => ({
                 kind: "action",
                 value: `trellis-move:${target.projectId}`,
-                searchTerms: [target.label],
+                searchTerms: target.detail ? [target.label, target.detail] : [target.label],
                 title: target.label,
+                ...(target.detail ? { description: target.detail } : {}),
                 icon: <SproutIcon className={ITEM_ICON_CLASS} />,
                 run: async () => {
                   await moveThreadToProject(threadRef, {

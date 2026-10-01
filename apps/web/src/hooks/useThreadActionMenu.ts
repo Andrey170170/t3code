@@ -30,11 +30,7 @@ import {
 } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
 import { readLocalApi } from "../localApi";
-import {
-  deriveLogicalProjectKeyFromSettings,
-  derivePhysicalProjectKey,
-  selectProjectGroupingSettings,
-} from "../logicalProject";
+import { deriveLogicalProjectKeyFromSettings, derivePhysicalProjectKey } from "../logicalProject";
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import { useCopyToClipboard } from "./useCopyToClipboard";
@@ -45,6 +41,7 @@ import { useMoveThreadToProject } from "./useTrellis";
 import { trellisMoveMenu } from "../lib/trellis";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { readTrellisStatus } from "../state/trellis";
+import { useProjectGroupingSettings } from "./useProjectGroupingSettings";
 
 function failureToast(title: string, error: unknown) {
   toastManager.add(
@@ -76,7 +73,7 @@ export function useThreadActionMenu(input: {
   const router = useRouter();
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const projectGroupingSettings = useProjectGroupingSettings();
   const logicalProjectKeyByPhysicalKey = useMemo(
     () =>
       buildPhysicalToLogicalProjectKeyMap({

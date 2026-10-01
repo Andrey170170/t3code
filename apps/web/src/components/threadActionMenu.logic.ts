@@ -67,7 +67,11 @@ export interface ThreadActionMenuState {
    */
   readonly moveToProject?: {
     readonly blockedReason: string | null;
-    readonly targets: ReadonlyArray<{ readonly projectId: string; readonly label: string }>;
+    readonly targets: ReadonlyArray<{
+      readonly projectId: string;
+      readonly label: string;
+      readonly detail?: string | null;
+    }>;
   } | null;
 }
 
@@ -197,6 +201,7 @@ export function buildThreadActionMenuItems(
                 ? state.moveToProject.targets.map((target) => ({
                     id: `move-to-project:${target.projectId}` as const,
                     label: target.label,
+                    ...(target.detail ? { detail: target.detail } : {}),
                   }))
                 : [
                     {

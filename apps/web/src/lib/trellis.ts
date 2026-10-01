@@ -6,7 +6,7 @@ import {
   type TrellisState,
 } from "@t3tools/contracts";
 import { isLoopbackHostname, normalizePreviewUrl } from "@t3tools/shared/preview";
-import { isTrellisManagedPath } from "@t3tools/shared/trellis";
+import { isTrellisManagedPath, trellisWorkspaceIdOf } from "@t3tools/shared/trellis";
 
 /**
  * Whether a project directory is a Trellis workspace: a project directory
@@ -77,6 +77,40 @@ export function trellisItemKind(
 ): "idea" | "fork" | "project" {
   if (status.root && isTrellisIdeaPath(workspaceRoot, status.root)) return "idea";
   return status.forkRoots?.includes(trimTrailingSlashes(workspaceRoot)) ? "fork" : "project";
+}
+
+/**
+ * A second line telling same-named Trellis items apart: the kind and the
+ * idea folder or the workspace id, e.g. "Idea · idea-x4jh" or "Fork ·
+ * ws-q3bn". Null outside the Trellis root.
+ */
+export function trellisItemDetail(
+  workspaceRoot: string,
+  status: { readonly root?: string | null | undefined; readonly forkRoots?: ReadonlyArray<string> },
+): string | null {
+  const workspace = status.root ? trellisWorkspaceIdOf(status.root, workspaceRoot) : null;
+  if (workspace === null) return null;
+  const kind = trellisItemKind(workspaceRoot, status);
+  const label = kind === "idea" ? "Idea" : kind === "fork" ? "Fork" : "Project";
+  const where =
+    kind === "idea"
+      ? (trimTrailingSlashes(workspaceRoot).split("/").at(-1) ?? workspace)
+      : workspace;
+  return `${label} · ${where}`;
+}
+
+/**
+ * Keeps a project out of repository grouping when it lives in a Trellis
+ * workspace of its environment: each is its own environment, so two clones of
+ * one repository there are two projects.
+ */
+export function trellisKeepSeparate(
+  rootsByEnvironment: ReadonlyMap<EnvironmentId, ReadonlyArray<string>>,
+): (project: { readonly environmentId: EnvironmentId; readonly workspaceRoot: string }) => boolean {
+  return (project) =>
+    (rootsByEnvironment.get(project.environmentId) ?? []).some((root) =>
+      isTrellisManagedPath(root, project.workspaceRoot),
+    );
 }
 
 /** Confirmation lines for moving Trellis-managed projects to the trash. */
@@ -210,10 +244,16 @@ export function trellisMoveMenu<
     readonly state: TrellisState;
     readonly root?: string | null | undefined;
     readonly retiredRoots?: ReadonlyArray<string> | undefined;
+    readonly forkRoots?: ReadonlyArray<string> | undefined;
   } | null,
 ): {
   readonly blockedReason: string | null;
-  readonly targets: ReadonlyArray<{ readonly projectId: ProjectId; readonly label: string }>;
+  readonly targets: ReadonlyArray<{
+    readonly projectId: ProjectId;
+    readonly label: string;
+    /** Kind and idea folder or workspace, telling same-named projects apart. */
+    readonly detail: string | null;
+  }>;
 } | null {
   if (status?.state !== "ready") return null;
   const targets = trellisMoveTargets(projects, {
@@ -225,7 +265,14 @@ export function trellisMoveMenu<
   if (targets.length === 0) return null;
   return {
     blockedReason: threadMoveBlocker(thread),
-    targets: targets.map((project) => ({ projectId: project.id, label: project.title })),
+    targets: targets.map((project) => ({
+      projectId: project.id,
+      label: project.title,
+      detail: trellisItemDetail(project.workspaceRoot, {
+        root: status.root ?? null,
+        ...(status.forkRoots === undefined ? {} : { forkRoots: status.forkRoots }),
+      }),
+    })),
   };
 }
 
