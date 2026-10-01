@@ -22,6 +22,7 @@ import { HttpClient } from "effect/unstable/http";
 
 import { CLI_RELEASE_BASE_URL_ENV } from "@t3tools/shared/cliRelease";
 
+import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -205,6 +206,11 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       }
       return yield* failWith(
         "This server is managed by the T3 Code desktop app on its machine; update the desktop app to update it.",
+      );
+    }
+    if (packageJson.version.includes("-forgejo.")) {
+      return yield* failWith(
+        "This Forgejo build uses custom npm packages. Run `t3code-update` on the server machine, or reinstall the custom package from Forgejo.",
       );
     }
     if (capability === null) {
