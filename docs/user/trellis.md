@@ -1,0 +1,69 @@
+# Trellis workspaces
+
+Trellis runs projects in isolated workspaces with snapshots, so an agent can change a whole
+environment and you can roll it back. Quick ideas live as folders in a shared scratch workspace;
+Trellis projects get workspaces of their own. T3 Code shows each idea, project and fork as a project
+in the sidebar and runs Codex and Claude inside the workspace.
+
+The integration is off by default and set per environment. Trellis itself must be installed and
+running on that machine.
+
+## Turning it on
+
+Open **Settings** > **Trellis** and turn on **Use Trellis workspaces**. The row shows whether T3 Code
+reaches Trellis. While the integration is off, T3 Code does not contact Trellis; existing Trellis
+projects keep their conversations, but their agents do not run until you turn it back on.
+
+T3 Code uses the socket at `/trellis/state/api.sock` unless the server was started with
+`TRELLIS_SOCKET` set.
+
+## Ideas and projects
+
+**New idea** (sidebar, command palette or its shortcut) opens an empty draft. The idea is created in
+Trellis when you send the first message, and the thread moves into it; a draft you abandon leaves
+nothing behind.
+
+**New Trellis project** in the command palette creates a project right away, optionally from a git
+repository. **Find in Trellis** searches ideas and projects and opens the workspace that matched,
+including forks.
+
+New ideas and projects are named from their first thread: a name appears shortly after the first
+message and is refined once after the third turn. A name you or an agent gave, or a repository's
+name, is never replaced.
+
+## Agents, terminals and previews
+
+Codex and Claude threads in a Trellis project run inside its workspace; other providers are refused
+there. Git worktrees are not available in Trellis projects, since they would run outside the
+workspace: use a Trellis fork for parallel work instead. Instances with a custom provider home
+directory cannot run Trellis threads.
+
+A terminal opened in a Trellis project is a shell inside the workspace, at the same path you see on
+the host.
+
+`localhost` in a Trellis thread means its workspace, not the machine T3 Code runs on. When you or an
+agent open `localhost:8000` in the preview, T3 Code asks Trellis to publish that workspace port and
+loads the published address instead, keeping the path. If Trellis cannot publish it (for example,
+the workspace is stopped), the preview shows an error rather than loading the host's port.
+
+## Moving a thread to another project
+
+**Move to project** in a thread's menu or the command palette moves a thread to another Trellis
+project. Only threads that have not run yet can move; a thread with history stays where it is.
+
+## Deleting and restoring
+
+Deleting a Trellis project or idea in T3 Code moves it to the Trellis trash, archives its
+conversations and removes it from the sidebar. Restore it from **Settings** > **Trellis**; restoring
+also unarchives its conversations. The trash list shows when each item is removed for good.
+Deleting is refused while an agent is still working in the project, and while Trellis is off or not
+running. Deleting a conversation only deletes the conversation.
+
+## Restoring files from a turn
+
+Reverting a turn in a Trellis project restores its files from Trellis' snapshot of that turn. An
+idea restores only its folder; a project restores its whole workspace and restarts it. While another
+thread is working in the same idea or workspace, the restore is refused; try again once it
+finishes. If other threads did later work there, T3 Code names them and asks before undoing it.
+Trellis keeps a snapshot of the files from before the restore, so a restore can itself be undone
+with Trellis. A turn whose snapshot is missing or has expired cannot be restored.
