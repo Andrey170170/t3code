@@ -454,7 +454,13 @@ export const layer: Layer.Layer<
         const snapshot: TrellisSnapshot =
           tagged ??
           (yield* trellis
-            .createSnapshot({ target: cwd, turn: ref })
+            // Pinned as created where Trellis supports it; older versions
+            // create it unpinned and the pin below follows.
+            .createSnapshot({
+              target: cwd,
+              turn: ref,
+              ...(isBaselineRef(ref) ? { pinned: true } : {}),
+            })
             .pipe(Effect.mapError(backendError("capture"))));
         if (isBaselineRef(ref) && snapshot.pinned !== true) {
           yield* trellis

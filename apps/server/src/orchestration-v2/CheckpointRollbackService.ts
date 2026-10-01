@@ -480,7 +480,10 @@ export const layer: Layer.Layer<
         // Shown after the target run (or at the top for a full rewind).
         const targetRun = projection.runs.find((run) => run.ordinal === targetOrdinal);
         const item: OrchestrationV2TurnItem = {
-          id: TurnItemId.make(`turn-item:checkpoint-restore:${conversationEvents[0]!.id}`),
+          // The same item on every retry of one rollback.
+          id: TurnItemId.make(
+            `turn-item:checkpoint-restore:${input.requestId ?? conversationEvents[0]!.id}`,
+          ),
           type: "system_notice",
           message: notice,
           threadId: input.threadId,

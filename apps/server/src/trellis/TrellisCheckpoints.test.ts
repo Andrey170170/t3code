@@ -52,7 +52,7 @@ import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
 import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
 import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
-import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
+import { ProjectStoreV2, ProjectStoreV2Error } from "../orchestration-v2/ProjectStore.ts";
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import { RestoreLease } from "../orchestration-v2/RestoreLease.ts";
 import { RuntimePolicyV2 } from "../orchestration-v2/RuntimePolicy.ts";
@@ -88,6 +88,8 @@ function makeFakeTrellis(root: string) {
     pinAnswerLost?: boolean;
     /** Rollbacks take effect, but the answer reports a failure. */
     rollbackAnswerLost?: boolean;
+    /** This Trellis honours `pinned` on snapshot creation. */
+    pinOnCreate?: boolean;
   } = {};
   const workspacePath = (ws: string) => NodePath.join(root, "workspaces", ws, "project");
   for (const path of [
@@ -118,7 +120,7 @@ function makeFakeTrellis(root: string) {
       workspace_id: ws,
       seq,
       kind,
-      pinned: false,
+      pinned: false as boolean,
       thread: null,
       turn,
       created_at: seq,
@@ -147,14 +149,16 @@ function makeFakeTrellis(root: string) {
           ),
         );
       }),
-    createSnapshot: ({ target, turn }) =>
+    createSnapshot: ({ target, turn, pinned }) =>
       Effect.suspend(() => {
-        calls.push(`create ${turn}`);
+        calls.push(`create ${turn}${pinned === true ? " pinned" : ""}`);
         if (failures.create > 0) {
           failures.create -= 1;
           return Effect.fail({ _tag: "TrellisError", message: "Trellis is busy" } as never);
         }
         const snapshot = take(target, "turn", turn);
+        // Trellis versions before pin-on-create ignore the field.
+        if (pinned === true && hooks.pinOnCreate === true) snapshot.pinned = true;
         hooks.afterCreate?.();
         return Effect.succeed(snapshot);
       }),
@@ -334,6 +338,24 @@ it.effect("a turn captures a tagged snapshot and the baseline once, pinned", () 
       second.files.map((file) => [file.path, file.additions, file.deletions]),
       [["a.txt", 1, 1]],
     );
+  }).pipe(Effect.provide(storeLayer(fake)));
+});
+
+it.effect("a baseline is created pinned where Trellis supports it", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  fake.hooks.pinOnCreate = true;
+  const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+  const scope = scopeAt(idea, "pinned-create");
+  return Effect.gen(function* () {
+    yield* runTurn(scope, 1, () => NodeFS.writeFileSync(`${idea}/a.txt`, "one\n"));
+    // Pinned in the creating request; no separate pin, no unpinned window.
+    assert.deepEqual(
+      fake.calls.filter((call) => call.startsWith("create")),
+      [`create ${refOf(scope, 0)} pinned`, `create ${refOf(scope, 1)}`],
+    );
+    const baseline = fake.snapshots[0]!;
+    assert.isTrue(baseline.pinned);
+    assert.notInclude(fake.calls, `pin ${baseline.id}`);
   }).pipe(Effect.provide(storeLayer(fake)));
 });
 
@@ -728,7 +750,11 @@ interface RollbackFixture {
     readonly rollbackRestoredFiles?: boolean;
     /** Its run's checkpoint capture is still queued. */
     readonly capturing?: boolean;
+    /** An older stopped run whose capture is still queued (it was retried). */
+    readonly olderCapturing?: boolean;
   };
+  /** Reading the other thread's project fails. */
+  readonly projectReadFails?: boolean;
   /** A run of the requesting thread itself, besides its completed run 1. */
   readonly ownRunStatus?: OrchestrationV2ThreadProjection["runs"][number]["status"];
   readonly sessions?: ReadonlyArray<{ readonly id: string; readonly cwd: string }>;
@@ -817,6 +843,8 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
             {
               id: RunId.make("run-other"),
               ordinal: 1,
+              // Its own capture finished, after an older one was requeued.
+              checkpointId: other.olderCapturing === true ? "checkpoint-other" : null,
               status: other.runStatus,
               completedAt:
                 other.completedAt === undefined ? null : DateTime.makeUnsafe(other.completedAt),
@@ -824,6 +852,17 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
                 ? {}
                 : { rollbackRestoredFiles: other.rollbackRestoredFiles }),
             },
+            ...(other.olderCapturing === true
+              ? [
+                  {
+                    id: RunId.make("run-other-0"),
+                    ordinal: 0,
+                    checkpointId: null,
+                    status: "interrupted",
+                    completedAt: DateTime.makeUnsafe("2026-09-30T00:00:00.000Z"),
+                  },
+                ]
+              : []),
           ],
     checkpointScopes: other === undefined ? [] : [{ cwd: other.cwd }],
     providerSessions: [],
@@ -841,11 +880,13 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
     Layer.provide(
       Layer.mock(ProjectStoreV2)({
         get: () =>
-          Effect.succeed(
-            other === undefined
-              ? Option.none()
-              : Option.some({ workspaceRoot: other.cwd } as never),
-          ),
+          fixture.projectReadFails === true
+            ? Effect.fail(new ProjectStoreV2Error({ operation: "get", cause: null }))
+            : Effect.succeed(
+                other === undefined
+                  ? Option.none()
+                  : Option.some({ workspaceRoot: other.cwd } as never),
+              ),
       }),
     ),
     Layer.provide(
@@ -857,7 +898,9 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
       Layer.mock(EffectOutboxV2)({
         get: (effectId) =>
           Effect.succeed(
-            other?.capturing === true && effectId === "effect:checkpoint.capture:run-other"
+            (other?.capturing === true && effectId === "effect:checkpoint.capture:run-other") ||
+              (other?.olderCapturing === true &&
+                effectId === "effect:checkpoint.capture:run-other-0")
               ? Option.some({ status: "pending" } as never)
               : Option.none(),
           ),
@@ -940,7 +983,7 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
     Layer.provide(seams),
     Layer.provide(PlatformLayer),
   );
-  const execute = (acknowledgeThreads?: ReadonlyArray<ThreadId>) =>
+  const execute = (acknowledgeThreads?: ReadonlyArray<ThreadId>, requestId?: string) =>
     Effect.flatMap(CheckpointRollbackServiceV2, (rollback) =>
       rollback.execute({
         threadId,
@@ -948,6 +991,7 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
         checkpointId: checkpoint.id,
         scopeId: fixture.scope.id,
         ...(acknowledgeThreads === undefined ? {} : { acknowledgeThreads }),
+        ...(requestId === undefined ? {} : { requestId }),
       }),
     );
   /** Captures the checkpoint the rollback targets. */
@@ -1173,6 +1217,60 @@ it.effect("a turn in a thread whose revert is between attempts waits, without bl
     harness.rollbackState.rollbackCompletedRequestId = "rollback-1";
     yield* TestClock.adjust("1 second");
     assert.isTrue(yield* Fiber.join(turn));
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("a revert is refused when another thread's project cannot be read", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const scope = ideaScope(fake);
+  const harness = rollbackHarness(fake, {
+    scope,
+    projectReadFails: true,
+    other: { cwd: scope.cwd, runStatus: "completed", completedAt: "2026-10-01T00:05:00.000Z" },
+  });
+  return Effect.gen(function* () {
+    yield* harness.captureBaseline;
+    // Not even acknowledged work goes ahead when where it ran is unknown.
+    yield* Effect.flip(harness.execute([otherThreadId]));
+    assert.deepEqual(harness.log, []);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("a revert waits for an older stopped run's requeued capture", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const scope = ideaScope(fake);
+  const harness = rollbackHarness(fake, {
+    scope,
+    other: {
+      cwd: scope.cwd,
+      runStatus: "completed",
+      completedAt: "2026-10-01T00:05:00.000Z",
+      olderCapturing: true,
+    },
+  });
+  return Effect.gen(function* () {
+    yield* harness.captureBaseline;
+    const refused = yield* Effect.flip(harness.execute([otherThreadId]));
+    assert.include(refused.message, '"Other" is still working');
+    assert.deepEqual(harness.log, []);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("a retried revert updates its notice instead of adding another", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const harness = rollbackHarness(fake, { scope: ideaScope(fake) });
+  return Effect.gen(function* () {
+    yield* harness.captureBaseline;
+    // The second run is a retry after a step past the notice failed.
+    yield* harness.execute(undefined, "rollback-1");
+    yield* harness.execute(undefined, "rollback-1");
+    const notices = harness.events.flatMap((event) =>
+      event.type === "turn-item.updated" && event.payload.type === "system_notice"
+        ? [event.payload.id]
+        : [],
+    );
+    assert.lengthOf(notices, 2);
+    assert.equal(notices[0], notices[1]);
   }).pipe(Effect.provide(harness.layer));
 });
 

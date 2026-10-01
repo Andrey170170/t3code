@@ -1055,10 +1055,9 @@ const make = Effect.gen(function* () {
         shell: projectionStore.getShellSnapshot(),
         records: (threadId) => projectionStore.getThreadRecords(threadId, ["runs"]),
         projectRoot: (projectId) =>
-          projectStore.get(projectId).pipe(
-            Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot),
-            Effect.orElseSucceed(() => undefined),
-          ),
+          projectStore
+            .get(projectId)
+            .pipe(Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot)),
       },
       { threadId: input.threadId, scopePath: restoreScope.path, since: checkpoint.capturedAt },
     );
