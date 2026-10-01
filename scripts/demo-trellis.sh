@@ -6,18 +6,20 @@
 #
 #   scripts/demo-trellis.sh [out-dir]       (default /tmp/trellis-demo)
 #
-# Needs: a running development Trellis (TRELLIS_DEV_ROOT, default
-# /trellis/dev-t3, with the `dev` base), playwright-cli with a cached
-# Chromium, Codex and Claude logins, `vp i` done in this checkout. It starts
-# its own dev T3 with a fresh home in a temporary directory and stops only
-# the processes it started. Costs a few Haiku turns and a few Codex turns.
+# Each run writes to a new <out-dir>/<run-id>/ and points <out-dir>/latest at
+# it; nothing else in <out-dir> is touched.
 #
-# Before step 8 it renames Trellis projects already named `click` (from
-# earlier runs) to `click-prev-<id>`, so the new clone is the only `click`.
+# Needs: a running development Trellis (TRELLIS_DEV_ROOT, default
+# /trellis/dev-t3; it must be a /trellis/dev-* root with the `dev` base),
+# playwright-cli with a cached Chromium, Codex and Claude logins, `vp i` done
+# in this checkout. It starts its own dev T3 with a fresh home in a temporary
+# directory and stops only the processes it started. Costs a few Haiku turns
+# and a few Codex turns.
 set -uo pipefail
 
+die() { echo "error: $*" >&2; exit 1; }
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-OUT=$(realpath -m "${1:-/tmp/trellis-demo}")
+OUT_BASE=$(realpath -m "${1:-/tmp/trellis-demo}")
 TRELLIS_DEV_ROOT=${TRELLIS_DEV_ROOT:-/trellis/dev-t3}
 TRELLIS_REPO=${TRELLIS_REPO:-$HOME/projects/trellis}
 CLAUDE_MODEL_LABEL="Claude Haiku 4.5"
@@ -29,12 +31,29 @@ HOME_DIR=$WORK/t3home
 DB=$HOME_DIR/userdata/statev2.sqlite
 export PATH=$REPO/node_modules/.bin:$PATH
 
+OUT=$OUT_BASE/$RUN_ID
+[[ ! -e $OUT ]] || die "$OUT already exists"
 mkdir -p "$OUT" "$WORK/pw/.playwright"
-rm -f "$OUT"/*.png "$OUT"/*.log "$OUT"/checklist.txt
+ln -sfn "$RUN_ID" "$OUT_BASE/latest"
 echo '{"browser":{"browserName":"chromium","launchOptions":{"channel":"chromium"}}}' \
   >"$WORK/pw/.playwright/cli.config.json"
-eval "$(TRELLIS_DEV_ROOT=$TRELLIS_DEV_ROOT "$TRELLIS_REPO/scripts/dev.sh" env)"
-export TRELLIS_SOCKET
+
+# Only ever a development Trellis: a failed `dev.sh env` must not leave an
+# inherited (live) TRELLIS_* in place, so its status is checked and the
+# result validated before anything talks to Trellis.
+unset TRELLIS_ROOT TRELLIS_CONFIG TRELLIS_SOCKET TRELLIS_BIN
+DEV_ENV=$(TRELLIS_DEV_ROOT=$TRELLIS_DEV_ROOT "$TRELLIS_REPO/scripts/dev.sh" env) ||
+  die "dev.sh env failed for $TRELLIS_DEV_ROOT"
+eval "$DEV_ENV"
+TRELLIS_ROOT=$(realpath -m "${TRELLIS_ROOT:-}")
+case $TRELLIS_ROOT in
+  /trellis/dev-*) [[ $TRELLIS_ROOT != */*/*/* ]] || die "$TRELLIS_ROOT is not a /trellis/dev-* root" ;;
+  *) die "refusing Trellis root '$TRELLIS_ROOT': only /trellis/dev-* roots" ;;
+esac
+for path in "${TRELLIS_SOCKET:-}" "${TRELLIS_BIN:-}"; do
+  [[ $(realpath -m "$path") == "$TRELLIS_ROOT"/* ]] || die "'$path' is not under $TRELLIS_ROOT"
+done
+export TRELLIS_ROOT TRELLIS_SOCKET
 HOST_NAME=$(hostname)
 
 log() { printf '[%s] %s\n' "$(date +%T)" "$*" | tee -a "$OUT/demo.log" >&2; }
@@ -528,9 +547,6 @@ check 7 "Find \"README\" lists the project (by its README) and selecting it open
 
 # ---- 8. Clone click -----------------------------------------------------
 step 8 "clone click"
-for id in $(tr_ --json ls | jq -r '.[] | select(.name=="click" and .kind=="project") | .id'); do
-  tr_ rename --target "$id" "click-prev-$id" >/dev/null && log "renamed earlier click $id"
-done
 palette "New Trellis project"
 pwc <<'JS' >/dev/null
 async page => {
@@ -550,23 +566,27 @@ C_PATH=$(thread_root "$C_THREAD")
 guard_trellis_path "$C_PATH"
 C_PROJECT=$(thread_project "$C_THREAD")
 C_REPLY=$(last_reply "$C_THREAD")
+# The clone is identified by the path its thread runs in; Trellis may give a
+# repeated clone a distinct name, so the name is read rather than assumed.
+C_NAME=$(item_at "$C_PATH" | jq -r .name)
+C_WS=$(item_at "$C_PATH" | jq -r .workspace_id)
 {
   echo "Trellis item: $(item_at "$C_PATH" | jq -c '{id,name,name_source}')"
   echo "T3 project title: $(project_title "$C_PROJECT")"
   echo "--- reply"; echo "$C_REPLY"
 } >"$OUT/08-click.log"
-c8a() { [[ $(item_at "$C_PATH" | jq -r .name) == click && $(project_title "$C_PROJECT") == click && -f $C_PATH/pyproject.toml ]]; }
+c8a() { [[ $C_NAME =~ ^click([^a-z]|$) && $(project_title "$C_PROJECT") == "$C_NAME" && -f $C_PATH/pyproject.toml ]]; }
 c8b() { [[ $C_RUN1 == completed ]] && grep -q pyproject.toml <<<"$C_REPLY" && grep -q README.md <<<"$C_REPLY"; }
-check 8a "The cloned project is named click in Trellis and in T3" "$OUT/08-click.log" \
+check 8a "The new clone is named after the repository (\"$C_NAME\") in Trellis and the same in T3" "$OUT/08-click.log" \
   c8a
 check 8b "A thread there lists the top-level files" "$OUT/08-click.png" \
   c8b
 C_ROW=$(pwc <<JS
-async page => await page.getByRole('button', { name: $(js "$(sql "select title from orchestration_v2_projection_threads where thread_id='$C_THREAD'"), click"), exact: true }).count()
+async page => await page.getByRole('button', { name: $(js "$(sql "select title from orchestration_v2_projection_threads where thread_id='$C_THREAD'"), $C_NAME"), exact: true }).count()
 JS
 )
 c8c() { [[ $C_ROW == 1 ]]; }
-check 8c "The sidebar lists the thread under its own project 'click', not a repository group of all clones" "$OUT/08-click.png" c8c
+check 8c "The sidebar lists the thread under its own project, not a repository group of all clones" "$OUT/08-click.png" c8c
 
 # ---- 9. Delete and restore ----------------------------------------------
 step 9 "trash and restore click"
@@ -603,14 +623,19 @@ c9a() {
 check 9a "Deleting click moves it to the Trellis trash, archives its thread and removes it from the sidebar" \
   "$OUT/09a-sidebar-after-delete.png, $OUT/09b-trash.png" \
   c9a
-pwc <<'JS' >>"$OUT/09-trash.log"
+pwc <<JS >>"$OUT/09-trash.log"
 async page => {
+  // The trash names items only; another trashed item of the same name
+  // would make the row ambiguous, so that stops the run.
+  const heading = page.getByRole('heading', { name: $(js "$C_NAME"), exact: true });
+  const count = await heading.count();
+  if (count !== 1) throw new Error(count + ' trash rows are named ' + $(js "$C_NAME"));
   const row = page.locator('div')
-    .filter({ has: page.getByRole('heading', { name: 'click', exact: true }) })
+    .filter({ has: heading })
     .filter({ has: page.getByRole('button', { name: 'Restore' }) })
     .last();
   await row.getByRole('button', { name: 'Restore' }).click();
-  await page.getByText('Restored click').waitFor({ timeout: 60000 });
+  await page.getByText('Restored ' + $(js "$C_NAME")).waitFor({ timeout: 60000 });
   return 'restored';
 }
 JS
@@ -641,10 +666,10 @@ JS
 echo "opened from the sidebar: $(path_now) (created $M_THREAD)" >>"$OUT/10-move.log"
 thread_menu "Move me"
 shot 10a-move-menu
-pwc <<'JS' >/dev/null
+pwc <<JS >/dev/null
 async page => {
-  // Targets are named "<title> (<kind> · <workspace>)".
-  await page.getByRole('button', { name: /^click \(Project · / }).click();
+  // Targets are named "<title> (<kind> · <workspace>)": this run's clone by its workspace.
+  await page.getByRole('button', { name: $(js "$C_NAME (Project · $C_WS)"), exact: true }).click();
   await page.waitForTimeout(2000);
 }
 JS
@@ -677,9 +702,15 @@ note 10 "Adaptation: the UI keeps a new thread as a client draft until its first
 step 11 "transcript recall spike"
 pwc <<<'async page => { await page.keyboard.press("Escape"); }' >/dev/null
 SPIKE_START=$(date +%s)
-(cd "$REPO" && TRELLIS_SPIKE=1 vp run --filter t3 test TrellisClaudeTranscripts.spike) >"$OUT/11-recall-spike.log" 2>&1
+# A is this run's idea (step 2), B its project (step 5), Claude through this
+# instance's shim.
+SPIKE_SHIM=$TRELLIS_ROOT/shims/claude
+echo "A=$IDEA_PATH B=$B_PATH shim=$SPIKE_SHIM" >"$OUT/11-recall-spike.log"
+(cd "$REPO" && TRELLIS_SPIKE=1 TRELLIS_SPIKE_A=$IDEA_PATH TRELLIS_SPIKE_B=$B_PATH \
+  TRELLIS_SPIKE_SHIM=$SPIKE_SHIM vp run --filter t3 test TrellisClaudeTranscripts.spike) \
+  >>"$OUT/11-recall-spike.log" 2>&1
 SPIKE_RC=$?
-SPIKE_B=${TRELLIS_SPIKE_B:-$TRELLIS_DEV_ROOT/workspaces/ws-cfbiimgf/project}
+SPIKE_B=$B_PATH
 SLUG_DIR=$HOME/.claude/projects/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$SPIKE_B")
 {
   echo "--- transcripts the run wrote beside B ($SLUG_DIR)"
@@ -689,7 +720,7 @@ SLUG_DIR=$HOME/.claude/projects/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$SPIKE_B")
   done
 } >>"$OUT/11-recall-spike.log" 2>&1
 c11() { [[ $SPIKE_RC == 0 ]] && grep -q 'Tests  1 passed' "$OUT/11-recall-spike.log" && ! grep -q skipped "$OUT/11-recall-spike.log"; }
-check 11 "Thinking-only recall survives prepare to project B; forkSession with dir B succeeds (spike test)" \
+check 11 "Thinking-only recall survives prepare from this run's idea to its project; forkSession with dir B succeeds (spike test)" \
   "$OUT/11-recall-spike.log" c11
 note 11 "Transcript-level by design: the UI cannot move a thread with history in M1."
 

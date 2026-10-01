@@ -3,9 +3,11 @@
  * Live check that a Claude session keeps its hidden reasoning when it moves
  * between Trellis workspaces: run with `TRELLIS_SPIKE=1` against a development
  * Trellis (for example `eval "$(TRELLIS_DEV_ROOT=/trellis/dev-t3 scripts/dev.sh
- * env)"` in the Trellis repo) with two workspaces, the paths in
- * `TRELLIS_SPIKE_A` and `TRELLIS_SPIKE_B` (default: the dev-t3 spike projects)
- * and a Claude login. It costs two Haiku turns.
+ * env)"` in the Trellis repo) and a Claude login, naming two workspace paths of
+ * that instance in `TRELLIS_SPIKE_A` and `TRELLIS_SPIKE_B` and its Claude shim
+ * in `TRELLIS_SPIKE_SHIM`. Without all three it fails rather than guessing:
+ * paths of another instance would run Claude on the host. It costs two Haiku
+ * turns.
  */
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -21,9 +23,16 @@ import { describe, expect } from "vite-plus/test";
 import { claudeSessionDirectory, prepareClaudeTranscript } from "./TrellisClaudeTranscripts.ts";
 
 const spike = process.env.TRELLIS_SPIKE === "1";
-const workspaceA = process.env.TRELLIS_SPIKE_A ?? "/trellis/dev-t3/workspaces/ws-r7wx5vdv/project";
-const workspaceB = process.env.TRELLIS_SPIKE_B ?? "/trellis/dev-t3/workspaces/ws-cfbiimgf/project";
-const shim = process.env.TRELLIS_SPIKE_SHIM ?? "/trellis/dev-t3/shims/claude";
+const workspaceA = process.env.TRELLIS_SPIKE_A ?? "";
+const workspaceB = process.env.TRELLIS_SPIKE_B ?? "";
+const shim = process.env.TRELLIS_SPIKE_SHIM ?? "";
+const missing = Object.entries({
+  TRELLIS_SPIKE_A: workspaceA,
+  TRELLIS_SPIKE_B: workspaceB,
+  TRELLIS_SPIKE_SHIM: shim,
+})
+  .filter(([, value]) => value.length === 0)
+  .map(([name]) => name);
 const configDir = process.env.CLAUDE_CONFIG_DIR ?? NodePath.join(NodeOS.homedir(), ".claude");
 
 /** One turn the way ClaudeAdapterV2 drives it, through the Trellis shim. */
@@ -79,7 +88,11 @@ function thinkingOf(transcriptPath: string): string {
 }
 
 describe.skipIf(!spike)("TrellisClaudeTranscripts spike", () => {
-  it.effect(
+  it.runIf(missing.length > 0)("needs this instance's workspaces and shim", () => {
+    throw new Error(`Set ${missing.join(", ")} to run the spike.`);
+  });
+
+  it.effect.runIf(missing.length === 0)(
     "keeps a thinking-only recall across a move between workspaces",
     () =>
       Effect.gen(function* () {
