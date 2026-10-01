@@ -37,7 +37,7 @@ import { isTrellisManagedPath, Trellis } from "./Trellis.ts";
 import { TrellisCatalog } from "./TrellisCatalog.ts";
 
 /** The completed turn after which the name is regenerated from the thread. */
-export const TRELLIS_NAME_REFINE_TURN = 3;
+const TRELLIS_NAME_REFINE_TURN = 3;
 
 export type NamingStage = "initial" | "refine";
 
