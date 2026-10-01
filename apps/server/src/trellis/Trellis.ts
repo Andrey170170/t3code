@@ -353,6 +353,32 @@ export function parseKnownRoots(text: string): ReadonlyArray<string> {
     .filter((line) => line.startsWith("/"));
 }
 
+/**
+ * For the offline CLI, which runs without Trellis or its catalog: refuses
+ * deleting a project under a Trellis root this state directory has used,
+ * since that would delete its conversations and the catalog would bring it
+ * back. See `TrellisCatalog.checkProjectDelete` for the server's check.
+ */
+export const refuseOfflineTrellisProjectDelete = (input: {
+  readonly stateDir: string;
+  readonly workspaceRoot: string;
+  readonly title: string;
+}) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const roots = yield* fileSystem
+      .readFileString(NodePath.join(input.stateDir, "trellis-root"))
+      .pipe(
+        Effect.map(parseKnownRoots),
+        Effect.orElseSucceed((): ReadonlyArray<string> => []),
+      );
+    if (roots.some((root) => isTrellisManagedPath(root, input.workspaceRoot))) {
+      return yield* new TrellisError({
+        message: `"${input.title}" is a Trellis project. Start T3 and move it to the Trellis trash instead; removing only its T3 entry would delete its conversations, and the project would come back.`,
+      });
+    }
+  });
+
 const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;

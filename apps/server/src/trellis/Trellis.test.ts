@@ -274,3 +274,24 @@ describe("refuseWorktreeIn", () => {
     }),
   );
 });
+
+describe("refuseOfflineTrellisProjectDelete", () => {
+  it.effect("refuses projects under a recorded Trellis root and allows the rest", () =>
+    Effect.gen(function* () {
+      const stateDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-trellis-cli-"));
+      NodeFS.writeFileSync(NodePath.join(stateDir, "trellis-root"), "/trellis\n");
+      const refusal = yield* Trellis.refuseOfflineTrellisProjectDelete({
+        stateDir,
+        workspaceRoot: "/trellis/workspaces/ws-1/project",
+        title: "Engine",
+      }).pipe(Effect.flip);
+      expect(refusal.message).toContain("Trellis trash");
+      yield* Trellis.refuseOfflineTrellisProjectDelete({
+        stateDir,
+        workspaceRoot: "/home/me/code",
+        title: "Code",
+      });
+      NodeFS.rmSync(stateDir, { recursive: true, force: true });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
