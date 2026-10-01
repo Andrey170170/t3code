@@ -208,6 +208,7 @@ import {
   derivePhysicalProjectKey,
   deriveProjectGroupingOverrideKey,
   getProjectOrderKey,
+  type ProjectGroupingSettings,
 } from "../logicalProject";
 import type { SidebarThreadSummary } from "../types";
 import {
@@ -1153,6 +1154,8 @@ interface SidebarProjectItemProps {
   suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
   isManualProjectSorting: boolean;
   dragHandleProps: SortableProjectHandleProps | null;
+  /** From the sidebar, so rows do not each subscribe to Trellis status. */
+  projectGroupingSettings: ProjectGroupingSettings;
 }
 
 const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjectItemProps) {
@@ -1190,7 +1193,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const appSettingsConfirmThreadArchive = useClientSettings<boolean>(
     (settings) => settings.confirmThreadArchive,
   );
-  const projectGroupingSettings = useProjectGroupingSettings();
+  const { projectGroupingSettings } = props;
   const deleteProject = useAtomCommand(projectEnvironment.delete, {
     reportFailure: false,
   });
@@ -2948,6 +2951,7 @@ interface SidebarProjectsContentProps {
   suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
   attachProjectListAutoAnimateRef: (node: HTMLElement | null) => void;
   projectsLength: number;
+  projectGroupingSettings: ProjectGroupingSettings;
 }
 
 const SidebarProjectsContent = memo(function SidebarProjectsContent(
@@ -3127,6 +3131,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         }
                         isManualProjectSorting={isManualProjectSorting}
                         dragHandleProps={dragHandleProps}
+                        projectGroupingSettings={props.projectGroupingSettings}
                       />
                     )}
                   </SortableProjectItem>
@@ -3159,6 +3164,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
                 isManualProjectSorting={isManualProjectSorting}
                 dragHandleProps={null}
+                projectGroupingSettings={props.projectGroupingSettings}
               />
             ))}
           </SidebarMenu>
@@ -3817,6 +3823,7 @@ export default function LegacySidebar() {
       <SidebarChromeHeader isElectron={isElectron} />
 
       <SidebarProjectsContent
+        projectGroupingSettings={projectGroupingSettings}
         showArm64IntelBuildWarning={showArm64IntelBuildWarning}
         arm64IntelBuildWarningDescription={arm64IntelBuildWarningDescription}
         desktopUpdateButtonAction={desktopUpdateButtonAction}
