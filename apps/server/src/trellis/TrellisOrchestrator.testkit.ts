@@ -22,6 +22,7 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import { layer as mcpSessionRegistryTestLayer } from "../mcp/McpSessionRegistry.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
+import { layer as effectOutboxLayer } from "../orchestration-v2/EffectOutbox.ts";
 import { layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -90,6 +91,8 @@ export const TrellisOrchestratorTestLayer = Layer.mergeAll(
   OrchestrationV2EventSinkLayerLive,
   ProjectStore.layer,
   idAllocatorLayer,
+  // Reads the effects the orchestrator persisted, from the same database.
+  effectOutboxLayer,
 ).pipe(
   Layer.provide(
     Layer.succeed(

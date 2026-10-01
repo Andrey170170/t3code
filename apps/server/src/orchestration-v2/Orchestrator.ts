@@ -770,6 +770,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       : {};
 
+  /** `unloadProviderThreadsOn` for every provider thread recorded on `providerSessionId`. */
+  const unloadProviderThreadsLeaving = (
+    providerSessionId: ProviderSessionId,
+    providerThreads: ReadonlyArray<OrchestrationV2ProviderThread>,
+  ) => {
+    const unloadProviderThreads = providerThreads.flatMap(
+      (providerThread) =>
+        unloadProviderThreadsOn(providerSessionId, providerThread).unloadProviderThreads ?? [],
+    );
+    return unloadProviderThreads.length === 0 ? {} : { unloadProviderThreads };
+  };
+
   /**
    * Detaches the live session a thread leaves because its session key changed
    * (its project moved to another workspace), so the old workspace's process
@@ -3223,6 +3235,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           "checkpointScopes",
           "contextTransfers",
           "providerSessions",
+          "providerThreads",
         ])
         .pipe(
           Effect.mapError(
@@ -3294,7 +3307,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             id: `effect:${command.commandId}:provider-session.detach:${session.id}`,
             commandId: command.commandId,
             threadId: command.threadId,
-            request: { type: "provider-session.detach", providerSessionId: session.id, detail },
+            request: {
+              type: "provider-session.detach",
+              providerSessionId: session.id,
+              detail,
+              // Captured now: the next turn may move the rows to the new
+              // workspace's session before this detach runs.
+              ...unloadProviderThreadsLeaving(session.id, projection.providerThreads),
+            },
           } satisfies PendingOrchestrationEffectV2,
         ]);
       }

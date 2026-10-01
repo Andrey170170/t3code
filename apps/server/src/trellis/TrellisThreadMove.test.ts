@@ -1,16 +1,20 @@
 import { assert, it } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  CommandId,
   ContextTransferId,
   EventId,
   NodeId,
   ProjectId,
+  ProviderDriverKind,
+  ProviderThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 
+import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
 import { IdAllocatorV2 } from "../orchestration-v2/IdAllocator.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import { ProjectionMaintenanceV2 } from "../orchestration-v2/ProjectionMaintenance.ts";
@@ -31,12 +35,15 @@ import {
 // compacted), the detach, and the moved thread's first turn opening in the
 // new project's workspace.
 
+const driver = ProviderDriverKind.make("codex");
+
 it.layer(TrellisOrchestratorTestLayer)("thread.project.move", (it) => {
   it.effect(
     "moves a thread without history, detaches its session, and runs it in the new workspace",
     () =>
       Effect.gen(function* () {
         const orchestrator = yield* OrchestratorV2;
+        const outbox = yield* EffectOutboxV2;
         const ids = yield* IdAllocatorV2;
         const { threadId, projectId: from } = yield* createThread(
           "move-ok",
@@ -48,12 +55,51 @@ it.layer(TrellisOrchestratorTestLayer)("thread.project.move", (it) => {
           sessionKey: "ws-a",
         });
         yield* attachSession(threadId, sessionA, "ws-a");
+        const now = yield* DateTime.now;
+        const nativeThreadRef = {
+          driver,
+          nativeId: "native-move-ok",
+          strength: "strong" as const,
+        };
+        const providerThreadId = ProviderThreadId.make("provider-thread:move-ok");
+        yield* writeEvent({
+          id: EventId.make("move-ok:provider-thread"),
+          type: "provider-thread.updated",
+          threadId,
+          driver,
+          occurredAt: now,
+          payload: {
+            id: providerThreadId,
+            driver,
+            providerInstanceId: modelSelection.instanceId,
+            providerSessionId: sessionA,
+            appThreadId: threadId,
+            ownerNodeId: null,
+            nativeThreadRef,
+            nativeConversationHeadRef: null,
+            status: "idle",
+            firstRunOrdinal: null,
+            lastRunOrdinal: null,
+            handoffIds: [],
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
 
         const moved = yield* move(threadId, to, "1", from);
         assert.deepEqual(
           moved.storedEvents.map((stored) => stored.event.type),
           ["thread.project-moved", "provider-session.detached"],
         );
+        // The detach unloads the thread from the old workspace's process by
+        // the native ref it had there.
+        const [detach] = yield* outbox.listByCommandId(CommandId.make(`${threadId}:move:1`));
+        assert.deepInclude(detach?.request, {
+          type: "provider-session.detach",
+          providerSessionId: sessionA,
+          unloadProviderThreads: [{ providerThreadId, nativeThreadRef }],
+        });
         const projection = yield* orchestrator.getThreadProjection(threadId);
         assert.equal(projection.thread.projectId, to);
         assert.isNull(projection.thread.worktreePath);
