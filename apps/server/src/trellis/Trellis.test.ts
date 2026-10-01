@@ -119,7 +119,7 @@ describe("Trellis client", () => {
     }),
   );
 
-  it.effect("probes an unavailable Trellis once per interval and resolves symlinks", () =>
+  it.effect("probes an unavailable Trellis once per interval, shared by concurrent callers", () =>
     Effect.gen(function* () {
       const harness = setup(() => ({ status: 503, body: { error: "starting" } }));
       const layer = yield* Effect.promise(() => harness.listen());
@@ -129,7 +129,10 @@ describe("Trellis client", () => {
       NodeFS.symlinkSync(workspace, alias);
       const result = yield* Effect.gen(function* () {
         const trellis = yield* Trellis.Trellis;
-        const first = yield* trellis.discover;
+        const [first] = yield* Effect.all(
+          [trellis.discover, trellis.discover, trellis.expectedRoots],
+          { concurrency: "unbounded" },
+        );
         yield* trellis.expectedRoots;
         const second = yield* trellis.discover;
         return {
@@ -211,6 +214,22 @@ describe("refuseWorktreeIn", () => {
       ).pipe(Effect.flip);
       expect(refused).toBe(Trellis.TRELLIS_WORKTREE_REFUSAL);
       yield* Trellis.refuseWorktreeIn(trellis, "/home/me/code", (detail) => detail);
+      // A symlink to a workspace path is refused as the path it resolves to.
+      const aliased = Option.some(
+        Trellis.makeTestTrellis({
+          expectedRoots: Effect.succeed(["/trellis"]),
+          canonicalPath: (path) =>
+            Effect.succeed(
+              path === "/home/me/idea" ? "/trellis/workspaces/ws-1/project/idea" : path,
+            ),
+        }),
+      );
+      const refusedAlias = yield* Trellis.refuseWorktreeIn(
+        aliased,
+        "/home/me/idea",
+        (detail) => detail,
+      ).pipe(Effect.flip);
+      expect(refusedAlias).toBe(Trellis.TRELLIS_WORKTREE_REFUSAL);
       yield* Trellis.refuseWorktreeIn(
         Option.none(),
         "/trellis/workspaces/ws-1/project",
