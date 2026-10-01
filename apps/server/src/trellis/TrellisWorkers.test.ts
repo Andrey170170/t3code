@@ -56,8 +56,10 @@ const pathOf = (workspace: string) => `/trellis/workspaces/${workspace}/project`
  * A Trellis with one dedicated project (`prj-1`, primary workspace `ws-a`)
  * that records forks, activities, discards and purge requests.
  */
-function makeForkTrellis(input: { readonly checkpoints: ReadonlyArray<string> }) {
+function makeForkTrellis(input: { readonly checkpoints: Array<string> }) {
   const state = {
+    /** The next fork fails: `lost` after creating it (the response is lost), `before` without. */
+    failNextFork: null as "lost" | "before" | null,
     workspaces: [
       {
         id: LEAD_WS,
@@ -81,6 +83,38 @@ function makeForkTrellis(input: { readonly checkpoints: ReadonlyArray<string> })
     /** Activity writes to fail before they succeed, as while Trellis restarts. */
     failActivities: 0,
   };
+  const created = (
+    snapshot: string,
+    thread: string | undefined,
+    name: string | undefined,
+    services: unknown,
+  ) => {
+    state.forks.push({ snapshot, thread, name, services });
+    const id = `ws-fork${state.forks.length}`;
+    const view: TrellisWorkspaceView = {
+      id,
+      kind: "dedicated",
+      name: name ?? `fork-${state.forks.length}`,
+      path: pathOf(id),
+      deleted_at: null,
+      project_id: "prj-1",
+      created_at: 1 + state.forks.length,
+      spawned_by: thread === undefined ? null : { thread, workspace: LEAD_WS },
+      parent_snapshot: snapshot,
+    };
+    state.workspaces.push(view);
+    return {
+      ...view,
+      warnings: ["9 workspaces are running (warn_running_workspaces is 8)"],
+      ...(services === undefined || services === "none"
+        ? {}
+        : {
+            services: [
+              { name: "web", state: "starting", previews: [{ port: 3000, url: "http://p" }] },
+            ],
+          }),
+    };
+  };
   const trellis = makeTestTrellis({
     resolve: (target) =>
       Effect.succeed({
@@ -98,32 +132,19 @@ function makeForkTrellis(input: { readonly checkpoints: ReadonlyArray<string> })
         { id: "snap-turn", kind: "turn" },
       ] as never),
     fork: ({ snapshot, thread, name, services }) =>
-      Effect.sync(() => {
-        state.forks.push({ snapshot, thread, name, services });
-        const id = `ws-fork${state.forks.length}`;
-        const view: TrellisWorkspaceView = {
-          id,
-          kind: "dedicated",
-          name: name ?? `fork-${state.forks.length}`,
-          path: pathOf(id),
-          deleted_at: null,
-          project_id: "prj-1",
-          created_at: 1 + state.forks.length,
-          spawned_by: thread === undefined ? null : { thread, workspace: LEAD_WS },
-          parent_snapshot: snapshot,
-        };
-        state.workspaces.push(view);
-        return {
-          ...view,
-          warnings: ["9 workspaces are running (warn_running_workspaces is 8)"],
-          ...(services === undefined || services === "none"
-            ? {}
-            : {
-                services: [
-                  { name: "web", state: "starting", previews: [{ port: 3000, url: "http://p" }] },
-                ],
-              }),
-        };
+      Effect.suspend(() => {
+        const failing = state.failNextFork;
+        state.failNextFork = null;
+        if (failing === "before") {
+          return Effect.fail(new TrellisError({ message: "Trellis is unavailable: restarting" }));
+        }
+        return Effect.sync(() => created(snapshot, thread, name, services)).pipe(
+          Effect.flatMap((view) =>
+            failing === "lost"
+              ? Effect.fail(new TrellisError({ message: "Trellis is unavailable: timed out" }))
+              : Effect.succeed(view),
+          ),
+        );
       }),
     recordActivity: (activity) =>
       Effect.suspend(() => {
@@ -132,7 +153,12 @@ function makeForkTrellis(input: { readonly checkpoints: ReadonlyArray<string> })
         state.failActivities -= 1;
         return Effect.fail(new TrellisError({ message: "Trellis is unavailable: restarting" }));
       }),
-    listWorkspaces: () => Effect.sync(() => state.workspaces),
+    listWorkspaces: ({ spawnedBy }) =>
+      Effect.sync(() =>
+        spawnedBy === undefined
+          ? state.workspaces
+          : state.workspaces.filter((workspace) => workspace.spawned_by?.thread === spawnedBy),
+      ),
     listTrash: Effect.sync(() => ({
       projects: [],
       workspaces: state.workspaces
@@ -166,7 +192,7 @@ function makeForkTrellis(input: { readonly checkpoints: ReadonlyArray<string> })
         Object.assign(workspace, { deleted_at: 10 });
       }),
   });
-  return { trellis, state };
+  return { trellis, state, checkpoints: input.checkpoints };
 }
 
 /** A catalog whose sync gives each live workspace a T3 project, as the real sync does. */
@@ -393,6 +419,54 @@ it.effect("the lead's thread tools reach its worker in a fork; other threads' do
       .readThread(scopeOf(other.threadId), { threadId: forked.childThreadId })
       .pipe(Effect.flip);
     assert.equal(refused.code, "thread_not_found");
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
+it.effect("a spawn retried after its fork response was lost reuses that fork", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const lead = yield* startLead;
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    const spawn = service.delegateTask(scopeOf(lead.threadId), {
+      task: "Add the parser",
+      title: "Parser work",
+      clientRequestId: "spawn-lost",
+      workspace: { fork: { from: "latest" } },
+    });
+    fake.state.failNextFork = "lost";
+    const lost = yield* spawn.pipe(Effect.flip);
+    assert.equal(lost.code, "orchestration_error");
+    assert.equal(fake.state.forks.length, 1);
+    const retried = yield* spawn;
+    // No second fork: the retry found the first by its request-derived name.
+    assert.equal(fake.state.forks.length, 1);
+    assert.equal(retried.fork?.workspaceId, "ws-fork1");
+    assert.match(retried.fork?.name ?? "", /^parser-work-[0-9a-f]{6}$/);
+    const child = yield* threadOf(retried.childThreadId);
+    assert.equal(child.thread.projectId, "ws-fork1-project");
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
+it.effect("a retried spawn keeps the checkpoint its first attempt resolved", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const lead = yield* startLead;
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    const spawn = service.delegateTask(scopeOf(lead.threadId), {
+      task: "Add the parser",
+      clientRequestId: "spawn-before",
+      workspace: { fork: { from: "latest" } },
+    });
+    fake.state.failNextFork = "before";
+    yield* spawn.pipe(Effect.flip);
+    // A newer checkpoint arrives before the retry; the request meant the earlier one.
+    fake.checkpoints.push("snap-2");
+    const retried = yield* spawn;
+    assert.equal(retried.fork?.snapshot, "snap-1");
+    assert.deepEqual(
+      fake.state.forks.map((fork) => fork.snapshot),
+      ["snap-1"],
+    );
   }).pipe(Effect.provide(testLayer(fake)));
 });
 

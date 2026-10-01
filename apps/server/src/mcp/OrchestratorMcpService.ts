@@ -1474,6 +1474,9 @@ const make = Effect.gen(function* () {
                         from: forkSpec.from,
                         name: forkSpec.name,
                         services: forkSpec.services,
+                        // Only a caller-chosen key can be retried.
+                        requestKey: input.clientRequestId,
+                        title: input.title ?? taskTitle(input.task),
                       })
                 ).pipe(
                   Effect.mapError((error) =>

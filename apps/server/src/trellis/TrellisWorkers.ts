@@ -19,6 +19,7 @@
  *
  * @module trellis/TrellisWorkers
  */
+import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 
 import {
@@ -91,6 +92,14 @@ export class TrellisWorkers extends Context.Service<
       readonly from: string;
       readonly name?: string | undefined;
       readonly services?: "none" | "all" | ReadonlyArray<string> | undefined;
+      /**
+       * The caller's retry key (its clientRequestId). With one, the fork is
+       * named from it and its checkpoint kept, so a retry after a lost
+       * response finds that fork instead of forking again.
+       */
+      readonly requestKey?: string | undefined;
+      /** Names a keyed fork when `name` is absent. */
+      readonly title?: string | undefined;
     }) => Effect.Effect<TrellisWorkerFork, TrellisForkSpawnError>;
     /** Moves a fork spawned for a child that could not be created to the trash. */
     readonly abandonFork: (workspaceId: string) => Effect.Effect<void>;
@@ -182,6 +191,33 @@ function workerGuide(input: {
   ].join("\n");
 }
 
+/**
+ * A keyed spawn's fork name: the requested name (or title) as a slug and a
+ * short hash of the request, the same on every retry.
+ */
+function keyedForkName(base: string, thread: string, key: string): string {
+  const slug =
+    base
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 32)
+      .replace(/-+$/, "") || "worker";
+  const hash = NodeCrypto.createHash("sha256").update(`${thread}\n${key}`).digest("hex");
+  return `${slug}-${hash.slice(0, 6)}`;
+}
+
+/** The checkpoint each keyed spawn resolved, by request key. */
+const PendingSpawns = Schema.Record(
+  Schema.String,
+  Schema.Struct({ snapshot: Schema.String, at: Schema.Finite }),
+);
+type PendingSpawns = typeof PendingSpawns.Type;
+const decodeSpawns = Schema.decodeUnknownEffect(Schema.fromJsonString(PendingSpawns));
+const encodeSpawns = Schema.encodeEffect(Schema.fromJsonString(PendingSpawns));
+/** How long a keyed spawn's checkpoint is remembered for its retries. */
+const SPAWN_MEMORY_MS = 2 * 24 * 60 * 60 * 1000;
+
 /** A client-side failure to reach Trellis, as opposed to Trellis's own refusal. */
 const isUnreachable = (message: string) =>
   /^(Trellis is unavailable|This Trellis does not support|Trellis answered|Unexpected Trellis response|The Trellis integration is turned off)/.test(
@@ -223,6 +259,32 @@ const make = Effect.gen(function* () {
   const stateDir = (yield* ServerConfig).stateDir;
   const cursorPath = NodePath.join(stateDir, "trellis-workers-cursor");
   const pendingPath = NodePath.join(stateDir, "trellis-pending-summaries.json");
+  const spawnsPath = NodePath.join(stateDir, "trellis-pending-spawns.json");
+  const spawnsLock = yield* Semaphore.make(1);
+  const readSpawns = fileSystem.readFileString(spawnsPath).pipe(
+    Effect.flatMap(decodeSpawns),
+    // Only retries read it: a missing or unreadable record means resolving again.
+    Effect.orElseSucceed((): PendingSpawns => ({})),
+  );
+  const rememberSpawn = (key: string, snapshot: string) =>
+    spawnsLock.withPermits(1)(
+      Effect.gen(function* () {
+        const now = DateTime.toEpochMillis(yield* DateTime.now);
+        const kept = Object.fromEntries(
+          Object.entries(yield* readSpawns).filter(([, entry]) => now - entry.at < SPAWN_MEMORY_MS),
+        );
+        const partial = `${spawnsPath}.partial`;
+        yield* fileSystem.writeFileString(
+          partial,
+          yield* encodeSpawns({ ...kept, [key]: { snapshot, at: now } }),
+        );
+        yield* fileSystem.rename(partial, spawnsPath);
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("could not remember a fork spawn's checkpoint", { cause }),
+        ),
+      ),
+    );
 
   const commandId = (operation: string) =>
     crypto.randomUUIDv4.pipe(
@@ -273,16 +335,58 @@ const make = Effect.gen(function* () {
           "This thread works in an idea, which shares the scratch workspace and has no forks. Delegate without workspace (it runs here), or graduate the idea first.",
         );
       }
-      const snapshots = yield* trellis
-        .listSnapshots(resolved.workspace.id)
-        .pipe(Effect.mapError(unavailable));
-      const checkpoint = pickCheckpoint(snapshots, input.from);
+      const key = input.requestKey;
+      const name =
+        key === undefined
+          ? input.name
+          : keyedForkName(input.name ?? input.title ?? "worker", input.parentThreadId, key);
+      if (key !== undefined) {
+        // A retry: the fork an earlier attempt created (its response lost) is reused.
+        const existing = (yield* trellis
+          .listWorkspaces({ all: false, spawnedBy: input.parentThreadId })
+          .pipe(Effect.mapError(unavailable))).find(
+          (workspace) => workspace.name === name && workspace.deleted_at === null,
+        );
+        if (existing !== undefined) {
+          const ids = yield* catalog.syncNow;
+          const projectId = ids.get(normalizeRoot(existing.path));
+          if (projectId !== undefined) {
+            const snapshot = existing.parent_snapshot ?? "";
+            return {
+              projectId,
+              fork: {
+                workspaceId: existing.id,
+                name: existing.name,
+                path: existing.path,
+                snapshot,
+                warnings: [],
+                services: [],
+              },
+              guide: workerGuide({ name: existing.name, workspaceId: existing.id, snapshot }),
+            } satisfies TrellisWorkerFork;
+          }
+        }
+      }
+      // A keyed spawn forks from the checkpoint its first attempt resolved.
+      const remembered = key === undefined ? undefined : (yield* readSpawns)[key]?.snapshot;
+      const checkpoint =
+        remembered !== undefined
+          ? { id: remembered }
+          : pickCheckpoint(
+              yield* trellis
+                .listSnapshots(resolved.workspace.id)
+                .pipe(Effect.mapError(unavailable)),
+              input.from,
+            );
       if ("error" in checkpoint) return yield* invalid(checkpoint.error);
+      if (key !== undefined && remembered === undefined) {
+        yield* rememberSpawn(key, checkpoint.id);
+      }
       const fork = yield* trellis
         .fork({
           target: resolved.workspace.id,
           snapshot: checkpoint.id,
-          name: input.name,
+          name,
           thread: input.parentThreadId,
           services: input.services,
         })

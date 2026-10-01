@@ -181,7 +181,8 @@ export const OrchestratorMcpTaskWorkspace = Schema.Union([
       }),
       name: Schema.optional(
         TrimmedNonEmptyString.check(Schema.isMaxLength(100)).annotate({
-          description: "Name of the fork (default fork-N).",
+          description:
+            "Name of the fork (default fork-N). With a clientRequestId it gets a short suffix, so a retry finds the same fork.",
         }),
       ),
       services: Schema.optional(
