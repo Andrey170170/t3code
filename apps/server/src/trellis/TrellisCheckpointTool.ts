@@ -83,7 +83,7 @@ const failure = (code: TrellisCheckpointMcpFailure["code"], message: string) =>
 const quoted = (titles: ReadonlyArray<string>) => titles.map((title) => `"${title}"`).join(", ");
 
 /** The threads below `ancestor` (its delegated workers, and theirs). */
-function workersOf(
+export function workersOf(
   ancestor: ThreadId,
   threads: ReadonlyArray<Pick<OrchestrationV2ThreadShell, "id" | "lineage">>,
 ): ReadonlySet<ThreadId> {

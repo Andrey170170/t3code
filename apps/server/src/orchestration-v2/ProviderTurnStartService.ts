@@ -262,10 +262,13 @@ export const layer: Layer.Layer<
           admissionRead.nodes.find((node) => node.id === admissionRun?.rootNodeId)
             ?.checkpointScopeId,
       )?.cwd;
-      const held =
+      const admission =
         admissionRun?.status === "starting" && admissionCwd !== undefined
-          ? yield* turnAdmission.start({ threadId: input.threadId, runId, cwd: admissionCwd })
-          : false;
+          ? yield* Effect.result(
+              turnAdmission.start({ threadId: input.threadId, runId, cwd: admissionCwd }),
+            )
+          : undefined;
+      const held = admission?._tag === "Success" && admission.success;
       const projection = held
         ? yield* projectionStore.getTurnStartContext(input.threadId, runId)
         : admissionRead;
@@ -417,6 +420,26 @@ export const layer: Layer.Layer<
           });
         },
       );
+      if (admission?._tag === "Failure") {
+        const now = yield* DateTime.now;
+        yield* settleRunBeforeStart({
+          signal: "turn-admission-refused",
+          status: "failed",
+          now,
+          startedAt: now,
+          providerInstanceId: run.providerInstanceId,
+          itemProviderThreadId: providerThread.id,
+          item: {
+            type: "error",
+            title: "Turn not started",
+            failure: makeProviderFailure({
+              class: "validation_error",
+              message: admission.failure.message,
+            }),
+          },
+        });
+        return;
+      }
       if (message.attachments.length === 0 && message.text.trimStart().startsWith("/")) {
         const isEmptyCompaction =
           message.text.trim().toLowerCase() === "/compact" && !projection.hasConversation;

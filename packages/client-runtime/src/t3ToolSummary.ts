@@ -303,6 +303,8 @@ export function summarizeT3ToolCalls(
       break;
     case "trellis-discard-fork":
       label = phrase("Discarded", "discard", `a Trellis fork ${times}`);
+    case "trellis-graduate":
+      label = phrase("Graduated", "graduate", `the Trellis idea ${times}`);
       break;
     case "project-list":
       label = phrase("Listed", "list", `projects ${times}`);

@@ -1611,6 +1611,87 @@ describe("ClaudeAdapterV2 attachments", () => {
 });
 
 describe("ClaudeAdapterV2 native fork", () => {
+  it.effect("forks a source that moved to this workspace from its relocated transcript", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const idAllocator = yield* IdAllocatorV2;
+        const configDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-cfg-" });
+        const workspaceA = yield* fileSystem.realPath(
+          yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-ws-a-" }),
+        );
+        const workspaceB = yield* fileSystem.realPath(
+          yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-ws-b-" }),
+        );
+        const slug = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, "-");
+        // The source ran in A, then its thread moved to B without running there.
+        yield* fileSystem.makeDirectory(path.join(configDir, "projects", slug(workspaceA)), {
+          recursive: true,
+        });
+        yield* fileSystem.writeFileString(
+          path.join(configDir, "projects", slug(workspaceA), "source-native-session.jsonl"),
+          "{}\n",
+        );
+        const transcriptInB: Array<boolean> = [];
+        const adapter = makeClaudeAdapterV2({
+          instanceId: CLAUDE_DEFAULT_INSTANCE_ID,
+          settings: DEFAULT_CLAUDE_SETTINGS,
+          environment: { CLAUDE_CONFIG_DIR: configDir },
+          attachmentsDir: configDir,
+          fileSystem,
+          path,
+          idAllocator,
+          queryRunner: {
+            allocateSessionId: Effect.succeed("source-native-session"),
+            open: () => Effect.die("no query opens"),
+            forkSession: () =>
+              fileSystem
+                .exists(
+                  path.join(configDir, "projects", slug(workspaceB), "source-native-session.jsonl"),
+                )
+                .pipe(
+                  Effect.orDie,
+                  Effect.map((present) => {
+                    transcriptInB.push(present);
+                    return { sessionId: "forked-native-session" };
+                  }),
+                ),
+            subagentLaunchToolUseId: () => Effect.succeed(null),
+            assertComplete: Effect.void,
+          },
+        });
+        const modelSelection = {
+          instanceId: ProviderInstanceId.make(CLAUDE_PROVIDER),
+          model: "claude-sonnet-4-6",
+        };
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: workspaceB,
+          launch: { executable: "/shims/claude", sessionKey: "ws-b" },
+        });
+        const runtime = yield* adapter.openSession({
+          threadId: ThreadId.make("thread-moved-fork-source"),
+          providerSessionId: ProviderSessionId.make("provider-session-moved-fork"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const sourceProviderThread = yield* runtime.ensureThread({
+          threadId: ThreadId.make("thread-moved-fork-source"),
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* runtime.forkThread({
+          sourceProviderThread,
+          sourceProviderTurns: [],
+          targetThreadId: ThreadId.make("thread-moved-fork-target"),
+        });
+        assert.deepEqual(transcriptInB, [true]);
+      }),
+    ).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+  );
+
   it.effect("forks at the source assistant cursor and resumes the forked session", () =>
     Effect.scoped(
       Effect.gen(function* () {

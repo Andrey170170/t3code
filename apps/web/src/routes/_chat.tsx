@@ -25,6 +25,7 @@ import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { primaryServerKeybindingsAtom } from "~/state/server";
+import { GraduateIdeaDialogHost } from "../components/trellis/GraduateIdeaDialog";
 import { NewTrellisProjectDialogHost } from "../components/trellis/NewTrellisProjectDialog";
 import { useProjectGroupingSettings } from "../hooks/useProjectGroupingSettings";
 
@@ -202,6 +203,7 @@ function ChatRouteLayout() {
     <>
       <ChatRouteGlobalShortcuts />
       <NewTrellisProjectDialogHost />
+      <GraduateIdeaDialogHost />
       {threadTarget ? <ThreadRouteView target={threadTarget} /> : <Outlet />}
     </>
   );

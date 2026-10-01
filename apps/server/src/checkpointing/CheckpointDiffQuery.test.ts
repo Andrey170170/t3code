@@ -36,6 +36,7 @@ function makeProjection(): ProjectionCheckpointContext {
       {
         scopeId: secondScopeId,
         runId: secondRunId,
+        ordinalWithinScope: 2,
         appRunOrdinal: 2,
         status: "ready",
         ref: secondRef,
@@ -191,5 +192,127 @@ it.effect("preserves the typed missing-baseline-ref error contract", () => {
       { checkpoint: error.checkpoint, turnCount: error.turnCount },
       { checkpoint: "from", turnCount: 0 },
     );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("diffs a moved thread's turns within the scope of the project they ran in", () => {
+  // Run 1 ran in the idea; the thread moved, and run 2 ran in the project,
+  // whose scope starts at the baseline taken there (ordinal 1).
+  const ideaScope = CheckpointScopeId.make("scope:moved:root");
+  const projectScope = CheckpointScopeId.make("scope:moved:root:1");
+  const ref = (scopeId: CheckpointScopeId, ordinal: number) =>
+    checkpointRefForScopeOrdinal({ scopeId, ordinalWithinScope: ordinal });
+  const diffCheckpoints = vi.fn((_input: CheckpointStore.DiffCheckpointsInput) =>
+    Effect.succeed("diff"),
+  );
+  const layer = makeLayer({
+    projection: Effect.succeed({
+      runs: [
+        { id: firstRunId, ordinal: 1, status: "completed" },
+        { id: secondRunId, ordinal: 2, status: "completed" },
+      ],
+      checkpointScopes: [
+        { id: ideaScope, runId: firstRunId, kind: "root_run", cwd: "/idea" },
+        {
+          id: projectScope,
+          runId: secondRunId,
+          kind: "root_run",
+          cwd: "/project",
+          workspaceAssignment: 1,
+        },
+      ],
+      checkpoints: [
+        {
+          scopeId: ideaScope,
+          runId: firstRunId,
+          ordinalWithinScope: 1,
+          appRunOrdinal: 1,
+          status: "ready",
+          ref: ref(ideaScope, 1),
+        },
+        {
+          scopeId: projectScope,
+          runId: null,
+          ordinalWithinScope: 1,
+          appRunOrdinal: null,
+          status: "ready",
+          ref: ref(projectScope, 1),
+        },
+        {
+          scopeId: projectScope,
+          runId: secondRunId,
+          ordinalWithinScope: 2,
+          appRunOrdinal: 2,
+          status: "ready",
+          ref: ref(projectScope, 2),
+        },
+      ],
+    }),
+    diffCheckpoints,
+  });
+
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    yield* query.getTurnDiff({ threadId, fromTurnCount: 1, toTurnCount: 2 });
+    // The whole thread's diff starts where the thread arrived in the project.
+    yield* query.getFullThreadDiff({ threadId, toTurnCount: 2 });
+    // A turn before the move still diffs in the idea's own scope.
+    yield* query.getTurnDiff({ threadId, fromTurnCount: 0, toTurnCount: 1 });
+    assert.deepEqual(
+      diffCheckpoints.mock.calls.map(([call]) => [
+        call.cwd,
+        call.fromCheckpointRef,
+        call.toCheckpointRef,
+      ]),
+      [
+        ["/project", ref(projectScope, 1), ref(projectScope, 2)],
+        ["/project", ref(projectScope, 1), ref(projectScope, 2)],
+        ["/idea", ref(ideaScope, 0), ref(ideaScope, 1)],
+      ],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("a moved thread's diff is unavailable when its new scope's baseline is missing", () => {
+  const projectScope = CheckpointScopeId.make("scope:moved-missing:root:1");
+  const ref = (ordinal: number) =>
+    checkpointRefForScopeOrdinal({ scopeId: projectScope, ordinalWithinScope: ordinal });
+  const layer = makeLayer({
+    projection: Effect.succeed({
+      runs: [{ id: secondRunId, ordinal: 2, status: "completed" }],
+      checkpointScopes: [
+        {
+          id: projectScope,
+          runId: secondRunId,
+          kind: "root_run",
+          cwd: "/project",
+          workspaceAssignment: 1,
+        },
+      ],
+      checkpoints: [
+        {
+          scopeId: projectScope,
+          runId: null,
+          ordinalWithinScope: 1,
+          appRunOrdinal: null,
+          status: "missing",
+          ref: ref(1),
+        },
+        {
+          scopeId: projectScope,
+          runId: secondRunId,
+          ordinalWithinScope: 2,
+          appRunOrdinal: 2,
+          status: "ready",
+          ref: ref(2),
+        },
+      ],
+    }),
+  });
+
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    const error = yield* query.getFullThreadDiff({ threadId, toTurnCount: 2 }).pipe(Effect.flip);
+    assert.instanceOf(error, CheckpointRefUnavailableError);
   }).pipe(Effect.provide(layer));
 });

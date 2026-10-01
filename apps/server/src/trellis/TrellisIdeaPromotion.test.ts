@@ -1,9 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import {
-  CheckpointScopeId,
   CommandId,
+  ContextTransferId,
   EventId,
-  NodeId,
   ProjectId,
   ThreadId,
   TRELLIS_LANDING_PAD_PROJECT_ID,
@@ -74,6 +73,8 @@ const FakeCatalog = Layer.effect(
       forkWorkspace: unused,
       purge: unused,
       discardFork: unused,
+      projectFor: unused,
+      listBases: Effect.die("unused catalog operation"),
     });
   }),
 );
@@ -330,25 +331,30 @@ it.layer(TestLayer)("TrellisIdeaPromotion", (it) => {
       const promotion = yield* TrellisIdeaPromotion.TrellisIdeaPromotion;
       const threadId = ThreadId.make("idea-move-failed");
       yield* createIn(threadId, TRELLIS_LANDING_PAD_PROJECT_ID);
-      // History (a checkpoint scope) makes the move refuse.
+      // A fork that has not run yet makes the move refuse.
       const now = yield* DateTime.now;
       yield* writeEvent({
-        id: EventId.make("idea-move-failed:scope"),
-        type: "checkpoint-scope.created",
+        id: EventId.make("idea-move-failed:transfer"),
+        type: "context-transfer.updated",
         threadId,
         occurredAt: now,
         payload: {
-          id: CheckpointScopeId.make("checkpoint-scope:thread:idea-move-failed:name:root"),
-          threadId,
-          runId: null,
-          nodeId: NodeId.make("idea-move-failed:node"),
-          parentScopeId: null,
-          providerThreadId: null,
-          kind: "root_run",
-          ordinalWithinParent: 0,
-          advancesAppRunCount: true,
-          cwd: "/t3/state/trellis-landing-pad",
+          id: ContextTransferId.make("idea-move-failed:transfer"),
+          type: "fork",
+          sourceThreadId: ThreadId.make("idea-move-failed-source"),
+          targetThreadId: threadId,
+          sourcePoint: { threadId: ThreadId.make("idea-move-failed-source") },
+          basePoint: null,
+          sourceProviderInstanceId: modelSelection.instanceId,
+          targetProviderInstanceId: modelSelection.instanceId,
+          targetRunId: null,
+          status: "pending",
+          resolution: null,
+          createdBy: "user",
+          error: null,
           createdAt: now,
+          updatedAt: now,
+          consumedAt: null,
         },
       });
       const error = yield* promotion

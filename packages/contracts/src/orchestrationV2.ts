@@ -433,6 +433,12 @@ export const OrchestrationV2AppThread = Schema.Struct({
     ),
   ),
   deletedAt: Schema.NullOr(Schema.DateTimeUtc),
+  /**
+   * How many times the thread moved to another project after it had run
+   * (absent: never). Each assignment checkpoints into its own root scope, so
+   * earlier checkpoints keep the directory they were taken in.
+   */
+  workspaceAssignment: Schema.optional(NonNegativeInt),
 });
 export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
 
@@ -681,6 +687,8 @@ export const OrchestrationV2CheckpointScope = Schema.Struct({
   advancesAppRunCount: Schema.Boolean,
   cwd: TrimmedNonEmptyString,
   createdAt: Schema.DateTimeUtc,
+  /** The thread's workspace assignment a root scope belongs to (absent: 0). */
+  workspaceAssignment: Schema.optional(NonNegativeInt),
 });
 export type OrchestrationV2CheckpointScope = typeof OrchestrationV2CheckpointScope.Type;
 

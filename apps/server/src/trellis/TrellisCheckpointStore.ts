@@ -6,9 +6,10 @@
  * a Trellis `turn` snapshot of its workspace, tagged with the checkpoint ref,
  * and everything else goes to the Git store. `trellis_checkpoint_refs` maps
  * each ref to its snapshot; a ref is captured only once it is mapped (and,
- * for a scope's ordinal 0, the baseline every later diff starts from,
- * pinned), so it stays captured after retention removed the snapshot and is
- * never recaptured from newer files. A capture interrupted after Trellis took
+ * for a baseline, the state a scope starts from, pinned), so it stays
+ * captured after retention removed the snapshot and is never recaptured from
+ * newer files. A thread's first scope starts at ordinal 0; one it moved to
+ * with history starts where the move left it. A capture interrupted after Trellis took
  * the snapshot finds it again by its tag instead of taking another.
  *
  * Restores are Trellis rollbacks (an idea's folder, or the whole dedicated
@@ -44,7 +45,10 @@ import {
   CheckpointBackendError,
   CheckpointSnapshotUnavailableError,
 } from "../checkpointing/Errors.ts";
-import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointService.ts";
+import {
+  checkpointRefForScopeOrdinal,
+  rootCheckpointScopeName,
+} from "../orchestration-v2/CheckpointService.ts";
 import { IdAllocatorV2, layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import {
@@ -66,9 +70,6 @@ const shellQuote = (word: string) =>
 /** Patches larger than this are not shown (as for v0's Trellis-only turns). */
 const MAX_DIFF_BYTES = 5 * 1024 * 1024;
 
-/** The baseline of a checkpoint scope: kept for as long as the thread is. */
-const isBaselineRef = (ref: string) => ref.endsWith("/ordinal/0");
-
 const RetiredSnapshotIds = Schema.fromJsonString(Schema.Array(Schema.String));
 const decodeRetired = Schema.decodeUnknownOption(RetiredSnapshotIds);
 const parseRetired = (text: string | undefined): ReadonlyArray<string> =>
@@ -79,6 +80,8 @@ interface RefRow {
   readonly target: string;
   readonly snapshot_id: string | null;
   readonly retired_snapshot_ids: string;
+  /** 1 for a scope's baseline (its first capture), kept pinned for as long as the thread is. */
+  readonly baseline: number;
 }
 
 /**
@@ -114,12 +117,16 @@ function normalizeNoIndexPatch(output: string): string {
 export interface TrellisCheckpointPinsShape {
   /**
    * Releases what the store keeps for threads that no longer exist (absent
-   * from `liveThreadIds`, which was read at `readAt`): their baselines' pins
-   * and ref mappings. Also releases read pins a crash left behind. Never
-   * fails; what cannot be released now is tried again on the next call.
+   * from `liveThreads`, which was read at `readAt`, with each thread's
+   * workspace assignment): their baselines' pins and ref mappings. Also
+   * releases read pins a crash left behind. Never fails; what cannot be
+   * released now is tried again on the next call.
    */
   readonly reconcile: (input: {
-    readonly liveThreadIds: ReadonlyArray<ThreadId>;
+    readonly liveThreads: ReadonlyArray<{
+      readonly id: ThreadId;
+      readonly workspaceAssignment?: number | undefined;
+    }>;
     readonly readAt: DateTime.Utc;
   }) => Effect.Effect<void>;
 }
@@ -166,6 +173,18 @@ export const layer: Layer.Layer<
         retired_snapshot_ids TEXT NOT NULL DEFAULT '[]'
       )
     `.pipe(Effect.orDie);
+    // Baselines were ordinal 0 only until threads could move with history.
+    const refColumns = yield* sql<{ readonly name: string }>`
+      PRAGMA table_info(trellis_checkpoint_refs)
+    `.pipe(Effect.orDie);
+    if (!refColumns.some((column) => column.name === "baseline")) {
+      yield* sql`
+        ALTER TABLE trellis_checkpoint_refs ADD COLUMN baseline INTEGER NOT NULL DEFAULT 0
+      `.pipe(Effect.orDie);
+      yield* sql`
+        UPDATE trellis_checkpoint_refs SET baseline = 1 WHERE ref LIKE '%/ordinal/0'
+      `.pipe(Effect.orDie);
+    }
     // Captures not yet mapped, recorded before the snapshot is taken. It is
     // pinned until mapped; where Trellis creates it unpinned, a crash before
     // the pin leaves one thinning could remove, so the reconcile finds it by
@@ -223,7 +242,7 @@ export const layer: Layer.Layer<
 
     const readRow = (ref: string) =>
       sql<RefRow>`
-        SELECT target, snapshot_id, retired_snapshot_ids
+        SELECT target, snapshot_id, retired_snapshot_ids, baseline
         FROM trellis_checkpoint_refs WHERE ref = ${ref}
       `.pipe(
         Effect.map((rows) => rows[0] ?? null),
@@ -314,7 +333,9 @@ export const layer: Layer.Layer<
             held.count -= 1;
             if (held.count > 0) return;
             protections.delete(snapshotId);
-            if (held.pinnedHere && !isBaselineRef(ref)) {
+            // A baseline found unpinned stays pinned: it is meant to be.
+            const baseline = (yield* readRow(ref).pipe(Effect.orElseSucceed(() => null)))?.baseline;
+            if (held.pinnedHere && baseline !== 1) {
               yield* trellis.setSnapshotPinned(snapshotId, false).pipe(
                 Effect.andThen(forgetReadPin(snapshotId)),
                 Effect.catch((error) =>
@@ -463,11 +484,14 @@ export const layer: Layer.Layer<
         yield* git(["update-ref", ref, commit]);
       }).pipe(Effect.scoped);
 
-    const capture = (cwd: string, ref: CheckpointRef) =>
+    const capture = (cwd: string, ref: CheckpointRef, asBaseline = false) =>
       Effect.gen(function* () {
         const row = yield* readRow(ref);
         if (row?.snapshot_id != null) return;
         const retired = parseRetired(row?.retired_snapshot_ids);
+        // Kept for the thread's life: ordinal 0 of its first scope, and the
+        // state a moved thread arrived with in its new project.
+        const baseline = asBaseline || row?.baseline === 1 || ref.endsWith("/ordinal/0");
         // A snapshot taken by an interrupted capture carries the ref as its tag.
         const tagged = yield* trellis.listSnapshots(cwd).pipe(
           Effect.mapError(backendError("capture")),
@@ -503,8 +527,8 @@ export const layer: Layer.Layer<
         }
         const capturedAt = DateTime.formatIso(yield* DateTime.now);
         yield* sql`
-          INSERT INTO trellis_checkpoint_refs (ref, target, snapshot_id, captured_at)
-          VALUES (${ref}, ${cwd}, ${snapshot.id}, ${capturedAt})
+          INSERT INTO trellis_checkpoint_refs (ref, target, snapshot_id, captured_at, baseline)
+          VALUES (${ref}, ${cwd}, ${snapshot.id}, ${capturedAt}, ${baseline ? 1 : 0})
           ON CONFLICT (ref) DO UPDATE SET
             target = excluded.target,
             snapshot_id = excluded.snapshot_id,
@@ -515,7 +539,7 @@ export const layer: Layer.Layer<
         yield* sql`DELETE FROM trellis_capture_intents WHERE ref = ${ref}`.pipe(
           Effect.mapError(backendError("capture")),
         );
-        if (!isBaselineRef(ref)) {
+        if (!baseline) {
           yield* trellis.setSnapshotPinned(snapshot.id, false).pipe(
             Effect.catch((error) =>
               Effect.logWarning("could not unpin a captured Trellis turn snapshot", {
@@ -716,9 +740,17 @@ export const layer: Layer.Layer<
 
         const ids = yield* IdAllocatorV2;
         const live = new Set<string>();
-        for (const threadId of input.liveThreadIds) {
-          const scopeId = yield* ids.allocate.checkpointScope({ threadId, name: "root" });
-          live.add(scopeKeyOfRef(checkpointRefForScopeOrdinal({ scopeId, ordinalWithinScope: 0 })));
+        for (const thread of input.liveThreads) {
+          // Every project the thread worked in keeps its scope's baseline.
+          for (let assignment = 0; assignment <= (thread.workspaceAssignment ?? 0); assignment++) {
+            const scopeId = yield* ids.allocate.checkpointScope({
+              threadId: thread.id,
+              name: rootCheckpointScopeName(assignment),
+            });
+            live.add(
+              scopeKeyOfRef(checkpointRefForScopeOrdinal({ scopeId, ordinalWithinScope: 0 })),
+            );
+          }
         }
         // Rows captured after the thread list was read may belong to a
         // thread it does not know yet.
@@ -726,8 +758,9 @@ export const layer: Layer.Layer<
           readonly ref: string;
           readonly target: string;
           readonly snapshot_id: string | null;
+          readonly baseline: number;
         }>`
-          SELECT ref, target, snapshot_id FROM trellis_checkpoint_refs
+          SELECT ref, target, snapshot_id, baseline FROM trellis_checkpoint_refs
           WHERE captured_at < ${DateTime.formatIso(input.readAt)}
         `.pipe(Effect.mapError(backendError("reconcile")));
         const intents = yield* sql<{ readonly ref: string; readonly target: string }>`
@@ -767,7 +800,7 @@ export const layer: Layer.Layer<
         for (const row of rows) {
           if (live.has(scopeKeyOfRef(row.ref))) continue;
           yield* Effect.gen(function* () {
-            if (row.snapshot_id !== null && isBaselineRef(row.ref)) {
+            if (row.snapshot_id !== null && row.baseline === 1) {
               yield* unpin(row.target, row.snapshot_id);
             }
             yield* sql`DELETE FROM trellis_checkpoint_refs WHERE ref = ${row.ref}`.pipe(
@@ -809,7 +842,7 @@ export const layer: Layer.Layer<
           captureCheckpoint: (input) =>
             Effect.flatMap(isTrellisPath(input.cwd), (trellisPath) =>
               trellisPath
-                ? capture(input.cwd, input.checkpointRef).pipe(
+                ? capture(input.cwd, input.checkpointRef, input.baseline === true).pipe(
                     // As v0 did: a busy or restarting Trellis gets two more tries.
                     Effect.retry({ times: 2, schedule: Schedule.spaced("1 second") }),
                   )
@@ -889,6 +922,17 @@ export const layer: Layer.Layer<
                 SET snapshot_id = NULL, retired_snapshot_ids = ${retiredText}
                 WHERE ref = ${ref}
               `.pipe(Effect.mapError(backendError("delete")));
+                  // A retired baseline no longer holds its snapshot for the thread.
+                  if (row.baseline === 1) {
+                    yield* unpin(row.target, row.snapshot_id).pipe(
+                      Effect.catch((error) =>
+                        Effect.logWarning("could not unpin a retired Trellis baseline", {
+                          snapshotId: row.snapshot_id,
+                          detail: error.message,
+                        }),
+                      ),
+                    );
+                  }
                 }
               }),
             ),

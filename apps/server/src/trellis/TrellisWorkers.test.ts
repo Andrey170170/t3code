@@ -231,6 +231,8 @@ function fakeCatalog(fake: ReturnType<typeof makeForkTrellis>) {
         listCheckpoints: unused,
         forkWorkspace: unused,
         purge: unused,
+        listBases: Effect.die("unused"),
+        projectFor: unused,
       });
     }),
   );

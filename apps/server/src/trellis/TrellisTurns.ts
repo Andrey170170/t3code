@@ -35,14 +35,16 @@ export interface TrellisTurnsShape {
    * Reports that `runId` starts a turn in the Trellis path `cwd` (canonical),
    * waiting while its workspace is checkpointing. `restarted` is true when a
    * checkpoint stopped and restarted the workspace since the last start
-   * there, so its provider processes are gone. Never fails: an unreachable
-   * Trellis admits the turn and the next resynchronization records it.
+   * there, so its provider processes are gone. `graduatedTo` names the
+   * project an idea graduated into when Trellis refused the start there; the
+   * turn is then not open. Never fails: an unreachable Trellis admits the
+   * turn and the next resynchronization records it.
    */
   readonly start: (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly cwd: string;
-  }) => Effect.Effect<{ readonly restarted: boolean }>;
+  }) => Effect.Effect<{ readonly restarted: boolean; readonly graduatedTo?: string }>;
   /** Reports that `runId` ended, in the background; a run never started is ignored. */
   readonly end: (input: {
     readonly threadId: ThreadId;
@@ -140,10 +142,16 @@ const make = Effect.gen(function* () {
       const reply = yield* send("start", (seq) =>
         trellis.reportTurn({ target: cwd, thread: threadId, turn: runId, event: "start", seq }),
       ).pipe(turn.lock.withPermits(1));
-      return {
-        restarted:
-          workspace !== null && Option.isSome(reply) && reply.value.restarted.includes(workspace),
-      };
+      const restarted =
+        workspace !== null && Option.isSome(reply) && reply.value.restarted.includes(workspace);
+      const graduatedTo = Option.isSome(reply) ? reply.value.graduatedTo : undefined;
+      if (graduatedTo !== undefined) {
+        // Refused: the turn never opened in Trellis.
+        open.delete(runId);
+        Deferred.doneUnsafe(turn.ended, Effect.void);
+        return { restarted, graduatedTo };
+      }
+      return { restarted };
     });
 
   const end: TrellisTurnsShape["end"] = ({ threadId, runId }) =>

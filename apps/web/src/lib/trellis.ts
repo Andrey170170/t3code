@@ -164,11 +164,11 @@ export function trellisFindHitSummary(hit: TrellisFindHit, maxSnippets = 2): str
 }
 
 /**
- * Why a thread cannot move to another project, or null when it may. Only a
- * thread that never ran moves for now: a run's checkpoints belong to the old
- * folder (graduation will move threads with history). A fork moves once it
- * has run, which is too late, so not-yet-run forks are refused as well. The
- * server checks the same rules.
+ * Why a thread cannot move to another project, or null when it may. A thread
+ * with history moves with its conversation; its earlier turns' files stay in
+ * the old folder (they can be rewound in the conversation, not restored). A
+ * fork that has not run yet would fork its conversation in the wrong place,
+ * so it is refused, as is a working thread. The server checks the same rules.
  */
 export function threadMoveBlocker(thread: {
   readonly latestRun: object | null;
@@ -186,10 +186,7 @@ export function threadMoveBlocker(thread: {
   ) {
     return "This thread is working; wait for it to finish, then move it.";
   }
-  if (thread.latestRun !== null) {
-    return "This thread has history; graduation will move such threads.";
-  }
-  if (thread.forkedFrom !== null) {
+  if (thread.forkedFrom !== null && thread.latestRun === null) {
     return "This fork has not run yet, so it cannot move to another project.";
   }
   return null;
@@ -280,6 +277,24 @@ export function trellisMoveMenu<
       }),
     })),
   };
+}
+
+/**
+ * Whether a project can be graduated: a live Trellis idea (not yet retired)
+ * of an environment whose Trellis is ready.
+ */
+export function canGraduateIdea(
+  workspaceRoot: string,
+  status: {
+    readonly state: TrellisState;
+    readonly root?: string | null | undefined;
+    readonly retiredRoots?: ReadonlyArray<string> | undefined;
+  } | null,
+): boolean {
+  if (status?.state !== "ready" || !status.root) return false;
+  if (!isTrellisManagedPath(status.root, workspaceRoot)) return false;
+  if (status.retiredRoots?.includes(trimTrailingSlashes(workspaceRoot))) return false;
+  return isTrellisIdeaPath(workspaceRoot, status.root);
 }
 
 /** Whether a preview URL points at this machine, in any loopback spelling. */

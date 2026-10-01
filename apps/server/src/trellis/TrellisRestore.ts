@@ -58,7 +58,11 @@ import {
   type RestoreLeaseShape,
 } from "../orchestration-v2/RestoreLease.ts";
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
-import { TurnAdmission, type TurnAdmissionShape } from "../orchestration-v2/TurnAdmission.ts";
+import {
+  TurnAdmission,
+  TurnAdmissionRefusedError,
+  type TurnAdmissionShape,
+} from "../orchestration-v2/TurnAdmission.ts";
 import { Trellis, trellisRootOf, trellisWorkspaceOf } from "./Trellis.ts";
 import { TrellisTurns } from "./TrellisTurns.ts";
 
@@ -485,7 +489,23 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | 
               const directory = yield* workspaceProjectOf(trellis, path);
               const seen = gate.releases(directory);
               // Waits while the workspace is checkpointing.
-              const { restarted } = yield* turns.start({ threadId, runId, cwd: path });
+              const { restarted, graduatedTo } = yield* turns.start({
+                threadId,
+                runId,
+                cwd: path,
+              });
+              // The idea graduated (from the CLI, or before this thread moved):
+              // its folder is no longer where work goes. The catalog moves the
+              // thread into the project once this turn has ended.
+              if (graduatedTo !== undefined) {
+                const name = yield* trellis.getProject(graduatedTo).pipe(
+                  Effect.map((project) => `"${project.name}"`),
+                  Effect.orElseSucceed(() => graduatedTo),
+                );
+                return yield* new TurnAdmissionRefusedError({
+                  message: `This idea graduated into the project ${name}, so this thread is moving there. Send your message again once it shows under that project.`,
+                });
+              }
               // A checkpoint T3 started holds the gate until it released the
               // workspace's sessions, so this turn opens a fresh one after.
               if (yield* gate.waitFree(path)) waited = true;

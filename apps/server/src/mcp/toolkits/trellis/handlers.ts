@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 
 import { TrellisCheckpointTool } from "../../../trellis/TrellisCheckpointTool.ts";
 import { TrellisWorkers } from "../../../trellis/TrellisWorkers.ts";
+import { TrellisGraduation } from "../../../trellis/TrellisGraduation.ts";
 import { McpInvocationContext } from "../../McpInvocationContext.ts";
 import { TrellisToolkit } from "./tools.ts";
 
@@ -17,6 +18,12 @@ const handlers = {
       const scope = yield* McpInvocationContext;
       const workers = yield* TrellisWorkers;
       return yield* workers.discardFork(scope, input);
+    }),
+  trellis_graduate: (input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext;
+      const graduation = yield* TrellisGraduation;
+      return yield* graduation.graduateFromTool(scope, input);
     }),
 } satisfies Parameters<typeof TrellisToolkit.toLayer>[0];
 

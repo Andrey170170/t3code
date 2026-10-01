@@ -26,6 +26,11 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 export interface CaptureCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
+  /**
+   * The state before a run that no earlier capture holds: a scope's start,
+   * which later diffs begin from. A store that ages captures out keeps it.
+   */
+  readonly baseline?: boolean;
 }
 
 export interface RestoreCheckpointInput {

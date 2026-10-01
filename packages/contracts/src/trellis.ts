@@ -405,3 +405,78 @@ export class TrellisCheckpointMcpFailure extends Schema.TaggedError<TrellisCheck
     message: Schema.String,
   },
 ) {}
+
+/**
+ * Input for the `trellis_graduate` MCP tool: graduates the calling thread's
+ * idea into a dedicated project and moves its threads there, which ends the
+ * calling turn. The result arrives as the thread's next message, in the new
+ * project.
+ */
+export const TrellisGraduateMcpInput = Schema.Struct({
+  base: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(200)).annotate({
+      description: "Base image of the new project's workspace; default: Trellis's default base.",
+    }),
+  ),
+  name: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(200)).annotate({
+      description: "Name of the new project; default: the idea's name.",
+    }),
+  ),
+  interrupt: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Also end the running turns of your own delegated workers (and theirs) in this idea; they continue in the new project. Other threads' running turns always refuse the graduation.",
+    }),
+  ),
+});
+export type TrellisGraduateMcpInput = typeof TrellisGraduateMcpInput.Type;
+
+export const TrellisGraduateMcpResult = Schema.Struct({
+  status: Schema.Literal("started"),
+  /** Workers whose turns are being ended, by title. */
+  interrupting: Schema.Array(Schema.String),
+  note: Schema.String,
+});
+export type TrellisGraduateMcpResult = typeof TrellisGraduateMcpResult.Type;
+
+export class TrellisGraduateMcpFailure extends Schema.TaggedError<TrellisGraduateMcpFailure>()(
+  "TrellisGraduateMcpFailure",
+  {
+    code: Schema.Literals([
+      "capability_denied",
+      "thread_not_found",
+      "not_an_idea",
+      "threads_running",
+      "graduation_in_progress",
+      "trellis_unavailable",
+      "operation_failed",
+    ]),
+    message: Schema.String,
+  },
+) {}
+
+/** Graduates the idea behind a T3 project into a dedicated project (the "Graduate" action). */
+export const TrellisGraduateInput = Schema.Struct({
+  projectId: ProjectId,
+  base: Schema.optionalKey(TrimmedNonEmptyString),
+  name: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type TrellisGraduateInput = typeof TrellisGraduateInput.Type;
+
+export const TrellisGraduateResult = Schema.Struct({
+  /** The new project's T3 project. */
+  projectId: ProjectId,
+  workspaceRoot: Schema.String,
+  name: Schema.String,
+  /** Threads that could not move now (they move once their turn ends). */
+  notMoved: Schema.Array(Schema.String),
+});
+export type TrellisGraduateResult = typeof TrellisGraduateResult.Type;
+
+/** The bases a Trellis project can start from. */
+export const TrellisBasesResult = Schema.Struct({
+  bases: Schema.Array(Schema.String),
+  defaultBase: Schema.NullOr(Schema.String),
+});
+export type TrellisBasesResult = typeof TrellisBasesResult.Type;

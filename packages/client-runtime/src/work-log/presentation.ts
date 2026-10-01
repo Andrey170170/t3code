@@ -615,6 +615,7 @@ function summaryActionPriority(action: ToolGroupAction | T3McpToolSummaryAction)
     case "worktree-handoff":
     case "trellis-checkpoint":
     case "trellis-discard-fork":
+    case "trellis-graduate":
     case "project-create":
     case "project-update":
     case "project-delete":

@@ -19,6 +19,7 @@ import {
   isUnderTrellisRoots,
   pickTrellisEnvironment,
   threadMoveBlocker,
+  canGraduateIdea,
   trellisFindHitSummary,
   trellisItemDetail,
   trellisItemKind,
@@ -238,11 +239,10 @@ describe("trellisMoveTargets", () => {
 describe("threadMoveBlocker", () => {
   const idle = { status: "idle", activeRunId: null };
 
-  it("lets only threads that never ran move", () => {
+  it("lets idle threads move, with or without history", () => {
     expect(threadMoveBlocker({ latestRun: null, runtime: null, forkedFrom: null })).toBeNull();
-    expect(threadMoveBlocker({ latestRun: {}, runtime: idle, forkedFrom: null })).toContain(
-      "history",
-    );
+    expect(threadMoveBlocker({ latestRun: {}, runtime: idle, forkedFrom: null })).toBeNull();
+    expect(threadMoveBlocker({ latestRun: {}, runtime: idle, forkedFrom: {} })).toBeNull();
   });
 
   it("blocks busy threads and forks that have not run", () => {
@@ -416,5 +416,18 @@ describe("worker forks", () => {
       'Discarded · worker fork of "Lead" · unmerged work (uncommitted changes) · kept until purged · purge requested by "Lead": dead end',
     );
     expect(trellisWorkspaceDetail(entries[0]!)).toBe("Running · project workspace");
+  });
+});
+
+describe("canGraduateIdea", () => {
+  const ready = { state: "ready" as const, root: "/trellis" };
+
+  it("offers graduation for live ideas only", () => {
+    const idea = "/trellis/workspaces/ws-s/project/idea-1";
+    expect(canGraduateIdea(idea, ready)).toBe(true);
+    expect(canGraduateIdea("/trellis/workspaces/ws-p/project", ready)).toBe(false);
+    expect(canGraduateIdea("/home/me/repo", ready)).toBe(false);
+    expect(canGraduateIdea(idea, { ...ready, retiredRoots: [idea] })).toBe(false);
+    expect(canGraduateIdea(idea, { ...ready, state: "unavailable" })).toBe(false);
   });
 });
