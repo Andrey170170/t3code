@@ -533,6 +533,36 @@ it.effect("keeps a summary Trellis could not take and posts it on a later flush"
   }).pipe(Effect.provide(testLayer(fake)));
 });
 
+it.effect("an unreadable pending file fails the event and is left as it was", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const workers = yield* TrellisWorkers.TrellisWorkers;
+    const config = yield* ServerConfig;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const pendingFile = NodePath.join(config.stateDir, "trellis-pending-summaries.json");
+    yield* fileSystem.writeFileString(pendingFile, "{not json");
+    const lead = yield* startLead;
+    const forked = yield* delegate(lead.threadId, { fork: { from: "latest" } });
+    const task = (yield* threadOf(lead.threadId)).subagents.find(
+      (candidate) => candidate.childThreadId === forked.childThreadId,
+    )!;
+    const failed = yield* workers
+      .handle({
+        type: "subagent.updated",
+        threadId: lead.threadId,
+        payload: {
+          ...task,
+          status: "completed",
+          result: "Done.",
+          completedAt: yield* DateTime.now,
+        },
+      } as unknown as OrchestrationV2DomainEvent)
+      .pipe(Effect.flip);
+    assert.equal(failed._tag, "TrellisSummaryQueueError");
+    assert.equal(yield* fileSystem.readFileString(pendingFile), "{not json");
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
 it.effect("archiving a lead reaches workers below an archived worker", () => {
   const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
   return Effect.gen(function* () {

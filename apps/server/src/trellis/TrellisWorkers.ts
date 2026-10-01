@@ -64,6 +64,12 @@ export class TrellisForkSpawnError extends Schema.TaggedError<TrellisForkSpawnEr
   { message: Schema.String, invalid: Schema.Boolean },
 ) {}
 
+/** A worker summary could not be written to the pending-summaries file. */
+export class TrellisSummaryQueueError extends Schema.TaggedError<TrellisSummaryQueueError>()(
+  "TrellisSummaryQueueError",
+  { message: Schema.String },
+) {}
+
 export interface TrellisWorkerFork {
   /** The fork's T3 project, for the child thread. */
   readonly projectId: ProjectId;
@@ -96,8 +102,13 @@ export class TrellisWorkers extends Context.Service<
     ) => Effect.Effect<TrellisDiscardForkMcpResult, TrellisDiscardForkMcpFailure>;
     /** Follows orchestration events for summaries and the archive cascade. */
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
-    /** Handles one orchestration event as `start` does (tests feed it directly). Never fails. */
-    readonly handle: (event: OrchestrationV2DomainEvent) => Effect.Effect<void>;
+    /**
+     * Handles one orchestration event as `start` does (tests feed it
+     * directly). Fails only when a summary could not be queued durably.
+     */
+    readonly handle: (
+      event: OrchestrationV2DomainEvent,
+    ) => Effect.Effect<void, TrellisSummaryQueueError>;
     /** Posts the summaries Trellis could not take yet; `start` runs it every 30 s. */
     readonly flushSummaries: Effect.Effect<void>;
   }
@@ -477,10 +488,11 @@ const make = Effect.gen(function* () {
     posted.add(key);
     if (posted.size > 2_000) posted.delete(posted.values().next().value!);
   };
-  const readPending = fileSystem.readFileString(pendingPath).pipe(
-    Effect.flatMap(decodePending),
-    Effect.orElseSucceed((): ReadonlyArray<PendingSummary> => []),
-  );
+  // Empty only when there is no file: an unreadable one fails, so nothing overwrites it.
+  const readPending = Effect.gen(function* () {
+    if (!(yield* fileSystem.exists(pendingPath))) return [] as ReadonlyArray<PendingSummary>;
+    return yield* decodePending(yield* fileSystem.readFileString(pendingPath));
+  });
   const writePending = (entries: ReadonlyArray<PendingSummary>) =>
     Effect.gen(function* () {
       const partial = `${pendingPath}.partial`;
@@ -626,7 +638,9 @@ const make = Effect.gen(function* () {
       });
       yield* flushSummaries;
     }).pipe(
-      Effect.catchCause((cause) =>
+      // Not queued: the follower retries the event before moving its cursor.
+      Effect.mapError((error) => new TrellisSummaryQueueError({ message: String(error) })),
+      Effect.tapCause((cause) =>
         Effect.logWarning("could not queue a worker's summary", {
           childThreadId,
           cause: Cause.pretty(cause),
