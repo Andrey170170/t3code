@@ -671,6 +671,33 @@ it.effect("a replayed archive of a lead reopened since leaves its new workers al
   }).pipe(Effect.provide(testLayer(fake)));
 });
 
+it.effect("deleting a lead cancels and archives its workers", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const workers = yield* TrellisWorkers.TrellisWorkers;
+    const orchestrator = yield* OrchestratorV2;
+    const lead = yield* startLead;
+    const forked = yield* delegate(lead.threadId, { fork: { from: "latest" } });
+    const leadRun = (yield* threadOf(lead.threadId)).runs.at(-1)!;
+    yield* writeEvent({
+      id: `completed:${leadRun.id}` as never,
+      type: "run.updated",
+      threadId: lead.threadId,
+      runId: leadRun.id,
+      providerInstanceId: leadRun.providerInstanceId,
+      occurredAt: leadRun.requestedAt,
+      payload: { ...leadRun, status: "completed", completedAt: leadRun.requestedAt },
+    });
+    const deleted = yield* orchestrator.dispatch({
+      type: "thread.delete",
+      commandId: CommandId.make("lead:delete"),
+      threadId: lead.threadId,
+    });
+    for (const stored of deleted.storedEvents) yield* workers.handle(stored.event);
+    assert.isNotNull((yield* threadOf(forked.childThreadId)).thread.archivedAt);
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
 it.effect("archiving a lead reaches workers below an archived worker", () => {
   const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
   return Effect.gen(function* () {

@@ -14,8 +14,8 @@
  * - `start`: follows orchestration events, resuming after the last one it
  *   handled. A worker in another project that completes posts its result as
  *   the fork's `summary` activity (what `trellis merge-brief` shows the
- *   lead), kept in a file until Trellis takes it; archiving a thread cancels
- *   and archives its workers, transitively. Their forks stay.
+ *   lead), kept in a file until Trellis takes it; archiving or deleting a
+ *   thread cancels and archives its workers, transitively. Their forks stay.
  *
  * @module trellis/TrellisWorkers
  */
@@ -687,18 +687,19 @@ const make = Effect.gen(function* () {
     );
 
   /**
-   * Cancels and archives the workers below a thread archived at `archivedAt`;
+   * Cancels and archives the workers below a thread archived (or deleted) at `archivedAt`;
    * their forks stay. A replayed event acts only while the lead is still
    * archived, and only on workers that existed then. Fails (so the follower
    * retries the event) when a worker could not be archived.
    */
-  const archiveWorkers = (leadId: ThreadId, archivedAt: DateTime.Utc) =>
+  const archiveWorkers = (leadId: ThreadId, archivedAt: DateTime.Utc, deleted = false) =>
     Effect.gen(function* () {
       if (!(yield* trellis.enabled)) return;
       // Lineage through archived workers too; only active ones are stopped.
       const shell = yield* threads.getShellSnapshot();
       const all = [...shell.threads, ...shell.archivedThreads];
-      if (all.find((thread) => thread.id === leadId)?.archivedAt == null) return;
+      // A deleted lead is gone for good (and from the snapshot); an archived one may be reopened.
+      if (!deleted && all.find((thread) => thread.id === leadId)?.archivedAt == null) return;
       const workers = new Set(descendantsOf(leadId, all));
       const failed: Array<ThreadId> = [];
       for (const worker of shell.threads) {
@@ -754,6 +755,9 @@ const make = Effect.gen(function* () {
     if (event.type === "thread.archived") {
       return archiveWorkers(event.threadId, event.payload.archivedAt ?? event.occurredAt);
     }
+    if (event.type === "thread.deleted") {
+      return archiveWorkers(event.threadId, event.payload.deletedAt ?? event.occurredAt, true);
+    }
     if (event.type !== "subagent.updated") return Effect.void;
     const task = event.payload;
     if (
@@ -791,6 +795,7 @@ const make = Effect.gen(function* () {
   /** Whether `handle` acts on the event; only those move the cursor. */
   const relevant = (event: OrchestrationV2DomainEvent) =>
     event.type === "thread.archived" ||
+    event.type === "thread.deleted" ||
     (event.type === "subagent.updated" && event.payload.status === "completed");
 
   const saveCursor = (sequence: number) =>
