@@ -710,8 +710,10 @@ const make = Effect.gen(function* () {
           );
         }
         if (failed.length > 0) {
+          // Retried on every poll; a fork that has not run yet stays until it
+          // is archived (it cannot follow, and cannot run in the idea).
           return yield* new TrellisError({
-            message: `could not move threads of a graduated idea: ${failed.join("; ")}`,
+            message: `could not move threads of a graduated idea (a fork that has not run yet stays until archived): ${failed.join("; ")}`,
           });
         }
         // The next pass retires the idea's project, now without active threads.

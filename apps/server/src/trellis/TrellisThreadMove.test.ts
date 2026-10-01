@@ -301,6 +301,13 @@ it.layer(TrellisOrchestratorTestLayer)("thread.project.move", (it) => {
       );
       const rewound = yield* rollback("conversation", false);
       assert.isAtLeast(rewound.sequence, 1);
+      // While that revert is in flight the thread cannot move again: it would
+      // land after the move.
+      const elsewhere = yield* createProject(
+        "move-boundary-elsewhere",
+        "/trellis/workspaces/ws-h/project",
+      );
+      assert.include(yield* rejection(move(threadId, elsewhere, "during-revert")), "reverting");
     }),
   );
 

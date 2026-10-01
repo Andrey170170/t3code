@@ -292,9 +292,14 @@ export const layer: Layer.Layer<
 
       const restoreFiles = input.restoreFiles !== false;
       const targetAssignment = scopeAssignmentOf(scope, projection.checkpointScopes);
+      // Held through the provider rewind and the file restore; released when
+      // `execute` ends.
+      yield* restoreLease.acquire(scope);
       // The decider resolved file restores into the thread's current project;
-      // a move accepted since then puts this one across the boundary.
-      if (restoreFiles && targetAssignment !== workspaceAssignmentOf(projection.thread)) {
+      // read again under the lease, a move since then puts this one across
+      // the boundary.
+      const current = (yield* projections.getThreadRecords(input.threadId, [])).thread;
+      if (restoreFiles && targetAssignment !== workspaceAssignmentOf(current)) {
         return yield* new CheckpointRollbackExecutionError({
           reason: "rollback-target-invalid",
           threadId: input.threadId,
@@ -303,9 +308,6 @@ export const layer: Layer.Layer<
           detail: MOVE_BOUNDARY_RESTORE_MESSAGE,
         });
       }
-      // Held through the provider rewind and the file restore; released when
-      // `execute` ends.
-      yield* restoreLease.acquire(scope);
       if (restoreFiles) {
         const refusal = yield* restoreRule.check(
           {
@@ -368,12 +370,26 @@ export const layer: Layer.Layer<
         thread: projection.thread,
         modelSelection,
       });
-      const existingSession = projection.providerSessions.find(
+      const storedSession = projection.providerSessions.find(
         (candidate) => candidate.id === providerThread.providerSessionId,
       );
+      // A thread that moved since its session opened rewinds in its new
+      // workspace's session, as its next turn would run, never in a process
+      // still serving the old workspace for other threads.
+      const sessionKey = resolvedRuntimePolicy.launch?.sessionKey;
+      const rebound = storedSession !== undefined && storedSession.sessionKey !== sessionKey;
+      const providerSessionId = !rebound
+        ? providerThread.providerSessionId
+        : storedSession.capabilities.sessions.supportsMultipleProviderThreadsPerSession
+          ? ids.derive.providerSession({
+              providerInstanceId: providerThread.providerInstanceId,
+              ...(sessionKey === undefined ? {} : { sessionKey }),
+            })
+          : providerThread.providerSessionId;
+      const existingSession = rebound ? undefined : storedSession;
       const session = yield* sessions.open({
         threadId: input.threadId,
-        providerSessionId: providerThread.providerSessionId,
+        providerSessionId,
         modelSelection,
         runtimePolicy: resolvedRuntimePolicy,
         ...(existingSession === undefined ? {} : { resumeFromSession: existingSession }),
@@ -476,6 +492,7 @@ export const layer: Layer.Layer<
           occurredAt: now,
           payload: {
             ...snapshot.providerThread,
+            providerSessionId,
             lastRunOrdinal: targetOrdinal === 0 ? null : targetOrdinal,
             updatedAt: now,
           },
@@ -531,8 +548,11 @@ export const layer: Layer.Layer<
         const candidateScope = projection.checkpointScopes.find(
           (other) => other.id === candidate.scopeId,
         );
+        // A project's baseline stays: the files it holds are still there, and
+        // later turns in that project diff from it.
         return (
           candidateScope?.kind === "root_run" &&
+          candidate.appRunOrdinal !== null &&
           scopeAssignmentOf(candidateScope, projection.checkpointScopes) > targetAssignment &&
           checkpointRunOrdinal(candidate, candidateScope) > targetOrdinal
         );

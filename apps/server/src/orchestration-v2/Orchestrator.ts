@@ -76,7 +76,12 @@ import { notificationTurnItem } from "./Notification.ts";
 import { isRestartNoteSource } from "./RestartBackgroundNote.ts";
 import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
 import { EventSinkV2 } from "./EventSink.ts";
-import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
+import {
+  EffectOutboxV2,
+  type OrchestrationEffectRequestV2,
+  type PendingOrchestrationEffectV2,
+} from "./EffectOutbox.ts";
+import { rollbackInFlight } from "./CheckpointRollbackService.ts";
 import { IdAllocatorV2 } from "./IdAllocator.ts";
 import {
   ThreadCommandExecutor,
@@ -656,6 +661,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const idAllocator = yield* IdAllocatorV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projectionStore = yield* ProjectionStoreV2;
+  // Present in the server; tells a rollback whose effect settled apart from one in flight.
+  const effectOutbox = yield* Effect.serviceOption(EffectOutboxV2);
   const nextTurnItemOrdinal = (
     projection: Pick<OrchestrationV2ThreadProjection, "thread"> &
       Partial<Pick<OrchestrationV2ThreadProjection, "turnItems">>,
@@ -3290,6 +3297,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (projection.runs.some(isBlockingRun)) {
         return yield* reject(
           "This thread has a running turn (thread_busy); wait for it to finish or stop it, then move it.",
+        );
+      }
+      // A revert accepted before the move would restore the old project's
+      // files after it; rollbacks are accepted on this same per-thread queue.
+      if (yield* rollbackInFlight(thread, effectOutbox)) {
+        return yield* reject(
+          "This thread is reverting (thread_busy); wait for the revert to finish, then move it.",
         );
       }
       if (pendingForkTransferForThread(projection) !== undefined) {

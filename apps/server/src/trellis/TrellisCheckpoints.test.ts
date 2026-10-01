@@ -727,6 +727,20 @@ it.effect("a moved thread's baseline in its new project is kept with the thread"
   }).pipe(Effect.provide(storeLayer(fake)));
 });
 
+it.effect("a baseline whose ref is retired gives up its pin", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");
+  const scope = scopeAt(idea, "retired-baseline");
+  return Effect.gen(function* () {
+    const store = yield* CheckpointStore.CheckpointStore;
+    yield* store.captureCheckpoint({ cwd: idea, checkpointRef: refOf(scope, 2), baseline: true });
+    const baseline = fake.snapshots.at(-1)!;
+    assert.isTrue(baseline.pinned);
+    yield* store.deleteCheckpointRefs({ cwd: idea, checkpointRefs: [refOf(scope, 2)] });
+    assert.isFalse(baseline.pinned);
+  }).pipe(Effect.provide(storeLayer(fake)));
+});
+
 it.effect("a read pin left by a crash is released, and a read in progress keeps its own", () => {
   const fake = makeFakeTrellis(tempRoot());
   const idea = NodePath.join(fake.workspacePath("ws-s"), "idea-a");

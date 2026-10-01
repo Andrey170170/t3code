@@ -16,6 +16,8 @@ import * as Layer from "effect/Layer";
 
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
+import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import {
   ProjectionStoreThreadNotFoundError,
@@ -61,6 +63,8 @@ const view = (overrides: Partial<TrellisProjectView>): TrellisProjectView => ({
 function makeGraduationTrellis(options: { readonly refuse?: string } = {}) {
   const open = new Map<string, string>();
   const graduations: Array<{ base?: string | undefined; thread?: string | undefined }> = [];
+  // Session releases and graduations, in order.
+  const log: Array<string> = [];
   const project = view({ id: "prj-1", kind: "project", name: "Demo", path: PROJECT });
   const trellis = makeTestTrellis({
     env: { root: "/trellis", bin: "trellis", shimDir: "/t3/trellis-shims" },
@@ -84,6 +88,7 @@ function makeGraduationTrellis(options: { readonly refuse?: string } = {}) {
     graduate: ({ base, thread }) =>
       Effect.sync(() => {
         graduations.push({ base, thread });
+        log.push("graduate");
         if (options.refuse !== undefined) {
           return { ok: false as const, error: options.refuse, turns: [] };
         }
@@ -98,13 +103,19 @@ function makeGraduationTrellis(options: { readonly refuse?: string } = {}) {
         return { ok: true as const, project };
       }),
   });
-  return { trellis, graduations, open };
+  return { trellis, graduations, open, log };
 }
 
 const NEW_PROJECT = ProjectId.make("project-demo");
 
 function graduationLayer(fake: ReturnType<typeof makeGraduationTrellis>) {
   return TrellisGraduation.layer.pipe(
+    Layer.provide(
+      Layer.mock(ProviderSessionManagerV2)({
+        release: ({ providerSessionId }) =>
+          Effect.sync(() => void fake.log.push(`release ${providerSessionId}`)),
+      }),
+    ),
     // The catalog makes the new project's T3 project.
     Layer.provide(
       Layer.unwrap(
@@ -182,6 +193,18 @@ const settleInterrupted = (run: OrchestrationV2Run) =>
       occurredAt: run.requestedAt,
       payload: { ...run, status: "interrupted", completedAt: run.requestedAt },
     });
+  });
+
+/** What the provider does when its turn completes. */
+const settleCompleted = (run: OrchestrationV2Run) =>
+  writeEvent({
+    id: `completed:${run.id}` as never,
+    type: "run.updated",
+    threadId: run.threadId,
+    runId: run.id,
+    providerInstanceId: run.providerInstanceId,
+    occurredAt: run.requestedAt,
+    payload: { ...run, status: "completed", completedAt: run.requestedAt },
   });
 
 const continuationOf = (threadId: ThreadId) =>
@@ -400,3 +423,112 @@ it.effect(
     );
   },
 );
+
+it.effect("refuses while a fork in the idea has not run yet, by name", () => {
+  const fake = makeGraduationTrellis();
+  return Effect.gen(function* () {
+    const graduation = yield* TrellisGraduation.TrellisGraduation;
+    const source = yield* createThread("source", IDEA);
+    const fork = yield* createThreadIn("unforked", source.projectId);
+    // A fork of the source, created but never sent a message.
+    const thread = (yield* projectionOf(fork)).thread;
+    yield* writeEvent({
+      id: "unforked:forked" as never,
+      type: "thread.metadata-updated",
+      threadId: fork,
+      providerInstanceId: thread.providerInstanceId,
+      occurredAt: thread.createdAt,
+      payload: {
+        ...thread,
+        forkedFrom: { type: "run", threadId: source.threadId, runId: RunId.make("run-source") },
+      },
+    });
+    const refusal = yield* graduation.graduate({ projectId: source.projectId }).pipe(Effect.flip);
+    assert.include(refusal.message, '"unforked" is a fork that has not run yet');
+    assert.deepEqual(fake.graduations, []);
+  }).pipe(Effect.provide(graduationLayer(fake)));
+});
+
+/** Background work left by a thread's settled turn, as the provider reports it. */
+const withBackgroundTask = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const projection = yield* projectionOf(threadId);
+    const providerThread = projection.providerThreads.find(
+      (candidate) => candidate.id === projection.thread.activeProviderThreadId,
+    )!;
+    yield* writeEvent({
+      id: `${threadId}:background` as never,
+      type: "provider-thread.updated",
+      threadId,
+      driver: providerThread.driver,
+      occurredAt: providerThread.updatedAt,
+      payload: {
+        ...providerThread,
+        pendingBackgroundTasks: [
+          { taskId: "bash-1", kind: "command", description: "npm run watch" },
+        ],
+      },
+    });
+  });
+
+it.effect("an idle thread's background work refuses the graduation, by name", () => {
+  const fake = makeGraduationTrellis();
+  return Effect.gen(function* () {
+    const graduation = yield* TrellisGraduation.TrellisGraduation;
+    const first = yield* createThread("first", IDEA);
+    const watcher = yield* createThreadIn("watcher", first.projectId);
+    const run = yield* startTurn(watcher, "start a watcher in the background");
+    yield* settleCompleted(run);
+    yield* withBackgroundTask(watcher);
+    const refusal = yield* graduation.graduate({ projectId: first.projectId }).pipe(Effect.flip);
+    assert.include(refusal.message, '"watcher" is mid-turn in this idea');
+    assert.deepEqual(fake.graduations, []);
+  }).pipe(Effect.provide(graduationLayer(fake)));
+});
+
+it.effect("the caller's own session and background work stop before the copy", () => {
+  const fake = makeGraduationTrellis();
+  return Effect.gen(function* () {
+    const graduation = yield* TrellisGraduation.TrellisGraduation;
+    const lead = yield* createThread("lead", IDEA);
+    const run = yield* startTurn(lead.threadId, "work");
+    yield* withBackgroundTask(lead.threadId);
+    // A session of its own (not shared), live in the idea.
+    const now = run.requestedAt;
+    yield* writeEvent({
+      id: "lead:session" as never,
+      type: "provider-session.attached",
+      threadId: lead.threadId,
+      driver: "codex" as never,
+      providerInstanceId: modelSelection.instanceId,
+      occurredAt: now,
+      payload: {
+        id: ProviderSessionId.make("session-lead-own"),
+        driver: "codex" as never,
+        providerInstanceId: modelSelection.instanceId,
+        status: "ready",
+        cwd: IDEA,
+        model: modelSelection.model,
+        capabilities: {
+          ...CodexProviderCapabilitiesV2,
+          sessions: {
+            ...CodexProviderCapabilitiesV2.sessions,
+            supportsMultipleProviderThreadsPerSession: false,
+          },
+        },
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+        sessionKey: "ws-s",
+      },
+    });
+    yield* graduation.graduateFromTool(scopeOf(lead.threadId), {});
+    yield* settleInterrupted(run);
+    yield* graduation.drain;
+    assert.deepEqual(fake.log, ["release session-lead-own", "graduate"]);
+    assert.include(
+      yield* continuationOf(lead.threadId),
+      "Background tasks you had running were stopped",
+    );
+  }).pipe(Effect.provide(graduationLayer(fake)));
+});

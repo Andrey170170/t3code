@@ -32,6 +32,7 @@ import {
   MessageId,
   type OrchestrationV2ThreadShell,
   type ProjectId,
+  type ProviderSessionId,
   type RunId,
   ThreadId,
   type TrellisCreateResult,
@@ -52,12 +53,14 @@ import * as Option from "effect/Option";
 
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
+import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import { queuedRunsInDeliveryOrder } from "../orchestration-v2/QueuedRunOrder.ts";
 import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
 import { Trellis, trellisRootOf } from "./Trellis.ts";
 import { TrellisCatalog } from "./TrellisCatalog.ts";
 import { workersOf } from "./TrellisCheckpointTool.ts";
+import { TrellisRestoreGate } from "./TrellisRestore.ts";
 import { TrellisTurns } from "./TrellisTurns.ts";
 
 export interface TrellisGraduationShape {
@@ -140,6 +143,8 @@ interface StartInput {
 const make = Effect.gen(function* () {
   const trellisOption = yield* Effect.serviceOption(Trellis);
   const turnsOption = yield* Effect.serviceOption(TrellisTurns);
+  const gateOption = yield* Effect.serviceOption(TrellisRestoreGate);
+  const sessions = yield* ProviderSessionManagerV2;
   const catalogOption = yield* Effect.serviceOption(TrellisCatalog);
   const threads = yield* ThreadManagementService;
   const projects = yield* ProjectStoreV2;
@@ -160,13 +165,15 @@ const make = Effect.gen(function* () {
     if (
       Option.isNone(trellisOption) ||
       Option.isNone(turnsOption) ||
-      Option.isNone(catalogOption)
+      Option.isNone(catalogOption) ||
+      Option.isNone(gateOption)
     ) {
       return yield* failure("not_an_idea", "Trellis is not available on this server.");
     }
     const trellis = trellisOption.value;
     const turns = turnsOption.value;
     const catalog = catalogOption.value;
+    const gate = gateOption.value;
     const unavailable = (error: { readonly message: string }) =>
       failure("trellis_unavailable", `Trellis could not be asked: ${error.message}`);
 
@@ -218,14 +225,28 @@ const make = Effect.gen(function* () {
       const nameOf = (thread: ThreadId) => titles.get(thread) ?? thread;
       const running = new Map<ThreadId, RunId | null>();
       for (const thread of ideaThreads) {
-        if (thread.id !== caller?.id && thread.activeRunId !== null) {
-          running.set(thread.id, thread.activeRunId);
-        }
+        if (thread.id === caller?.id) continue;
+        if (thread.activeRunId !== null) running.set(thread.id, thread.activeRunId);
+        // Background work (a background shell, a subagent) outlives its turn
+        // and keeps writing; the graduation stops it, so it counts as running.
+        else if ((thread.pendingBackgroundTasks ?? []).length > 0) running.set(thread.id, null);
       }
       for (const turn of yield* trellis.listTurns(root).pipe(Effect.mapError(unavailable))) {
         if (turn.project !== idea.id) continue;
         const thread = ThreadId.make(turn.thread);
         if (thread !== caller?.id && !running.has(thread)) running.set(thread, null);
+      }
+      // A fork that has not run yet forks its conversation when it first
+      // runs, which cannot follow it to another project yet.
+      const unforked = ideaThreads.filter(
+        (thread) => thread.forkedFrom !== null && thread.latestRunId === null,
+      );
+      if (unforked.length > 0) {
+        const one = unforked.length === 1;
+        return yield* failure(
+          "threads_running",
+          `${quoted(unforked.map((thread) => thread.title))} ${one ? "is a fork that has" : "are forks that have"} not run yet and cannot move to another project. Send ${one ? "it" : "them"} a message or archive ${one ? "it" : "them"} first, then graduate the idea.`,
+        );
       }
       const workers = caller === null ? new Set<ThreadId>() : workersOf(caller.id, input.shell);
       const others = [...running.keys()];
@@ -244,6 +265,15 @@ const make = Effect.gen(function* () {
         );
       }
 
+      // The caller's background work (its shell's list is empty while its
+      // turn runs) ends with its session; its continuation says so.
+      const callerHadBackgroundWork =
+        caller !== null &&
+        (yield* threads
+          .getThreadRecords(caller.id, ["providerThreads"])
+          .pipe(Effect.orElseSucceed(() => ({ providerThreads: [] })))).providerThreads.some(
+          (providerThread) => (providerThread.pendingBackgroundTasks ?? []).length > 0,
+        );
       // Workers with a turn T3 runs; a stale Trellis row goes with the resynchronization.
       const interrupted = others.filter((thread) => running.get(thread) != null);
       const ending = [
@@ -376,6 +406,52 @@ const make = Effect.gen(function* () {
           return notMoved;
         });
 
+      /**
+       * Ends the provider sessions of the idea's threads, background work
+       * included: a session of its own is released (its process and what it
+       * started end, awaited); a thread sharing a process (Codex) is detached
+       * from it. They reopen in the new project on the next turn.
+       */
+      const stopSession = (
+        threadId: ThreadId,
+        session: { readonly id: ProviderSessionId; readonly shared: boolean },
+      ) =>
+        session.shared
+          ? Effect.flatMap(commandId("detach"), (id) =>
+              threads.dispatch({
+                type: "provider-session.detach",
+                commandId: id,
+                threadId,
+                providerSessionId: session.id,
+                reason: "The idea is graduating.",
+              }),
+            ).pipe(failedQuietly("detach a provider session", threadId))
+          : sessions
+              .release({
+                providerSessionId: session.id,
+                reason: "manual_shutdown",
+                detail: "The idea is graduating into its own project.",
+              })
+              .pipe(failedQuietly("release a provider session", threadId));
+      const stopIdeaSessions = Effect.gen(function* () {
+        const current = yield* threads.getShellSnapshot({ location: "active" });
+        for (const thread of current.threads) {
+          if (thread.projectId !== input.ideaProjectId) continue;
+          const records = yield* threads.getThreadRecords(thread.id, ["providerSessions"]);
+          for (const session of records.providerSessions) {
+            if (session.status === "stopped" || session.status === "error") continue;
+            yield* stopSession(thread.id, {
+              id: session.id,
+              shared: session.capabilities.sessions.supportsMultipleProviderThreadsPerSession,
+            });
+          }
+        }
+      }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("trellis graduation could not read the idea's sessions", { cause }),
+        ),
+      );
+
       const run = Effect.gen(function* () {
         // A queue the user paused stays paused; such a thread gets its
         // continuation afterwards (an idle thread starts it at once).
@@ -422,18 +498,26 @@ const make = Effect.gen(function* () {
               error: "the turns it ended did not stop in time, so nothing was copied",
               turns: [],
             }
-          : yield* trellis
-              .graduate({
-                id: idea.id,
-                base: input.base,
-                name: input.name,
-                thread: caller?.id,
-              })
-              .pipe(
-                Effect.catch((error) =>
-                  Effect.succeed({ ok: false as const, error: error.message, turns: [] }),
-                ),
-              );
+          : yield* Effect.scoped(
+              Effect.gen(function* () {
+                // No turn starts in the idea from here until the copy is done,
+                // and nothing the idea's threads started keeps writing.
+                yield* gate.hold([root]);
+                yield* stopIdeaSessions;
+                return yield* trellis
+                  .graduate({
+                    id: idea.id,
+                    base: input.base,
+                    name: input.name,
+                    thread: caller?.id,
+                  })
+                  .pipe(
+                    Effect.catch((error) =>
+                      Effect.succeed({ ok: false as const, error: error.message, turns: [] }),
+                    ),
+                  );
+              }),
+            );
         let outcome: Outcome;
         if (!graduated.ok) {
           let reason = graduated.error;
@@ -456,7 +540,11 @@ const make = Effect.gen(function* () {
 
         // A run whose interrupt did not land settles shortly.
         yield* awaitEnded;
-        const callerText = callerContinuation(outcome, interrupted.map(nameOf));
+        const callerText =
+          callerContinuation(outcome, interrupted.map(nameOf)) +
+          (callerHadBackgroundWork && !Option.isNone(ended)
+            ? " Background tasks you had running were stopped for the copy; restart any you still need."
+            : "");
         for (const threadId of new Set(ending.map((entry) => entry.threadId))) {
           const text =
             threadId === caller?.id

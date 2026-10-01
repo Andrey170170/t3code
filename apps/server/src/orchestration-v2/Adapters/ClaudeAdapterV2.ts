@@ -7348,6 +7348,10 @@ export function makeClaudeAdapterV2(
 
               const sourceNativeThreadId = yield* getNativeThreadId(forkInput.sourceProviderThread);
               yield* closeLiveQueryForNativeThread(sourceNativeThreadId);
+              // The fork reads the source transcript beside `dir`: a source that
+              // moved to this workspace and has not run here yet is relocated
+              // first (the fork child shares its project).
+              yield* prepareLaunchedTranscript(input.runtimePolicy, sourceNativeThreadId);
               const upToMessageId = yield* resolveClaudeForkUpToMessageId(forkInput);
               const forkOptions: ForkSessionOptions = {
                 ...(input.runtimePolicy.cwd === null ? {} : { dir: input.runtimePolicy.cwd }),

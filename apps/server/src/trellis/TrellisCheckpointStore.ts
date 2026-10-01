@@ -922,6 +922,17 @@ export const layer: Layer.Layer<
                 SET snapshot_id = NULL, retired_snapshot_ids = ${retiredText}
                 WHERE ref = ${ref}
               `.pipe(Effect.mapError(backendError("delete")));
+                  // A retired baseline no longer holds its snapshot for the thread.
+                  if (row.baseline === 1) {
+                    yield* unpin(row.target, row.snapshot_id).pipe(
+                      Effect.catch((error) =>
+                        Effect.logWarning("could not unpin a retired Trellis baseline", {
+                          snapshotId: row.snapshot_id,
+                          detail: error.message,
+                        }),
+                      ),
+                    );
+                  }
                 }
               }),
             ),
