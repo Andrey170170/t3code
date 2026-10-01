@@ -10,6 +10,9 @@
  * server HMR) pass through. Threads outside Trellis are unchanged, and a
  * failed mapping is an error rather than a silent fall back to the host.
  *
+ * A URL is mapped exactly once: an address Trellis already published, and
+ * T3's own signed asset URLs (local file previews), load as given.
+ *
  * Hooks: the `preview.open`/`preview.navigate` WS handlers, the
  * `trellis.resolvePreviewUrl` RPC (the address bar of an open tab) and the
  * `preview_open`/`preview_navigate` MCP tools.
@@ -17,15 +20,17 @@
  * @module trellis/TrellisPreview
  */
 import { PreviewTrellisError, type ThreadId } from "@t3tools/contracts";
-import { isLoopbackHost, normalizePreviewUrl } from "@t3tools/shared/preview";
+import { isLoopbackHostname, normalizePreviewUrl } from "@t3tools/shared/preview";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
+import { isIssuedAssetUrl } from "../assets/AssetAccess.ts";
+import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import { ProjectService } from "../project/ProjectService.ts";
-import { Trellis, trellisRootOf } from "./Trellis.ts";
+import { Trellis, trellisRootOf, trellisWorkspaceOf } from "./Trellis.ts";
 
 /** The port of a loopback `http(s)` URL, or null for any other URL. */
 export function loopbackPort(url: string): number | null {
@@ -35,7 +40,7 @@ export function loopbackPort(url: string): number | null {
   } catch {
     return null;
   }
-  if (!isLoopbackHost(parsed.hostname)) return null;
+  if (!isLoopbackHostname(parsed.hostname)) return null;
   if (parsed.port) return Number(parsed.port);
   return parsed.protocol === "https:" ? 443 : 80;
 }
@@ -76,12 +81,27 @@ export class TrellisPreview extends Context.Service<
 const readFailure = (what: string) =>
   new PreviewTrellisError({ detail: `could not read ${what} to find its workspace` });
 
+const outsideWorkspace = () =>
+  new PreviewTrellisError({
+    detail:
+      "this thread runs outside its Trellis workspace (an external worktree), so its localhost is not the workspace's",
+  });
+
+/** Port of a URL, with the scheme's default. */
+const portOf = (url: URL) => Number(url.port || (url.protocol === "https:" ? 443 : 80));
+
 const make = Effect.gen(function* () {
   const trellis = yield* Trellis;
   const orchestrator = yield* OrchestratorV2;
   const projects = yield* ProjectService;
+  const secrets = yield* ServerSecretStore;
 
-  // The Trellis folder the thread runs in (worktree first), or null.
+  /**
+   * The Trellis folder the thread runs in (worktree first), or null outside
+   * Trellis. A Trellis project's thread whose worktree lies outside the
+   * project's workspace fails: its localhost is neither the workspace nor
+   * safely the host's.
+   */
   const trellisCwdOf = Effect.fn("TrellisPreview.trellisCwdOf")(function* (threadId: ThreadId) {
     const roots = yield* trellis.expectedRoots;
     if (roots.length === 0) return null;
@@ -90,17 +110,39 @@ const make = Effect.gen(function* () {
       .getThreadShell(threadId)
       .pipe(Effect.mapError(() => readFailure("the thread")));
     if (thread === null) return null;
-    const path =
-      thread.worktreePath ??
-      (yield* projects.getById(thread.projectId).pipe(
-        Effect.map((project) => Option.getOrNull(project)?.workspaceRoot ?? null),
-        Effect.mapError(() => readFailure("the project")),
-      ));
-    if (path === null) return null;
+    const projectPath = yield* projects.getById(thread.projectId).pipe(
+      Effect.map((project) => Option.getOrNull(project)?.workspaceRoot ?? null),
+      Effect.mapError(() => readFailure("the project")),
+    );
     // Classified by realpath, as the runtime policy does.
-    const cwd = yield* trellis.canonicalPath(path);
+    const projectRoot = projectPath === null ? null : yield* trellis.canonicalPath(projectPath);
+    const worktree =
+      thread.worktreePath === null ? null : yield* trellis.canonicalPath(thread.worktreePath);
+    const projectWorkspace = projectRoot === null ? null : trellisWorkspaceOf(roots, projectRoot);
+    const cwd = worktree ?? projectRoot;
+    if (cwd === null) return null;
+    if (projectWorkspace !== null) {
+      if (trellisWorkspaceOf(roots, cwd) !== projectWorkspace) return yield* outsideWorkspace();
+      return cwd;
+    }
     return trellisRootOf(roots, cwd) !== null ? cwd : null;
   });
+
+  // Mapped already: an address Trellis published (any workspace) for this port.
+  const isPublished = (url: URL) =>
+    trellis.listPreviews.pipe(
+      Effect.map((previews) =>
+        previews.some((preview) => {
+          try {
+            const published = new URL(preview.url);
+            return isLoopbackHostname(published.hostname) && portOf(published) === portOf(url);
+          } catch {
+            return false;
+          }
+        }),
+      ),
+      Effect.mapError((error) => new PreviewTrellisError({ detail: error.message })),
+    );
 
   const publish = (cwd: string, port: number) =>
     trellis
@@ -112,8 +154,13 @@ const make = Effect.gen(function* () {
   )(function* (threadId, url) {
     const port = loopbackPort(url);
     if (port === null) return url;
+    // T3's own file previews are served by this server, not the workspace.
+    if (yield* isIssuedAssetUrl(url).pipe(Effect.provideService(ServerSecretStore, secrets))) {
+      return url;
+    }
     const cwd = yield* trellisCwdOf(threadId);
     if (cwd === null) return url;
+    if (yield* isPublished(new URL(normalizePreviewUrl(url)))) return url;
     const published = yield* publish(cwd, port);
     return rewriteToPreview(url, published.url);
   });

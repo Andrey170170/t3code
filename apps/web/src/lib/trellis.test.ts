@@ -252,6 +252,9 @@ describe("isLoopbackPreviewUrl", () => {
     expect(isLoopbackPreviewUrl("http://127.0.0.1:3000/x")).toBe(true);
     expect(isLoopbackPreviewUrl("http://[::1]:8080")).toBe(true);
     expect(isLoopbackPreviewUrl("http://0.0.0.0:4000")).toBe(true);
+    expect(isLoopbackPreviewUrl("http://127.0.0.2:8000/")).toBe(true);
+    expect(isLoopbackPreviewUrl("http://localhost.:8000/")).toBe(true);
+    expect(isLoopbackPreviewUrl("http://[::ffff:127.0.0.1]:8000/")).toBe(true);
     expect(isLoopbackPreviewUrl("https://example.com")).toBe(false);
     expect(isLoopbackPreviewUrl("http://node.ts.net:21001/")).toBe(false);
   });
