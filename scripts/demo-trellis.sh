@@ -719,7 +719,8 @@ SLUG_DIR=$HOME/.claude/projects/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$SPIKE_B")
     jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="thinking" or .type=="text") | "  \(.type): \(.thinking // .text | gsub("\n"; " ") | .[0:200])"' "$f" | tail -4
   done
 } >>"$OUT/11-recall-spike.log" 2>&1
-c11() { [[ $SPIKE_RC == 0 ]] && grep -q 'Tests  1 passed' "$OUT/11-recall-spike.log" && ! grep -q skipped "$OUT/11-recall-spike.log"; }
+# One test passes (the recall); the guard for missing paths is skipped.
+c11() { [[ $SPIKE_RC == 0 ]] && grep -qE 'Tests +1 passed' "$OUT/11-recall-spike.log" && ! grep -q failed "$OUT/11-recall-spike.log"; }
 check 11 "Thinking-only recall survives prepare from this run's idea to its project; forkSession with dir B succeeds (spike test)" \
   "$OUT/11-recall-spike.log" c11
 note 11 "Transcript-level by design: the UI cannot move a thread with history in M1."
