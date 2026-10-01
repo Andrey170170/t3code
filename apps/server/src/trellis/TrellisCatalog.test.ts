@@ -9,6 +9,7 @@ import {
   ProviderInstanceId,
   RunId,
   ThreadId,
+  TrellisError,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -24,7 +25,7 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import { layer as mcpSessionRegistryTestLayer } from "../mcp/McpSessionRegistry.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
-import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import { OrchestratorProjectionError, OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { TurnAdmission } from "../orchestration-v2/TurnAdmission.ts";
 import type { ProviderAdapterV2Shape } from "../orchestration-v2/ProviderAdapter.ts";
@@ -247,6 +248,52 @@ describe("planCatalogSync", () => {
         ],
       }),
     ).toEqual([]);
+  });
+
+  it("retires a fork the listing reports as trashed, with threads from its deletion second", () => {
+    const actions = TrellisCatalog.planCatalogSync({
+      root: ROOT,
+      items: [
+        dedicated("prj-b", "Engine", [
+          workspace("ws-b"),
+          { ...workspace("ws-fork", "fork"), deleted_at: 100 },
+        ]),
+      ],
+      projects: [
+        project("p-b", `${ROOT}/workspaces/ws-b/project`, "Engine"),
+        project("p-fork", `${ROOT}/workspaces/ws-fork/project`, "Engine · fork"),
+      ],
+      threads: [
+        {
+          id: ThreadId.make("t-same-second"),
+          projectId: ProjectId.make("p-fork"),
+          archived: false,
+          // Updated during second 100, before the fork was trashed in it.
+          updatedAtMs: 100_500,
+        },
+      ],
+      deletedWorkspaces: noDeletedWorkspaces,
+    });
+    expect(actions).toEqual([
+      {
+        type: "retire",
+        projectId: ProjectId.make("p-fork"),
+        archiveThreadIds: [ThreadId.make("t-same-second")],
+        deleteProject: false,
+      },
+    ]);
+    expect(
+      TrellisCatalog.unlistedWorkspaceIds({
+        root: ROOT,
+        items: [
+          dedicated("prj-b", "Engine", [
+            workspace("ws-b"),
+            { ...workspace("ws-fork", "fork"), deleted_at: 100 },
+          ]),
+        ],
+        projects: [project("p-fork", `${ROOT}/workspaces/ws-fork/project`)],
+      }),
+    ).toEqual(["ws-fork"]);
   });
 
   it("does not re-archive a thread unarchived or used after the item was trashed", () => {
@@ -547,6 +594,62 @@ describe("TrellisCatalog service", () => {
     }));
   };
 
+  /** Failures the service tests inject. */
+  const faults = {
+    restoreAnswerLost: false,
+    projectListFails: false,
+    projectGetFails: false,
+    /** Active-thread reads that succeed before the next one fails; null never fails. */
+    activeReadsBeforeFailure: null as number | null,
+  };
+
+  /** The catalog's orchestrator, with active-thread reads failing per `faults`. */
+  const flakyOrchestrator = Layer.effect(
+    OrchestratorV2,
+    Effect.map(OrchestratorV2, (orchestrator) =>
+      OrchestratorV2.of({
+        ...orchestrator,
+        getShellSnapshot: (options) =>
+          Effect.suspend(() => {
+            if (options?.location === "active" && faults.activeReadsBeforeFailure !== null) {
+              if (faults.activeReadsBeforeFailure === 0) {
+                faults.activeReadsBeforeFailure = null;
+                return Effect.fail(
+                  new OrchestratorProjectionError({ threadId: ThreadId.make("shell") }),
+                );
+              }
+              faults.activeReadsBeforeFailure -= 1;
+            }
+            return orchestrator.getShellSnapshot(options);
+          }),
+      }),
+    ),
+  );
+
+  /** The catalog's project store, with `list` failing while `faults.projectListFails` is set. */
+  const flakyProjectStore = Layer.effect(
+    ProjectStore.ProjectStoreV2,
+    Effect.map(ProjectStore.ProjectStoreV2, (store) =>
+      ProjectStore.ProjectStoreV2.of({
+        ...store,
+        get: (projectId, options) =>
+          Effect.suspend(() =>
+            faults.projectGetFails
+              ? Effect.fail(new ProjectStore.ProjectStoreV2Error({ operation: "get", cause: null }))
+              : store.get(projectId, options),
+          ),
+        list: (options) =>
+          Effect.suspend(() =>
+            faults.projectListFails
+              ? Effect.fail(
+                  new ProjectStore.ProjectStoreV2Error({ operation: "list", cause: null }),
+                )
+              : store.list(options),
+          ),
+      }),
+    ),
+  );
+
   /**
    * A Trellis whose catalog is `state`; trash and restore edit it. A trash
    * reports `trashStarted` and waits for `trashRelease` when they are given.
@@ -572,11 +675,16 @@ describe("TrellisCatalog service", () => {
           );
         }),
       restoreProject: (id) =>
-        Effect.sync(() => {
+        Effect.suspend(() => {
           state.items = state.items.map((item) =>
             item.id === id ? { ...item, deleted_at: null } : item,
           );
-          return state.items.find((item) => item.id === id)!;
+          // Trellis restored it, but the answer was lost.
+          if (faults.restoreAnswerLost) {
+            faults.restoreAnswerLost = false;
+            return Effect.fail(new TrellisError({ message: "connection reset" }));
+          }
+          return Effect.succeed(state.items.find((item) => item.id === id)!);
         }),
       trashWorkspace: (id) => Effect.sync(() => setWorkspaceDeletedAt(state, id, 0)),
       restoreWorkspace: (id) => Effect.sync(() => setWorkspaceDeletedAt(state, id, null)),
@@ -670,6 +778,7 @@ describe("TrellisCatalog service", () => {
 
   const catalogLayer = (state: CatalogState) =>
     TrellisCatalog.layer.pipe(
+      Layer.provide(Layer.merge(flakyProjectStore, flakyOrchestrator)),
       Layer.provideMerge(
         Layer.mergeAll(
           OrchestrationV2LayerLive,
@@ -796,9 +905,32 @@ describe("TrellisCatalog service", () => {
         const status = yield* catalog.status;
         assert.include(status.retiredRoots ?? [], `${SCRATCH}/idea-a`);
 
+        // Trellis restores it but the answer is lost: the conversations stay
+        // archived until a retry finishes the restore.
+        faults.restoreAnswerLost = true;
+        yield* catalog.restore({ kind: "idea", id: "idea-a" }).pipe(Effect.flip);
+        assert.isNotNull(yield* archivedAt(kept));
         const restored = yield* catalog.restore({ kind: "idea", id: "idea-a" });
         assert.equal(restored.projectId, a!.projectId);
         assert.isNull(yield* archivedAt(kept));
+
+        // Trashing refuses while it cannot tell whether anything is running.
+        faults.projectListFails = true;
+        const unverified = yield* catalog
+          .trashProject(a!.projectId)
+          .pipe(
+            Effect.flip,
+            Effect.ensuring(Effect.sync(() => void (faults.projectListFails = false))),
+          );
+        assert.include(unverified.message, "Could not check");
+        assert.deepEqual(state.trashed, ["idea-a"]);
+
+        // Trashed, but its conversations could not be archived: reported.
+        faults.activeReadsBeforeFailure = 1;
+        const partial = yield* catalog.trashProject(a!.projectId).pipe(Effect.flip);
+        assert.include(partial.message, "is in the Trellis trash, but");
+        assert.deepEqual(state.trashed, ["idea-a", "idea-a"]);
+        yield* catalog.restore({ kind: "idea", id: "idea-a" });
 
         // Once the trash is purged, a project kept for its conversations
         // stays retired.
@@ -811,6 +943,15 @@ describe("TrellisCatalog service", () => {
         const refused = yield* catalog.checkProjectDelete(b!.projectId).pipe(Effect.flip);
         assert.include(refused.message, "move it to the Trellis trash");
         yield* catalog.checkProjectDelete(c.projectId);
+        // A failed project read refuses rather than letting the delete through.
+        faults.projectGetFails = true;
+        const unreadable = yield* catalog
+          .checkProjectDelete(c.projectId)
+          .pipe(
+            Effect.flip,
+            Effect.ensuring(Effect.sync(() => void (faults.projectGetFails = false))),
+          );
+        assert.include(unreadable.message, "Could not read the project");
       }),
     );
 

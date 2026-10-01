@@ -15,7 +15,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 
-import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import { OrchestratorProjectionError, OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { TrellisCatalog } from "./TrellisCatalog.ts";
 import * as TrellisIdeaPromotion from "./TrellisIdeaPromotion.ts";
@@ -73,7 +73,23 @@ const FakeCatalog = Layer.effect(
   }),
 );
 
+/** Set to make thread reads fail, as a projection read error would. */
+const shellReads = { failing: false };
+const FlakyOrchestrator = Layer.effect(
+  OrchestratorV2,
+  Effect.map(OrchestratorV2, (orchestrator) =>
+    OrchestratorV2.of({
+      ...orchestrator,
+      getThreadShell: (threadId) =>
+        shellReads.failing
+          ? Effect.fail(new OrchestratorProjectionError({ threadId }))
+          : orchestrator.getThreadShell(threadId),
+    }),
+  ),
+);
+
 const TestLayer = TrellisIdeaPromotion.layer.pipe(
+  Layer.provide(FlakyOrchestrator),
   Layer.provideMerge(FakeCatalog),
   Layer.provideMerge(TrellisOrchestratorTestLayer),
 );
@@ -249,6 +265,28 @@ it.layer(TestLayer)("TrellisIdeaPromotion", (it) => {
         commandId: CommandId.make("idea-move:message"),
         dispatch: sendMessage(threadId, "first"),
       });
+      assert.equal(yield* projectOf(threadId), ProjectId.make("idea-1-project"));
+      assert.deepEqual(ideas.discarded, []);
+    }),
+  );
+
+  it.effect("keeps the idea when its thread cannot be read after a failed message", () =>
+    Effect.gen(function* () {
+      yield* reset;
+      yield* landingPad;
+      const promotion = yield* TrellisIdeaPromotion.TrellisIdeaPromotion;
+      const threadId = ThreadId.make("idea-move-unreadable");
+      yield* createIn(threadId, TRELLIS_LANDING_PAD_PROJECT_ID);
+      yield* promotion
+        .dispatchMessage({
+          threadId,
+          commandId: CommandId.make("idea-move-unreadable:message"),
+          // The move has committed; the cleanup's read of the thread fails.
+          dispatch: Effect.sync(() => void (shellReads.failing = true)).pipe(
+            Effect.andThen(Effect.fail("message failed")),
+          ),
+        })
+        .pipe(Effect.flip, Effect.ensuring(Effect.sync(() => void (shellReads.failing = false))));
       assert.equal(yield* projectOf(threadId), ProjectId.make("idea-1-project"));
       assert.deepEqual(ideas.discarded, []);
     }),

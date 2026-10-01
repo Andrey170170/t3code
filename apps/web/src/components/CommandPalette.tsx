@@ -103,6 +103,7 @@ import { readLocalApi } from "../localApi";
 import { desktopLocalBackendId } from "../connection/desktopLocal";
 import { filesystemEnvironment } from "../state/filesystem";
 import { projectEnvironment } from "../state/projects";
+import { useSidebarProjects } from "../hooks/useSidebarProjects";
 import { useEnvironmentQuery } from "../state/query";
 import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -718,6 +719,8 @@ function OpenCommandPaletteDialog(props: {
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
   const projects = useProjects();
+  // Pickers leave out Trellis projects whose item is in the trash.
+  const pickableProjects = useSidebarProjects();
   const referenceThreadRef =
     pathname === "/pull-requests"
       ? environments.some(
@@ -897,7 +900,7 @@ function OpenCommandPaletteDialog(props: {
   const orderedProjects = useMemo(
     () =>
       orderItemsByPreferredIds({
-        items: projects,
+        items: pickableProjects,
         preferredIds: projectOrder,
         getId: getProjectOrderKey,
         getPreferenceIds: (project) => [
@@ -905,12 +908,13 @@ function OpenCommandPaletteDialog(props: {
           legacyProjectCwdPreferenceKey(project.workspaceRoot),
         ],
       }),
-    [projectOrder, projects],
+    [pickableProjects, projectOrder],
   );
   const unsortedProjectGroups = useMemo(
     () =>
       buildSidebarProjectSnapshots({
-        projects: clientSettings.sidebarProjectSortOrder === "manual" ? orderedProjects : projects,
+        projects:
+          clientSettings.sidebarProjectSortOrder === "manual" ? orderedProjects : pickableProjects,
         settings: projectGroupingSettings,
         primaryEnvironmentId,
         resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
@@ -920,8 +924,8 @@ function OpenCommandPaletteDialog(props: {
       environmentLabelById,
       orderedProjects,
       primaryEnvironmentId,
+      pickableProjects,
       projectGroupingSettings,
-      projects,
     ],
   );
   const projectGroups = useMemo(
@@ -1981,7 +1985,9 @@ function OpenCommandPaletteDialog(props: {
   }
 
   const activeThreadMoveMenu =
-    activeThread === null ? null : trellisMoveMenu(activeThread, projects, activeThreadTrellis);
+    activeThread === null
+      ? null
+      : trellisMoveMenu(activeThread, pickableProjects, activeThreadTrellis);
   if (activeThread !== null && activeThreadMoveMenu !== null) {
     const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
     const fromProjectId = activeThread.projectId;
