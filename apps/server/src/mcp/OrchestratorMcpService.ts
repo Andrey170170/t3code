@@ -76,6 +76,8 @@ import {
 } from "../orchestration-v2/ThreadManagementService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
+import { TrellisWorkers } from "../trellis/TrellisWorkers.ts";
+import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -556,6 +558,12 @@ function threadTitle(input: {
   return detail.length > 80 ? `${detail.slice(0, 77)}...` : detail;
 }
 
+/** A title from a task's first line, clipped like the orchestrator's subagent titles. */
+function taskTitle(task: string): string {
+  const line = task.trim().split("\n")[0]!.trim();
+  return line.length > 72 ? `${line.slice(0, 69)}...` : line;
+}
+
 function taskPrompt(input: OrchestratorMcpDelegateTaskInput): string {
   return input.role === undefined || input.role === "general"
     ? input.task
@@ -763,6 +771,9 @@ const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
   const scheduledTasks = yield* ScheduledTaskService;
+  // Workers in Trellis forks (`delegate_task.workspace`); absent without Trellis.
+  const trellisWorkers = yield* Effect.serviceOption(TrellisWorkers);
+  const idAllocator = yield* IdAllocator.IdAllocatorV2;
 
   const requireCapability = (scope: McpInvocationScope) =>
     scope.capabilities.has("orchestration")
@@ -820,6 +831,47 @@ const make = Effect.gen(function* () {
       )
       .pipe(Effect.mapError(threadManagementFailure));
 
+  /**
+   * Whether `threadId` is a delegated worker below `ancestor` (its child, or
+   * theirs). Workers in Trellis forks live in their fork's project, so thread
+   * tools reach them through this lineage rather than the caller's project.
+   */
+  const isWorkerOf = (ancestor: ThreadId, threadId: ThreadId) =>
+    Effect.gen(function* () {
+      let current = threadId;
+      for (let depth = 0; depth < 32; depth++) {
+        // Any failure to read the lineage leaves the thread out of reach.
+        const shell = yield* threadManagement
+          .getThreadShell(current)
+          .pipe(Effect.catchCause(() => Effect.succeed(null)));
+        const parentId = shell?.lineage.parentThreadId ?? null;
+        if (
+          shell == null ||
+          shell.lineage.relationshipToParent !== "subagent" ||
+          parentId === null
+        ) {
+          return false;
+        }
+        if (parentId === ancestor) return true;
+        current = parentId;
+      }
+      return false;
+    });
+
+  /** The caller's own workers outside its project, as `thread_not_found` otherwise. */
+  const orWorkerOf =
+    <A>(
+      scope: McpInvocationScope,
+      threadId: ThreadId,
+      load: () => Effect.Effect<A, OrchestratorMcpFailure>,
+    ) =>
+    (error: OrchestratorMcpFailure) =>
+      error.code !== "thread_not_found"
+        ? Effect.fail(error)
+        : isWorkerOf(scope.threadId, threadId).pipe(
+            Effect.flatMap((worker) => (worker ? load() : Effect.fail(error))),
+          );
+
   const loadScopedThread = (scope: McpInvocationScope, threadId: ThreadId) =>
     Effect.gen(function* () {
       yield* requireCapability(scope);
@@ -827,7 +879,9 @@ const make = Effect.gen(function* () {
       const target =
         threadId === scope.threadId
           ? parent
-          : yield* loadProjectThread(parent.thread.projectId, threadId);
+          : yield* loadProjectThread(parent.thread.projectId, threadId).pipe(
+              Effect.catch(orWorkerOf(scope, threadId, () => loadProjection(threadId))),
+            );
       return { parent, target } as const;
     });
 
@@ -871,6 +925,7 @@ const make = Effect.gen(function* () {
               error.code === "thread_not_found" && userAttachedThreadIds(parent).has(threadId),
             loadTarget,
           ),
+          Effect.catch(orWorkerOf(scope, threadId, loadTarget)),
         );
       if (target.thread.deletedAt !== null) {
         return yield* failure("thread_not_found", `Thread ${threadId} is no longer available.`);
@@ -1394,6 +1449,49 @@ const make = Effect.gen(function* () {
           requestKey: key,
           operation: "delegate-task",
         });
+        // A fork spawn names its checkpoint and never stops the workspace.
+        const forkSpec =
+          input.workspace === undefined || input.workspace === "parent"
+            ? undefined
+            : input.workspace.fork;
+        // A retry of an applied spawn (same clientRequestId) reports its fork, never a new one.
+        const priorTask = parent.subagents.find(
+          (task) => task.id === idAllocator.derive.delegatedTaskNode({ commandId }),
+        );
+        let spawned =
+          forkSpec === undefined
+            ? undefined
+            : Option.isNone(trellisWorkers)
+              ? yield* failure(
+                  "invalid_request",
+                  "workspace: {fork} needs Trellis, which this server does not have.",
+                )
+              : yield* (
+                  priorTask?.childThreadId != null
+                    ? trellisWorkers.value.forkOf(priorTask.childThreadId)
+                    : trellisWorkers.value.spawnFork({
+                        parentThreadId: scope.threadId,
+                        from: forkSpec.from,
+                        name: forkSpec.name,
+                        services: forkSpec.services,
+                        // Only a caller-chosen key can be retried.
+                        requestKey: input.clientRequestId,
+                        title: input.title ?? taskTitle(input.task),
+                      })
+                ).pipe(
+                  Effect.mapError((error) =>
+                    failure(
+                      error.invalid ? "invalid_request" : "orchestration_error",
+                      error.message,
+                    ),
+                  ),
+                );
+        const abandonFork =
+          spawned === undefined || priorTask !== undefined || Option.isNone(trellisWorkers)
+            ? Effect.void
+            : trellisWorkers.value.abandonFork(spawned.fork.workspaceId);
+        const withFork = (task: OrchestratorMcpDelegateTaskResult) =>
+          spawned === undefined ? task : { ...task, fork: spawned.fork };
         const result = yield* threadManagement
           .dispatch({
             type: "delegated_task.request",
@@ -1403,8 +1501,18 @@ const make = Effect.gen(function* () {
             parentThreadId: scope.threadId,
             parentRunId: parentRun.id,
             parentNodeId: parentRun.rootNodeId,
-            task: taskPrompt(input),
-            ...(input.title === undefined ? {} : { title: input.title }),
+            // A fork worker's guide follows its task.
+            task:
+              spawned === undefined
+                ? taskPrompt(input)
+                : `${taskPrompt(input)}\n\n${spawned.guide}`,
+            ...(spawned === undefined ? {} : { projectId: spawned.projectId }),
+            // A fork worker's task ends with the guide: title it from the task alone.
+            ...(input.title !== undefined
+              ? { title: input.title }
+              : spawned === undefined
+                ? {}
+                : { title: taskTitle(input.task) }),
             modelSelection: target.modelSelection,
             runtimeMode,
             interactionMode,
@@ -1414,6 +1522,7 @@ const make = Effect.gen(function* () {
             completionWake: input.mode === "wait" ? "settled_only" : "always",
           })
           .pipe(
+            Effect.tapError(() => abandonFork),
             Effect.mapError((error) =>
               failure(
                 "orchestration_error",
@@ -1431,10 +1540,29 @@ const make = Effect.gen(function* () {
             "Delegated task command did not produce a task projection.",
           );
         }
+        // A concurrent call with the same clientRequestId created the child
+        // first (the dispatch replayed it): report that child's fork, drop ours.
+        const childThreadId = taskEvent.event.payload.childThreadId;
+        if (
+          spawned !== undefined &&
+          priorTask === undefined &&
+          childThreadId !== null &&
+          Option.isSome(trellisWorkers)
+        ) {
+          const child = yield* threadManagement
+            .getThreadShell(childThreadId)
+            .pipe(Effect.orElseSucceed(() => null));
+          if (child != null && child.projectId !== spawned.projectId) {
+            yield* abandonFork;
+            spawned = yield* trellisWorkers.value
+              .forkOf(childThreadId)
+              .pipe(Effect.orElseSucceed(() => undefined));
+          }
+        }
         const taskId = taskEvent.event.payload.id;
 
         if (input.mode !== "wait") {
-          return yield* readTask(scope, taskId, false, true);
+          return withFork(yield* readTask(scope, taskId, false, true));
         }
         const timeoutMs = Math.min(
           MAX_WAIT_TIMEOUT_MS,
@@ -1442,7 +1570,7 @@ const make = Effect.gen(function* () {
         );
         const waited = yield* waitForTask(scope, taskId, timeoutMs);
         if (Option.isSome(waited)) {
-          return waited.value;
+          return withFork(waited.value);
         }
         // The blocking wait timed out, so it no longer owns delivery: upgrade
         // the task so a later terminal wakes the parent even mid-turn. Best
@@ -1483,7 +1611,7 @@ const make = Effect.gen(function* () {
               }),
             ),
           );
-        return yield* readTask(scope, taskId, true, true);
+        return withFork(yield* readTask(scope, taskId, true, true));
       }),
     taskStatus: (scope, taskId) => readTask(scope, taskId, false, true),
     cancelTask: (scope, input) =>
@@ -1850,7 +1978,8 @@ const make = Effect.gen(function* () {
         });
         const result = yield* threadManagement
           .sendToThread({
-            projectId: parent.thread.projectId,
+            // The target's: a worker in a Trellis fork lives in the fork's project.
+            projectId: target.thread.projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
@@ -1885,10 +2014,10 @@ const make = Effect.gen(function* () {
       }),
     waitForThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { target } = yield* loadScopedThread(scope, input.threadId);
         const result = yield* threadManagement
           .waitForThread({
-            projectId: parent.thread.projectId,
+            projectId: target.thread.projectId,
             threadId: input.threadId,
             ...(input.runId === undefined ? {} : { runId: input.runId }),
             timeoutMs: Math.min(
@@ -1906,11 +2035,11 @@ const make = Effect.gen(function* () {
       }),
     interruptThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { target } = yield* loadScopedThread(scope, input.threadId);
         const key = yield* requestKey(input.clientRequestId);
         const result = yield* threadManagement
           .interruptThread({
-            projectId: parent.thread.projectId,
+            projectId: target.thread.projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
@@ -1954,4 +2083,4 @@ export const layer: Layer.Layer<
   | ProviderRegistry
   | ProviderAdapterRegistryV2
   | ScheduledTaskService
-> = Layer.effect(OrchestratorMcpService, make);
+> = Layer.effect(OrchestratorMcpService, make).pipe(Layer.provide(IdAllocator.layer));

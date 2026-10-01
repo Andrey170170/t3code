@@ -115,6 +115,10 @@
       "types": "./src/relay/index.ts",
       "default": "./src/relay/index.ts"
     },
+    "./state/worker-forks": {
+      "types": "./src/state/workerForks.ts",
+      "default": "./src/state/workerForks.ts"
+    },
     "./state/auth": {
       "types": "./src/state/auth.ts",
       "default": "./src/state/auth.ts"

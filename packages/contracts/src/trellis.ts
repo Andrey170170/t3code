@@ -53,6 +53,11 @@ export const TrellisStatus = Schema.Struct({
   retiredRoots: Schema.optionalKey(Schema.Array(Schema.String)),
   /** Roots of live forks (non-primary workspaces), which are trashed on their own. */
   forkRoots: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * Roots of live worker forks (forks a thread spawned): clients keep them out
+   * of the sidebar and list them with their project's workspaces.
+   */
+  workerRoots: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type TrellisStatus = typeof TrellisStatus.Type;
 
@@ -79,6 +84,16 @@ export const TrellisTrashProjectResult = Schema.Struct({
 });
 export type TrellisTrashProjectResult = typeof TrellisTrashProjectResult.Type;
 
+/** An agent's request that the user purge a trashed item. */
+export const TrellisPurgeRequest = Schema.Struct({
+  /** Unix seconds. */
+  at: Schema.Finite,
+  reason: Schema.NullOr(Schema.String),
+  /** The thread that asked, by title when T3 knows it. */
+  by: Schema.NullOr(Schema.String),
+});
+export type TrellisPurgeRequest = typeof TrellisPurgeRequest.Type;
+
 export const TrellisTrashItem = Schema.Struct({
   /** `workspace` is one trashed fork of a project that is still live. */
   kind: Schema.Literals(["idea", "project", "workspace"]),
@@ -88,6 +103,14 @@ export const TrellisTrashItem = Schema.Struct({
   deletedAt: Schema.Finite,
   /** Unix seconds when it is removed for good; null when it stays until the trash is emptied. */
   expiresAt: Schema.NullOr(Schema.Finite),
+  /**
+   * Discarded forks: true when its repository holds work its parent lacks,
+   * which keeps it until purged; null when not known.
+   */
+  unmerged: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  unmergedReason: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** An agent asked for it to be purged; only the user purges. */
+  purgeRequested: Schema.optionalKey(Schema.NullOr(TrellisPurgeRequest)),
 });
 export type TrellisTrashItem = typeof TrellisTrashItem.Type;
 
@@ -112,6 +135,89 @@ export const TrellisEmptyTrashResult = Schema.Struct({
   purged: Schema.Finite,
 });
 export type TrellisEmptyTrashResult = typeof TrellisEmptyTrashResult.Type;
+
+/** Purges the listed trashed items for good, e.g. confirming an agent's purge request. */
+export const TrellisPurgeInput = Schema.Struct({
+  ids: Schema.Array(TrimmedNonEmptyString).check(Schema.isMinLength(1)),
+});
+export type TrellisPurgeInput = typeof TrellisPurgeInput.Type;
+
+/** The workspaces of the Trellis project behind a T3 project. */
+export const TrellisWorkspacesInput = Schema.Struct({ projectId: ProjectId });
+export type TrellisWorkspacesInput = typeof TrellisWorkspacesInput.Type;
+
+/**
+ * One workspace of a Trellis project: its primary workspace, a fork, or a
+ * discarded fork still in the trash.
+ */
+export const TrellisWorkspaceEntry = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  /** `primary` is the project's own workspace; forks are hidden from the sidebar when spawned. */
+  kind: Schema.Literals(["primary", "fork"]),
+  state: Schema.Literals(["running", "stopped", "checkpointing", "discarded"]),
+  /** Its T3 project, when it has one (live workspaces). */
+  projectId: Schema.NullOr(ProjectId),
+  /** The thread that spawned it (a worker fork), by id and title. */
+  spawnedBy: Schema.NullOr(
+    Schema.Struct({ threadId: ThreadId, title: Schema.NullOr(Schema.String) }),
+  ),
+  /** Unix seconds. */
+  createdAt: Schema.NullOr(Schema.Finite),
+  deletedAt: Schema.NullOr(Schema.Finite),
+  /** Discarded forks: see `TrellisTrashItem`. */
+  unmerged: Schema.NullOr(Schema.Boolean),
+  unmergedReason: Schema.NullOr(Schema.String),
+  expiresAt: Schema.NullOr(Schema.Finite),
+  purgeRequested: Schema.NullOr(TrellisPurgeRequest),
+});
+export type TrellisWorkspaceEntry = typeof TrellisWorkspaceEntry.Type;
+
+export const TrellisWorkspaceList = Schema.Struct({
+  /** The Trellis project; null when the T3 project is not a Trellis project. */
+  trellisProjectId: Schema.NullOr(Schema.String),
+  items: Schema.Array(TrellisWorkspaceEntry),
+});
+export type TrellisWorkspaceList = typeof TrellisWorkspaceList.Type;
+
+export const TrellisCheckpointsInput = Schema.Struct({ workspaceId: TrimmedNonEmptyString });
+export type TrellisCheckpointsInput = typeof TrellisCheckpointsInput.Type;
+
+/** A checkpoint snapshot, which forks start from. */
+export const TrellisCheckpointEntry = Schema.Struct({
+  id: Schema.String,
+  label: Schema.NullOr(Schema.String),
+  /** Unix seconds. */
+  createdAt: Schema.Finite,
+});
+export type TrellisCheckpointEntry = typeof TrellisCheckpointEntry.Type;
+
+/** Newest first. */
+export const TrellisCheckpointList = Schema.Struct({
+  items: Schema.Array(TrellisCheckpointEntry),
+});
+export type TrellisCheckpointList = typeof TrellisCheckpointList.Type;
+
+/**
+ * Forks a workspace from one of its checkpoints, for the user: a visible
+ * workspace (no `spawned_by`), whose threads are leads.
+ */
+export const TrellisForkWorkspaceInput = Schema.Struct({
+  workspaceId: TrimmedNonEmptyString,
+  snapshot: TrimmedNonEmptyString,
+  name: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(100))),
+});
+export type TrellisForkWorkspaceInput = typeof TrellisForkWorkspaceInput.Type;
+
+export const TrellisForkWorkspaceResult = Schema.Struct({
+  workspaceId: Schema.String,
+  name: Schema.String,
+  /** The fork's T3 project, once synced. */
+  projectId: Schema.NullOr(ProjectId),
+  /** Resource warnings (many running workspaces, memory nearly full). */
+  warnings: Schema.Array(Schema.String),
+});
+export type TrellisForkWorkspaceResult = typeof TrellisForkWorkspaceResult.Type;
 
 export const TrellisNewIdeaInput = Schema.Struct({
   name: Schema.optionalKey(TrimmedNonEmptyString),
@@ -222,6 +328,59 @@ export const TrellisCheckpointMcpInput = Schema.Struct({
   ),
 });
 export type TrellisCheckpointMcpInput = typeof TrellisCheckpointMcpInput.Type;
+
+/**
+ * Input for the `trellis_discard_fork` MCP tool: moves a fork of the caller's
+ * project to the Trellis trash, and optionally asks the user to purge it.
+ */
+export const TrellisDiscardForkMcpInput = Schema.Struct({
+  fork: TrimmedNonEmptyString.check(Schema.isMaxLength(200)).annotate({
+    description: "The fork's workspace id (ws-...) or name within this project.",
+  }),
+  requestPurge: Schema.optional(
+    Schema.Boolean.annotate({
+      description:
+        "Also ask the user to purge it for good (agents never purge). Use only when its work is truly not needed; a fork already in the trash is not discarded again.",
+    }),
+  ),
+  reason: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)).annotate({
+      description: "Why it can go, shown to the user with the purge request.",
+    }),
+  ),
+});
+export type TrellisDiscardForkMcpInput = typeof TrellisDiscardForkMcpInput.Type;
+
+export const TrellisDiscardForkMcpResult = Schema.Struct({
+  workspaceId: Schema.String,
+  name: Schema.String,
+  /** False when it was already in the trash. */
+  discarded: Schema.Boolean,
+  /** Whether it holds work its parent lacks (kept until purged), when Trellis knows. */
+  unmerged: Schema.NullOr(Schema.Boolean),
+  unmergedReason: Schema.NullOr(Schema.String),
+  /** Unix seconds when it expires; null keeps it until purged. */
+  expiresAt: Schema.NullOr(Schema.Finite),
+  purgeRequested: Schema.Boolean,
+});
+export type TrellisDiscardForkMcpResult = typeof TrellisDiscardForkMcpResult.Type;
+
+export class TrellisDiscardForkMcpFailure extends Schema.TaggedError<TrellisDiscardForkMcpFailure>()(
+  "TrellisDiscardForkMcpFailure",
+  {
+    code: Schema.Literals([
+      "capability_denied",
+      "thread_not_found",
+      "not_a_trellis_workspace",
+      "fork_not_found",
+      "fork_not_owned",
+      "threads_running",
+      "trellis_unavailable",
+      "operation_failed",
+    ]),
+    message: Schema.String,
+  },
+) {}
 
 export const TrellisCheckpointMcpResult = Schema.Struct({
   status: Schema.Literal("started"),

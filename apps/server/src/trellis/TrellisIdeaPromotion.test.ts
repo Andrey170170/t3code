@@ -68,6 +68,11 @@ const FakeCatalog = Layer.effect(
       newProject: unused,
       find: unused,
       checkProjectDelete: unused,
+      listWorkspaces: unused,
+      listCheckpoints: unused,
+      forkWorkspace: unused,
+      purge: unused,
+      discardFork: unused,
       projectFor: unused,
       listBases: Effect.die("unused catalog operation"),
     });

@@ -44,6 +44,7 @@ import * as TrellisCheckpointStore from "./trellis/TrellisCheckpointStore.ts";
 import * as TrellisIdeaPromotion from "./trellis/TrellisIdeaPromotion.ts";
 import * as TrellisNaming from "./trellis/TrellisNaming.ts";
 import * as TrellisPreview from "./trellis/TrellisPreview.ts";
+import * as TrellisWorkers from "./trellis/TrellisWorkers.ts";
 import * as TrellisPtyAdapter from "./trellis/TrellisPtyAdapter.ts";
 import * as TrellisRestore from "./trellis/TrellisRestore.ts";
 import * as TrellisTurns from "./trellis/TrellisTurns.ts";
@@ -494,9 +495,13 @@ const TrellisCatalogLive = Layer.effectDiscard(
     yield* catalog.start();
     const naming = yield* TrellisNaming.TrellisNaming;
     yield* naming.start();
+    const workers = yield* TrellisWorkers.TrellisWorkers;
+    yield* workers.start();
   }),
 ).pipe(
   Layer.provideMerge(TrellisNaming.layer),
+  // Workers in forks: fork spawns, discards, summaries, the archive cascade.
+  Layer.provideMerge(TrellisWorkers.layer),
   Layer.provideMerge(TrellisIdeaPromotion.layer),
   Layer.provideMerge(TrellisGraduation.layer),
   Layer.provideMerge(TrellisCatalog.layer),

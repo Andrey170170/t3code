@@ -29,11 +29,13 @@ export const trellisEnvironment = {
     staleTimeMs: 5_000,
     idleTtlMs: 60_000,
   }),
+  // Agents discard forks and file purge requests while the page is open.
   trash: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
     label: "environment-data:trellis:trash",
     tag: WS_METHODS.trellisListTrash,
     staleTimeMs: 5_000,
     idleTtlMs: 60_000,
+    refreshIntervalMs: 30_000,
   }),
   prepareIdeaDraft: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:prepare-idea-draft",
@@ -62,6 +64,31 @@ export const trellisEnvironment = {
   resolvePreviewUrl: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:resolve-preview-url",
     tag: WS_METHODS.trellisResolvePreviewUrl,
+  }),
+  /**
+   * A Trellis project's workspaces, worker forks and discarded forks included.
+   * Agents spawn and discard forks on their own, so it refreshes while shown.
+   */
+  workspaces: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:workspaces",
+    tag: WS_METHODS.trellisListWorkspaces,
+    staleTimeMs: 5_000,
+    idleTtlMs: 60_000,
+    refreshIntervalMs: 15_000,
+  }),
+  checkpoints: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:checkpoints",
+    tag: WS_METHODS.trellisListCheckpoints,
+    staleTimeMs: 5_000,
+    idleTtlMs: 60_000,
+  }),
+  forkWorkspace: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:fork-workspace",
+    tag: WS_METHODS.trellisForkWorkspace,
+  }),
+  purge: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:purge",
+    tag: WS_METHODS.trellisPurge,
   }),
   bases: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
     label: "environment-data:trellis:bases",

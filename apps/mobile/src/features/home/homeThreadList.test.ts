@@ -44,6 +44,41 @@ function makeThread(
 }
 
 describe("home project scopes", () => {
+  it("leaves out Trellis worker forks: projects only a lead elsewhere delegates into", () => {
+    const environmentId = EnvironmentId.make("environment-local");
+    const app = makeProject({ environmentId, id: ProjectId.make("app"), title: "app" });
+    const fork = makeProject({ environmentId, id: ProjectId.make("fork"), title: "app · w" });
+    const lead = makeThread({
+      environmentId,
+      id: ThreadId.make("lead"),
+      projectId: app.id,
+      title: "Lead",
+    });
+    const worker = makeThread({
+      environmentId,
+      id: ThreadId.make("worker"),
+      projectId: fork.id,
+      title: "Worker",
+      lineage: { parentThreadId: lead.id, relationshipToParent: "subagent", rootThreadId: lead.id },
+    });
+    const titles = (threads: ReadonlyArray<EnvironmentThreadShell>) =>
+      buildHomeProjectScopes({
+        projects: [app, fork],
+        threads,
+        environmentId,
+        projectGroupingMode: "separate",
+      }).map((scope) => scope.title);
+    expect(titles([lead, worker])).toEqual(["app"]);
+    // A lead of its own in the fork shows it again.
+    const forkLead = makeThread({
+      environmentId,
+      id: ThreadId.make("fork-lead"),
+      projectId: fork.id,
+      title: "Fork lead",
+    });
+    expect(titles([lead, worker, forkLead]).toSorted()).toEqual(["app", "app · w"]);
+  });
+
   it("builds one v2 scope for the same repository across environments", () => {
     const localEnvironmentId = EnvironmentId.make("environment-local");
     const remoteEnvironmentId = EnvironmentId.make("environment-remote");
@@ -72,6 +107,7 @@ describe("home project scopes", () => {
 
     const scopes = buildHomeProjectScopes({
       projects,
+      threads: [],
       environmentId: null,
       projectGroupingMode: "repository",
     });
@@ -124,6 +160,7 @@ describe("home project scopes", () => {
 
     const scopes = buildHomeProjectScopes({
       projects,
+      threads: [],
       environmentId: null,
       projectGroupingMode: "repository",
     });
@@ -150,6 +187,7 @@ describe("home project scopes", () => {
     });
     const scopes = buildHomeProjectScopes({
       projects: [newerProject, olderProject],
+      threads: [],
       environmentId: null,
       projectGroupingMode: "separate",
     });
@@ -195,6 +233,7 @@ describe("home project scopes", () => {
     });
     const scopes = buildHomeProjectScopes({
       projects: [invalidProject, validProject],
+      threads: [],
       environmentId: null,
       projectGroupingMode: "separate",
     });
@@ -242,6 +281,7 @@ describe("home project scopes", () => {
     });
     const scopes = buildHomeProjectScopes({
       projects: [olderMember, newerMember, otherProject],
+      threads: [],
       environmentId: null,
       projectGroupingMode: "repository",
     });
@@ -277,6 +317,7 @@ describe("home project scopes", () => {
     expect(
       buildHomeProjectScopes({
         projects,
+        threads: [],
         environmentId: null,
         projectGroupingMode: "repository",
       }),

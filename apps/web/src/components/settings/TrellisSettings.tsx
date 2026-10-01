@@ -31,10 +31,31 @@ const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 const formatDay = (unixSeconds: number) => dateFormat.format(new Date(unixSeconds * 1000));
 
 /** When a trashed item goes away for good, in words. */
-function trashExpiryText(item: Pick<TrellisTrashItem, "expiresAt">): string {
+function trashExpiryText(item: Pick<TrellisTrashItem, "expiresAt" | "unmerged">): string {
   return item.expiresAt === null
-    ? "Kept until you empty the trash"
+    ? item.unmerged === true
+      ? "Kept until purged"
+      : "Kept until you empty the trash"
     : `Removed for good on ${formatDay(item.expiresAt)}`;
+}
+
+/** A discarded fork's unmerged work and any purge request, in words; null when neither. */
+function trashItemNotes(
+  item: Pick<TrellisTrashItem, "unmerged" | "unmergedReason" | "purgeRequested">,
+): string | null {
+  const notes: Array<string> = [];
+  if (item.unmerged === true) {
+    notes.push(`Unmerged work${item.unmergedReason ? `: ${item.unmergedReason}` : ""}`);
+  } else if (item.unmerged === false) {
+    notes.push("Nothing unmerged");
+  }
+  if (item.purgeRequested != null) {
+    const by = item.purgeRequested.by === null ? "An agent" : `"${item.purgeRequested.by}"`;
+    notes.push(
+      `${by} asked to purge it${item.purgeRequested.reason ? `: ${item.purgeRequested.reason}` : ""}`,
+    );
+  }
+  return notes.length === 0 ? null : notes.join(" · ");
 }
 
 const KIND_LABELS: Readonly<Record<TrellisTrashItem["kind"], string>> = {
@@ -171,6 +192,7 @@ function TrellisTrashSection(props: {
   const trashQuery = useEnvironmentQuery(trellisEnvironment.trash({ environmentId, input: {} }));
   const restore = useAtomCommand(trellisEnvironment.restore, { reportFailure: false });
   const emptyTrash = useAtomCommand(trellisEnvironment.emptyTrash, { reportFailure: false });
+  const purge = useAtomCommand(trellisEnvironment.purge, { reportFailure: false });
   const [pending, setPending] = useState<string | null>(null);
   const items = trashQuery.data?.items ?? [];
 
@@ -190,6 +212,39 @@ function TrellisTrashSection(props: {
       }
       toastManager.add({ type: "success", title: `Restored ${item.name}` });
       refreshTrellisStatus(appAtomRegistry, environmentId);
+    } finally {
+      setPending(null);
+      trashQuery.refresh();
+    }
+  };
+
+  // Confirms an agent's purge request: only the user purges.
+  const purgeItem = async (item: TrellisTrashItem) => {
+    const api = readLocalApi();
+    if (!api) return;
+    const confirmed = await api.dialogs.confirm(
+      [
+        `Purge ${KIND_LABELS[item.kind].toLowerCase()} "${item.name}" for good?`,
+        item.unmerged === true
+          ? `It holds unmerged work${item.unmergedReason ? ` (${item.unmergedReason})` : ""}, which is lost.`
+          : "Its files, workspace and snapshots are removed. Conversations in T3 are not affected.",
+        "This action cannot be undone.",
+      ].join("\n"),
+      { variant: "destructive" },
+    );
+    if (!confirmed) return;
+    setPending(item.id);
+    try {
+      const result = await purge({ environmentId, input: { ids: [item.id] } });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        toastManager.add({
+          type: "error",
+          title: `Could not purge ${item.name}`,
+          description: failureMessage(result, "Trellis did not respond."),
+        });
+        return;
+      }
+      toastManager.add({ type: "success", title: `Purged ${item.name}` });
     } finally {
       setPending(null);
       trashQuery.refresh();
@@ -273,16 +328,35 @@ function TrellisTrashSection(props: {
                 <span className="truncate">{item.name}</span>
               </span>
             }
-            description={`${KIND_LABELS[item.kind]} · deleted ${formatDay(item.deletedAt)} · ${trashExpiryText(item)}`}
+            description={
+              <>
+                {`${KIND_LABELS[item.kind]} · deleted ${formatDay(item.deletedAt)} · ${trashExpiryText(item)}`}
+                {trashItemNotes(item) === null ? null : (
+                  <span className="block">{trashItemNotes(item)}</span>
+                )}
+              </>
+            }
             control={
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={pending !== null}
-                onClick={() => void restoreItem(item)}
-              >
-                {pending === item.id ? "Restoring…" : "Restore"}
-              </Button>
+              <div className="flex items-center gap-2">
+                {item.purgeRequested != null ? (
+                  <Button
+                    size="sm"
+                    variant="destructive-outline"
+                    disabled={pending !== null}
+                    onClick={() => void purgeItem(item)}
+                  >
+                    Purge
+                  </Button>
+                ) : null}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={pending !== null}
+                  onClick={() => void restoreItem(item)}
+                >
+                  {pending === item.id ? "Working…" : "Restore"}
+                </Button>
+              </div>
             }
           />
         ))

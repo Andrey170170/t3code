@@ -1,4 +1,5 @@
 import { buildProjectGroups } from "@t3tools/client-runtime/state/project-grouping";
+import { workerForkProjectKeys } from "@t3tools/client-runtime/state/worker-forks";
 import type {
   EnvironmentProject,
   EnvironmentThreadShell,
@@ -42,11 +43,16 @@ function getProjectSortTimestamp(
 
 export function buildHomeProjectScopes(input: {
   readonly projects: ReadonlyArray<EnvironmentProject>;
+  /** All thread shells: Trellis worker forks among the projects are left out. */
+  readonly threads: ReadonlyArray<EnvironmentThreadShell>;
   readonly environmentId: EnvironmentId | null;
   readonly projectGroupingMode: SidebarProjectGroupingMode;
 }): ReadonlyArray<HomeProjectScope> {
+  const workerForks = workerForkProjectKeys(input.threads);
   const projects = input.projects.filter(
-    (project) => input.environmentId === null || project.environmentId === input.environmentId,
+    (project) =>
+      (input.environmentId === null || project.environmentId === input.environmentId) &&
+      !workerForks.has(`${project.environmentId}:${project.id}`),
   );
   return buildProjectGroups({
     projects,

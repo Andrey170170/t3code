@@ -1,7 +1,14 @@
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
 import {
+  TrellisCheckpointList,
+  TrellisCheckpointsInput,
   TrellisCreateResult,
   TrellisEmptyTrashResult,
+  TrellisForkWorkspaceInput,
+  TrellisForkWorkspaceResult,
+  TrellisPurgeInput,
+  TrellisWorkspaceList,
+  TrellisWorkspacesInput,
   TrellisError,
   TrellisFindInput,
   TrellisFindResult,
@@ -388,6 +395,10 @@ export const WS_METHODS = {
   trellisFind: "trellis.find",
   trellisRestoreConflicts: "trellis.restoreConflicts",
   trellisResolvePreviewUrl: "trellis.resolvePreviewUrl",
+  trellisListWorkspaces: "trellis.listWorkspaces",
+  trellisListCheckpoints: "trellis.listCheckpoints",
+  trellisForkWorkspace: "trellis.forkWorkspace",
+  trellisPurge: "trellis.purge",
   trellisGraduate: "trellis.graduate",
   trellisListBases: "trellis.listBases",
   assetsCreateUrl: "assets.createUrl",
@@ -1258,6 +1269,26 @@ const WsTrellisRestoreConflictsRpc = Rpc.make(WS_METHODS.trellisRestoreConflicts
   success: TrellisRestoreConflicts,
   error: TrellisRpcError,
 });
+const WsTrellisListWorkspacesRpc = Rpc.make(WS_METHODS.trellisListWorkspaces, {
+  payload: TrellisWorkspacesInput,
+  success: TrellisWorkspaceList,
+  error: TrellisRpcError,
+});
+const WsTrellisListCheckpointsRpc = Rpc.make(WS_METHODS.trellisListCheckpoints, {
+  payload: TrellisCheckpointsInput,
+  success: TrellisCheckpointList,
+  error: TrellisRpcError,
+});
+const WsTrellisForkWorkspaceRpc = Rpc.make(WS_METHODS.trellisForkWorkspace, {
+  payload: TrellisForkWorkspaceInput,
+  success: TrellisForkWorkspaceResult,
+  error: TrellisRpcError,
+});
+const WsTrellisPurgeRpc = Rpc.make(WS_METHODS.trellisPurge, {
+  payload: TrellisPurgeInput,
+  success: TrellisEmptyTrashResult,
+  error: TrellisRpcError,
+});
 
 const WsTrellisGraduateRpc = Rpc.make(WS_METHODS.trellisGraduate, {
   payload: TrellisGraduateInput,
@@ -1894,6 +1925,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsTrellisFindRpc,
   WsTrellisRestoreConflictsRpc,
   WsTrellisResolvePreviewUrlRpc,
+  WsTrellisListWorkspacesRpc,
+  WsTrellisListCheckpointsRpc,
+  WsTrellisForkWorkspaceRpc,
+  WsTrellisPurgeRpc,
   WsTrellisGraduateRpc,
   WsTrellisListBasesRpc,
   WsAgentSessionsScanRpc,

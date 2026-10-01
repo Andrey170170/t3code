@@ -65,6 +65,18 @@ new project. An idea graduated with `trellis graduate` on the command line has i
 into the project within a few seconds, and a message sent to one in the meantime asks you to send it
 again once it has moved.
 
+## Forks and workers
+
+A Trellis project's settings (**Settings** > **Project**) list its workspaces: the project's own,
+forks you made, forks its agents' workers run in, and discarded forks. **Fork…** copies a workspace
+as it was at one of its checkpoints into a new fork, listed in the sidebar, and opens a thread there.
+
+An agent can delegate a task into a fork of its own workspace, made from a checkpoint it chooses; to
+fork the current state it takes a checkpoint first. These worker forks stay out of the sidebar and
+appear in the workspace list with the thread that spawned them. A worker's final message is recorded
+as its fork's summary, which the lead reads when it merges the work. Archiving a thread stops and
+archives its workers; their forks stay until someone discards them.
+
 ## Deleting and restoring
 
 Deleting a Trellis project or idea in T3 Code moves it to the Trellis trash, archives its
@@ -72,6 +84,10 @@ conversations and removes it from the sidebar. Restore it from **Settings** > **
 also unarchives its conversations. The trash list shows when each item is removed for good.
 Deleting is refused while an agent is still working in the project, and while Trellis is off or not
 running. Deleting a conversation only deletes the conversation.
+
+A discarded fork that holds work its parent workspace lacks (uncommitted changes, or commits not
+merged back) is kept until you purge it; the trash says why. Agents never purge: they can ask you to,
+and the trash shows the request with a **Purge** button.
 
 ## Restoring files from a turn
 

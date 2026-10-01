@@ -148,14 +148,10 @@ function failureMessage(error: unknown, fallback: string): string {
  * toast. `newProject` creates the project right away and returns its outcome
  * so a dialog can show errors inline.
  */
-export function useTrellisCreate() {
+/** Opens a new thread draft in a Trellis project (never in a git worktree). */
+function useOpenTrellisDraft() {
   const handleNewThread = useNewThreadHandler();
-  const runPrepareIdeaDraft = useAtomCommand(trellisEnvironment.prepareIdeaDraft, {
-    reportFailure: false,
-  });
-  const runNewProject = useAtomCommand(trellisEnvironment.newProject, { reportFailure: false });
-
-  const openDraftIn = useCallback(
+  return useCallback(
     async (environmentId: EnvironmentId, projectId: ProjectId, errorTitle: string) => {
       const projectRef = scopeProjectRef(environmentId, projectId);
       // The server answers once the project is in its read model; the shell
@@ -175,6 +171,14 @@ export function useTrellisCreate() {
     },
     [handleNewThread],
   );
+}
+
+export function useTrellisCreate() {
+  const openDraftIn = useOpenTrellisDraft();
+  const runPrepareIdeaDraft = useAtomCommand(trellisEnvironment.prepareIdeaDraft, {
+    reportFailure: false,
+  });
+  const runNewProject = useAtomCommand(trellisEnvironment.newProject, { reportFailure: false });
 
   const newIdea = useCallback(
     async (environmentId: EnvironmentId): Promise<void> => {
@@ -227,6 +231,45 @@ export function useTrellisCreate() {
   );
 
   return { newIdea, newProject };
+}
+
+/**
+ * "Fork workspace": forks a Trellis workspace from one of its checkpoints as
+ * a visible workspace (no `spawned_by`), shows Trellis's resource warnings,
+ * and opens a new thread there, which is a lead. Resolves to the failure
+ * message, or null once forked.
+ */
+export function useTrellisForkWorkspace() {
+  const openDraftIn = useOpenTrellisDraft();
+  const run = useAtomCommand(trellisEnvironment.forkWorkspace, { reportFailure: false });
+  return useCallback(
+    async (
+      environmentId: EnvironmentId,
+      input: { readonly workspaceId: string; readonly snapshot: string; readonly name?: string },
+    ): Promise<string | null> => {
+      const result = await run({ environmentId, input });
+      if (result._tag === "Failure") {
+        return isAtomCommandInterrupted(result)
+          ? "Interrupted."
+          : failureMessage(squashAtomCommandFailure(result), "Trellis did not respond.");
+      }
+      await loadTrellisStatus(appAtomRegistry, environmentId);
+      const { name, projectId, warnings } = result.value;
+      toastManager.add(
+        stackedThreadToast({
+          type: warnings.length > 0 ? "warning" : "success",
+          title: `Forked workspace "${name}"`,
+          description:
+            warnings.length > 0 ? warnings.join(" ") : "A new thread there is a lead of its own.",
+        }),
+      );
+      if (projectId !== null) {
+        await openDraftIn(environmentId, projectId, `Forked "${name}", but could not open it`);
+      }
+      return null;
+    },
+    [openDraftIn, run],
+  );
 }
 
 /**
