@@ -39,6 +39,7 @@ import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
 import * as Trellis from "./trellis/Trellis.ts";
+import * as TrellisPtyAdapter from "./trellis/TrellisPtyAdapter.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -192,7 +193,8 @@ const ApplicationObservabilityLive = EventLoopMonitor.layer.pipe(
   Layer.provideMerge(ResourceAttributionLayerLive),
 );
 
-const PtyAdapterLive = NodePtyAdapter.layer;
+// Terminals in Trellis project paths run inside the workspace container.
+const PtyAdapterLive = TrellisPtyAdapter.layer.pipe(Layer.provide(NodePtyAdapter.layer));
 
 const ServerSettingsLayerLive = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
