@@ -99,6 +99,7 @@ function makeForkTrellis(input: { readonly checkpoints: ReadonlyArray<string> })
           project_id: "prj-1",
           created_at: 1 + state.forks.length,
           spawned_by: thread === undefined ? null : { thread, workspace: LEAD_WS },
+          parent_snapshot: snapshot,
         };
         state.workspaces.push(view);
         return {
@@ -314,6 +315,28 @@ it.effect("spawns a worker in a fork of the latest checkpoint, in the fork's own
     );
   }).pipe(Effect.provide(testLayer(fake)));
 });
+
+it.effect(
+  "a retried spawn with the same clientRequestId reports its fork and forks nothing new",
+  () => {
+    const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+    return Effect.gen(function* () {
+      const lead = yield* startLead;
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const spawn = service.delegateTask(scopeOf(lead.threadId), {
+        task: "Add the parser",
+        clientRequestId: "spawn-parser",
+        workspace: { fork: { from: "latest", name: "parser" } },
+      });
+      const first = yield* spawn;
+      const retried = yield* spawn;
+      assert.equal(fake.state.forks.length, 1);
+      assert.equal(retried.childThreadId, first.childThreadId);
+      assert.equal(retried.fork?.workspaceId, first.fork?.workspaceId);
+      assert.equal(retried.fork?.snapshot, "snap-1");
+    }).pipe(Effect.provide(testLayer(fake)));
+  },
+);
 
 it.effect(
   "spawns from an earlier checkpoint by id, and refuses one that is not a checkpoint",

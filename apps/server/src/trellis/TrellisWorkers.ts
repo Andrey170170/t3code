@@ -78,6 +78,13 @@ export class TrellisWorkers extends Context.Service<
     }) => Effect.Effect<TrellisWorkerFork, TrellisForkSpawnError>;
     /** Moves a fork spawned for a child that could not be created to the trash. */
     readonly abandonFork: (workspaceId: string) => Effect.Effect<void>;
+    /**
+     * The fork a delegated child works in (a retried spawn reports the
+     * original one); undefined when it shares its lead's folder.
+     */
+    readonly forkOf: (
+      childThreadId: ThreadId,
+    ) => Effect.Effect<TrellisWorkerFork | undefined, TrellisForkSpawnError>;
     readonly discardFork: (
       scope: McpInvocationScope,
       input: TrellisDiscardForkMcpInput,
@@ -90,7 +97,7 @@ export class TrellisWorkers extends Context.Service<
 >()("t3/trellis/TrellisWorkers") {}
 
 /** The newest checkpoint for `latest`, else the one named; null when there is none. */
-export function pickCheckpoint(
+function pickCheckpoint(
   snapshots: ReadonlyArray<{ readonly id: string; readonly kind: string }>,
   from: string,
 ): { readonly id: string } | { readonly error: string } {
@@ -115,7 +122,7 @@ export function pickCheckpoint(
 }
 
 /** The threads below `ancestor` (its delegated workers, and theirs). */
-export function descendantsOf(
+function descendantsOf(
   ancestor: ThreadId,
   threads: ReadonlyArray<Pick<OrchestrationV2ThreadShell, "id" | "lineage">>,
 ): ReadonlyArray<ThreadId> {
@@ -285,6 +292,42 @@ const make = Effect.gen(function* () {
       ),
       Effect.asVoid,
     );
+
+  const forkOf: TrellisWorkers["Service"]["forkOf"] = Effect.fn("TrellisWorkers.forkOf")(
+    function* (childThreadId) {
+      const child = yield* threads
+        .getThreadShell(childThreadId)
+        .pipe(Effect.orElseSucceed(() => null));
+      const root = child == null ? undefined : yield* projectRoot(child.projectId);
+      if (child == null || root === undefined) return undefined;
+      const workspaces = yield* trellis.listWorkspaces({ all: true }).pipe(
+        Effect.mapError(
+          (error) =>
+            new TrellisForkSpawnError({
+              message: `Trellis could not list the workspaces: ${error.message}`,
+              invalid: false,
+            }),
+        ),
+      );
+      const fork = workspaces.find(
+        (workspace) =>
+          normalizeRoot(workspace.path) === normalizeRoot(root) && workspace.spawned_by != null,
+      );
+      if (fork === undefined) return undefined;
+      return {
+        projectId: child.projectId,
+        fork: {
+          workspaceId: fork.id,
+          name: fork.name,
+          path: fork.path,
+          snapshot: fork.parent_snapshot ?? "",
+          warnings: [],
+          services: [],
+        },
+        guide: "",
+      } satisfies TrellisWorkerFork;
+    },
+  );
 
   const discardFork: TrellisWorkers["Service"]["discardFork"] = Effect.fn(
     "TrellisWorkers.discardFork",
@@ -520,7 +563,7 @@ const make = Effect.gen(function* () {
     );
   });
 
-  return TrellisWorkers.of({ spawnFork, abandonFork, discardFork, start, handle });
+  return TrellisWorkers.of({ spawnFork, abandonFork, forkOf, discardFork, start, handle });
 });
 
 export const layer = Layer.effect(TrellisWorkers, make);

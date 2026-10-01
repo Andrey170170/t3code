@@ -77,6 +77,7 @@ import {
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
 import { TrellisWorkers } from "../trellis/TrellisWorkers.ts";
+import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -766,6 +767,7 @@ const make = Effect.gen(function* () {
   const scheduledTasks = yield* ScheduledTaskService;
   // Workers in Trellis forks (`delegate_task.workspace`); absent without Trellis.
   const trellisWorkers = yield* Effect.serviceOption(TrellisWorkers);
+  const idAllocator = yield* IdAllocator.IdAllocatorV2;
 
   const requireCapability = (scope: McpInvocationScope) =>
     scope.capabilities.has("orchestration")
@@ -1402,6 +1404,10 @@ const make = Effect.gen(function* () {
           input.workspace === undefined || input.workspace === "parent"
             ? undefined
             : input.workspace.fork;
+        // A retry of an applied spawn (same clientRequestId) reports its fork, never a new one.
+        const priorTask = parent.subagents.find(
+          (task) => task.id === idAllocator.derive.delegatedTaskNode({ commandId }),
+        );
         const spawned =
           forkSpec === undefined
             ? undefined
@@ -1410,23 +1416,25 @@ const make = Effect.gen(function* () {
                   "invalid_request",
                   "workspace: {fork} needs Trellis, which this server does not have.",
                 )
-              : yield* trellisWorkers.value
-                  .spawnFork({
-                    parentThreadId: scope.threadId,
-                    from: forkSpec.from,
-                    name: forkSpec.name,
-                    services: forkSpec.services,
-                  })
-                  .pipe(
-                    Effect.mapError((error) =>
-                      failure(
-                        error.invalid ? "invalid_request" : "orchestration_error",
-                        error.message,
-                      ),
+              : yield* (
+                  priorTask?.childThreadId != null
+                    ? trellisWorkers.value.forkOf(priorTask.childThreadId)
+                    : trellisWorkers.value.spawnFork({
+                        parentThreadId: scope.threadId,
+                        from: forkSpec.from,
+                        name: forkSpec.name,
+                        services: forkSpec.services,
+                      })
+                ).pipe(
+                  Effect.mapError((error) =>
+                    failure(
+                      error.invalid ? "invalid_request" : "orchestration_error",
+                      error.message,
                     ),
-                  );
+                  ),
+                );
         const abandonFork =
-          spawned === undefined || Option.isNone(trellisWorkers)
+          spawned === undefined || priorTask !== undefined || Option.isNone(trellisWorkers)
             ? Effect.void
             : trellisWorkers.value.abandonFork(spawned.fork.workspaceId);
         const withFork = (task: OrchestratorMcpDelegateTaskResult) =>
@@ -1996,4 +2004,4 @@ export const layer: Layer.Layer<
   | ProviderRegistry
   | ProviderAdapterRegistryV2
   | ScheduledTaskService
-> = Layer.effect(OrchestratorMcpService, make);
+> = Layer.effect(OrchestratorMcpService, make).pipe(Layer.provide(IdAllocator.layer));

@@ -40,7 +40,7 @@ function trashExpiryText(item: Pick<TrellisTrashItem, "expiresAt" | "unmerged">)
 }
 
 /** A discarded fork's unmerged work and any purge request, in words; null when neither. */
-export function trashItemNotes(
+function trashItemNotes(
   item: Pick<TrellisTrashItem, "unmerged" | "unmergedReason" | "purgeRequested">,
 ): string | null {
   const notes: Array<string> = [];
