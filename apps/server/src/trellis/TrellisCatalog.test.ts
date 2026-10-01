@@ -8,6 +8,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  TrellisError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -535,6 +536,27 @@ describe("TrellisCatalog service", () => {
     }));
   };
 
+  /** Failures the service tests inject. */
+  const faults = { restoreAnswerLost: false, projectListFails: false };
+
+  /** The catalog's project store, with `list` failing while `faults.projectListFails` is set. */
+  const flakyProjectStore = Layer.effect(
+    ProjectStore.ProjectStoreV2,
+    Effect.map(ProjectStore.ProjectStoreV2, (store) =>
+      ProjectStore.ProjectStoreV2.of({
+        ...store,
+        list: (options) =>
+          Effect.suspend(() =>
+            faults.projectListFails
+              ? Effect.fail(
+                  new ProjectStore.ProjectStoreV2Error({ operation: "list", cause: null }),
+                )
+              : store.list(options),
+          ),
+      }),
+    ),
+  );
+
   /** A Trellis whose catalog is `state`; trash and restore edit it. */
   const fakeTrellis = (state: { items: Array<TrellisProjectView>; trashed: Array<string> }) =>
     makeTestTrellis({
@@ -554,11 +576,16 @@ describe("TrellisCatalog service", () => {
           );
         }),
       restoreProject: (id) =>
-        Effect.sync(() => {
+        Effect.suspend(() => {
           state.items = state.items.map((item) =>
             item.id === id ? { ...item, deleted_at: null } : item,
           );
-          return state.items.find((item) => item.id === id)!;
+          // Trellis restored it, but the answer was lost.
+          if (faults.restoreAnswerLost) {
+            faults.restoreAnswerLost = false;
+            return Effect.fail(new TrellisError({ message: "connection reset" }));
+          }
+          return Effect.succeed(state.items.find((item) => item.id === id)!);
         }),
       trashWorkspace: (id) => Effect.sync(() => setWorkspaceDeletedAt(state, id, 0)),
       restoreWorkspace: (id) => Effect.sync(() => setWorkspaceDeletedAt(state, id, null)),
@@ -652,6 +679,7 @@ describe("TrellisCatalog service", () => {
 
   const catalogLayer = (state: { items: Array<TrellisProjectView>; trashed: Array<string> }) =>
     TrellisCatalog.layer.pipe(
+      Layer.provide(flakyProjectStore),
       Layer.provideMerge(
         Layer.mergeAll(
           OrchestrationV2LayerLive,
@@ -777,9 +805,25 @@ describe("TrellisCatalog service", () => {
         const status = yield* catalog.status;
         assert.include(status.retiredRoots ?? [], `${SCRATCH}/idea-a`);
 
+        // Trellis restores it but the answer is lost: the conversations stay
+        // archived until a retry finishes the restore.
+        faults.restoreAnswerLost = true;
+        yield* catalog.restore({ kind: "idea", id: "idea-a" }).pipe(Effect.flip);
+        assert.isNotNull(yield* archivedAt(kept));
         const restored = yield* catalog.restore({ kind: "idea", id: "idea-a" });
         assert.equal(restored.projectId, a!.projectId);
         assert.isNull(yield* archivedAt(kept));
+
+        // Trashing refuses while it cannot tell whether anything is running.
+        faults.projectListFails = true;
+        const unverified = yield* catalog
+          .trashProject(a!.projectId)
+          .pipe(
+            Effect.flip,
+            Effect.ensuring(Effect.sync(() => void (faults.projectListFails = false))),
+          );
+        assert.include(unverified.message, "Could not check");
+        assert.deepEqual(state.trashed, ["idea-a"]);
 
         // Once the trash is purged, a project kept for its conversations
         // stays retired.

@@ -45,7 +45,7 @@ export interface IdeaPromotionDeps {
   >;
   readonly discardIdea: (trellisId: string) => Effect.Effect<void>;
   /** The project of an existing thread, or null when it does not exist. */
-  readonly threadProjectId: (threadId: ThreadId) => Effect.Effect<ProjectId | null>;
+  readonly threadProjectId: (threadId: ThreadId) => Effect.Effect<ProjectId | null, TrellisError>;
 }
 
 /**
@@ -63,7 +63,9 @@ const promoteIdeaDraft = <A, E, R>(input: {
 }): Effect.Effect<A, E, R> => {
   const { deps } = input;
   const program = Effect.gen(function* () {
-    const existing = yield* deps.threadProjectId(input.threadId);
+    const existing = yield* deps
+      .threadProjectId(input.threadId)
+      .pipe(Effect.mapError(input.ideaError));
     if (existing !== null && !isTrellisLandingPad(existing)) {
       return yield* input.send(existing, existing);
     }
@@ -75,15 +77,20 @@ const promoteIdeaDraft = <A, E, R>(input: {
             Effect.onExit((exit) =>
               Exit.isSuccess(exit)
                 ? Effect.void
-                : deps
-                    .threadProjectId(input.threadId)
-                    .pipe(
-                      Effect.flatMap((projectId) =>
-                        projectId === idea.projectId
-                          ? Effect.void
-                          : deps.discardIdea(idea.trellisId),
-                      ),
+                : // Discarded only when a successful read shows the thread is
+                  // not in the idea; a failed read keeps it, since the move
+                  // may have committed.
+                  deps.threadProjectId(input.threadId).pipe(
+                    Effect.flatMap((projectId) =>
+                      projectId === idea.projectId ? Effect.void : deps.discardIdea(idea.trellisId),
                     ),
+                    Effect.catch((error) =>
+                      Effect.logWarning("kept a new Trellis idea whose thread could not be read", {
+                        trellisId: idea.trellisId,
+                        detail: error.message,
+                      }),
+                    ),
+                  ),
             ),
           ),
         ),
@@ -124,7 +131,9 @@ const make = Effect.gen(function* () {
   const threadProjectId = (threadId: ThreadId) =>
     orchestrator.getThreadShell(threadId).pipe(
       Effect.map((shell) => shell?.projectId ?? null),
-      Effect.orElseSucceed(() => null),
+      Effect.mapError(
+        (error) => new TrellisError({ message: `Could not read the thread: ${error.message}` }),
+      ),
     );
   const deps: IdeaPromotionDeps = {
     createIdea: catalog.createIdeaForDraft,

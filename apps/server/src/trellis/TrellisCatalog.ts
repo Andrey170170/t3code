@@ -462,6 +462,17 @@ export const refuseTrellisProjectDelete = (projectId: ProjectId) =>
 
 const isTrellisError = Schema.is(TrellisError);
 
+/** A restore whose unarchives may not have finished; see `finishRestore`. */
+const PendingRestore = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.Literals(["idea", "project", "workspace"]),
+  /** When the item went to the trash, in Unix seconds. */
+  deletedAt: Schema.Finite,
+  /** The trashed project a fork's restore brings back, if any. */
+  ownerId: Schema.NullOr(Schema.String),
+});
+type PendingRestore = typeof PendingRestore.Type;
+
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
 
@@ -710,7 +721,13 @@ const make = Effect.gen(function* () {
         },
       ).pipe(keepAlive("the Trellis catalog stopped following project events")),
     );
-    yield* forkParked(syncNow.pipe(Effect.repeat(Schedule.spaced(POLL_INTERVAL)), Effect.asVoid));
+    yield* forkParked(
+      syncNow.pipe(
+        Effect.andThen(resumePendingRestores),
+        Effect.repeat(Schedule.spaced(POLL_INTERVAL)),
+        Effect.asVoid,
+      ),
+    );
   });
 
   const requireReady = Effect.gen(function* () {
@@ -890,7 +907,15 @@ const make = Effect.gen(function* () {
               .map((workspace) => workspace.path);
     // Trashing moves the files away and stops the workspace, so running
     // agents inside it would lose their work.
-    const busy = yield* busyThreadTitlesIn(scopes).pipe(Effect.orElseSucceed(() => []));
+    // Unverifiable activity refuses the trash rather than risking a running agent.
+    const busy = yield* busyThreadTitlesIn(scopes).pipe(
+      Effect.mapError(
+        (error) =>
+          new TrellisError({
+            message: `Could not check whether anything is still working in ${target.name}, so it was not moved to the trash: ${errorMessage(error)}`,
+          }),
+      ),
+    );
     if (busy.length > 0) {
       const one = busy.length === 1;
       return yield* new TrellisError({
@@ -908,79 +933,155 @@ const make = Effect.gen(function* () {
   });
 
   // Restoring also unarchives the conversations archived when the item went
-  // to the trash (archived since then), the reverse of retiring it.
-  const restore: TrellisCatalog["Service"]["restore"] = Effect.fn("TrellisCatalog.restore")(
-    function* (input) {
+  // to the trash (archived since then), the reverse of retiring it. Trellis
+  // forgets the deletion time as soon as it restores, so the restore is
+  // recorded in a file first and its unarchives resumed until they finish:
+  // on a retried restore and on every poll.
+  const pendingRestoresPath = NodePath.join(serverConfig.stateDir, "trellis-pending-restores.json");
+  const restoreLock = yield* Semaphore.make(1);
+  const decodePendingRestores = Schema.decodeUnknownEffect(
+    Schema.fromJsonString(Schema.Array(PendingRestore)),
+  );
+  const encodePendingRestores = Schema.encodeEffect(
+    Schema.fromJsonString(Schema.Array(PendingRestore)),
+  );
+  const readPendingRestores = Effect.gen(function* () {
+    if (!(yield* fileSystem.exists(pendingRestoresPath))) return [];
+    return yield* decodePendingRestores(yield* fileSystem.readFileString(pendingRestoresPath));
+  });
+  const writePendingRestores = (records: ReadonlyArray<PendingRestore>) =>
+    Effect.gen(function* () {
+      const partial = `${pendingRestoresPath}.partial`;
+      yield* fileSystem.writeFileString(partial, yield* encodePendingRestores(records));
+      yield* fileSystem.rename(partial, pendingRestoresPath);
+    });
+  const updatePendingRestores = (
+    update: (records: ReadonlyArray<PendingRestore>) => ReadonlyArray<PendingRestore>,
+  ) => readPendingRestores.pipe(Effect.flatMap((records) => writePendingRestores(update(records))));
+
+  const liveRoots = (item: TrellisProjectView) =>
+    item.kind === "idea" || item.workspaces.length === 0
+      ? [item.path]
+      : item.workspaces
+          .filter((workspace) => workspace.deleted_at === null)
+          .map((workspace) => workspace.path);
+
+  /**
+   * Unarchives what a recorded restore brings back, then drops the record.
+   * Waits while Trellis still has the item in its trash (not restored yet);
+   * drops it when the item is gone for good.
+   */
+  const finishRestore = Effect.fn("TrellisCatalog.finishRestore")(function* (
+    record: PendingRestore,
+  ) {
+    const env = yield* requireReady;
+    const items = yield* trellis.listProjects({ all: false });
+    let roots: ReadonlyArray<string> | null;
+    if (record.kind === "workspace") {
+      const live = items.some((item) =>
+        item.workspaces.some(
+          (workspace) => workspace.id === record.id && workspace.deleted_at === null,
+        ),
+      );
+      const owner = items.find((item) => item.id === record.ownerId);
+      roots = !live
+        ? null
+        : owner !== undefined
+          ? liveRoots(owner)
+          : [NodePath.posix.join(env.root, "workspaces", record.id, "project")];
+    } else {
+      const item = items.find((entry) => entry.id === record.id);
+      roots = item === undefined ? null : liveRoots(item);
+    }
+    if (roots === null) {
+      const trash = yield* trellis.listTrash;
+      const trashed = [...trash.projects, ...trash.workspaces].some(
+        (entry) => entry.id === record.id,
+      );
+      if (!trashed) yield* updatePendingRestores((all) => all.filter((r) => r.id !== record.id));
+      return;
+    }
+    const ids = yield* syncNow;
+    const restoredProjectIds = new Set(
+      roots.flatMap((entry) => {
+        const id = ids.get(normalizeRoot(entry));
+        return id === undefined ? [] : [id];
+      }),
+    );
+    const archived = (yield* orchestrator.getShellSnapshot({ location: "archive" }))
+      .archivedThreads;
+    for (const thread of archived) {
+      if (
+        restoredProjectIds.has(thread.projectId) &&
+        thread.archivedAt !== null &&
+        DateTime.toEpochMillis(thread.archivedAt) >= record.deletedAt * 1000
+      ) {
+        yield* orchestrator.dispatch({
+          type: "thread.unarchive",
+          commandId: yield* commandId("restore-unarchive"),
+          threadId: thread.id,
+        });
+      }
+    }
+    yield* updatePendingRestores((all) => all.filter((r) => r.id !== record.id));
+  });
+
+  /** Resumes the unarchives of restores a crash or failure left unfinished. Never fails. */
+  const resumePendingRestores = restoreLock.withPermits(1)(
+    Effect.gen(function* () {
+      for (const record of yield* readPendingRestores) {
+        yield* finishRestore(record).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("could not finish restoring a Trellis item", {
+              id: record.id,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("could not read the pending Trellis restores", {
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    ),
+  );
+
+  const restore = Effect.fn("TrellisCatalog.restore")(
+    function* (input: TrellisRestoreInput) {
       const env = yield* requireReady;
       const trash = yield* trellis.listTrash;
-      const deletedAt =
-        [...trash.projects, ...trash.workspaces].find((entry) => entry.id === input.id)
-          ?.deleted_at ?? null;
-      const liveRoots = (item: TrellisProjectView) =>
-        item.kind === "idea" || item.workspaces.length === 0
-          ? [item.path]
-          : item.workspaces
-              .filter((workspace) => workspace.deleted_at === null)
-              .map((workspace) => workspace.path);
+      const entry = [...trash.projects, ...trash.workspaces].find((item) => item.id === input.id);
+      // A fork whose project is trashed brings the project back first, and
+      // with it the project's other workspaces; a fork of a live project
+      // only itself.
+      const ownerId =
+        input.kind === "workspace" &&
+        entry?.project_id != null &&
+        trash.projects.some((project) => project.id === entry.project_id)
+          ? entry.project_id
+          : null;
+      const recorded = (yield* readPendingRestores).find((record) => record.id === input.id);
+      const record: PendingRestore | undefined =
+        entry?.deleted_at != null
+          ? { id: input.id, kind: input.kind, deletedAt: entry.deleted_at, ownerId }
+          : recorded;
+      if (record !== undefined && record !== recorded) {
+        yield* updatePendingRestores((all) => [...all.filter((r) => r.id !== record.id), record]);
+      }
       let root: string;
-      // Every T3 project the restore brings back. A project restores the
-      // workspaces of its deletion; a fork whose project is trashed brings
-      // the project back first, a fork of a live project only itself.
-      // Workspaces still trashed stay archived.
-      let roots: ReadonlyArray<string>;
       if (input.kind === "workspace") {
         yield* trellis.restoreWorkspace(input.id);
         root = NodePath.posix.join(env.root, "workspaces", input.id, "project");
-        const owner = (yield* trellis.listProjects({ all: false })).find((item) =>
-          item.workspaces.some((workspace) => workspace.id === input.id),
-        );
-        const ownerWasTrashed =
-          owner !== undefined && trash.projects.some((entry) => entry.id === owner.id);
-        roots = ownerWasTrashed ? liveRoots(owner) : [root];
       } else {
-        const restored = yield* trellis.restoreProject(input.id);
-        root = restored.path;
-        roots = liveRoots(restored);
+        root = (yield* trellis.restoreProject(input.id)).path;
       }
+      if (record !== undefined) yield* finishRestore(record);
       const ids = yield* syncNow;
-      const projectId = ids.get(normalizeRoot(root)) ?? null;
-      const restoredProjectIds = new Set(
-        roots.flatMap((entry) => {
-          const id = ids.get(normalizeRoot(entry));
-          return id === undefined ? [] : [id];
-        }),
-      );
-      if (deletedAt !== null) {
-        const archived = yield* orchestrator.getShellSnapshot({ location: "archive" }).pipe(
-          Effect.map((snapshot) => snapshot.archivedThreads),
-          Effect.orElseSucceed(() => []),
-        );
-        for (const thread of archived) {
-          if (
-            restoredProjectIds.has(thread.projectId) &&
-            thread.archivedAt !== null &&
-            DateTime.toEpochMillis(thread.archivedAt) >= deletedAt * 1000
-          ) {
-            yield* commandId("restore-unarchive").pipe(
-              Effect.flatMap((id) =>
-                orchestrator.dispatch({
-                  type: "thread.unarchive",
-                  commandId: id,
-                  threadId: thread.id,
-                }),
-              ),
-              Effect.catch((error) =>
-                Effect.logWarning("could not unarchive a restored Trellis thread", {
-                  threadId: thread.id,
-                  detail: errorMessage(error),
-                }),
-              ),
-            );
-          }
-        }
-      }
-      return { projectId } satisfies TrellisRestoreResult;
+      return { projectId: ids.get(normalizeRoot(root)) ?? null } satisfies TrellisRestoreResult;
     },
+    (effect) => restoreLock.withPermits(1)(effect),
   );
 
   // Moves an idea that never got a thread back out of the catalog.
