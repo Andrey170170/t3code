@@ -373,7 +373,10 @@ const make = Effect.gen(function* () {
         }
       }
       // A keyed spawn forks from the checkpoint its first attempt resolved.
-      const remembered = key === undefined ? undefined : (yield* readSpawns)[key]?.snapshot;
+      // Keyed by thread too: another thread may reuse the same clientRequestId.
+      const spawnKey = key === undefined ? undefined : `${input.parentThreadId}\n${key}`;
+      const remembered =
+        spawnKey === undefined ? undefined : (yield* readSpawns)[spawnKey]?.snapshot;
       const checkpoint =
         remembered !== undefined
           ? { id: remembered }
@@ -384,8 +387,8 @@ const make = Effect.gen(function* () {
               input.from,
             );
       if ("error" in checkpoint) return yield* invalid(checkpoint.error);
-      if (key !== undefined && remembered === undefined) {
-        yield* rememberSpawn(key, checkpoint.id);
+      if (spawnKey !== undefined && remembered === undefined) {
+        yield* rememberSpawn(spawnKey, checkpoint.id);
       }
       const fork = yield* trellis
         .fork({

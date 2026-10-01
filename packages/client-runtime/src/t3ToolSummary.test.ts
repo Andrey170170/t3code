@@ -7,6 +7,12 @@ function completed(input: unknown, output?: unknown): T3ToolSummaryCall {
 }
 
 describe("summarizeT3ToolCalls", () => {
+  it("labels Trellis fork discards as discards, not graduations", () => {
+    expect(
+      summarizeT3ToolCalls("trellis-discard-fork", [completed({ fork: "parser" })]).label,
+    ).toBe("Discarded a Trellis fork 1 time");
+  });
+
   it("counts registered projects, repository destinations, and accepted thread launches", () => {
     expect(
       summarizeT3ToolCalls("project-create", [

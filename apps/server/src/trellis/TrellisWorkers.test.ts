@@ -472,6 +472,31 @@ it.effect("a retried spawn keeps the checkpoint its first attempt resolved", () 
   }).pipe(Effect.provide(testLayer(fake)));
 });
 
+it.effect(
+  "a remembered spawn checkpoint belongs to its thread, not to another reusing the key",
+  () => {
+    const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+    return Effect.gen(function* () {
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const lead = yield* startLead;
+      const other = yield* createThread("other", pathOf(LEAD_WS));
+      yield* sendMessage(other.threadId, "work");
+      const spawn = (threadId: ThreadId) =>
+        service.delegateTask(scopeOf(threadId), {
+          task: "Add the parser",
+          clientRequestId: "spawn-parser",
+          workspace: { fork: { from: "latest" } },
+        });
+      fake.state.failNextFork = "before";
+      yield* spawn(lead.threadId).pipe(Effect.flip);
+      fake.checkpoints.push("snap-2");
+      // Another thread with the same key resolves its own latest checkpoint.
+      const theirs = yield* spawn(other.threadId);
+      assert.equal(theirs.fork?.snapshot, "snap-2");
+    }).pipe(Effect.provide(testLayer(fake)));
+  },
+);
+
 it.effect("concurrent spawns with one clientRequestId leave one fork and report it", () => {
   const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
   return Effect.gen(function* () {

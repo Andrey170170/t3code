@@ -317,6 +317,8 @@ export function isLoopbackPreviewUrl(url: string): boolean {
 export function isHiddenWorkerProject(
   project: { readonly workspaceRoot: string },
   status: {
+    /** The known `workerRoots` hold in any state; the lineage guess only while ready. */
+    readonly state?: TrellisState | undefined;
     readonly root?: string | null | undefined;
     readonly workerRoots?: ReadonlyArray<string> | undefined;
   } | null,
@@ -330,7 +332,11 @@ export function isHiddenWorkerProject(
   if (status === null || threads.leads > 0 || hasDraft) return false;
   const root = trimTrailingSlashes(project.workspaceRoot);
   if (status.workerRoots?.includes(root)) return true;
-  return threads.forkWorkers > 0 && isTrellisWorkspaceRoot(root, status.root);
+  return (
+    (status.state === undefined || status.state === "ready") &&
+    threads.forkWorkers > 0 &&
+    isTrellisWorkspaceRoot(root, status.root)
+  );
 }
 
 export type TrellisWorkspaceFilter = "all" | "leads" | "workers" | "discarded";

@@ -78,7 +78,7 @@ export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
                 : new Set(status.retiredRoots);
             return (
               isHiddenRetiredProject(project, retired, counts.leads + counts.workers > 0, false) ||
-              (status.state === "ready" && isHiddenWorkerProject(project, status, counts, false))
+              isHiddenWorkerProject(project, status, counts, false)
             );
           }),
     [activeThreads, projects, statuses],

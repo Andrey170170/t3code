@@ -356,6 +356,17 @@ describe("worker forks", () => {
     expect(isHiddenWorkerProject(project, null, workers, false)).toBe(false);
   });
 
+  it("keeps known worker forks hidden while Trellis is off or down; the lineage guess only when ready", () => {
+    const project = { workspaceRoot: fork };
+    const fresh = { workspaceRoot: `${root}/workspaces/ws-new/project` };
+    const workers = { leads: 0, forkWorkers: 1 };
+    for (const state of ["unavailable", "disabled"] as const) {
+      expect(isHiddenWorkerProject(project, { ...status, state }, workers, false)).toBe(true);
+      expect(isHiddenWorkerProject(fresh, { root, state }, workers, false)).toBe(false);
+    }
+    expect(isHiddenWorkerProject(fresh, { root, state: "ready" }, workers, false)).toBe(true);
+  });
+
   it("hides a fork whose workers' leads work elsewhere before the status lists it", () => {
     const fresh = { workspaceRoot: `${root}/workspaces/ws-new/project` };
     expect(isHiddenWorkerProject(fresh, { root }, { leads: 0, forkWorkers: 1 }, false)).toBe(true);
