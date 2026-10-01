@@ -561,7 +561,12 @@ check 8a "The cloned project is named click in Trellis and in T3" "$OUT/08-click
   c8a
 check 8b "A thread there lists the top-level files" "$OUT/08-click.png" \
   c8b
-note 8 "The sidebar labels this project 'pallets/click': T3 groups projects by Git remote, so other clones of the repository share the entry."
+C_ROW=$(pwc <<JS
+async page => await page.getByRole('button', { name: $(js "$(sql "select title from orchestration_v2_projection_threads where thread_id='$C_THREAD'"), click"), exact: true }).count()
+JS
+)
+c8c() { [[ $C_ROW == 1 ]]; }
+check 8c "The sidebar lists the thread under its own project 'click', not a repository group of all clones" "$OUT/08-click.png" c8c
 
 # ---- 9. Delete and restore ----------------------------------------------
 step 9 "trash and restore click"
@@ -638,7 +643,8 @@ thread_menu "Move me"
 shot 10a-move-menu
 pwc <<'JS' >/dev/null
 async page => {
-  await page.getByRole('button', { name: 'click', exact: true }).click();
+  // Targets are named "<title> (<kind> · <workspace>)".
+  await page.getByRole('button', { name: /^click \(Project · / }).click();
   await page.waitForTimeout(2000);
 }
 JS
