@@ -828,6 +828,11 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
     checkpointScopes: other === undefined ? [] : [{ cwd: other.cwd }],
     providerSessions: [],
   };
+  // The main thread's rollback bookkeeping, as the orchestrator records it.
+  const rollbackState: {
+    rollbackRequestId?: string;
+    rollbackCompletedRequestId?: string | null;
+  } = {};
   const shell = (id: ThreadId, title: string) =>
     ({ id, title, deletedAt: null, worktreePath: null, projectId: "p" }) as never;
   const trellisLayer = Layer.succeed(Trellis, fake.trellis);
@@ -841,6 +846,11 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
               ? Option.none()
               : Option.some({ workspaceRoot: other.cwd } as never),
           ),
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(ProjectionStoreV2)({
+        getThread: () => Effect.succeed(rollbackState as never),
       }),
     ),
     Layer.provide(
@@ -952,6 +962,7 @@ function rollbackHarness(fake: ReturnType<typeof makeFakeTrellis>, fixture: Roll
     execute,
     captureBaseline,
     runs,
+    rollbackState,
   };
 }
 
@@ -1138,6 +1149,30 @@ it.effect("a revert is refused while its own thread has a run going", () => {
     assert.equal(refused.reason, "shared-workspace");
     assert.include(refused.message, '"Main" is still working');
     assert.deepEqual(harness.log, []);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("a turn in a thread whose revert is between attempts waits, without blocking it", () => {
+  const fake = makeFakeTrellis(tempRoot());
+  const scope = ideaScope(fake);
+  // Another client sent a message after the first attempt failed.
+  const harness = rollbackHarness(fake, { scope, ownRunStatus: "starting" });
+  return Effect.gen(function* () {
+    const admission = yield* TurnAdmission;
+    yield* harness.captureBaseline;
+    harness.rollbackState.rollbackRequestId = "rollback-1";
+    harness.rollbackState.rollbackCompletedRequestId = null;
+    const turn = yield* Effect.forkChild(
+      admission.start({ threadId, runId: RunId.make("run-2"), cwd: scope.cwd }),
+    );
+    yield* TestClock.adjust("1 second");
+    assert.isUndefined(turn.pollUnsafe());
+    // The retry restores: the held-back run does not stand in its way.
+    yield* harness.execute();
+    assert.deepEqual(harness.log, ["rewind", "files"]);
+    harness.rollbackState.rollbackCompletedRequestId = "rollback-1";
+    yield* TestClock.adjust("1 second");
+    assert.isTrue(yield* Fiber.join(turn));
   }).pipe(Effect.provide(harness.layer));
 });
 
@@ -1328,6 +1363,7 @@ it.effect("outside Trellis the seams are V2's: the cwd lease and the isolated-wo
         TrellisRestore.layer.pipe(
           Layer.provide(Layer.mock(ProjectStoreV2)({})),
           Layer.provide(Layer.mock(EffectOutboxV2)({})),
+          Layer.provide(Layer.mock(ProjectionStoreV2)({})),
           Layer.provide(TrellisRestore.gateLayer),
           Layer.provide(Layer.succeed(Trellis, makeFakeTrellis(tempRoot()).trellis)),
         ),

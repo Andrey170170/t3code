@@ -20,6 +20,7 @@
  * @module trellis/TrellisRestore
  */
 import type {
+  OrchestrationV2AppThread,
   OrchestrationV2Run,
   OrchestrationV2ThreadShellSnapshot,
   ProjectId,
@@ -42,6 +43,7 @@ import {
   isolatedWorktreeRestoreRule,
 } from "../orchestration-v2/CheckpointRestoreSafety.ts";
 import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
+import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
 import {
   makeCwdRestoreLease,
@@ -203,6 +205,11 @@ export interface TrellisRestoreConflictReads<E> {
    * restore before it would make that checkpoint record the restored files.
    */
   readonly captureOutstanding?: (runId: RunId) => Effect.Effect<boolean>;
+  /**
+   * Whether `runId` is held back at turn admission: it cannot start before
+   * the restore ends, so it does not stand in its way.
+   */
+  readonly heldBack?: (runId: RunId) => boolean;
 }
 
 /**
@@ -256,7 +263,9 @@ export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")
         : false;
     if (
       (!archived.has(thread.id) &&
-        records.runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status))) ||
+        records.runs.some(
+          (run) => ACTIVE_RUN_STATUSES.has(run.status) && reads.heldBack?.(run.id) !== true,
+        )) ||
       capturing
     ) {
       running.push(entry);
@@ -291,13 +300,40 @@ function restoreRefusal(
  * the gate by restore scope, and the rule reports conflicts instead of
  * requiring an isolated worktree. Paths outside Trellis keep V2's defaults.
  */
-export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2> =
+const ROLLBACK_POLL_INTERVAL = "250 millis";
+
+/**
+ * Whether the thread's latest rollback is accepted but neither done nor
+ * failed for good. Servers that predate completion records never set it.
+ */
+function isRollbackPending(
+  thread: Pick<
+    OrchestrationV2AppThread,
+    "rollbackRequestId" | "rollbackCompletedRequestId" | "rollbackFailure"
+  >,
+): boolean {
+  return (
+    thread.rollbackRequestId !== undefined &&
+    thread.rollbackCompletedRequestId === null &&
+    thread.rollbackFailure?.requestId !== thread.rollbackRequestId
+  );
+}
+
+export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | ProjectionStoreV2> =
   Layer.effectContext(
     Effect.gen(function* () {
       const trellisOption = yield* Effect.serviceOption(Trellis);
       const gateOption = yield* Effect.serviceOption(TrellisRestoreGate);
       const projects = yield* ProjectStoreV2;
       const outbox = yield* EffectOutboxV2;
+      const projections = yield* ProjectionStoreV2;
+      // Runs waiting at turn admission.
+      const held = new Set<RunId>();
+      const rollbackPendingIn = (threadId: ThreadId) =>
+        projections.getThread(threadId).pipe(
+          Effect.map(isRollbackPending),
+          Effect.orElseSucceed(() => false),
+        );
       // The capture effect of a run has a fixed id (see RunExecutionService);
       // an unreadable outbox counts as outstanding.
       const captureOutstanding = (runId: RunId) =>
@@ -341,12 +377,21 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2> =
             }),
         },
         {
-          start: ({ cwd }) =>
+          start: ({ threadId, runId, cwd }) =>
             Effect.gen(function* () {
               const path = yield* trellis.canonicalPath(cwd);
               if (trellisRootOf(yield* trellis.expectedRoots, path) === null) return false;
-              return yield* gate.waitFree(path);
-            }),
+              held.add(runId);
+              let waited = false;
+              // A rollback holds its restore only while an attempt runs; a
+              // turn in its thread waits until it is done or failed for good,
+              // instead of starting on files about to be replaced.
+              while (yield* rollbackPendingIn(threadId)) {
+                waited = true;
+                yield* Effect.sleep(ROLLBACK_POLL_INTERVAL);
+              }
+              return (yield* gate.waitFree(path)) || waited;
+            }).pipe(Effect.ensuring(Effect.sync(() => held.delete(runId)))),
         },
         {
           check: (input, dependencies) =>
@@ -363,6 +408,7 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2> =
                     dependencies.projections.getThreadRecords(threadId, ["runs"]),
                   projectRoot,
                   captureOutstanding,
+                  heldBack: (runId) => held.has(runId),
                 },
                 {
                   threadId: input.thread.id,

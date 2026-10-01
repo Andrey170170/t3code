@@ -68,7 +68,7 @@ const runtimePolicyProvided = TrellisRuntimePolicy.layer.pipe(
 // Restores, turn admission and the restore rule follow Trellis restore scopes
 // in Trellis projects; without the Trellis service they are V2's defaults.
 const restoreSeamsProvided = TrellisRestore.layer.pipe(
-  Layer.provide(Layer.merge(ProjectStore.layer, effectOutboxLayer)),
+  Layer.provide(Layer.mergeAll(ProjectStore.layer, effectOutboxLayer, projectionStoreLayer)),
 );
 
 const eventStoreProvided = eventStoreLayer.pipe(

@@ -28,6 +28,7 @@ import { layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
 import { OrchestratorProjectionError, OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { TurnAdmission } from "../orchestration-v2/TurnAdmission.ts";
 import type { ProviderAdapterV2Shape } from "../orchestration-v2/ProviderAdapter.ts";
 import {
@@ -1063,7 +1064,10 @@ describe("TrellisCatalog service", () => {
             }),
           ).pipe(
             Effect.provide(
-              TrellisRestore.layer.pipe(Layer.provide(Layer.mock(EffectOutboxV2)({}))),
+              TrellisRestore.layer.pipe(
+                Layer.provide(Layer.mock(EffectOutboxV2)({})),
+                Layer.provide(Layer.mock(ProjectionStore.ProjectionStoreV2)({})),
+              ),
             ),
           ),
         );
