@@ -558,8 +558,42 @@ it.effect("an unreadable pending file fails the event and is left as it was", ()
         },
       } as unknown as OrchestrationV2DomainEvent)
       .pipe(Effect.flip);
-    assert.equal(failed._tag, "TrellisSummaryQueueError");
+    assert.equal(failed._tag, "TrellisWorkersEventError");
     assert.equal(yield* fileSystem.readFileString(pendingFile), "{not json");
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
+it.effect("a replayed archive of a lead reopened since leaves its new workers alone", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const workers = yield* TrellisWorkers.TrellisWorkers;
+    const orchestrator = yield* OrchestratorV2;
+    const lead = yield* startLead;
+    const leadRun = (yield* threadOf(lead.threadId)).runs.at(-1)!;
+    yield* writeEvent({
+      id: `completed:${leadRun.id}` as never,
+      type: "run.updated",
+      threadId: lead.threadId,
+      runId: leadRun.id,
+      providerInstanceId: leadRun.providerInstanceId,
+      occurredAt: leadRun.requestedAt,
+      payload: { ...leadRun, status: "completed", completedAt: leadRun.requestedAt },
+    });
+    // Archived while the follower was down; reopened, and it delegates again.
+    const archived = yield* orchestrator.dispatch({
+      type: "thread.archive",
+      commandId: CommandId.make("lead:archive-old"),
+      threadId: lead.threadId,
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.unarchive",
+      commandId: CommandId.make("lead:unarchive"),
+      threadId: lead.threadId,
+    });
+    yield* sendMessage(lead.threadId, "more work");
+    const later = yield* delegate(lead.threadId, "parent");
+    for (const stored of archived.storedEvents) yield* workers.handle(stored.event);
+    assert.isNull((yield* threadOf(later.childThreadId)).thread.archivedAt);
   }).pipe(Effect.provide(testLayer(fake)));
 });
 

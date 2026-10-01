@@ -64,9 +64,12 @@ export class TrellisForkSpawnError extends Schema.TaggedError<TrellisForkSpawnEr
   { message: Schema.String, invalid: Schema.Boolean },
 ) {}
 
-/** A worker summary could not be written to the pending-summaries file. */
-export class TrellisSummaryQueueError extends Schema.TaggedError<TrellisSummaryQueueError>()(
-  "TrellisSummaryQueueError",
+/**
+ * An event not fully handled (a summary not queued, a worker not archived):
+ * the follower retries it before moving its cursor.
+ */
+export class TrellisWorkersEventError extends Schema.TaggedError<TrellisWorkersEventError>()(
+  "TrellisWorkersEventError",
   { message: Schema.String },
 ) {}
 
@@ -104,11 +107,11 @@ export class TrellisWorkers extends Context.Service<
     readonly start: () => Effect.Effect<void, never, Scope.Scope>;
     /**
      * Handles one orchestration event as `start` does (tests feed it
-     * directly). Fails only when a summary could not be queued durably.
+     * directly). Fails when it could not finish, to be retried.
      */
     readonly handle: (
       event: OrchestrationV2DomainEvent,
-    ) => Effect.Effect<void, TrellisSummaryQueueError>;
+    ) => Effect.Effect<void, TrellisWorkersEventError>;
     /** Posts the summaries Trellis could not take yet; `start` runs it every 30 s. */
     readonly flushSummaries: Effect.Effect<void>;
   }
@@ -562,15 +565,24 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  /** Cancels and archives the workers below an archived thread; their forks stay. */
-  const archiveWorkers = (leadId: ThreadId) =>
+  /**
+   * Cancels and archives the workers below a thread archived at `archivedAt`;
+   * their forks stay. A replayed event acts only while the lead is still
+   * archived, and only on workers that existed then. Fails (so the follower
+   * retries the event) when a worker could not be archived.
+   */
+  const archiveWorkers = (leadId: ThreadId, archivedAt: DateTime.Utc) =>
     Effect.gen(function* () {
       if (!(yield* trellis.enabled)) return;
       // Lineage through archived workers too; only active ones are stopped.
       const shell = yield* threads.getShellSnapshot();
-      const workers = new Set(descendantsOf(leadId, [...shell.threads, ...shell.archivedThreads]));
+      const all = [...shell.threads, ...shell.archivedThreads];
+      if (all.find((thread) => thread.id === leadId)?.archivedAt == null) return;
+      const workers = new Set(descendantsOf(leadId, all));
+      const failed: Array<ThreadId> = [];
       for (const worker of shell.threads) {
         if (!workers.has(worker.id) || worker.archivedAt !== null) continue;
+        if (DateTime.toEpochMillis(worker.createdAt) > DateTime.toEpochMillis(archivedAt)) continue;
         if (worker.activeRunId !== null) {
           yield* threads
             .dispatch({
@@ -600,21 +612,27 @@ const make = Effect.gen(function* () {
               Effect.logWarning("could not archive a worker of an archived lead", {
                 threadId: worker.id,
                 cause: Cause.pretty(cause),
-              }),
+              }).pipe(Effect.andThen(Effect.sync(() => void failed.push(worker.id)))),
             ),
           );
       }
+      if (failed.length > 0) {
+        return yield* new TrellisWorkersEventError({
+          message: `could not archive the workers ${failed.join(", ")} of ${leadId}`,
+        });
+      }
     }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("could not archive the workers of an archived thread", {
-          threadId: leadId,
-          cause: Cause.pretty(cause),
-        }),
+      Effect.mapError((error) =>
+        Schema.is(TrellisWorkersEventError)(error)
+          ? error
+          : new TrellisWorkersEventError({ message: String(error) }),
       ),
     );
 
   const handle: TrellisWorkers["Service"]["handle"] = (event) => {
-    if (event.type === "thread.archived") return archiveWorkers(event.threadId);
+    if (event.type === "thread.archived") {
+      return archiveWorkers(event.threadId, event.payload.archivedAt ?? event.occurredAt);
+    }
     if (event.type !== "subagent.updated") return Effect.void;
     const task = event.payload;
     if (
@@ -639,7 +657,7 @@ const make = Effect.gen(function* () {
       yield* flushSummaries;
     }).pipe(
       // Not queued: the follower retries the event before moving its cursor.
-      Effect.mapError((error) => new TrellisSummaryQueueError({ message: String(error) })),
+      Effect.mapError((error) => new TrellisWorkersEventError({ message: String(error) })),
       Effect.tapCause((cause) =>
         Effect.logWarning("could not queue a worker's summary", {
           childThreadId,
