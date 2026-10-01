@@ -50,7 +50,7 @@ export const modelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5.4",
 } satisfies ModelSelection;
-export const driver = ProviderDriverKind.make("codex");
+const driver = ProviderDriverKind.make("codex");
 
 const PlatformTestLayer = Layer.merge(
   NodeServices.layer,

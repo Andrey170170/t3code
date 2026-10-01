@@ -53,7 +53,7 @@ export interface IdeaPromotionDeps {
  * the idea when the thread is new or still in the landing pad. `existing` is
  * the thread's project before the send (null for a thread not created yet).
  */
-export const promoteIdeaDraft = <A, E, R>(input: {
+const promoteIdeaDraft = <A, E, R>(input: {
   readonly threadId: ThreadId;
   readonly deps: IdeaPromotionDeps;
   readonly send: (projectId: ProjectId, existing: ProjectId | null) => Effect.Effect<A, E, R>;
@@ -112,7 +112,7 @@ export class TrellisIdeaPromotion extends Context.Service<
   }
 >()("t3/trellis/TrellisIdeaPromotion") {}
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const catalog = yield* TrellisCatalog;
   const orchestrator = yield* OrchestratorV2;
   const threadLocks = yield* makeKeyedSerialExecutor<ThreadId>();

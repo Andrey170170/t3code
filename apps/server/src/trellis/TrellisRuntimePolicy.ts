@@ -58,7 +58,7 @@ const TRELLIS_LOOPBACK_HOST = "host.containers.internal";
 export const TRELLIS_OUTSIDE_WORKSPACE_MESSAGE =
   "This thread belongs to a Trellis project but its folder is outside the Trellis workspace (for example a git worktree), so it would run on the host. Start a thread in the project folder instead; use `trellis fork` for parallel work.";
 
-export const TRELLIS_LANDING_PAD_MESSAGE =
+const TRELLIS_LANDING_PAD_MESSAGE =
   "This new idea has no folder yet: send its first message from T3 Code, which creates the idea.";
 
 export const TRELLIS_CUSTOM_HOME_MESSAGE =

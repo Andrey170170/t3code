@@ -108,9 +108,7 @@ const titleOf = (name: string, path: string) =>
   name.trim() || NodePath.posix.basename(path) || "Trellis project";
 
 /** One T3 project per live Trellis idea and per workspace of a live dedicated project. */
-export function desiredProjects(
-  items: ReadonlyArray<TrellisProjectView>,
-): ReadonlyArray<DesiredProject> {
+function desiredProjects(items: ReadonlyArray<TrellisProjectView>): ReadonlyArray<DesiredProject> {
   const desired: Array<DesiredProject> = [];
   for (const item of items) {
     if (!isLive(item)) continue;
@@ -447,7 +445,7 @@ export class TrellisCatalog extends Context.Service<
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const trellis = yield* Trellis;
   const orchestrator = yield* OrchestratorV2;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
