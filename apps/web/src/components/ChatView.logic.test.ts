@@ -2135,4 +2135,35 @@ describe("waitForRevertedMessage", () => {
     await settled;
     vi.useRealTimers();
   });
+
+  it("waits past the rolled-back run until the server reports the files restored", async () => {
+    const { state, projection } = projectionAtom();
+    let resolved = false;
+    const waiting = waitForRevertedMessage(threadRef, messageId, 1, requestId, async () => {}).then(
+      () => {
+        resolved = true;
+      },
+    );
+    await Promise.resolve();
+    const rolledBack = {
+      ...projection,
+      thread: {
+        ...projection.thread,
+        rollbackRequestId: requestId,
+        rollbackCompletedRequestId: null,
+      },
+      runs: [{ id: RunId.make("run-2"), ordinal: 2, status: "rolled_back" }],
+    } as unknown as typeof projection;
+    appAtomRegistry.set(state, { data: Option.some(rolledBack) });
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    appAtomRegistry.set(state, {
+      data: Option.some({
+        ...rolledBack,
+        thread: { ...rolledBack.thread, rollbackCompletedRequestId: requestId },
+      }),
+    });
+    await waiting;
+    expect(resolved).toBe(true);
+  });
 });

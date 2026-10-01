@@ -1157,12 +1157,17 @@ export async function waitForRevertedMessage(
         finish(new Error(failure.message));
         return;
       }
+      if (!accepted) return;
+      // Servers that report completion do so once the files are restored
+      // too; older ones are done when the run is rolled back.
+      const completed = thread.thread.rollbackCompletedRequestId;
       if (
-        accepted &&
-        thread.runs.some(
-          (run) =>
-            run.id === messageRunId && run.ordinal > turnCount && run.status === "rolled_back",
-        )
+        completed === undefined
+          ? thread.runs.some(
+              (run) =>
+                run.id === messageRunId && run.ordinal > turnCount && run.status === "rolled_back",
+            )
+          : completed === requestId
       )
         finish();
     };

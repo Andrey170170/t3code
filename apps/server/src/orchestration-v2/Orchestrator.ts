@@ -353,6 +353,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.user-input.dismiss":
     case "checkpoint.rollback":
     case "checkpoint.rollback.fail":
+    case "checkpoint.rollback.complete":
     case "provider.switch":
     case "thread.project.move":
       return command.threadId;
@@ -8264,6 +8265,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: {
           ...projection.thread,
           rollbackRequestId: command.commandId,
+          rollbackCompletedRequestId: null,
           rollbackFailure: null,
           updatedAt: now,
         },
@@ -8337,6 +8339,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           rollbackFailure: { requestId: command.requestId, message: command.message },
           updatedAt: now,
         },
+      });
+    });
+
+  /**
+   * Records that a rollback finished, files included, so clients waiting on
+   * it stop only then. A completion of a superseded rollback is ignored.
+   */
+  const dispatchCheckpointRollbackComplete = (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "checkpoint.rollback.complete" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) =>
+    Effect.gen(function* () {
+      const thread = yield* projectionStore
+        .getThread(command.threadId)
+        .pipe(mapDispatchError(command));
+      if (thread.deletedAt !== null || thread.rollbackRequestId !== command.requestId) return;
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: command.threadId,
+        providerInstanceId: thread.providerInstanceId,
+        occurredAt: now,
+        payload: { ...thread, rollbackCompletedRequestId: command.requestId, updatedAt: now },
       });
     });
 
@@ -9326,6 +9357,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "checkpoint.rollback.fail":
         yield* dispatchCheckpointRollbackFail(command, events);
+        break;
+      case "checkpoint.rollback.complete":
+        yield* dispatchCheckpointRollbackComplete(command, events);
         break;
       case "thread.fork":
         yield* dispatchThreadFork(command, events);

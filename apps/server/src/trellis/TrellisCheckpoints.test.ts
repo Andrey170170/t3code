@@ -75,7 +75,7 @@ function makeFakeTrellis(root: string) {
   > = [];
   const calls: Array<string> = [];
   let seq = 0;
-  const failures = { create: 0 };
+  const failures = { create: 0, list: 0 };
   /** Runs right after a turn snapshot is taken, as a process still writing would. */
   const hooks: { afterCreate?: () => void } = {};
   const workspacePath = (ws: string) => NodePath.join(root, "workspaces", ws, "project");
@@ -125,11 +125,17 @@ function makeFakeTrellis(root: string) {
   const trellis = makeTestTrellis({
     env: { root, bin: "trellis", shimDir: "/shims" },
     listSnapshots: (target) =>
-      Effect.sync(() =>
-        snapshots.filter(
-          (snapshot) => !snapshot.removed && snapshot.workspace_id === workspaceOf(target),
-        ),
-      ),
+      Effect.suspend(() => {
+        if (failures.list > 0) {
+          failures.list -= 1;
+          return Effect.fail({ _tag: "TrellisError", message: "Trellis is unavailable" } as never);
+        }
+        return Effect.succeed(
+          snapshots.filter(
+            (snapshot) => !snapshot.removed && snapshot.workspace_id === workspaceOf(target),
+          ),
+        );
+      }),
     createSnapshot: ({ target, turn }) =>
       Effect.suspend(() => {
         calls.push(`create ${turn}`);
@@ -770,6 +776,25 @@ it.effect("reverting to an expired checkpoint fails before the rewind and marks 
     );
   }).pipe(Effect.provide(harness.layer));
 });
+
+it.effect(
+  "a revert while Trellis is unreachable fails before the rewind and keeps the checkpoint",
+  () => {
+    const fake = makeFakeTrellis(tempRoot());
+    const harness = rollbackHarness(fake, { scope: ideaScope(fake) });
+    return Effect.gen(function* () {
+      yield* harness.captureBaseline;
+      fake.failures.list = 1;
+      const error = yield* Effect.flip(harness.execute());
+      assert.equal(error.reason, "unexpected-failure");
+      assert.deepEqual(harness.log, []);
+      assert.deepEqual(harness.events, []);
+      // The retry finds the checkpoint intact.
+      yield* harness.execute();
+      assert.deepEqual(harness.log, ["rewind", "files"]);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
 
 it.effect("a retried revert never rewinds the conversation twice", () => {
   const fake = makeFakeTrellis(tempRoot());

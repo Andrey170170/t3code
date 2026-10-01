@@ -15,6 +15,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
+import { CheckpointSnapshotUnavailableError } from "../checkpointing/Errors.ts";
+
 import {
   CheckpointRestoreRule,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
@@ -69,6 +71,7 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
 }
 
 const isCheckpointRollbackExecutionError = Schema.is(CheckpointRollbackExecutionError);
+const isCheckpointSnapshotUnavailableError = Schema.is(CheckpointSnapshotUnavailableError);
 
 /** What a client waiting on a failed rollback is told. */
 export function rollbackFailureMessage(cause: Cause.Cause<unknown>): string {
@@ -227,35 +230,38 @@ export const layer: Layer.Layer<
         }
       }
       // Before anything is rewound: a checkpoint whose files are gone fails
-      // here, and is marked missing so it is not offered again.
+      // here, and is marked missing so it is not offered again. Any other
+      // failure (the store unreachable) leaves it as it is for a retry.
       const reservation = restoreFiles
         ? yield* checkpoints.reserve({ scope, checkpoint }).pipe(
-            Effect.catchTag("CheckpointReserveError", (cause) =>
-              Effect.gen(function* () {
-                const now = yield* DateTime.now;
-                yield* eventSink.write({
-                  events: [
-                    {
-                      id: yield* ids.allocate.event({ threadId: input.threadId }),
-                      type: "checkpoint.captured",
-                      threadId: input.threadId,
-                      ...(checkpoint.runId === null ? {} : { runId: checkpoint.runId }),
-                      nodeId: checkpoint.nodeId,
-                      providerInstanceId: providerThread.providerInstanceId,
-                      occurredAt: now,
-                      payload: { ...checkpoint, status: "missing" },
-                    },
-                  ],
-                });
-                return yield* new CheckpointRollbackExecutionError({
-                  reason: "rollback-target-invalid",
-                  threadId: input.threadId,
-                  providerThreadId: input.providerThreadId,
-                  checkpointId: input.checkpointId,
-                  cause,
-                  detail: CHECKPOINT_EXPIRED_MESSAGE,
-                });
-              }),
+            Effect.catchIf(
+              (error) => isCheckpointSnapshotUnavailableError(error.cause),
+              (cause) =>
+                Effect.gen(function* () {
+                  const now = yield* DateTime.now;
+                  yield* eventSink.write({
+                    events: [
+                      {
+                        id: yield* ids.allocate.event({ threadId: input.threadId }),
+                        type: "checkpoint.captured",
+                        threadId: input.threadId,
+                        ...(checkpoint.runId === null ? {} : { runId: checkpoint.runId }),
+                        nodeId: checkpoint.nodeId,
+                        providerInstanceId: providerThread.providerInstanceId,
+                        occurredAt: now,
+                        payload: { ...checkpoint, status: "missing" },
+                      },
+                    ],
+                  });
+                  return yield* new CheckpointRollbackExecutionError({
+                    reason: "rollback-target-invalid",
+                    threadId: input.threadId,
+                    providerThreadId: input.providerThreadId,
+                    checkpointId: input.checkpointId,
+                    cause,
+                    detail: CHECKPOINT_EXPIRED_MESSAGE,
+                  });
+                }),
             ),
           )
         : null;

@@ -178,7 +178,18 @@ export const layer: Layer.Layer<
           // Pinning happens under the workspace's lock, so once it returns,
           // thinning can no longer remove the snapshot.
           if (pinnedHere) {
-            yield* trellis.setSnapshotPinned(snapshotId, true).pipe(Effect.mapError(() => gone));
+            // A failed pin means it is gone only when Trellis no longer lists it.
+            yield* trellis
+              .setSnapshotPinned(snapshotId, true)
+              .pipe(
+                Effect.catch((error) =>
+                  snapshotOf(target, snapshotId).pipe(
+                    Effect.flatMap((still) =>
+                      Effect.fail(still === null ? gone : backendError("protect")(error)),
+                    ),
+                  ),
+                ),
+              );
           }
           protections.set(snapshotId, { count: 1, pinnedHere });
         }).pipe(protectionLock.withPermits(1)),

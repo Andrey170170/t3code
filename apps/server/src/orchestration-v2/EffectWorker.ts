@@ -380,6 +380,16 @@ export const executorLayer: Layer.Layer<
                           ),
                         ),
                 ),
+                // Rollbacks record the rewind before restoring files, so
+                // waiting clients stop on this, after the files too.
+                Effect.andThen(
+                  threads.dispatch({
+                    type: "checkpoint.rollback.complete",
+                    commandId: CommandId.make(`${effect.commandId}:rollback-completed`),
+                    threadId: effect.threadId,
+                    requestId: effect.commandId,
+                  }),
+                ),
                 Effect.mapError(
                   (cause) =>
                     new OrchestrationEffectExecutionError({

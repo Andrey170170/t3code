@@ -418,6 +418,11 @@ export const OrchestrationV2AppThread = Schema.Struct({
   ),
   /** Latest accepted rollback. Only its failure is recorded in `rollbackFailure`. */
   rollbackRequestId: Schema.optional(CommandId),
+  /**
+   * Latest rollback whose conversation and files are both restored; null
+   * while the latest one runs. Absent from servers that predate it.
+   */
+  rollbackCompletedRequestId: Schema.optional(Schema.NullOr(CommandId)),
   /** Latest rollback that failed after every retry; cleared when the next rollback starts. */
   rollbackFailure: Schema.optional(
     Schema.NullOr(
@@ -2857,6 +2862,13 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     requestId: CommandId,
     message: TrimmedNonEmptyString,
+  }),
+  /** Records that the rollback `requestId` restored the conversation and the files. */
+  Schema.Struct({
+    type: Schema.Literal("checkpoint.rollback.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
   }),
   /**
    * Moves a thread to another project. Only a thread without history (no
