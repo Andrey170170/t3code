@@ -36,6 +36,7 @@ import {
 } from "../orchestration-v2/RuntimePolicy.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
+import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { ProviderInstanceRegistry } from "../provider/Services/ProviderInstanceRegistry.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
@@ -172,10 +173,9 @@ function instanceLaunchRefusal(
     value !== undefined &&
     value.trim().length > 0 &&
     NodePath.resolve(expandHomePath(value.trim())) !== NodePath.join(homeDir, defaultDir);
-  // The instance environment is merged over the inherited one.
-  const environmentValue = (name: string) =>
-    instance?.environment?.find((variable) => variable.name === name)?.value ??
-    hostEnvironment[name];
+  // The environment the provider starts with: the instance's merged over the inherited one.
+  const environment = mergeProviderInstanceEnvironment(instance?.environment, hostEnvironment);
+  const environmentValue = (name: string) => environment[name];
   // The shim runs the host binary whenever this is set, even empty.
   if (environmentValue("TRELLIS_WORKSPACE") !== undefined) {
     return TRELLIS_NESTED_WORKSPACE_MESSAGE;
