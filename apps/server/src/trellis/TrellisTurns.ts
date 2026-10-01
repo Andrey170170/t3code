@@ -62,6 +62,8 @@ export class TrellisTurns extends Context.Service<TrellisTurns, TrellisTurnsShap
 const RECONCILE_INTERVAL = Duration.seconds(5);
 /** How long shutdown waits for Trellis before leaving the rest to the next start. */
 const SHUTDOWN_WAIT = Duration.seconds(5);
+/** Ended run ids remembered against a late start; runs end far apart in time. */
+const MAX_ENDED_RUNS = 10_000;
 /** Resends of a message refused as stale before it counts as failed. */
 const STALE_RETRIES = 3;
 
@@ -79,6 +81,15 @@ const make = Effect.gen(function* () {
   const open = new Map<RunId, OpenTurn>();
   // Ended runs whose end message is still being sent.
   const ending = new Map<RunId, OpenTurn>();
+  // Runs that ended, so a start arriving late never reopens one; oldest dropped first.
+  const endedRuns = new Set<RunId>();
+  const markEnded = (runId: RunId) => {
+    endedRuns.add(runId);
+    if (endedRuns.size > MAX_ENDED_RUNS) {
+      const oldest = endedRuns.values().next().value;
+      if (oldest !== undefined) endedRuns.delete(oldest);
+    }
+  };
   let lastSeq = 0;
   let dirty = false;
   let syncedConnects = 0;
@@ -114,11 +125,14 @@ const make = Effect.gen(function* () {
 
   const start: TrellisTurnsShape["start"] = ({ threadId, runId, cwd }) =>
     Effect.gen(function* () {
+      // An end can arrive before the start (the run was cancelled while
+      // admission waited): the run stays ended, and nothing is reported.
+      if (endedRuns.has(runId)) return { restarted: false };
       const turn: OpenTurn = open.get(runId) ?? {
         threadId,
         cwd,
-        lock: yield* Semaphore.make(1),
-        ended: yield* Deferred.make<void>(),
+        lock: Semaphore.makeUnsafe(1),
+        ended: Deferred.makeUnsafe<void>(),
       };
       // Open before the message goes out, so a resynchronization meanwhile keeps it.
       open.set(runId, turn);
@@ -134,6 +148,7 @@ const make = Effect.gen(function* () {
 
   const end: TrellisTurnsShape["end"] = ({ threadId, runId }) =>
     Effect.gen(function* () {
+      markEnded(runId);
       const turn = open.get(runId);
       if (turn === undefined) return;
       open.delete(runId);

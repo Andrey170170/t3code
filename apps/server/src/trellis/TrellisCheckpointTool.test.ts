@@ -9,9 +9,13 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
+import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import type { TrellisCheckpointResult } from "./Trellis.ts";
@@ -198,6 +202,34 @@ it.effect("a second checkpoint of the workspace is refused while one is under wa
     }
     yield* tool.drain;
     assert.equal(fake.checkpoints.length, 1);
+  }).pipe(Effect.provide(toolLayer(fake)));
+});
+
+it.effect("the continuation says what the checkpoint did, not more", () => {
+  const fake = makeCheckpointTrellis({
+    checkpoint: false,
+    stopped: [{ pid: 42, cmd: "npm run dev" }],
+    interrupted: [],
+    restarted: false,
+  });
+  return Effect.gen(function* () {
+    const tool = yield* TrellisCheckpointTool.TrellisCheckpointTool;
+    const lead = yield* createThread("lead", WS);
+    const run = yield* startTurn(lead.threadId, "work");
+    yield* tool.checkpoint(scopeOf(lead.threadId), { name: "survivors" });
+    if ((yield* projectionOf(lead.threadId)).runs.at(-1)!.status !== "interrupted") {
+      yield* settleInterrupted(run);
+    }
+    yield* tool.drain;
+    const next = yield* continuationOf(lead.threadId);
+    assert.include(
+      next.text,
+      'No checkpoint was taken ("survivors"): processes outlived the stop.',
+    );
+    assert.include(next.text, "stopped and not restarted");
+    assert.notInclude(next.text, "unknown");
+    // It stopped all the same: the sessions there are gone.
+    assert.deepEqual(released, ["session-ws"]);
   }).pipe(Effect.provide(toolLayer(fake)));
 });
 
@@ -418,6 +450,25 @@ it.effect("with interrupt, ends the caller's worker too and continues both", () 
 
     // The worker finishes its continued turn: its result reaches the lead.
     const continued = (yield* projectionOf(worker.id)).runs.at(-1)!;
+    const eventSink = yield* EventSinkV2;
+    // The orchestrator's finalization of the task, awaited as its event (the
+    // stream reads from the sequence before the write, so no event is missed).
+    const finalized = yield* eventSink
+      .stream({
+        threadId: lead.threadId,
+        afterSequence: yield* eventSink.latestSequence({ threadId: lead.threadId }),
+        eventType: "subagent.updated",
+      })
+      .pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "subagent.updated" &&
+            stored.event.payload.childThreadId === worker.id &&
+            stored.event.payload.status === "completed",
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
     yield* writeEvent({
       id: `completed:${continued.id}` as never,
       type: "run.updated",
@@ -432,19 +483,12 @@ it.effect("with interrupt, ends the caller's worker too and continues both", () 
         completedAt: continued.requestedAt,
       },
     });
+    assert.isTrue(Option.isSome(yield* Fiber.join(finalized)));
     // Its completion is owed to the lead (delivered once the lead is idle), not disposed.
-    const owed = () =>
-      Effect.map(projectionOf(lead.threadId), (projection) => {
-        const task = projection.subagents.find(
-          (candidate) => candidate.childThreadId === worker.id,
-        );
-        return task?.status === "completed" ? task : undefined;
-      });
-    for (let attempt = 0; attempt < 200 && (yield* owed()) === undefined; attempt++) {
-      yield* Effect.yieldNow;
-    }
-    const task = yield* owed();
-    assert.isDefined(task);
+    const task = (yield* projectionOf(lead.threadId)).subagents.find(
+      (candidate) => candidate.childThreadId === worker.id,
+    );
+    assert.equal(task?.status, "completed");
     assert.oneOf(task?.completionDelivery?.state, ["pending", "claimed", "delivered"]);
   }).pipe(Effect.provide(toolLayer(fake)));
 });

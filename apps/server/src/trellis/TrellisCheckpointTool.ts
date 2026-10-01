@@ -179,9 +179,16 @@ function callerContinuation(
     return `[trellis_checkpoint] The checkpoint failed: ${reason}.${restarted}${workers} Continue the task; call trellis_checkpoint again if you still need a checkpoint.`;
   }
   const result = outcome.result;
-  const snapshot = result.snapshot?.id ?? "unknown";
-  const stopped = stoppedText(result.stopped);
-  return `[trellis_checkpoint] Checkpoint ${snapshot}${input.name === undefined ? "" : ` ("${input.name}")`} taken. The workspace was stopped and restarted. ${stopped}${workers} Continue the task.`;
+  const named = input.name === undefined ? "" : ` ("${input.name}")`;
+  const snapshot = result.snapshot?.id;
+  // Processes that outlived the stop make the snapshot an ordinary one.
+  const taken = result.checkpoint
+    ? `Checkpoint${snapshot === undefined ? "" : ` ${snapshot}`}${named} taken.`
+    : `No checkpoint was taken${named}: processes outlived the stop${snapshot === undefined ? "" : `, so snapshot ${snapshot} is an ordinary snapshot`}.`;
+  const restart = result.restarted
+    ? "The workspace was stopped and restarted."
+    : "The workspace was stopped and not restarted (it was not running).";
+  return `[trellis_checkpoint] ${taken} ${restart} ${stoppedText(result.stopped)}${workers} Continue the task.`;
 }
 
 /** Stands in for a continuation until the checkpoint's outcome replaces it. */
@@ -474,7 +481,8 @@ const make = Effect.gen(function* () {
                 ),
               );
             // Only a workspace that stopped lost its processes; a refusal keeps them.
-            if (outcome.ok ? outcome.result.restarted : outcome.restarted) {
+            // A checkpoint that answered stopped the workspace, restarted or not.
+            if (outcome.ok || outcome.restarted) {
               yield* gate.releaseOnce(
                 directory,
                 seen,

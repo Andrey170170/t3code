@@ -73,7 +73,7 @@ export interface TrellisRestoreGateShape {
   /** How many times the provider sessions in `directory` were released after a restart. */
   readonly releases: (directory: string) => number;
   /**
-   * Runs `release` for `directory` unless a release there ran since `seen`
+   * Runs `release` for `directory` unless a release there succeeded since `seen`
    * (a `releases` count read before waiting through the restart): the turns
    * that waited through one restart release its sessions once, and none
    * releases a session another turn opened after it.
@@ -81,7 +81,8 @@ export interface TrellisRestoreGateShape {
   readonly releaseOnce: (
     directory: string,
     seen: number,
-    release: Effect.Effect<unknown>,
+    /** Releases the sessions; returns those it could not release. */
+    release: Effect.Effect<ReadonlyArray<string>>,
   ) => Effect.Effect<void>;
 }
 
@@ -131,8 +132,10 @@ function makeRestoreGate(): TrellisRestoreGateShape {
       Effect.gen(function* () {
         const count = releaseCounts.get(directory) ?? 0;
         if (count !== seen) return;
-        yield* release;
-        releaseCounts.set(directory, count + 1);
+        // Counted only once every session is gone: after a failure the next
+        // turn through the same restart tries again.
+        const failed = yield* release;
+        if (failed.length === 0) releaseCounts.set(directory, count + 1);
       }).pipe(releaseLock.withPermits(1)),
     waitFree: (path) =>
       Effect.gen(function* () {

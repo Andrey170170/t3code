@@ -22,7 +22,10 @@ import {
 } from "../orchestration-v2/ProjectionStore.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderRuntimeRecoveryService from "../orchestration-v2/ProviderRuntimeRecoveryService.ts";
-import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
+import {
+  ProviderSessionManagerV2,
+  ProviderSessionReleaseError,
+} from "../orchestration-v2/ProviderSessionManager.ts";
 import { TurnAdmission } from "../orchestration-v2/TurnAdmission.ts";
 import { makeTestTrellis, Trellis } from "./Trellis.ts";
 import {
@@ -91,6 +94,8 @@ function makeTurnsTrellis() {
 /** The admission seam with turn reporting, over a mocked V2 and session manager. */
 function admissionLayer(fake: ReturnType<typeof makeTurnsTrellis>) {
   const released: Array<string> = [];
+  /** Sessions whose next release fails once. */
+  const failRelease = new Set<string>();
   const trellisLayer = Layer.succeed(Trellis, fake.trellis);
   const layer = TrellisRestore.layer.pipe(
     Layer.provide(Layer.mock(ProjectStoreV2)({})),
@@ -108,15 +113,17 @@ function admissionLayer(fake: ReturnType<typeof makeTurnsTrellis>) {
           { providerSessionId: ProviderSessionId.make("session-a-idea"), cwd: `${WS_A}/idea-x` },
           { providerSessionId: ProviderSessionId.make("session-b"), cwd: WS_B },
         ]),
-        release: ({ providerSessionId }) =>
-          Effect.sync(() => void released.push(providerSessionId)),
+        release: ({ providerSessionId, reason }) =>
+          failRelease.delete(providerSessionId)
+            ? Effect.fail(new ProviderSessionReleaseError({ providerSessionId, reason }))
+            : Effect.sync(() => void released.push(providerSessionId)),
       }),
     ),
     Layer.provideMerge(TrellisRestore.gateLayer),
     Layer.provideMerge(TrellisTurns.layer),
     Layer.provide(trellisLayer),
   );
-  return { layer, released };
+  return { layer, released, failRelease };
 }
 
 const turn = (name: string) => ({
@@ -222,6 +229,43 @@ it.effect("turns that waited through one restart release its sessions once", () 
     assert.isTrue(yield* Fiber.join(second));
     // The second would otherwise release the session the first opened meanwhile.
     assert.deepEqual(released, ["session-a", "session-a-idea"]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("a release that failed is tried again by the next turn through the same restart", () => {
+  const fake = makeTurnsTrellis();
+  const { layer, released, failRelease } = admissionLayer(fake);
+  return Effect.gen(function* () {
+    const admission = yield* TurnAdmission;
+    const checkpointEnds = yield* Deferred.make<ReadonlyArray<string>>();
+    fake.state.startGate = checkpointEnds;
+    failRelease.add("session-a");
+    const first = yield* Effect.forkChild(admission.start({ ...turn("one"), cwd: WS_A }));
+    const second = yield* Effect.forkChild(admission.start({ ...turn("two"), cwd: WS_A }));
+    yield* Effect.yieldNow;
+    yield* Deferred.succeed(checkpointEnds, ["ws-a"]);
+    yield* Fiber.join(first);
+    yield* Fiber.join(second);
+    // The first left session-a behind, so the second released it.
+    assert.deepEqual(released, ["session-a-idea", "session-a", "session-a-idea"]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("a start after its run already ended reports nothing", () => {
+  const fake = makeTurnsTrellis();
+  const { layer } = admissionLayer(fake);
+  return Effect.gen(function* () {
+    const admission = yield* TurnAdmission;
+    const turns = yield* TrellisTurns.TrellisTurns;
+    const one = turn("one");
+    // Cancelled while its admission still waited, before its start went out.
+    yield* admission.end({ ...one, status: "cancelled" });
+    assert.isFalse(yield* admission.start({ ...one, cwd: WS_A }));
+    yield* turns.awaitEnded([one.runId]);
+    assert.deepEqual(
+      fake.messages.filter((message) => message.kind !== "put"),
+      [],
+    );
   }).pipe(Effect.provide(layer));
 });
 
