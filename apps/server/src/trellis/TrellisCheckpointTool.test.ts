@@ -143,6 +143,7 @@ it.effect("ends the calling turn, checkpoints, and continues the thread with the
       { pid: 8, cmd: "node /home/me/.npm/_npx/1/node_modules/.bin/playwright-mcp" },
       { pid: 42, cmd: "npm run dev" },
       { pid: 43, cmd: "curl -H 'Authorization: Bearer s3cret' http://localhost:3000" },
+      { pid: 44, cmd: '/usr/local/bin/server --password s3cret --token="s3cret"' },
     ],
     interrupted: [],
     restarted: true,
@@ -166,7 +167,8 @@ it.effect("ends the calling turn, checkpoints, and continues the thread with the
     ]);
     const next = yield* continuationOf(lead.threadId);
     assert.include(next.text, "Checkpoint snap-1");
-    assert.include(next.text, "`npm run dev`, `curl -H 'Authorization: Bearer [REDACTED]'");
+    // Executables and pids only: arguments can carry credentials.
+    assert.include(next.text, "`npm (pid 42)`, `curl (pid 43)`, `server (pid 44)`");
     assert.notInclude(next.text, "s3cret");
     assert.notInclude(next.text, "claude");
     assert.notInclude(next.text, "playwright-mcp");
@@ -200,7 +202,9 @@ it.effect("a second checkpoint of the workspace is refused while one is under wa
 });
 
 it.effect("a failed checkpoint still continues the thread, with the reason", () => {
-  const fake = makeCheckpointTrellis("checkpoint failed: guarded commands did not end in time");
+  const fake = makeCheckpointTrellis(
+    "checkpoint failed: guarded commands did not end in time: deploy --password hunter2 --token='hunter2'",
+  );
   return Effect.gen(function* () {
     const tool = yield* TrellisCheckpointTool.TrellisCheckpointTool;
     const lead = yield* createThread("lead", WS);
@@ -212,6 +216,8 @@ it.effect("a failed checkpoint still continues the thread, with the reason", () 
     yield* tool.drain;
     const next = yield* continuationOf(lead.threadId);
     assert.include(next.text, "The checkpoint failed: checkpoint failed: guarded commands");
+    assert.include(next.text, "deploy --password [REDACTED] --token=[REDACTED]");
+    assert.notInclude(next.text, "hunter2");
     assert.include(next.text, "Nothing was stopped.");
     // Refused before the stop: the workspace's live sessions are kept.
     assert.deepEqual(released, []);
@@ -367,6 +373,7 @@ it.effect("with interrupt, ends the caller's worker too and continues both", () 
       modelSelection,
       runtimeMode: "full-access",
       interactionMode: "default",
+      completionWake: "always",
     });
     const shell = yield* orchestrator.getShellSnapshot({ location: "active" });
     const worker = shell.threads.find((thread) => thread.lineage.parentThreadId === lead.threadId)!;
@@ -408,5 +415,36 @@ it.effect("with interrupt, ends the caller's worker too and continues both", () 
     const workerNext = yield* continuationOf(worker.id);
     assert.include(workerNext.text, 'Your turn was ended because "lead" took a checkpoint');
     assert.equal(workerNext.runs.at(-1), "starting");
+
+    // The worker finishes its continued turn: its result reaches the lead.
+    const continued = (yield* projectionOf(worker.id)).runs.at(-1)!;
+    yield* writeEvent({
+      id: `completed:${continued.id}` as never,
+      type: "run.updated",
+      threadId: worker.id,
+      runId: continued.id,
+      providerInstanceId: continued.providerInstanceId,
+      occurredAt: continued.requestedAt,
+      payload: {
+        ...continued,
+        status: "completed",
+        startedAt: continued.requestedAt,
+        completedAt: continued.requestedAt,
+      },
+    });
+    // Its completion is owed to the lead (delivered once the lead is idle), not disposed.
+    const owed = () =>
+      Effect.map(projectionOf(lead.threadId), (projection) => {
+        const task = projection.subagents.find(
+          (candidate) => candidate.childThreadId === worker.id,
+        );
+        return task?.status === "completed" ? task : undefined;
+      });
+    for (let attempt = 0; attempt < 200 && (yield* owed()) === undefined; attempt++) {
+      yield* Effect.yieldNow;
+    }
+    const task = yield* owed();
+    assert.isDefined(task);
+    assert.oneOf(task?.completionDelivery?.state, ["pending", "claimed", "delivered"]);
   }).pipe(Effect.provide(toolLayer(fake)));
 });

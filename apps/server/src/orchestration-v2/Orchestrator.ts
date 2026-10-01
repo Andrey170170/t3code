@@ -1223,6 +1223,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
     });
 
+  const isTurnEndStatus = (status: OrchestrationV2Run["status"]) =>
+    status === "completed" ||
+    status === "interrupted" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "rolled_back";
+
   const startNextQueuedRun = (threadId: ThreadId, options?: { readonly failedRunId?: RunId }) =>
     Effect.gen(function* () {
       // Every terminal run checks the queue. Only a deliverable queued run
@@ -7856,6 +7863,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const completionCohortRunId = completionMessage?.delegatedCompletion?.parentRunId ?? run.id;
       const stopCompletionCohort = () =>
         Effect.gen(function* () {
+          if (command.keepDelegatedCompletions === true) return;
           yield* disposeDelegatedCompletionCohort({
             command,
             events,
@@ -9558,14 +9566,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
       const threadId = stored.event.threadId;
-      // Every terminal run ends its admitted turn, whatever path ended it.
-      if (stored.event.type === "run.updated") {
-        yield* turnAdmission.end({
-          threadId,
-          runId: stored.event.payload.id,
-          status: stored.event.payload.status,
-        });
-      }
       // finalize writes the parent thread and startNextQueuedRun writes this
       // thread, so each takes its own thread's lock, sequentially and never
       // nested: dispatchDelegatedTaskRequest already writes child events
@@ -9621,6 +9621,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             stored.event.payload.status === "rolled_back"),
       ),
       Stream.runForEach(handleTerminalRun),
+      Effect.forkDetach,
+    );
+
+  // Every terminal run ends its admitted turn, whatever ended it, including
+  // the runtime reconciliation at shutdown that queue promotion skips.
+  yield* eventSink
+    .stream({ afterSequence: terminalEventsAfterSequence, eventType: "run.updated" })
+    .pipe(
+      Stream.runForEach((stored) =>
+        stored.event.type === "run.updated" && isTurnEndStatus(stored.event.payload.status)
+          ? turnAdmission.end({
+              threadId: stored.event.threadId,
+              runId: stored.event.payload.id,
+              status: stored.event.payload.status,
+            })
+          : Effect.void,
+      ),
+      Effect.catchCause((cause) => Effect.logWarning("Failed to report V2 turn ends", { cause })),
       Effect.forkDetach,
     );
 

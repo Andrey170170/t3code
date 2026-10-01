@@ -113,14 +113,36 @@ function workersOf(
  */
 const PROVIDER_PROCESS = /--output-format stream-json|\bapp-server\b|\bmcp\b|-mcp\b|\/mcp\//;
 const MAX_LISTED = 8;
-const MAX_COMMAND = 160;
+const MAX_ERROR = 600;
 
-/** A stopped command as the agent sees it: credentials redacted, long ones cut. */
-function shownCommand(cmd: string): string {
-  const redacted = cmd
-    .replace(/\b(Bearer|Basic)\s+[^\s"',;]+/giu, "$1 [REDACTED]")
-    .replace(/((?:token|secret|password|api[_-]?key)=)[^\s"',;]+/giu, "$1[REDACTED]");
-  return redacted.length > MAX_COMMAND ? `${redacted.slice(0, MAX_COMMAND)}…` : redacted;
+/**
+ * A stopped process as the agent sees it: the executable's name and pid,
+ * never its arguments, which can carry credentials.
+ */
+function shownProcess(proc: { readonly pid: number; readonly cmd: string }): string {
+  const argv0 = /^\s*(?:"([^"]*)"|'([^']*)'|(\S+))/u.exec(proc.cmd);
+  const executable = argv0?.[1] ?? argv0?.[2] ?? argv0?.[3] ?? "";
+  return `${executable.split("/").pop() || "process"} (pid ${proc.pid})`;
+}
+
+const SECRET_NAME =
+  "(?:password|passwd|pass|token|secret|api[_-]?key|auth[a-z_-]*|credentials?|bearer)";
+
+/**
+ * Trellis's error text with credentials hidden: it can quote the commands
+ * of guarded or surviving processes, arguments included.
+ */
+function redactSecrets(text: string): string {
+  const redacted = text
+    .replace(/\b(Bearer|Basic)\s+("[^"]*"|'[^']*'|[^\s"',;]+)/giu, "$1 [REDACTED]")
+    .replace(
+      new RegExp(
+        `(-{0,2}${SECRET_NAME}["']?\\s*[=:]\\s*|--${SECRET_NAME}\\s+)("[^"]*"|'[^']*'|[^\\s"',;]+)`,
+        "giu",
+      ),
+      "$1[REDACTED]",
+    );
+  return redacted.length > MAX_ERROR ? `${redacted.slice(0, MAX_ERROR)}…` : redacted;
 }
 
 /** The message continuing the calling thread with the checkpoint's outcome. */
@@ -137,14 +159,11 @@ function callerContinuation(
     input.workers.length === 0
       ? ""
       : ` The turns of ${quoted(input.workers)} were ended too; they continue on their own.`;
-  const stoppedText = (procs: ReadonlyArray<{ readonly cmd: string }>) => {
-    const commands = procs
-      .map((proc) => proc.cmd)
-      .filter((cmd) => !PROVIDER_PROCESS.test(cmd))
-      .map(shownCommand);
+  const stoppedText = (procs: ReadonlyArray<{ readonly pid: number; readonly cmd: string }>) => {
+    const commands = procs.filter((proc) => !PROVIDER_PROCESS.test(proc.cmd)).map(shownProcess);
     const listed = commands
       .slice(0, MAX_LISTED)
-      .map((cmd) => `\`${cmd}\``)
+      .map((shown) => `\`${shown}\``)
       .join(", ");
     const more = commands.length > MAX_LISTED ? ` and ${commands.length - MAX_LISTED} more` : "";
     return commands.length === 0
@@ -152,7 +171,7 @@ function callerContinuation(
       : `These processes were stopped; restart any you still need: ${listed}${more}.`;
   };
   if (!outcome.ok) {
-    let reason = outcome.error;
+    let reason = redactSecrets(outcome.error);
     for (const [id, title] of input.titles) reason = reason.replaceAll(id, `"${title}"`);
     const restarted = outcome.restarted
       ? ` The workspace was stopped and restarted anyway. ${stoppedText(outcome.stopped)}`
@@ -370,9 +389,11 @@ const make = Effect.gen(function* () {
             commandId: yield* commandId("interrupt"),
             threadId,
             runId,
-            reason: "A Trellis checkpoint stops the workspace.",
+            reason: "Interrupted for a Trellis checkpoint",
             // The continuation (and anything queued) waits for the checkpoint.
             holdQueue: true,
+            // The turn continues after the checkpoint: its workers still report to it.
+            keepDelegatedCompletions: true,
           });
         });
       const interruptedRuns: Array<RunId> = ending.map((entry) => entry.runId);

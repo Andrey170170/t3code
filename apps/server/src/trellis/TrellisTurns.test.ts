@@ -21,6 +21,7 @@ import {
   ProjectionStoreV2,
 } from "../orchestration-v2/ProjectionStore.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
+import * as ProviderRuntimeRecoveryService from "../orchestration-v2/ProviderRuntimeRecoveryService.ts";
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import { TurnAdmission } from "../orchestration-v2/TurnAdmission.ts";
 import { makeTestTrellis, Trellis } from "./Trellis.ts";
@@ -289,6 +290,24 @@ it.effect("open turns are resynchronized on every connect and after a lost messa
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("T3 stopping ends every turn it reported, after the ends in flight", () => {
+  const fake = makeTurnsTrellis();
+  const { layer } = admissionLayer(fake);
+  return Effect.gen(function* () {
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const admission = yield* TurnAdmission;
+        yield* admission.start({ ...turn("one"), cwd: WS_A });
+        yield* admission.start({ ...turn("two"), cwd: WS_B });
+        yield* admission.end({ ...turn("one"), status: "completed" });
+      }).pipe(Effect.provide(layer)),
+    );
+    const last = fake.messages.at(-1);
+    assert.deepEqual(last?.kind === "put" ? last.open : undefined, []);
+    assert.isTrue(fake.messages.some((m) => m.kind === "end" && m.turn === turn("one").runId));
+  });
+});
+
 // ---- through the orchestrator --------------------------------------------
 
 /** V2 with in-memory persistence, Trellis turn reporting and the recording Trellis. */
@@ -341,6 +360,20 @@ it.effect("every way a run ends reports its turn's end", () => {
     const refusedRun = yield* runOf(refused.threadId);
     assert.equal(refusedRun.status, "failed");
     assert.isTrue(yield* ended(refusedRun.id));
+
+    // A run the shutdown reconciliation ends (which queue promotion skips).
+    const stopping = yield* createThread("stopping", WS_A);
+    yield* sendMessage(stopping.threadId, "work");
+    const stoppingRun = yield* runOf(stopping.threadId);
+    yield* turns.start({ threadId: stopping.threadId, runId: stoppingRun.id, cwd: WS_A });
+    yield* (yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService).reconcile(
+      "shutdown",
+    );
+    assert.notInclude(
+      ["starting", "running", "preparing", "waiting"],
+      (yield* runOf(stopping.threadId)).status,
+    );
+    assert.isTrue(yield* ended(stoppingRun.id));
 
     // Runs the provider ended: completed, interrupted, cancelled, failed.
     for (const status of ["completed", "interrupted", "cancelled", "failed"] as const) {

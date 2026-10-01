@@ -2727,6 +2727,11 @@ export const OrchestrationV2Command = Schema.Union([
     runId: RunId,
     reason: Schema.optional(Schema.String),
     holdQueue: Schema.optional(Schema.Boolean),
+    /**
+     * Keep the run's delegated workers reporting to it: the turn ends only to
+     * continue (a Trellis checkpoint), so the work it started is not stopped.
+     */
+    keepDelegatedCompletions: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("queued-message.promote-to-steer"),

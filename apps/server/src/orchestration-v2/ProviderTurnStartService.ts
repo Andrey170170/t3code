@@ -51,6 +51,9 @@ import {
   selectInheritedBackgroundTurnItems,
 } from "./RunExecutionService.ts";
 import { TurnAdmission } from "./TurnAdmission.ts";
+
+/** The message of an interrupt request that named no reason (Orchestrator `run.interrupt`). */
+const DEFAULT_INTERRUPT_REQUEST_MESSAGE = "Interrupt requested";
 import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
 import {
   isRestartNoteContinuation,
@@ -177,6 +180,32 @@ export const layer: Layer.Layer<
               }),
             )
             .pipe(Effect.catchCause(() => Effect.succeed(false))),
+        // The request's message when the interrupt named a reason (a Trellis
+        // checkpoint, an agent's t3_thread_interrupt); a plain Stop has none.
+        interruptReason: () =>
+          projectionStore
+            .getThreadRecords(input.threadId, ["turnItems"], {
+              turnItemRunId: input.runId,
+              turnItemTypes: ["run_interrupt_request"],
+            })
+            .pipe(
+              Effect.map((records) => {
+                const request = records.turnItems.find(
+                  (item) =>
+                    item.type === "run_interrupt_request" &&
+                    item.id ===
+                      idAllocator.derive.runSignalTurnItem({
+                        runId: input.runId,
+                        signal: "interrupt-request",
+                      }),
+                );
+                return request?.type === "run_interrupt_request" &&
+                  request.message !== DEFAULT_INTERRUPT_REQUEST_MESSAGE
+                  ? request.message
+                  : undefined;
+              }),
+              Effect.catchCause(() => Effect.succeed(undefined)),
+            ),
       };
     };
 
@@ -1258,6 +1287,7 @@ export const layer: Layer.Layer<
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
+        interruptReason: runControls.interruptReason,
         message: {
           messageId: message.id,
           text: userText,

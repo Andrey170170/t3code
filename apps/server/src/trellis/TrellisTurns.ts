@@ -12,7 +12,8 @@
  * newer start). Starts and ends are idempotent in Trellis, so a stale one is
  * resent with a new `seq`. The whole set is resynchronized (`PUT`) whenever
  * Trellis becomes reachable, including the first time after a T3 restart
- * (when nothing is open yet), and after any message failed to arrive.
+ * (when nothing is open yet), and after any message failed to arrive; when
+ * T3 stops, it clears them.
  *
  * @module trellis/TrellisTurns
  */
@@ -59,6 +60,8 @@ export class TrellisTurns extends Context.Service<TrellisTurns, TrellisTurnsShap
 
 /** How often the connection is checked for a resynchronization. */
 const RECONCILE_INTERVAL = Duration.seconds(5);
+/** How long shutdown waits for Trellis before leaving the rest to the next start. */
+const SHUTDOWN_WAIT = Duration.seconds(5);
 /** Resends of a message refused as stale before it counts as failed. */
 const STALE_RETRIES = 3;
 
@@ -140,12 +143,14 @@ const make = Effect.gen(function* () {
         trellis.reportTurn({ target: turn.cwd, thread: threadId, turn: runId, event: "end", seq }),
       ).pipe(
         turn.lock.withPermits(1),
+        // Finishes even while T3 shuts down (see the finalizer).
+        Effect.uninterruptible,
         Effect.ensuring(
           Effect.sync(() => ending.delete(runId)).pipe(
             Effect.andThen(Deferred.succeed(turn.ended, undefined)),
           ),
         ),
-        Effect.forkIn(scope),
+        Effect.forkIn(scope, { startImmediately: true }),
       );
     });
 
@@ -184,6 +189,20 @@ const make = Effect.gen(function* () {
     syncedConnects = connects;
     yield* reconcile;
   });
+  // T3 stopping ends every turn it runs: their providers stop with it. Ends
+  // still being sent finish first, then Trellis forgets the rest, so no
+  // stale turn blocks checkpoints until T3 is back.
+  yield* Effect.addFinalizer(() =>
+    Effect.gen(function* () {
+      if ((yield* trellis.current) === null) return;
+      // Ends being sent finished already: their fibers are uninterruptible and
+      // were forked after this finalizer, so the scope closed them first.
+      open.clear();
+      yield* send("shutdown", (seq) => trellis.replaceTurns({ open: [], seq })).pipe(
+        Effect.timeoutOption(SHUTDOWN_WAIT),
+      );
+    }),
+  );
   yield* syncIfNeeded.pipe(
     Effect.repeat(Schedule.spaced(RECONCILE_INTERVAL)),
     Effect.forkIn(scope),

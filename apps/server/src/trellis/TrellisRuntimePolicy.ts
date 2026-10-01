@@ -99,7 +99,7 @@ type TrellisLaunchDecision =
  * tool, which ends the turn cleanly and continues the thread with the result.
  */
 export const TRELLIS_T3_GUIDE =
-  "In T3, take a checkpoint of a dedicated project (ideas have none) with the `trellis_checkpoint` tool of the t3-code MCP server instead of running `trellis checkpoint`: it ends this turn, takes the checkpoint (which restarts the workspace) and continues this conversation with the result as the next message. Call it as the last action of a turn. It refuses while other threads are mid-turn in the workspace; pass `interrupt: true` to end the turns of your own delegated workers too, who continue after the restart.";
+  "In T3, take a checkpoint of a dedicated project (ideas have none) only with the `trellis_checkpoint` tool of the t3-code MCP server, never by running `trellis checkpoint` (or `trellis fork` without a snapshot, which checkpoints first) in a shell: the stop kills your own turn mid-command, which T3 then records as failed. The tool ends this turn cleanly, takes the checkpoint (which restarts the workspace) and continues this conversation with the result as the next message. Call it as the last action of a turn. It refuses while other threads are mid-turn in the workspace; pass `interrupt: true` to end the turns of your own delegated workers too, who continue after the restart.";
 
 function decideTrellisLaunch(input: {
   readonly env: TrellisEnv | null;
