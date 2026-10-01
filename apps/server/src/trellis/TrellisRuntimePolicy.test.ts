@@ -287,6 +287,30 @@ describe("TrellisRuntimePolicy", () => {
         }),
       );
       assert.equal(instanceEnvHome, TrellisRuntimePolicy.TRELLIS_CUSTOM_HOME_MESSAGE);
+      // Duplicate entries: the last one is the one the provider starts with.
+      const codexWith = (values: ReadonlyArray<string>) =>
+        resolve({
+          instance: "codex",
+          projectRoot: idea,
+          providerInstances: {
+            providerInstances: {
+              [ProviderInstanceId.make("codex")]: {
+                driver: ProviderDriverKind.make("codex"),
+                environment: values.map((value) => ({
+                  name: "CODEX_HOME",
+                  value,
+                  sensitive: false,
+                })),
+              },
+            },
+          },
+        });
+      assert.equal(
+        yield* refusal(codexWith(["~/.codex", "/srv/codex-work"])),
+        TrellisRuntimePolicy.TRELLIS_CUSTOM_HOME_MESSAGE,
+      );
+      const { policy: lastDefault } = yield* codexWith(["/srv/codex-work", "~/.codex"]);
+      assert.equal(lastDefault.launch?.sessionKey, "ws-1");
       vi.stubEnv("CLAUDE_CONFIG_DIR", "/srv/claude-inherited");
       const inheritedHome = yield* refusal(
         resolve({ instance: "claudeAgent", projectRoot: idea }),

@@ -1632,8 +1632,6 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             ),
           );
         const initialized = yield* Ref.make(false);
-        // Read once at initialization when a launch adds instructions.
-        let configuredDeveloperInstructions: string | undefined;
         const ensureInitialized = Effect.gen(function* () {
           const alreadyInitialized = yield* Ref.get(initialized);
           if (alreadyInitialized) {
@@ -1645,21 +1643,30 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             capabilities: CODEX_CLIENT_CAPABILITIES,
           });
           yield* client.notify("initialized", undefined);
-          if (input.runtimePolicy.launch?.instructions !== undefined) {
-            configuredDeveloperInstructions = yield* client
-              .request("config/read", {
-                ...(input.runtimePolicy.cwd === null ? {} : { cwd: input.runtimePolicy.cwd }),
-                includeLayers: false,
-              })
-              .pipe(
-                Effect.map(
-                  (response) => response.config.developer_instructions?.trim() || undefined,
-                ),
-                Effect.orElseSucceed(() => undefined),
-              );
-          }
           yield* Ref.set(initialized, true);
         });
+        /**
+         * The configured `developer_instructions` for a request's cwd, when a
+         * launch adds instructions that would otherwise replace them. Read per
+         * request: threads of one workspace share this process, yet each cwd
+         * may carry its own project config.
+         */
+        const configuredDeveloperInstructionsFor = (
+          runtimePolicy: ProviderAdapterV2RuntimePolicy | undefined,
+        ) =>
+          runtimePolicy?.launch?.instructions === undefined
+            ? Effect.succeed(undefined)
+            : client
+                .request("config/read", {
+                  ...(runtimePolicy.cwd === null ? {} : { cwd: runtimePolicy.cwd }),
+                  includeLayers: false,
+                })
+                .pipe(
+                  Effect.map(
+                    (response) => response.config.developer_instructions?.trim() || undefined,
+                  ),
+                  Effect.orElseSucceed(() => undefined),
+                );
         const now = yield* DateTime.now;
         const session = providerSession({
           providerSessionId: input.providerSessionId,
@@ -5426,7 +5433,8 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             }),
           ensureThread: (threadInput) =>
             ensureInitialized.pipe(
-              Effect.andThen(() =>
+              Effect.andThen(configuredDeveloperInstructionsFor(threadInput.runtimePolicy)),
+              Effect.flatMap((configuredDeveloperInstructions) =>
                 client.request(
                   "thread/start",
                   codexThreadRuntimeParams({
@@ -5461,7 +5469,8 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
 
               const response = yield* ensureInitialized.pipe(
-                Effect.andThen(() =>
+                Effect.andThen(configuredDeveloperInstructionsFor(threadInput.runtimePolicy)),
+                Effect.flatMap((configuredDeveloperInstructions) =>
                   // excludeTurns is not in the generated request schema yet.
                   client.raw.request("thread/resume", {
                     threadId: nativeThreadId,
@@ -6188,6 +6197,9 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               // process. After a restart or idle release, load it the same way
               // the next turn would before reverting.
               if (!loaded) {
+                const configuredDeveloperInstructions = yield* configuredDeveloperInstructionsFor(
+                  input.runtimePolicy,
+                );
                 yield* client.raw.request("thread/resume", {
                   threadId,
                   excludeTurns: true,
@@ -6235,7 +6247,8 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               const threadId = yield* getNativeThreadId(threadInput.sourceProviderThread);
               const boundary = yield* resolveCodexForkBoundary(threadInput);
               const response = yield* ensureInitialized.pipe(
-                Effect.andThen(() =>
+                Effect.andThen(configuredDeveloperInstructionsFor(threadInput.runtimePolicy)),
+                Effect.flatMap((configuredDeveloperInstructions) =>
                   client.request("thread/fork", {
                     threadId,
                     ...(boundary.lastTurnId === undefined

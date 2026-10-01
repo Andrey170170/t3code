@@ -2659,6 +2659,90 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("appends a launch primer to each cwd's own configured developer instructions", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-launch-instructions-per-cwd";
+        const nativeThreadId = `native-${scenario}-thread`;
+        const preamble = codexReplayPreamble({
+          nativeThreadId,
+          nativeTurnId: "unused-turn",
+          prompt: "unused-prompt",
+        }).slice(0, 5);
+        // Two projects of one workspace share the app-server, each with its config.
+        const projects = [
+          { cwd: "/trellis/workspaces/ws-1/project/a", instructions: "Project A rules." },
+          { cwd: "/trellis/workspaces/ws-1/project/b", instructions: "Project B rules." },
+        ];
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...preamble,
+            ...projects.flatMap(({ cwd, instructions }, index) => {
+              const readId = 3 + index * 2;
+              return [
+                {
+                  type: "expect_outbound" as const,
+                  label: "config/read",
+                  frame: {
+                    id: readId,
+                    method: "config/read",
+                    params: { cwd, includeLayers: false },
+                  },
+                },
+                {
+                  type: "emit_inbound" as const,
+                  label: "config/read",
+                  frame: {
+                    id: readId,
+                    result: { config: { developer_instructions: instructions }, origins: {} },
+                  },
+                },
+                {
+                  type: "expect_outbound" as const,
+                  label: "thread/resume",
+                  frame: {
+                    id: readId + 1,
+                    method: "thread/resume",
+                    params: {
+                      threadId: nativeThreadId,
+                      excludeTurns: true,
+                      cwd,
+                      config: {
+                        ...CODEX_THREAD_CONFIG,
+                        developer_instructions: `${instructions}\n\nPrimer.`,
+                      },
+                    },
+                  },
+                },
+                {
+                  type: "emit_inbound" as const,
+                  label: "thread/resume",
+                  frame: {
+                    id: readId + 1,
+                    result: { thread: { id: nativeThreadId, updatedAt: 1782622450 } },
+                  },
+                },
+              ];
+            }),
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        for (const { cwd } of projects) {
+          yield* harness.runtime.resumeThread({
+            providerThread: harness.providerThread,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+              ...CODEX_TEST_RUNTIME_POLICY,
+              cwd,
+              launch: { executable: "/t3/trellis-shims/codex", instructions: "Primer." },
+            }),
+          });
+        }
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
   it.effect("continues an interrupted native thread with empty input and reasoning summaries", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -3,10 +3,12 @@ import {
   ModelSelection,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProviderSession,
+  type OrchestrationV2ProviderRef,
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
   ProviderInstanceId,
   ProviderSessionId,
+  type ProviderThreadId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -176,6 +178,15 @@ export interface ProviderSessionManagerV2Shape {
      * potential re-attach.
      */
     readonly revokeMcpCredential?: boolean;
+    /**
+     * Provider threads that left this session for another one, with the
+     * native refs they had here; unloaded along with the threads whose rows
+     * still name this session.
+     */
+    readonly unloadProviderThreads?: ReadonlyArray<{
+      readonly providerThreadId: ProviderThreadId;
+      readonly nativeThreadRef: OrchestrationV2ProviderRef;
+    }>;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
 }
 
@@ -1829,7 +1840,22 @@ export const layerWithOptions = (
                     .filter((thread) => thread.providerSessionId === input.providerSessionId)
                     .map((thread) => [thread.id, thread] as const),
                 );
-                detachedProviderThreads = [...providerThreads.values()];
+                // Threads that already moved on are unloaded as they were here.
+                const left = (input.unloadProviderThreads ?? []).flatMap((moved) => {
+                  const row = projection.value.providerThreads.find(
+                    (thread) => thread.id === moved.providerThreadId,
+                  );
+                  return row === undefined || providerThreads.has(row.id)
+                    ? []
+                    : [
+                        {
+                          ...row,
+                          providerSessionId: input.providerSessionId,
+                          nativeThreadRef: moved.nativeThreadRef,
+                        },
+                      ];
+                });
+                detachedProviderThreads = [...providerThreads.values(), ...left];
                 const activeTurns = projection.value.providerTurns.filter(
                   (turn) => turn.status === "running" && providerThreads.has(turn.providerThreadId),
                 );

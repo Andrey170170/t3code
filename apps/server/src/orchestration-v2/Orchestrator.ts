@@ -750,6 +750,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       sessionKey.value;
 
   /**
+   * The detach field naming `providerThread` with its native ref, when it is
+   * still recorded on `providerSessionId`: the dispatch moves its row to the
+   * new session before the detach runs, which then could not find it.
+   */
+  const unloadProviderThreadsOn = (
+    providerSessionId: ProviderSessionId,
+    providerThread: OrchestrationV2ProviderThread | undefined,
+  ) =>
+    providerThread?.providerSessionId === providerSessionId &&
+    providerThread.nativeThreadRef !== null
+      ? {
+          unloadProviderThreads: [
+            {
+              providerThreadId: providerThread.id,
+              nativeThreadRef: providerThread.nativeThreadRef,
+            },
+          ],
+        }
+      : {};
+
+  /**
    * Detaches the live session a thread leaves because its session key changed
    * (its project moved to another workspace), so the old workspace's process
    * stops serving it.
@@ -762,6 +783,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly projection: Pick<OrchestrationV2ThreadProjection, "providerSessions">;
     readonly previous: ProviderSessionId | null;
     readonly next: ProviderSessionId;
+    /** The thread's provider thread as it was on `previous`, to unload there. */
+    readonly providerThread: OrchestrationV2ProviderThread | undefined;
   }) =>
     Effect.gen(function* () {
       const session = input.projection.providerSessions.find(
@@ -794,6 +817,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             type: "provider-session.detach",
             providerSessionId: session.id,
             detail: "Workspace changed.",
+            ...unloadProviderThreadsOn(session.id, input.providerThread),
           },
         } satisfies PendingOrchestrationEffectV2,
       ]);
@@ -1786,6 +1810,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               type: "provider-session.detach" as const,
               providerSessionId: session.id,
               detail: "Provider or model selection changed.",
+              ...(session.id === supersededSessionId
+                ? unloadProviderThreadsOn(session.id, queuedProviderThread)
+                : {}),
             },
           })),
           {
@@ -3942,6 +3969,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           projection: input.projection,
           previous: existingTargetProviderSessionId,
           next: targetProviderSessionId,
+          providerThread: existingTargetProviderThread,
         });
         const targetProviderThreadBase: OrchestrationV2ProviderThread =
           existingTargetProviderThread === undefined
@@ -5036,6 +5064,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           projection,
           previous: activeProviderSessionId,
           next: providerSessionId,
+          providerThread: activeProviderThread,
         });
         const providerThreadId =
           activeProviderThread?.id ??
@@ -5437,6 +5466,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection,
         previous: targetProviderSessionId,
         next: providerSessionId,
+        providerThread: targetProviderThread,
       });
       const existingProviderSession = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
