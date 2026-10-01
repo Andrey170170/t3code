@@ -1,0 +1,526 @@
+// @effect-diagnostics nodeBuiltinImport:off
+/**
+ * TrellisWorkers - delegated workers in Trellis forks.
+ *
+ * - `spawnFork`: the `workspace: {fork}` option of `delegate_task`. Forks the
+ *   caller's dedicated workspace from a checkpoint it names (`latest` or an
+ *   id; a spawn never stops the workspace), records the caller's thread as
+ *   the fork's `spawned_by`, and returns the fork's T3 project, which the
+ *   catalog sync creates, for the child thread. Clients hide such projects
+ *   from the sidebar (`workerRoots` in the status).
+ * - `discardFork`: the `trellis_discard_fork` tool. Moves a fork of the
+ *   caller's project to the trash (refused while its threads work) and can
+ *   file a purge request, which only the user confirms.
+ * - `start`: follows orchestration events. A worker in another project that
+ *   completes posts its result as the fork's `summary` activity (what
+ *   `trellis merge-brief` shows the lead); archiving a thread cancels and
+ *   archives its workers, transitively. Their forks stay.
+ *
+ * @module trellis/TrellisWorkers
+ */
+import * as NodePath from "node:path";
+
+import {
+  CommandId,
+  type OrchestrationV2DomainEvent,
+  type OrchestrationV2ThreadShell,
+  type OrchestratorMcpTaskFork,
+  type ProjectId,
+  ThreadId,
+  TrellisDiscardForkMcpFailure,
+  type TrellisDiscardForkMcpInput,
+  type TrellisDiscardForkMcpResult,
+} from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
+
+import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
+import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
+import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import { OrchestrationEventStore } from "../persistence/Services/OrchestrationEventStore.ts";
+import { forkParked } from "../serverActivation.ts";
+import { Trellis, type TrellisWorkspaceView, trellisRootOf } from "./Trellis.ts";
+import { TrellisCatalog } from "./TrellisCatalog.ts";
+
+/**
+ * A refused fork spawn. `invalid` when the request is the caller's to fix (no
+ * checkpoint, an idea, an unknown id), false when Trellis failed.
+ */
+export class TrellisForkSpawnError extends Schema.TaggedError<TrellisForkSpawnError>()(
+  "TrellisForkSpawnError",
+  { message: Schema.String, invalid: Schema.Boolean },
+) {}
+
+export interface TrellisWorkerFork {
+  /** The fork's T3 project, for the child thread. */
+  readonly projectId: ProjectId;
+  readonly fork: OrchestratorMcpTaskFork;
+  /** Orientation prepended to the worker's task. */
+  readonly guide: string;
+}
+
+export class TrellisWorkers extends Context.Service<
+  TrellisWorkers,
+  {
+    readonly spawnFork: (input: {
+      readonly parentThreadId: ThreadId;
+      readonly from: string;
+      readonly name?: string | undefined;
+      readonly services?: "none" | "all" | ReadonlyArray<string> | undefined;
+    }) => Effect.Effect<TrellisWorkerFork, TrellisForkSpawnError>;
+    /** Moves a fork spawned for a child that could not be created to the trash. */
+    readonly abandonFork: (workspaceId: string) => Effect.Effect<void>;
+    readonly discardFork: (
+      scope: McpInvocationScope,
+      input: TrellisDiscardForkMcpInput,
+    ) => Effect.Effect<TrellisDiscardForkMcpResult, TrellisDiscardForkMcpFailure>;
+    /** Follows orchestration events for summaries and the archive cascade. */
+    readonly start: () => Effect.Effect<void, never, Scope.Scope>;
+    /** Handles one orchestration event as `start` does (tests feed it directly). Never fails. */
+    readonly handle: (event: OrchestrationV2DomainEvent) => Effect.Effect<void>;
+  }
+>()("t3/trellis/TrellisWorkers") {}
+
+/** The newest checkpoint for `latest`, else the one named; null when there is none. */
+export function pickCheckpoint(
+  snapshots: ReadonlyArray<{ readonly id: string; readonly kind: string }>,
+  from: string,
+): { readonly id: string } | { readonly error: string } {
+  const checkpoints = snapshots.filter((snapshot) => snapshot.kind === "checkpoint");
+  if (from === "latest") {
+    const latest = checkpoints.at(-1);
+    return latest !== undefined
+      ? { id: latest.id }
+      : {
+          error:
+            'This workspace has no checkpoint yet, and a fork starts from one. Call trellis_checkpoint first (it ends your turn and continues you with the result), then spawn with from: "latest".',
+        };
+  }
+  if (checkpoints.some((snapshot) => snapshot.id === from)) return { id: from };
+  const known = checkpoints
+    .slice(-5)
+    .map((snapshot) => snapshot.id)
+    .join(", ");
+  return {
+    error: `${from} is not a checkpoint of this workspace${known ? ` (newest last: ${known})` : ", which has none yet; call trellis_checkpoint first"}. Use from: "latest" or a checkpoint id.`,
+  };
+}
+
+/** The threads below `ancestor` (its delegated workers, and theirs). */
+export function descendantsOf(
+  ancestor: ThreadId,
+  threads: ReadonlyArray<Pick<OrchestrationV2ThreadShell, "id" | "lineage">>,
+): ReadonlyArray<ThreadId> {
+  const found = new Set<ThreadId>();
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const thread of threads) {
+      const parent = thread.lineage.parentThreadId;
+      if (
+        thread.lineage.relationshipToParent === "subagent" &&
+        parent !== null &&
+        (parent === ancestor || found.has(parent)) &&
+        !found.has(thread.id)
+      ) {
+        found.add(thread.id);
+        grew = true;
+      }
+    }
+  }
+  return [...found];
+}
+
+/** What a worker in a fork is told before its task. */
+function workerGuide(input: {
+  readonly name: string;
+  readonly workspaceId: string;
+  readonly snapshot: string;
+}): string {
+  return [
+    `[Trellis worker] You work in your own Trellis fork "${input.name}" (${input.workspaceId}), made from checkpoint ${input.snapshot} of your lead's workspace. Your files are yours alone until the lead merges them.`,
+    "Commit your work and put a jj bookmark on it (`jj commit -m MSG && jj bookmark set NAME -r @-`).",
+    "Your final message is recorded as the fork's summary, which the lead reads with `trellis merge-brief`: say what you did, the bookmark to fetch, and which environment changes (installed packages, configuration) the lead should carry over.",
+  ].join("\n");
+}
+
+/** A client-side failure to reach Trellis, as opposed to Trellis's own refusal. */
+const isUnreachable = (message: string) =>
+  /^(Trellis is unavailable|This Trellis does not support|Trellis answered|Unexpected Trellis response|The Trellis integration is turned off)/.test(
+    message,
+  );
+
+const normalizeRoot = (root: string) => NodePath.posix.normalize(root).replace(/(.)\/+$/, "$1");
+
+/** How many summaries posted are remembered against duplicate events. */
+const MAX_POSTED = 2_000;
+
+const make = Effect.gen(function* () {
+  const trellis = yield* Trellis;
+  const catalog = yield* TrellisCatalog;
+  const threads = yield* OrchestratorV2;
+  const projects = yield* ProjectStoreV2;
+  const applicationEvents = yield* OrchestrationEventStore;
+  const crypto = yield* Crypto.Crypto;
+
+  const commandId = (operation: string) =>
+    crypto.randomUUIDv4.pipe(
+      Effect.orDie,
+      Effect.map((id) => CommandId.make(`server:trellis-workers:${operation}:${id}`)),
+    );
+
+  const projectRoot = (projectId: ProjectId) =>
+    projects.get(projectId).pipe(
+      Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot),
+      Effect.orElseSucceed(() => undefined),
+    );
+
+  /** The canonical Trellis folder a thread works in, or undefined outside Trellis. */
+  const folderOf = (thread: Pick<OrchestrationV2ThreadShell, "projectId" | "worktreePath">) =>
+    Effect.gen(function* () {
+      const folder = thread.worktreePath ?? (yield* projectRoot(thread.projectId));
+      if (folder === undefined) return undefined;
+      const path = yield* trellis.canonicalPath(folder);
+      return trellisRootOf(yield* trellis.expectedRoots, path) === null ? undefined : path;
+    });
+
+  const spawnFork: TrellisWorkers["Service"]["spawnFork"] = Effect.fn("TrellisWorkers.spawnFork")(
+    function* (input) {
+      const invalid = (message: string) => new TrellisForkSpawnError({ message, invalid: true });
+      const unavailable = (error: { readonly message: string }) =>
+        new TrellisForkSpawnError({
+          message: `Trellis could not fork the workspace: ${error.message}`,
+          invalid: false,
+        });
+      if ((yield* trellis.discover) === null) {
+        return yield* invalid(
+          "Trellis is not available on this server, so the child cannot get a fork.",
+        );
+      }
+      const parent = yield* threads
+        .getThreadShell(input.parentThreadId)
+        .pipe(Effect.orElseSucceed(() => null));
+      const cwd = parent === null || parent === undefined ? undefined : yield* folderOf(parent);
+      if (cwd === undefined) {
+        return yield* invalid(
+          "This thread does not work in a Trellis project, so there is no workspace to fork.",
+        );
+      }
+      const resolved = yield* trellis.resolve(cwd).pipe(Effect.mapError(unavailable));
+      if (resolved.workspace.kind !== "dedicated") {
+        return yield* invalid(
+          "This thread works in an idea, which shares the scratch workspace and has no forks. Delegate without workspace (it runs here), or graduate the idea first.",
+        );
+      }
+      const snapshots = yield* trellis
+        .listSnapshots(resolved.workspace.id)
+        .pipe(Effect.mapError(unavailable));
+      const checkpoint = pickCheckpoint(snapshots, input.from);
+      if ("error" in checkpoint) return yield* invalid(checkpoint.error);
+      const fork = yield* trellis
+        .fork({
+          target: resolved.workspace.id,
+          snapshot: checkpoint.id,
+          name: input.name,
+          thread: input.parentThreadId,
+          services: input.services,
+        })
+        .pipe(
+          Effect.mapError((error) =>
+            // Trellis's own refusals (an unknown service, say) are the caller's to fix.
+            isUnreachable(error.message)
+              ? unavailable(error)
+              : invalid(`Trellis refused the fork: ${error.message}`),
+          ),
+        );
+      const ids = yield* catalog.syncNow;
+      const projectId = ids.get(normalizeRoot(fork.path));
+      if (projectId === undefined) {
+        yield* abandonFork(fork.id);
+        return yield* new TrellisForkSpawnError({
+          message: `Trellis forked ${fork.id}, but its T3 project could not be created, so the fork was moved to the trash.`,
+          invalid: false,
+        });
+      }
+      return {
+        projectId,
+        fork: {
+          workspaceId: fork.id,
+          name: fork.name,
+          path: fork.path,
+          snapshot: checkpoint.id,
+          warnings: fork.warnings ?? [],
+          services: (fork.services ?? []).map((service) => ({
+            name: service.name,
+            state: service.state,
+            ...(service.error === undefined ? {} : { error: service.error }),
+            previews: service.previews ?? [],
+          })),
+        },
+        guide: workerGuide({
+          name: fork.name,
+          workspaceId: fork.id,
+          snapshot: checkpoint.id,
+        }),
+      } satisfies TrellisWorkerFork;
+    },
+  );
+
+  const abandonFork = (workspaceId: string) =>
+    trellis.trashWorkspace(workspaceId).pipe(
+      Effect.andThen(catalog.syncNow),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("could not trash a fork spawned for a child that was not created", {
+          workspaceId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+      Effect.asVoid,
+    );
+
+  const discardFork: TrellisWorkers["Service"]["discardFork"] = Effect.fn(
+    "TrellisWorkers.discardFork",
+  )(function* (callScope, input) {
+    const failure = (code: TrellisDiscardForkMcpFailure["code"], message: string) =>
+      new TrellisDiscardForkMcpFailure({ code, message });
+    const unavailable = (error: { readonly message: string }) =>
+      failure("trellis_unavailable", `Trellis could not be asked: ${error.message}`);
+    if (!callScope.capabilities.has("orchestration")) {
+      return yield* failure("capability_denied", "This credential cannot control threads.");
+    }
+    if ((yield* trellis.discover) === null) {
+      return yield* failure("not_a_trellis_workspace", "Trellis is not available on this server.");
+    }
+    const caller = yield* threads
+      .getThreadShell(callScope.threadId)
+      .pipe(Effect.orElseSucceed(() => null));
+    if (caller === null || caller === undefined || caller.deletedAt !== null) {
+      return yield* failure("thread_not_found", "The calling thread was not found.");
+    }
+    const cwd = yield* folderOf(caller);
+    if (cwd === undefined) {
+      return yield* failure(
+        "not_a_trellis_workspace",
+        "This thread does not work in a Trellis project, so it has no forks.",
+      );
+    }
+    const resolved = yield* trellis.resolve(cwd).pipe(Effect.mapError(unavailable));
+    const project = resolved.project;
+    if (project === null || project.kind === "idea") {
+      return yield* failure(
+        "not_a_trellis_workspace",
+        "This thread works in an idea, which has no forks.",
+      );
+    }
+    const workspaces = yield* trellis
+      .listWorkspaces({ all: true })
+      .pipe(Effect.mapError(unavailable));
+    const ofProject = workspaces.filter((workspace) => workspace.project_id === project.id);
+    // An id, else a name; a live fork wins over trashed ones of the same name.
+    const matches = ofProject.filter(
+      (workspace) => workspace.id === input.fork || workspace.name === input.fork,
+    );
+    const fork: TrellisWorkspaceView | undefined =
+      matches.find((workspace) => workspace.deleted_at === null) ?? matches.at(-1);
+    if (fork === undefined) {
+      const names = ofProject
+        .filter((workspace) => workspace.id !== project.workspace_id)
+        .map((workspace) => `${workspace.name} (${workspace.id})`)
+        .join(", ");
+      return yield* failure(
+        "fork_not_found",
+        `No fork "${input.fork}" in this project${names ? `; its forks: ${names}` : ""}.`,
+      );
+    }
+    if (fork.id === project.workspace_id) {
+      return yield* failure(
+        "fork_not_found",
+        `${fork.name} is the project's own workspace, not a fork.`,
+      );
+    }
+    if (fork.id === resolved.workspace.id) {
+      return yield* failure(
+        "fork_not_found",
+        `${fork.name} is the workspace this thread works in; a lead discards it.`,
+      );
+    }
+    let discarded = false;
+    if (fork.deleted_at === null) {
+      // Refused while a thread there works; Trellis would stop it mid-turn.
+      const ids = yield* catalog.syncNow;
+      const forkProject = ids.get(normalizeRoot(fork.path));
+      const shell = yield* threads
+        .getShellSnapshot({ location: "active" })
+        .pipe(Effect.mapError((error) => failure("operation_failed", error.message)));
+      const busy = shell.threads.filter(
+        (thread) =>
+          forkProject !== undefined &&
+          thread.projectId === forkProject &&
+          (thread.activeRunId !== null || thread.activityRunStatus != null),
+      );
+      if (busy.length > 0) {
+        const one = busy.length === 1;
+        return yield* failure(
+          "threads_running",
+          `${busy.map((thread) => `"${thread.title}"`).join(", ")} ${one ? "is" : "are"} still working in ${fork.name}. Wait for ${one ? "it" : "them"} to finish (or cancel the task with task_cancel), then discard it.`,
+        );
+      }
+      discarded = yield* catalog
+        .discardFork(fork.id)
+        .pipe(Effect.mapError((error) => failure("operation_failed", error.message)));
+    }
+    if (input.requestPurge === true) {
+      yield* trellis
+        .requestPurge({ ids: [fork.id], reason: input.reason, thread: callScope.threadId })
+        .pipe(Effect.mapError((error) => failure("operation_failed", error.message)));
+    }
+    const trash = yield* trellis.listTrash.pipe(Effect.mapError(unavailable));
+    const entry = trash.workspaces.find((candidate) => candidate.id === fork.id);
+    return {
+      workspaceId: fork.id,
+      name: fork.name,
+      discarded,
+      unmerged: entry?.unmerged ?? null,
+      unmergedReason: entry?.unmerged_reason ?? null,
+      expiresAt: entry?.expires_at ?? null,
+      purgeRequested: entry?.purge_requested != null,
+    } satisfies TrellisDiscardForkMcpResult;
+  });
+
+  // Summaries already posted, by task and completion, against repeated events.
+  const posted = new Set<string>();
+
+  /** Posts a finished worker's result as its fork's `summary` activity. */
+  const postSummary = (input: {
+    readonly key: string;
+    readonly parentThreadId: ThreadId;
+    readonly childThreadId: ThreadId;
+    readonly text: string;
+  }) =>
+    Effect.gen(function* () {
+      if (posted.has(input.key) || (yield* trellis.current) === null) return;
+      const [parent, child] = yield* Effect.all([
+        threads.getThreadShell(input.parentThreadId),
+        threads.getThreadShell(input.childThreadId),
+      ]);
+      // Only a worker in a project of its own (its fork), never one sharing its lead's folder.
+      if (parent == null || child == null || parent.projectId === child.projectId) return;
+      const folder = yield* folderOf(child);
+      if (folder === undefined) return;
+      posted.add(input.key);
+      if (posted.size > MAX_POSTED) posted.delete(posted.values().next().value!);
+      yield* trellis.recordActivity({
+        target: folder,
+        kind: "summary",
+        data: { text: input.text, thread: input.childThreadId },
+      });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("could not post a worker's summary to its Trellis fork", {
+          childThreadId: input.childThreadId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
+
+  /** Cancels and archives the workers below an archived thread; their forks stay. */
+  const archiveWorkers = (leadId: ThreadId) =>
+    Effect.gen(function* () {
+      if (!(yield* trellis.enabled)) return;
+      const shell = yield* threads.getShellSnapshot({ location: "active" });
+      const workers = new Set(descendantsOf(leadId, [...shell.threads, ...shell.archivedThreads]));
+      for (const worker of shell.threads) {
+        if (!workers.has(worker.id) || worker.archivedAt !== null) continue;
+        if (worker.activeRunId !== null) {
+          yield* threads
+            .dispatch({
+              type: "run.interrupt",
+              commandId: yield* commandId("cancel"),
+              threadId: worker.id,
+              runId: worker.activeRunId,
+              reason: "Its lead was archived.",
+            })
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("could not cancel a worker of an archived lead", {
+                  threadId: worker.id,
+                  cause: Cause.pretty(cause),
+                }),
+              ),
+            );
+        }
+        yield* threads
+          .dispatch({
+            type: "thread.archive",
+            commandId: yield* commandId("archive"),
+            threadId: worker.id,
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("could not archive a worker of an archived lead", {
+                threadId: worker.id,
+                cause: Cause.pretty(cause),
+              }),
+            ),
+          );
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("could not archive the workers of an archived thread", {
+          threadId: leadId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
+
+  const handle: TrellisWorkers["Service"]["handle"] = (event) => {
+    if (event.type === "thread.archived") return archiveWorkers(event.threadId);
+    if (event.type !== "subagent.updated") return Effect.void;
+    const task = event.payload;
+    if (
+      task.origin !== "app_owned" ||
+      task.status !== "completed" ||
+      task.childThreadId === null ||
+      task.result === null ||
+      task.result.trim() === ""
+    ) {
+      return Effect.void;
+    }
+    return postSummary({
+      key: `${task.id}:${task.completedAt === null ? "" : DateTime.toEpochMillis(task.completedAt)}`,
+      parentThreadId: task.threadId,
+      childThreadId: task.childThreadId,
+      text: task.result,
+    });
+  };
+
+  const start: TrellisWorkers["Service"]["start"] = Effect.fn("TrellisWorkers.start")(function* () {
+    const from = yield* applicationEvents.latestApplicationSequence.pipe(
+      Effect.orElseSucceed(() => 0),
+    );
+    yield* forkParked(
+      applicationEvents.streamApplicationEvents({ afterSequence: from }).pipe(
+        Stream.runForEach((stored) =>
+          "aggregateKind" in stored ? Effect.void : handle(stored.event),
+        ),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Trellis workers stopped following orchestration events", {
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      ),
+    );
+  });
+
+  return TrellisWorkers.of({ spawnFork, abandonFork, discardFork, start, handle });
+});
+
+export const layer = Layer.effect(TrellisWorkers, make);

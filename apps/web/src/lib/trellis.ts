@@ -4,6 +4,7 @@ import {
   type ProjectId,
   type TrellisFindHit,
   type TrellisState,
+  type TrellisWorkspaceEntry,
 } from "@t3tools/contracts";
 import { isLoopbackHostname, normalizePreviewUrl } from "@t3tools/shared/preview";
 import { isTrellisManagedPath, trellisWorkspaceIdOf } from "@t3tools/shared/trellis";
@@ -288,4 +289,99 @@ export function isLoopbackPreviewUrl(url: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether the sidebar hides a project as a worker fork: Trellis reports its
+ * root as a fork a thread spawned (`workerRoots`), or it is a Trellis project
+ * whose only active threads are delegated workers (a fork spawned before the
+ * status caught up). A lead or a draft there shows it again. Worker forks are
+ * listed with their project's workspaces in its settings instead.
+ */
+export function isHiddenWorkerProject(
+  project: { readonly workspaceRoot: string },
+  status: {
+    readonly root?: string | null | undefined;
+    readonly workerRoots?: ReadonlyArray<string> | undefined;
+  } | null,
+  threads: { readonly leads: number; readonly workers: number },
+  hasDraft: boolean,
+): boolean {
+  if (status === null || threads.leads > 0 || hasDraft) return false;
+  const root = trimTrailingSlashes(project.workspaceRoot);
+  if (status.workerRoots?.includes(root)) return true;
+  return (
+    threads.workers > 0 &&
+    isTrellisWorkspaceRoot(root, status.root) &&
+    !isTrellisIdeaPath(root, status.root ?? "")
+  );
+}
+
+export type TrellisWorkspaceFilter = "all" | "leads" | "workers" | "discarded";
+
+/**
+ * The workspace list's filters: `leads` are live workspaces nobody spawned
+ * (the primary one and forks the user made), `workers` live forks a thread
+ * spawned, `discarded` forks in the trash.
+ */
+export function filterTrellisWorkspaces<
+  T extends {
+    readonly state: TrellisWorkspaceEntry["state"];
+    readonly spawnedBy: TrellisWorkspaceEntry["spawnedBy"];
+  },
+>(entries: ReadonlyArray<T>, filter: TrellisWorkspaceFilter): ReadonlyArray<T> {
+  switch (filter) {
+    case "all":
+      return entries;
+    case "discarded":
+      return entries.filter((entry) => entry.state === "discarded");
+    case "leads":
+      return entries.filter((entry) => entry.state !== "discarded" && entry.spawnedBy === null);
+    case "workers":
+      return entries.filter((entry) => entry.state !== "discarded" && entry.spawnedBy !== null);
+  }
+}
+
+const dayFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+
+/**
+ * One line about a workspace for its list: its state, who spawned it, and for
+ * a discarded fork whether it holds unmerged work, when it expires and any
+ * purge request.
+ */
+export function trellisWorkspaceDetail(entry: TrellisWorkspaceEntry): string {
+  const state =
+    entry.state === "discarded"
+      ? "Discarded"
+      : entry.state === "checkpointing"
+        ? "Checkpointing"
+        : entry.state === "running"
+          ? "Running"
+          : "Stopped";
+  const parts = [entry.kind === "primary" ? `${state} · project workspace` : state];
+  if (entry.spawnedBy !== null) {
+    parts.push(
+      `worker fork of "${entry.spawnedBy.title ?? entry.spawnedBy.threadId}"${entry.state === "discarded" ? "" : ", hidden from the sidebar"}`,
+    );
+  }
+  if (entry.state === "discarded") {
+    parts.push(
+      entry.unmerged === true
+        ? `unmerged work${entry.unmergedReason ? ` (${entry.unmergedReason})` : ""}`
+        : entry.unmerged === false
+          ? "nothing unmerged"
+          : "unmerged state unknown",
+    );
+    parts.push(
+      entry.expiresAt === null
+        ? "kept until purged"
+        : `removed for good on ${dayFormat.format(new Date(entry.expiresAt * 1000))}`,
+    );
+    if (entry.purgeRequested !== null) {
+      parts.push(
+        `purge requested${entry.purgeRequested.by ? ` by "${entry.purgeRequested.by}"` : ""}${entry.purgeRequested.reason ? `: ${entry.purgeRequested.reason}` : ""}`,
+      );
+    }
+  }
+  return parts.join(" · ");
 }

@@ -1,20 +1,23 @@
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, TrellisStatus } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useMemo } from "react";
 
 import { useComposerDraftStore } from "~/composerDraftStore";
-import { isHiddenRetiredProject } from "~/lib/trellis";
+import { isHiddenRetiredProject, isHiddenWorkerProject } from "~/lib/trellis";
 import { useProjects, useThreadShells } from "~/state/entities";
 import { trellisEnvironment } from "~/state/trellis";
 
+const NO_THREADS = { leads: 0, workers: 0 } as const;
+
 /**
  * The projects the sidebars list: every project, minus Trellis projects whose
- * item is in the trash and that have no active thread or draft. Their
- * archived conversations stay in Settings → Archive.
+ * item is in the trash and worker forks (forks delegated workers run in),
+ * unless a lead thread or a draft is there. Archived conversations stay in
+ * Settings → Archive; worker forks are listed in their project's settings.
  */
 export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
   const projects = useProjects();
@@ -22,47 +25,55 @@ export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
   const environmentKey = [...new Set(projects.map((project) => project.environmentId))]
     .toSorted()
     .join("\n");
-  const retiredAtom = useMemo(
+  const statusAtom = useMemo(
     () =>
       Atom.make((get) => {
-        const retired = new Map<EnvironmentId, ReadonlySet<string>>();
+        const statuses = new Map<EnvironmentId, TrellisStatus>();
         for (const environmentId of environmentKey.split("\n")) {
           if (environmentId.length === 0) continue;
           const id = environmentId as EnvironmentId;
           const status = Option.getOrNull(
             AsyncResult.value(get(trellisEnvironment.status({ environmentId: id, input: {} }))),
           );
-          if (status?.retiredRoots !== undefined && status.retiredRoots.length > 0) {
-            retired.set(id, new Set(status.retiredRoots));
-          }
+          if (status !== null) statuses.set(id, status);
         }
-        return retired;
+        return statuses;
       }),
     [environmentKey],
   );
-  const retired = useAtomValue(retiredAtom);
-  const activeKeys = useMemo(
-    () =>
-      new Set(
-        threads
-          .filter((thread) => thread.archivedAt === null)
-          .map((thread) => `${thread.environmentId}:${thread.projectId}`),
-      ),
-    [threads],
-  );
+  const statuses = useAtomValue(statusAtom);
+  // Active lead and worker threads per project.
+  const activeThreads = useMemo(() => {
+    const counts = new Map<string, { leads: number; workers: number }>();
+    for (const thread of threads) {
+      if (thread.archivedAt !== null) continue;
+      const key = `${thread.environmentId}:${thread.projectId}`;
+      const entry = counts.get(key) ?? { leads: 0, workers: 0 };
+      if (thread.lineage.relationshipToParent === "subagent") entry.workers += 1;
+      else entry.leads += 1;
+      counts.set(key, entry);
+    }
+    return counts;
+  }, [threads]);
   const candidates = useMemo(
     () =>
-      retired.size === 0
+      statuses.size === 0
         ? []
-        : projects.filter((project) =>
-            isHiddenRetiredProject(
-              project,
-              retired.get(project.environmentId),
-              activeKeys.has(`${project.environmentId}:${project.id}`),
-              false,
-            ),
-          ),
-    [activeKeys, projects, retired],
+        : projects.filter((project) => {
+            const status = statuses.get(project.environmentId);
+            if (status === undefined) return false;
+            const counts =
+              activeThreads.get(`${project.environmentId}:${project.id}`) ?? NO_THREADS;
+            const retired =
+              status.retiredRoots === undefined || status.retiredRoots.length === 0
+                ? undefined
+                : new Set(status.retiredRoots);
+            return (
+              isHiddenRetiredProject(project, retired, counts.leads + counts.workers > 0, false) ||
+              (status.state === "ready" && isHiddenWorkerProject(project, status, counts, false))
+            );
+          }),
+    [activeThreads, projects, statuses],
   );
   const draftKeys = useComposerDraftStore((store) =>
     candidates

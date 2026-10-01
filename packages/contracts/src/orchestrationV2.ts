@@ -2825,6 +2825,9 @@ export const OrchestrationV2Command = Schema.Union([
     parentNodeId: NodeId,
     task: TrimmedNonEmptyString,
     title: Schema.optional(TrimmedNonEmptyString),
+    // The child's project when it is not the parent's (a Trellis fork's
+    // project); it then works in that project's folder, not the parent's.
+    projectId: Schema.optional(ProjectId),
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,

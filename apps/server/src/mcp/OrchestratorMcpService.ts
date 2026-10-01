@@ -76,6 +76,7 @@ import {
 } from "../orchestration-v2/ThreadManagementService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
+import { TrellisWorkers } from "../trellis/TrellisWorkers.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -763,6 +764,8 @@ const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
   const scheduledTasks = yield* ScheduledTaskService;
+  // Workers in Trellis forks (`delegate_task.workspace`); absent without Trellis.
+  const trellisWorkers = yield* Effect.serviceOption(TrellisWorkers);
 
   const requireCapability = (scope: McpInvocationScope) =>
     scope.capabilities.has("orchestration")
@@ -1394,6 +1397,40 @@ const make = Effect.gen(function* () {
           requestKey: key,
           operation: "delegate-task",
         });
+        // A fork spawn names its checkpoint and never stops the workspace.
+        const forkSpec =
+          input.workspace === undefined || input.workspace === "parent"
+            ? undefined
+            : input.workspace.fork;
+        const spawned =
+          forkSpec === undefined
+            ? undefined
+            : Option.isNone(trellisWorkers)
+              ? yield* failure(
+                  "invalid_request",
+                  "workspace: {fork} needs Trellis, which this server does not have.",
+                )
+              : yield* trellisWorkers.value
+                  .spawnFork({
+                    parentThreadId: scope.threadId,
+                    from: forkSpec.from,
+                    name: forkSpec.name,
+                    services: forkSpec.services,
+                  })
+                  .pipe(
+                    Effect.mapError((error) =>
+                      failure(
+                        error.invalid ? "invalid_request" : "orchestration_error",
+                        error.message,
+                      ),
+                    ),
+                  );
+        const abandonFork =
+          spawned === undefined || Option.isNone(trellisWorkers)
+            ? Effect.void
+            : trellisWorkers.value.abandonFork(spawned.fork.workspaceId);
+        const withFork = (task: OrchestratorMcpDelegateTaskResult) =>
+          spawned === undefined ? task : { ...task, fork: spawned.fork };
         const result = yield* threadManagement
           .dispatch({
             type: "delegated_task.request",
@@ -1403,7 +1440,11 @@ const make = Effect.gen(function* () {
             parentThreadId: scope.threadId,
             parentRunId: parentRun.id,
             parentNodeId: parentRun.rootNodeId,
-            task: taskPrompt(input),
+            task:
+              spawned === undefined
+                ? taskPrompt(input)
+                : `${spawned.guide}\n\n${taskPrompt(input)}`,
+            ...(spawned === undefined ? {} : { projectId: spawned.projectId }),
             ...(input.title === undefined ? {} : { title: input.title }),
             modelSelection: target.modelSelection,
             runtimeMode,
@@ -1414,6 +1455,7 @@ const make = Effect.gen(function* () {
             completionWake: input.mode === "wait" ? "settled_only" : "always",
           })
           .pipe(
+            Effect.tapError(() => abandonFork),
             Effect.mapError((error) =>
               failure(
                 "orchestration_error",
@@ -1434,7 +1476,7 @@ const make = Effect.gen(function* () {
         const taskId = taskEvent.event.payload.id;
 
         if (input.mode !== "wait") {
-          return yield* readTask(scope, taskId, false, true);
+          return withFork(yield* readTask(scope, taskId, false, true));
         }
         const timeoutMs = Math.min(
           MAX_WAIT_TIMEOUT_MS,
@@ -1442,7 +1484,7 @@ const make = Effect.gen(function* () {
         );
         const waited = yield* waitForTask(scope, taskId, timeoutMs);
         if (Option.isSome(waited)) {
-          return waited.value;
+          return withFork(waited.value);
         }
         // The blocking wait timed out, so it no longer owns delivery: upgrade
         // the task so a later terminal wakes the parent even mid-turn. Best
@@ -1483,7 +1525,7 @@ const make = Effect.gen(function* () {
               }),
             ),
           );
-        return yield* readTask(scope, taskId, true, true);
+        return withFork(yield* readTask(scope, taskId, true, true));
       }),
     taskStatus: (scope, taskId) => readTask(scope, taskId, false, true),
     cancelTask: (scope, input) =>

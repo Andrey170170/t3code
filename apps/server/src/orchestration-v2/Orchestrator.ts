@@ -6416,6 +6416,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
 
+      if (
+        command.projectId !== undefined &&
+        command.projectId !== parentProjection.thread.projectId
+      ) {
+        const project = yield* projects.get(command.projectId).pipe(mapDispatchError(command));
+        if (Option.isNone(project) || project.value.deletedAt !== null) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Project ${command.projectId} does not exist.`,
+          });
+        }
+      }
+
       const now = command.createdAt ?? (yield* DateTime.now);
       const taskNodeId = idAllocator.derive.delegatedTaskNode({
         commandId: command.commandId,
@@ -6450,6 +6464,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
+        // A child in another project works in that project's own folder.
+        ...(command.projectId === undefined ||
+        command.projectId === parentProjection.thread.projectId
+          ? {}
+          : { projectId: command.projectId, worktreePath: null, branch: null }),
       };
       const task: OrchestrationV2Subagent = {
         id: taskNodeId,

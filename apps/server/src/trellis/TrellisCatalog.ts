@@ -22,7 +22,7 @@ import * as NodePath from "node:path";
 import {
   CommandId,
   ProjectId,
-  type ThreadId,
+  ThreadId,
   TRELLIS_LANDING_PAD_PROJECT_ID,
   TrellisError,
   type TrellisCreateResult,
@@ -34,8 +34,13 @@ import {
   type TrellisRestoreInput,
   type TrellisRestoreResult,
   type TrellisStatus,
+  type TrellisCheckpointEntry,
+  type TrellisForkWorkspaceInput,
+  type TrellisForkWorkspaceResult,
   type TrellisTrashItem,
   type TrellisTrashProjectResult,
+  type TrellisWorkspaceEntry,
+  type TrellisWorkspaceList,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -68,6 +73,7 @@ import {
   type TrellisFindHitView,
   TrellisProjectView,
   type TrellisTrashView,
+  type TrellisWorkspaceView,
 } from "./Trellis.ts";
 import { TrellisCheckpointPins } from "./TrellisCheckpointStore.ts";
 import {
@@ -113,6 +119,8 @@ export interface DesiredProject {
   readonly title: string;
   /** False for fork workspaces, whose title is derived from the project name. */
   readonly primary: boolean;
+  /** A fork a thread spawned (Trellis `spawned_by`): hidden from the sidebar. */
+  readonly worker: boolean;
 }
 
 const normalizeRoot = (root: string) => NodePath.posix.normalize(root).replace(/(.)\/+$/, "$1");
@@ -129,7 +137,12 @@ function desiredProjects(items: ReadonlyArray<TrellisProjectView>): ReadonlyArra
     if (!isLive(item)) continue;
     const name = titleOf(item.name, item.path);
     if (item.kind === "idea" || item.workspaces.length === 0) {
-      desired.push({ workspaceRoot: normalizeRoot(item.path), title: name, primary: true });
+      desired.push({
+        workspaceRoot: normalizeRoot(item.path),
+        title: name,
+        primary: true,
+        worker: false,
+      });
       continue;
     }
     for (const workspace of item.workspaces) {
@@ -140,10 +153,18 @@ function desiredProjects(items: ReadonlyArray<TrellisProjectView>): ReadonlyArra
         workspaceRoot: normalizeRoot(workspace.path),
         title: primary ? name : `${name} · ${workspace.name.trim() || workspace.id}`,
         primary,
+        worker: !primary && workspace.spawned_by != null,
       });
     }
   }
   return desired;
+}
+
+/** Roots of live worker forks (Trellis `spawned_by`), which clients keep out of the sidebar. */
+export function workerRoots(items: ReadonlyArray<TrellisProjectView>): ReadonlyArray<string> {
+  return desiredProjects(items)
+    .filter((entry) => entry.worker)
+    .map((entry) => entry.workspaceRoot);
 }
 
 /** `<ws>` when `root` is exactly `<trellis root>/workspaces/<ws>/project`. */
@@ -376,7 +397,11 @@ export function splitFindHits(
  * expiry is what Trellis reports per item; Trellis versions without it purge
  * every kind after `purge_after_days`.
  */
-export function trashItems(view: TrellisTrashView): ReadonlyArray<TrellisTrashItem> {
+export function trashItems(
+  view: TrellisTrashView,
+  /** Thread titles by id, to name who asked for a purge. */
+  titles: ReadonlyMap<string, string> = new Map(),
+): ReadonlyArray<TrellisTrashItem> {
   const expiryOf = (entry: TrellisTrashView["projects"][number], deletedAt: number) =>
     entry.expires_at !== undefined
       ? entry.expires_at
@@ -385,6 +410,23 @@ export function trashItems(view: TrellisTrashView): ReadonlyArray<TrellisTrashIt
           ? deletedAt + view.idea_expiry_days * 86_400
           : null
         : deletedAt + (view.purge_after_days ?? 30) * 86_400;
+  // Only what this Trellis reports: versions before purge requests send neither field.
+  const purgeRequestOf = (entry: TrellisTrashView["projects"][number]) =>
+    entry.purge_requested === undefined
+      ? {}
+      : {
+          purgeRequested:
+            entry.purge_requested === null
+              ? null
+              : {
+                  at: entry.purge_requested.at,
+                  reason: entry.purge_requested.reason,
+                  by:
+                    entry.purge_requested.thread === null
+                      ? null
+                      : (titles.get(entry.purge_requested.thread) ?? entry.purge_requested.thread),
+                },
+        };
   const projectDeletedAt = new Map<string, number>();
   const items: Array<TrellisTrashItem> = [];
   for (const entry of view.projects) {
@@ -396,6 +438,7 @@ export function trashItems(view: TrellisTrashView): ReadonlyArray<TrellisTrashIt
       name: entry.name.trim() || entry.id,
       deletedAt: entry.deleted_at,
       expiresAt: expiryOf(entry, entry.deleted_at),
+      ...purgeRequestOf(entry),
     });
   }
   for (const entry of view.workspaces) {
@@ -408,9 +451,72 @@ export function trashItems(view: TrellisTrashView): ReadonlyArray<TrellisTrashIt
       name: entry.name.trim() || entry.id,
       deletedAt: entry.deleted_at,
       expiresAt: expiryOf(entry, entry.deleted_at),
+      ...(entry.unmerged === undefined
+        ? {}
+        : { unmerged: entry.unmerged, unmergedReason: entry.unmerged_reason ?? null }),
+      ...purgeRequestOf(entry),
     });
   }
   return items.toSorted((left, right) => right.deletedAt - left.deletedAt);
+}
+
+/**
+ * The workspaces of one Trellis project for its workspace list: the primary
+ * workspace, then live forks, then discarded forks still in the trash, each
+ * oldest first. `workspaces` is a listing with `all` (trashed ones too).
+ */
+export function workspaceEntries(input: {
+  readonly trellisProjectId: string;
+  readonly primaryWorkspaceId: string;
+  readonly workspaces: ReadonlyArray<TrellisWorkspaceView>;
+  readonly trash: TrellisTrashView;
+  /** T3 project ids by workspace root. */
+  readonly projectIds: ReadonlyMap<string, ProjectId>;
+  /** Thread titles by id. */
+  readonly titles: ReadonlyMap<string, string>;
+}): ReadonlyArray<TrellisWorkspaceEntry> {
+  const trashed = new Map(trashItems(input.trash, input.titles).map((item) => [item.id, item]));
+  const entries: Array<TrellisWorkspaceEntry> = [];
+  for (const workspace of input.workspaces) {
+    if (workspace.project_id !== input.trellisProjectId) continue;
+    const primary = workspace.id === input.primaryWorkspaceId;
+    const discarded = workspace.deleted_at !== null;
+    // A fork trashed with its project is not listed (the project is gone).
+    const trash = trashed.get(workspace.id);
+    if (discarded && (primary || trash === undefined)) continue;
+    const spawnedBy = workspace.spawned_by ?? null;
+    entries.push({
+      id: workspace.id,
+      name: workspace.name.trim() || workspace.id,
+      kind: primary ? "primary" : "fork",
+      state: discarded
+        ? "discarded"
+        : workspace.checkpointing === true
+          ? "checkpointing"
+          : workspace.running === true
+            ? "running"
+            : "stopped",
+      projectId: discarded ? null : (input.projectIds.get(normalizeRoot(workspace.path)) ?? null),
+      spawnedBy:
+        spawnedBy === null
+          ? null
+          : {
+              threadId: ThreadId.make(spawnedBy.thread),
+              title: input.titles.get(spawnedBy.thread) ?? null,
+            },
+      createdAt: workspace.created_at ?? null,
+      deletedAt: workspace.deleted_at,
+      unmerged: trash?.unmerged ?? null,
+      unmergedReason: trash?.unmergedReason ?? null,
+      expiresAt: trash?.expiresAt ?? null,
+      purgeRequested: trash?.purgeRequested ?? null,
+    });
+  }
+  const rank = (entry: TrellisWorkspaceEntry) =>
+    entry.kind === "primary" ? 0 : entry.state === "discarded" ? 2 : 1;
+  return entries.toSorted(
+    (left, right) => rank(left) - rank(right) || (left.createdAt ?? 0) - (right.createdAt ?? 0),
+  );
 }
 
 /**
@@ -499,6 +605,26 @@ export class TrellisCatalog extends Context.Service<
      * back), and any Trellis project while Trellis is unreachable.
      */
     readonly checkProjectDelete: (projectId: ProjectId) => Effect.Effect<void, TrellisError>;
+    /** The workspaces of the Trellis project behind a T3 project, worker forks included. */
+    readonly listWorkspaces: (
+      projectId: ProjectId,
+    ) => Effect.Effect<TrellisWorkspaceList, TrellisError>;
+    /** A workspace's checkpoints, newest first. */
+    readonly listCheckpoints: (
+      workspaceId: string,
+    ) => Effect.Effect<ReadonlyArray<TrellisCheckpointEntry>, TrellisError>;
+    /** Forks a workspace from a checkpoint for the user (no `spawned_by`), with its T3 project. */
+    readonly forkWorkspace: (
+      input: TrellisForkWorkspaceInput,
+    ) => Effect.Effect<TrellisForkWorkspaceResult, TrellisError>;
+    /** Purges the listed trashed items for good. */
+    readonly purge: (ids: ReadonlyArray<string>) => Effect.Effect<number, TrellisError>;
+    /**
+     * Moves one fork to the Trellis trash as a project's trash does: refused
+     * while a thread works in it, its sessions released and its threads
+     * archived. Returns false when it was already in the trash.
+     */
+    readonly discardFork: (workspaceId: string) => Effect.Effect<boolean, TrellisError>;
   }
 >()("t3/trellis/TrellisCatalog") {}
 
@@ -1058,6 +1184,15 @@ const make = Effect.gen(function* () {
           : item.workspaces
               .filter((workspace) => workspace.deleted_at === null)
               .map((workspace) => workspace.path);
+    return yield* trashResolved(target, item, scopes);
+  });
+
+  /** Trashes a resolved target: see `trashProject`. */
+  const trashResolved = Effect.fn("TrellisCatalog.trashResolved")(function* (
+    target: NonNullable<ReturnType<typeof trashTargetOf>>,
+    item: TrellisProjectView | undefined,
+    scopes: ReadonlyArray<string>,
+  ) {
     const { unreleased, archived } = yield* Effect.scoped(
       Effect.gen(function* () {
         // New turns there wait from before the busy check until the trash,
@@ -1350,9 +1485,122 @@ const make = Effect.gen(function* () {
     }
   });
 
+  const threadTitles = orchestrator.getShellSnapshot().pipe(
+    Effect.map(
+      (shell) =>
+        new Map(
+          [...shell.threads, ...shell.archivedThreads].map((thread) => [thread.id, thread.title]),
+        ) as ReadonlyMap<string, string>,
+    ),
+    Effect.orElseSucceed((): ReadonlyMap<string, string> => new Map()),
+  );
+
+  const listWorkspaces = Effect.fn("TrellisCatalog.listWorkspaces")(function* (
+    projectId: ProjectId,
+  ) {
+    yield* requireReady;
+    const none: TrellisWorkspaceList = { trellisProjectId: null, items: [] };
+    const project = Option.getOrUndefined(yield* projectStore.get(projectId));
+    if (project === undefined) return none;
+    const resolved = yield* trellis
+      .resolve(project.workspaceRoot)
+      .pipe(Effect.catch(() => Effect.succeed(null)));
+    const item = resolved?.project ?? null;
+    if (item === null || item.kind === "idea") return none;
+    const [workspaces, trash, titles] = yield* Effect.all([
+      trellis.listWorkspaces({ all: true }),
+      trellis.listTrash,
+      threadTitles,
+    ]);
+    let ids = (yield* Ref.get(lastApplied))?.ids ?? new Map<string, ProjectId>();
+    const live = workspaces.filter(
+      (workspace) => workspace.project_id === item.id && workspace.deleted_at === null,
+    );
+    if (live.some((workspace) => !ids.has(normalizeRoot(workspace.path)))) ids = yield* syncNow;
+    return {
+      trellisProjectId: item.id,
+      items: workspaceEntries({
+        trellisProjectId: item.id,
+        primaryWorkspaceId: item.workspace_id,
+        workspaces,
+        trash,
+        projectIds: ids,
+        titles,
+      }),
+    } satisfies TrellisWorkspaceList;
+  });
+
+  const listCheckpoints = Effect.fn("TrellisCatalog.listCheckpoints")(function* (
+    workspaceId: string,
+  ) {
+    yield* requireReady;
+    const snapshots = yield* trellis.listSnapshots(workspaceId);
+    return snapshots
+      .filter((snapshot) => snapshot.kind === "checkpoint")
+      .map((snapshot): TrellisCheckpointEntry => ({
+        id: snapshot.id,
+        label: snapshot.label ?? null,
+        createdAt: snapshot.created_at,
+      }))
+      .toReversed();
+  });
+
+  const forkWorkspace = Effect.fn("TrellisCatalog.forkWorkspace")(function* (
+    input: TrellisForkWorkspaceInput,
+  ) {
+    yield* requireReady;
+    // No thread: a visible fork whose threads are leads.
+    const fork = yield* trellis.fork({
+      target: input.workspaceId,
+      snapshot: input.snapshot,
+      name: input.name,
+    });
+    const ids = yield* syncNow;
+    return {
+      workspaceId: fork.id,
+      name: fork.name,
+      projectId: ids.get(normalizeRoot(fork.path)) ?? null,
+      warnings: fork.warnings ?? [],
+    } satisfies TrellisForkWorkspaceResult;
+  });
+
+  const discardFork = Effect.fn("TrellisCatalog.discardFork")(function* (workspaceId: string) {
+    yield* requireReady;
+    const items = yield* trellis.listProjects({ all: false });
+    const item = items.find((entry) =>
+      entry.workspaces.some(
+        (workspace) => workspace.id === workspaceId && workspace.deleted_at === null,
+      ),
+    );
+    const workspace = item?.workspaces.find((entry) => entry.id === workspaceId);
+    if (item === undefined || workspace === undefined) return false;
+    if (workspace.id === item.workspace_id) {
+      return yield* new TrellisError({
+        message: `${workspace.name} is the project's own workspace, not a fork.`,
+      });
+    }
+    const target = trashTargetOf(items, workspace.path);
+    if (target === null) return false;
+    yield* trashResolved(target, item, [workspace.path]);
+    return true;
+  });
+
   return TrellisCatalog.of({
     start,
     checkProjectDelete,
+    listWorkspaces: (projectId) =>
+      listWorkspaces(projectId).pipe(asTrellisError("Could not list the workspaces")),
+    listCheckpoints: (workspaceId) =>
+      listCheckpoints(workspaceId).pipe(asTrellisError("Could not list the checkpoints")),
+    forkWorkspace: (input) =>
+      forkWorkspace(input).pipe(asTrellisError("Could not fork the workspace")),
+    purge: (ids) =>
+      requireReady.pipe(
+        Effect.andThen(trellis.purge(ids)),
+        Effect.tap(() => Ref.set(dirty, true)),
+      ),
+    discardFork: (workspaceId) =>
+      discardFork(workspaceId).pipe(asTrellisError("Could not discard the fork")),
     syncNow,
     status: Effect.gen(function* () {
       let connection = yield* trellis.connection;
@@ -1374,6 +1622,7 @@ const make = Effect.gen(function* () {
               forkRoots: desiredProjects(applied.items)
                 .filter((entry) => !entry.primary)
                 .map((entry) => entry.workspaceRoot),
+              workerRoots: workerRoots(applied.items),
             }),
       } satisfies TrellisStatus;
     }),
@@ -1395,7 +1644,10 @@ const make = Effect.gen(function* () {
     prepareIdeaDraft,
     trashProject: (projectId) =>
       trashProject(projectId).pipe(asTrellisError("Could not move the project to the trash")),
-    listTrash: requireReady.pipe(Effect.andThen(trellis.listTrash), Effect.map(trashItems)),
+    listTrash: requireReady.pipe(
+      Effect.andThen(Effect.all([trellis.listTrash, threadTitles])),
+      Effect.map(([view, titles]) => trashItems(view, titles)),
+    ),
     restore: (input) => restore(input).pipe(asTrellisError("Could not restore it")),
     emptyTrash: requireReady.pipe(Effect.andThen(trellis.emptyTrash)),
     find: (query) => find(query).pipe(asTrellisError("Trellis find failed")),

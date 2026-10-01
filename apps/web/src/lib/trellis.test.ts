@@ -4,11 +4,15 @@ import {
   EnvironmentId,
   ProjectId,
   TRELLIS_LANDING_PAD_PROJECT_ID,
+  ThreadId,
   type TrellisFindHit,
   type TrellisState,
+  type TrellisWorkspaceEntry,
 } from "@t3tools/contracts";
 import {
+  filterTrellisWorkspaces,
   isHiddenRetiredProject,
+  isHiddenWorkerProject,
   isLoopbackPreviewUrl,
   isTrellisIdeaPath,
   isTrellisWorkspaceRoot,
@@ -23,6 +27,7 @@ import {
   trellisMoveTargets,
   trellisRemovalOf,
   trellisTrashConfirmation,
+  trellisWorkspaceDetail,
 } from "./trellis";
 
 describe("isTrellisWorkspaceRoot", () => {
@@ -333,5 +338,83 @@ describe("same-named Trellis items", () => {
         workspaceRoot: "/srv/trellis/workspaces/w1/project",
       }),
     ).toBe(false);
+  });
+});
+
+describe("worker forks", () => {
+  const root = "/trellis";
+  const fork = `${root}/workspaces/ws-w/project`;
+  const status = { root, workerRoots: [fork] };
+
+  it("hides a worker fork from the sidebar unless a lead or a draft is there", () => {
+    const project = { workspaceRoot: fork };
+    expect(isHiddenWorkerProject(project, status, { leads: 0, workers: 1 }, false)).toBe(true);
+    expect(isHiddenWorkerProject(project, status, { leads: 0, workers: 0 }, false)).toBe(true);
+    expect(isHiddenWorkerProject(project, status, { leads: 1, workers: 1 }, false)).toBe(false);
+    expect(isHiddenWorkerProject(project, status, { leads: 0, workers: 1 }, true)).toBe(false);
+    expect(isHiddenWorkerProject(project, null, { leads: 0, workers: 1 }, false)).toBe(false);
+  });
+
+  it("hides a fork whose only threads are workers before the status lists it", () => {
+    const fresh = { workspaceRoot: `${root}/workspaces/ws-new/project` };
+    expect(isHiddenWorkerProject(fresh, { root }, { leads: 0, workers: 1 }, false)).toBe(true);
+    // A fork the user made, still empty, stays visible; so do ideas and host folders.
+    expect(isHiddenWorkerProject(fresh, { root }, { leads: 0, workers: 0 }, false)).toBe(false);
+    const idea = { workspaceRoot: `${root}/workspaces/ws-s/project/idea-a` };
+    expect(isHiddenWorkerProject(idea, { root }, { leads: 0, workers: 1 }, false)).toBe(false);
+    const host = { workspaceRoot: "/home/me/code" };
+    expect(isHiddenWorkerProject(host, { root }, { leads: 0, workers: 1 }, false)).toBe(false);
+  });
+
+  const entry = (
+    id: string,
+    patch: Partial<TrellisWorkspaceEntry> = {},
+  ): TrellisWorkspaceEntry => ({
+    id,
+    name: id,
+    kind: "fork",
+    state: "running",
+    projectId: null,
+    spawnedBy: null,
+    createdAt: 1,
+    deletedAt: null,
+    unmerged: null,
+    unmergedReason: null,
+    expiresAt: null,
+    purgeRequested: null,
+    ...patch,
+  });
+  const lead = ThreadId.make("lead");
+  const entries = [
+    entry("ws-a", { kind: "primary" }),
+    entry("ws-mine"),
+    entry("ws-w", { spawnedBy: { threadId: lead, title: "Lead" }, state: "stopped" }),
+    entry("ws-d", {
+      spawnedBy: { threadId: lead, title: "Lead" },
+      state: "discarded",
+      deletedAt: 5,
+      unmerged: true,
+      unmergedReason: "uncommitted changes",
+      purgeRequested: { at: 6, reason: "dead end", by: "Lead" },
+    }),
+  ];
+
+  it("filters the workspace list into leads, workers and discarded forks", () => {
+    const ids = (filter: Parameters<typeof filterTrellisWorkspaces>[1]) =>
+      filterTrellisWorkspaces(entries, filter).map((item) => item.id);
+    expect(ids("all")).toEqual(["ws-a", "ws-mine", "ws-w", "ws-d"]);
+    expect(ids("leads")).toEqual(["ws-a", "ws-mine"]);
+    expect(ids("workers")).toEqual(["ws-w"]);
+    expect(ids("discarded")).toEqual(["ws-d"]);
+  });
+
+  it("describes a worker fork and a discarded fork's trash state", () => {
+    expect(trellisWorkspaceDetail(entries[2]!)).toBe(
+      'Stopped · worker fork of "Lead", hidden from the sidebar',
+    );
+    expect(trellisWorkspaceDetail(entries[3]!)).toBe(
+      'Discarded · worker fork of "Lead" · unmerged work (uncommitted changes) · kept until purged · purge requested by "Lead": dead end',
+    );
+    expect(trellisWorkspaceDetail(entries[0]!)).toBe("Running · project workspace");
   });
 });

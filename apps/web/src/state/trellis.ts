@@ -63,6 +63,27 @@ export const trellisEnvironment = {
     label: "environment-data:trellis:resolve-preview-url",
     tag: WS_METHODS.trellisResolvePreviewUrl,
   }),
+  /** A Trellis project's workspaces, worker forks and discarded forks included. */
+  workspaces: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:workspaces",
+    tag: WS_METHODS.trellisListWorkspaces,
+    staleTimeMs: 5_000,
+    idleTtlMs: 60_000,
+  }),
+  checkpoints: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:checkpoints",
+    tag: WS_METHODS.trellisListCheckpoints,
+    staleTimeMs: 5_000,
+    idleTtlMs: 60_000,
+  }),
+  forkWorkspace: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:fork-workspace",
+    tag: WS_METHODS.trellisForkWorkspace,
+  }),
+  purge: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:purge",
+    tag: WS_METHODS.trellisPurge,
+  }),
 };
 
 /** The last Trellis status of an environment, for event handlers; null while unknown. */

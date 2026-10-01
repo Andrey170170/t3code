@@ -33,6 +33,7 @@ import { useThreadShells } from "../../state/entities";
 import { projectEnvironment } from "../../state/projects";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { TrellisWorkspacesSection } from "../trellis/TrellisWorkspacesSection";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -571,6 +572,14 @@ function ProjectDetail({
         </SettingsSection>
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />
+        {trellisRemoval === "trash" &&
+        representativeTrellis !== null &&
+        trellisItemKind(representative.workspaceRoot, representativeTrellis) !== "idea" ? (
+          <TrellisWorkspacesSection
+            environmentId={representative.environmentId}
+            projectId={representative.id}
+          />
+        ) : null}
         {hasMultipleCheckouts ? checkoutChoices : null}
         <SettingsSection title="Danger">
           <SettingsRow

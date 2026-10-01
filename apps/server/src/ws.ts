@@ -3168,6 +3168,30 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.trellisFind, trellisCatalog.find(input.query), {
             "rpc.aggregate": "trellis",
           }),
+        [WS_METHODS.trellisListWorkspaces]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisListWorkspaces,
+            trellisCatalog.listWorkspaces(input.projectId),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisListCheckpoints]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisListCheckpoints,
+            trellisCatalog
+              .listCheckpoints(input.workspaceId)
+              .pipe(Effect.map((items) => ({ items }))),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisForkWorkspace]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisForkWorkspace, trellisCatalog.forkWorkspace(input), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisPurge]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisPurge,
+            trellisCatalog.purge(input.ids).pipe(Effect.map((purged) => ({ purged }))),
+            { "rpc.aggregate": "trellis" },
+          ),
         [WS_METHODS.filesystemBrowse]: (input) =>
           observeRpcEffect(
             WS_METHODS.filesystemBrowse,

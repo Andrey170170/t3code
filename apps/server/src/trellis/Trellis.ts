@@ -48,12 +48,23 @@ const DISCOVERY_RETRY_MS = 10_000;
 /** Turn messages wait while a workspace checkpoints; Trellis gives up after 15 minutes. */
 const TURN_WAIT_MS = 16 * 60_000;
 
+/** Who spawned a fork: the thread whose `fork` created it, and the workspace it forked. */
+export const TrellisSpawnedBy = Schema.Struct({ thread: Schema.String, workspace: Schema.String });
+
 export const TrellisWorkspaceView = Schema.Struct({
   id: Schema.String,
   kind: Schema.String,
   name: Schema.String,
   path: Schema.String,
   deleted_at: Schema.NullOr(Schema.Finite),
+  // Absent from older Trellis versions.
+  project_id: Schema.optional(Schema.NullOr(Schema.String)),
+  created_at: Schema.optional(Schema.Finite),
+  /** Container state; always false in light listings. */
+  running: Schema.optional(Schema.Boolean),
+  checkpointing: Schema.optional(Schema.Boolean),
+  parent_snapshot: Schema.optional(Schema.NullOr(Schema.String)),
+  spawned_by: Schema.optional(Schema.NullOr(TrellisSpawnedBy)),
 });
 export type TrellisWorkspaceView = typeof TrellisWorkspaceView.Type;
 
@@ -87,6 +98,7 @@ export const TrellisSnapshot = Schema.Struct({
   thread: Schema.NullOr(Schema.String),
   turn: Schema.NullOr(Schema.String),
   created_at: Schema.Finite,
+  label: Schema.optional(Schema.NullOr(Schema.String)),
 });
 export type TrellisSnapshot = typeof TrellisSnapshot.Type;
 
@@ -119,6 +131,20 @@ export const TrellisTrashEntryView = Schema.Struct({
   deleted_at: Schema.NullOr(Schema.Finite),
   /** When Trellis removes it for good; null keeps it until the trash is emptied. */
   expires_at: Schema.optional(Schema.NullOr(Schema.Finite)),
+  /** Discarded forks only: whether its repository holds work its parent lacks. */
+  unmerged: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  unmerged_reason: Schema.optional(Schema.NullOr(Schema.String)),
+  /** An agent asked the user to purge it. */
+  purge_requested: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        at: Schema.Finite,
+        reason: Schema.NullOr(Schema.String),
+        thread: Schema.NullOr(Schema.String),
+      }),
+    ),
+  ),
+  spawned_by: Schema.optional(Schema.NullOr(TrellisSpawnedBy)),
 });
 export type TrellisTrashEntryView = typeof TrellisTrashEntryView.Type;
 
@@ -132,6 +158,25 @@ export const TrellisTrashView = Schema.Struct({
 export type TrellisTrashView = typeof TrellisTrashView.Type;
 
 const TrellisStatusView = Schema.Struct({ root: Schema.String });
+
+/** A service a fork started (`POST /v1/fork {services}`), not yet ready. */
+export const TrellisStartedService = Schema.Struct({
+  name: Schema.String,
+  state: Schema.String,
+  error: Schema.optional(Schema.String),
+  previews: Schema.optional(
+    Schema.Array(Schema.Struct({ port: Schema.Finite, url: Schema.String })),
+  ),
+});
+export type TrellisStartedService = typeof TrellisStartedService.Type;
+
+/** `POST /v1/fork`: the new workspace, with resource warnings and started services. */
+const TrellisForkView = Schema.Struct({
+  ...TrellisWorkspaceView.fields,
+  warnings: Schema.optional(Schema.Array(Schema.String)),
+  services: Schema.optional(Schema.Array(TrellisStartedService)),
+});
+export type TrellisForkView = typeof TrellisForkView.Type;
 const TrellisPurgeView = Schema.Struct({ purged: Schema.Finite });
 const TrellisRollbackView = Schema.Struct({ undo_snapshot: Schema.optional(Schema.Unknown) });
 const TrellisDescribeView = Schema.Struct({
@@ -276,10 +321,40 @@ export class Trellis extends Context.Service<
     readonly expectedRoots: Effect.Effect<ReadonlyArray<string>>;
     /** The `trellis` binary, for `trellis exec`. */
     readonly bin: string;
-    /** `all` includes trashed workspaces; this listing queries container state. */
+    /**
+     * `all` includes trashed workspaces; `spawnedBy` keeps forks a thread (or
+     * threads of a workspace) spawned. This listing queries container state.
+     */
     readonly listWorkspaces: (options: {
       readonly all: boolean;
+      readonly spawnedBy?: string | undefined;
     }) => Effect.Effect<ReadonlyArray<TrellisWorkspaceView>, TrellisError>;
+    /**
+     * Forks `target`'s workspace from `snapshot` (a checkpoint). A `thread`
+     * is recorded as the fork's `spawned_by`; `services` starts those
+     * workspace services in it.
+     */
+    readonly fork: (input: {
+      readonly target: string;
+      readonly snapshot: string;
+      readonly name?: string | undefined;
+      readonly thread?: string | undefined;
+      readonly services?: "none" | "all" | ReadonlyArray<string> | undefined;
+    }) => Effect.Effect<TrellisForkView, TrellisError>;
+    /** Records activity in the target's workspace (for example a `summary`). */
+    readonly recordActivity: (input: {
+      readonly target: string;
+      readonly kind: string;
+      readonly data: unknown;
+    }) => Effect.Effect<void, TrellisError>;
+    /** Asks the user to purge trashed items; agents never purge. */
+    readonly requestPurge: (input: {
+      readonly ids: ReadonlyArray<string>;
+      readonly reason?: string | undefined;
+      readonly thread?: string | undefined;
+    }) => Effect.Effect<void, TrellisError>;
+    /** Permanently removes the listed trashed items. */
+    readonly purge: (ids: ReadonlyArray<string>) => Effect.Effect<number, TrellisError>;
     /** `all` includes trashed and graduated items; the list never includes container state. */
     readonly listProjects: (options: {
       readonly all: boolean;
@@ -484,6 +559,10 @@ const ROUTE_MINIMUM: ReadonlyArray<{ readonly route: string; readonly since: str
     route,
     since: "main at or after PR #15 (core/checkpoint, d949d28)",
   })),
+  {
+    route: "POST /v1/trash/purge-requests",
+    since: "main at or after PR #26 (core/stage-b-forks, 90c1ab6)",
+  },
 ];
 
 /** The error for a failed response whose body is not Trellis' `{error}`. */
@@ -775,8 +854,42 @@ const make = Effect.gen(function* () {
     connection,
     expectedRoots,
     bin,
-    listWorkspaces: ({ all }) =>
-      call(Schema.Array(TrellisWorkspaceView), "GET", `/v1/workspaces${all ? "?all=true" : ""}`),
+    listWorkspaces: ({ all, spawnedBy }) =>
+      call(
+        Schema.Array(TrellisWorkspaceView),
+        "GET",
+        `/v1/workspaces?${query({
+          ...(all ? { all: "true" } : {}),
+          ...(spawnedBy === undefined ? {} : { spawned_by: spawnedBy }),
+        })}`,
+      ),
+    fork: ({ target, snapshot, name, thread, services }) =>
+      call(TrellisForkView, "POST", "/v1/fork", {
+        body: {
+          target,
+          snapshot,
+          ...(name === undefined ? {} : { name }),
+          ...(thread === undefined ? {} : { thread }),
+          ...(services === undefined ? {} : { services }),
+        },
+        // A reflink copy of the snapshot, and with services a container start.
+        timeoutMs: 5 * 60_000,
+      }),
+    recordActivity: (body) =>
+      call(Schema.Unknown, "POST", "/v1/activities", { body }).pipe(Effect.asVoid),
+    requestPurge: ({ ids, reason, thread }) =>
+      call(Schema.Unknown, "POST", "/v1/trash/purge-requests", {
+        body: {
+          ids,
+          ...(reason === undefined ? {} : { reason }),
+          ...(thread === undefined ? {} : { thread }),
+        },
+      }).pipe(Effect.asVoid),
+    purge: (ids) =>
+      call(TrellisPurgeView, "POST", "/v1/trash/purge", {
+        body: { ids },
+        timeoutMs: 5 * 60_000,
+      }).pipe(Effect.map((view) => view.purged)),
     listProjects: ({ all }) =>
       call(
         Schema.Array(TrellisProjectView),
@@ -1001,6 +1114,10 @@ export function makeTestTrellis(
     expectedRoots: Effect.succeed(env === null ? [] : [env.root]),
     bin: env?.bin ?? "trellis",
     listWorkspaces: unused,
+    fork: unused,
+    recordActivity: unused,
+    requestPurge: unused,
+    purge: unused,
     listProjects: unused,
     createIdea: unused,
     createProject: unused,
