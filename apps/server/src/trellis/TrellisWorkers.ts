@@ -821,26 +821,52 @@ const make = Effect.gen(function* () {
     event.type === "thread.deleted" ||
     (event.type === "subagent.updated" && event.payload.status === "completed");
 
+  const previousCursorPath = `${cursorPath}.previous`;
+  /**
+   * Written whole (a temporary file renamed over it); the cursor it replaces
+   * stays as `.previous`, the fallback should this one ever be unreadable.
+   */
   const saveCursor = (sequence: number) =>
-    fileSystem
-      .writeFileString(cursorPath, `${sequence}\n`)
-      .pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("could not save the Trellis workers' event cursor", { cause }),
-        ),
-      );
+    Effect.gen(function* () {
+      const partial = `${cursorPath}.partial`;
+      yield* fileSystem.writeFileString(partial, `${sequence}\n`);
+      if (yield* fileSystem.exists(cursorPath)) {
+        yield* fileSystem.rename(cursorPath, previousCursorPath);
+      }
+      yield* fileSystem.rename(partial, cursorPath);
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("could not save the Trellis workers' event cursor", { cause }),
+      ),
+    );
+
+  /** A saved cursor: the sequence, `missing` when there is no file, else `invalid`. */
+  const readCursor = (path: string) =>
+    Effect.gen(function* () {
+      if (!(yield* fileSystem.exists(path))) return "missing" as const;
+      const text = (yield* fileSystem.readFileString(path)).trim();
+      return /^\d+$/.test(text) && Number.isSafeInteger(Number(text))
+        ? Number(text)
+        : ("invalid" as const);
+    }).pipe(Effect.orElseSucceed(() => "invalid" as const));
 
   const start: TrellisWorkers["Service"]["start"] = Effect.fn("TrellisWorkers.start")(function* () {
     const latest = yield* applicationEvents.latestApplicationSequence.pipe(
       Effect.orElseSucceed(() => 0),
     );
-    const saved = yield* fileSystem.readFileString(cursorPath).pipe(
-      Effect.map((text) => Number.parseInt(text.trim(), 10)),
-      Effect.orElseSucceed(() => Number.NaN),
-    );
-    // The first start begins now (saved at once, so a restart replays from
-    // here); later ones resume after the last event handled.
-    let cursor = Number.isSafeInteger(saved) && saved <= latest ? saved : latest;
+    // The first start (no cursor) begins now, saved at once so a restart
+    // replays from here; later ones resume after the last event handled. An
+    // unreadable cursor falls back to the one before it, else to the start of
+    // the retained events: handling an event twice is harmless, missing one is not.
+    const saved = yield* readCursor(cursorPath);
+    const fallback = saved === "invalid" ? yield* readCursor(previousCursorPath) : saved;
+    let cursor =
+      saved === "missing" ? latest : typeof fallback === "number" ? Math.min(fallback, latest) : 0;
+    if (saved !== "missing" && typeof saved !== "number") {
+      yield* Effect.logWarning("the Trellis workers' event cursor was unreadable; replaying", {
+        from: cursor,
+      });
+    }
     if (cursor !== saved) yield* saveCursor(cursor);
     let failures = 0;
     const follow = Effect.suspend(() =>

@@ -888,7 +888,16 @@ it.effect("discarding a fork is refused while its worker runs, then files a purg
   }).pipe(Effect.provide(testLayer(fake)));
 });
 
-it.effect("resumes after the saved event cursor, so a restart misses no completion", () => {
+/**
+ * T3 handled event 7 before it stopped and 8 arrived while it was down;
+ * `saveCursor` leaves the cursor files as a restart finds them.
+ */
+const replaysAfterRestart = (
+  saveCursor: (paths: {
+    readonly cursor: string;
+    readonly previous: string;
+  }) => Effect.Effect<void, never, FileSystem.FileSystem>,
+) => {
   const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
   const replayed = Deferred.makeUnsafe<void>();
   // What the store serves: events from `afterSequence` on, then the stream ends.
@@ -920,11 +929,10 @@ it.effect("resumes after the saved event cursor, so a restart misses no completi
           payload: { ...task, status: "completed", result: text, completedAt: task.startedAt },
         } as unknown as OrchestrationV2DomainEvent;
       });
-    // T3 handled event 7 before it stopped; 8 arrived while it was down.
     stored.push({ sequence: 7, event: yield* completion(first.childThreadId, "One.") });
     stored.push({ sequence: 8, event: yield* completion(second.childThreadId, "Two.") });
     const cursor = NodePath.join(config.stateDir, "trellis-workers-cursor");
-    yield* fileSystem.writeFileString(cursor, "7\n");
+    yield* saveCursor({ cursor, previous: `${cursor}.previous` });
     yield* Effect.scoped(workers.start().pipe(Effect.andThen(Deferred.await(replayed))));
     assert.deepEqual(
       fake.state.activities.map((activity) => activity.data),
@@ -932,7 +940,25 @@ it.effect("resumes after the saved event cursor, so a restart misses no completi
     );
     assert.equal((yield* fileSystem.readFileString(cursor)).trim(), "8");
   }).pipe(Effect.provide(testLayer(fake, events)));
-});
+};
+
+it.effect("resumes after the saved event cursor, so a restart misses no completion", () =>
+  replaysAfterRestart(({ cursor }) =>
+    Effect.flatMap(FileSystem.FileSystem, (fs) => fs.writeFileString(cursor, "7\n")).pipe(
+      Effect.orDie,
+    ),
+  ),
+);
+
+it.effect("an unreadable cursor falls back to the one saved before it, not to now", () =>
+  replaysAfterRestart(({ cursor, previous }) =>
+    Effect.flatMap(FileSystem.FileSystem, (fs) =>
+      fs
+        .writeFileString(previous, "7\n")
+        .pipe(Effect.andThen(fs.writeFileString(cursor, "\u0000garbage")), Effect.orDie),
+    ),
+  ),
+);
 
 it.effect("a lead discards only forks it or its workers spawned", () => {
   const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
