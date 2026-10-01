@@ -355,6 +355,21 @@ export const layer: Layer.Layer<
         return { target: row.target, snapshotId: row.snapshot_id };
       });
 
+    // A restore of a folder whose `.git` is inside it brings back the `.git`
+    // of the snapshot, which predates the ref built from that very snapshot
+    // (and any later ones); such a ref is built again from its snapshot.
+    const ensureGitRef = (cwd: string, ref: CheckpointRef) =>
+      Effect.gen(function* () {
+        const present = yield* run(
+          "git ref",
+          { command: "git", args: ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd },
+          [0, 1],
+        );
+        if (present.code === 0) return;
+        const { snapshotId } = yield* protectedSnapshot(ref);
+        yield* writeGitRef(cwd, ref, snapshotId);
+      }).pipe(Effect.scoped);
+
     const trellisDiff = (input: Parameters<CheckpointStore["Service"]["diffCheckpoints"]>[0]) =>
       Effect.gen(function* () {
         const from = yield* protectedSnapshot(input.fromCheckpointRef);
@@ -454,6 +469,8 @@ export const layer: Layer.Layer<
             // Git projects keep diffing through the hidden refs, so ignore
             // rules apply as without Trellis.
             if (yield* base.isGitRepository(input.cwd).pipe(Effect.orElseSucceed(() => false))) {
+              yield* ensureGitRef(input.cwd, input.fromCheckpointRef);
+              yield* ensureGitRef(input.cwd, input.toCheckpointRef);
               return yield* base.diffCheckpoints(input);
             }
             return yield* trellisDiff(input);

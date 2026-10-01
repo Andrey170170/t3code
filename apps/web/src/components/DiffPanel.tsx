@@ -85,6 +85,8 @@ import { useAtomCommand } from "../state/use-atom-command";
 import { serverEnvironment } from "../state/server";
 import { reviewEnvironment } from "../state/review";
 import { vcsEnvironment } from "../state/vcs";
+import { useTrellisRoot } from "../hooks/useTrellis";
+import { isTrellisWorkspaceRoot } from "../lib/trellis";
 import { buildBaseRefChoices, filterBaseRefChoices } from "../lib/baseRefChoices";
 import { createGitDiffFileContentsLoader } from "../lib/diffFileContents";
 
@@ -190,6 +192,11 @@ export default function DiffPanel({
     selectThreadDiffPanelSelection(state.byThreadKey, routeThreadRef),
   );
   const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
+  // Trellis checkpoints are workspace snapshots, so its turns have diffs
+  // without git; only the working-tree and branch views need a repository.
+  const trellisRoot = useTrellisRoot(activeThread?.environmentId ?? null);
+  const hasTurnDiffs =
+    isGitRepo || (activeCwd != null && isTrellisWorkspaceRoot(activeCwd, trellisRoot));
   const { turnDiffSummaries, inferredCheckpointTurnCountByRunId } =
     useTurnDiffSummaries(activeThreadProjection);
   const orderedTurnDiffSummaries = useMemo(
@@ -267,7 +274,7 @@ export default function DiffPanel({
       ignoreWhitespace: diffIgnoreWhitespace,
       cacheScope: selectedTurn ? `turn:${selectedTurn.runId}` : null,
     },
-    { enabled: isGitRepo && selectedTurn !== undefined },
+    { enabled: hasTurnDiffs && selectedTurn !== undefined },
   );
   const primaryBranchDiffPreview = useEnvironmentQuery(
     selectedRunId === null && activeThread && activeCwd
@@ -975,9 +982,13 @@ export default function DiffPanel({
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
           Select a thread to inspect turn diffs.
         </div>
-      ) : !isGitRepo ? (
+      ) : !hasTurnDiffs ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
           Turn diffs are unavailable because this project is not a git repository.
+        </div>
+      ) : !isGitRepo && selectedRunId === null ? (
+        <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
+          This project is not a git repository. Select a turn to see what it changed.
         </div>
       ) : selectedRunId !== null && orderedTurnDiffSummaries.length === 0 ? (
         <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">

@@ -481,6 +481,16 @@ it.effect("a git project diffs through refs built from the snapshot, not the liv
     });
     assert.include(diff.diff, "-print(2)\n+print(3)");
     assert.notInclude(diff.diff, "build/");
+
+    // Restoring a folder brings back its `.git` from the snapshot, which
+    // lacks the refs built after it; a diff builds them again.
+    git(project, "update-ref", "-d", refOf(scope, 2));
+    const again = yield* (yield* CheckpointDiffQuery).getTurnDiff({
+      threadId: scope.threadId,
+      fromTurnCount: 1,
+      toTurnCount: 2,
+    });
+    assert.include(again.diff, "-print(2)\n+print(3)");
   }).pipe(Effect.provide(diffLayer(fake, scope)));
 });
 
