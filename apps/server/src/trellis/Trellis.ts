@@ -449,12 +449,12 @@ const make = Effect.gen(function* () {
     ),
   );
 
+  // When a probe last found Trellis unreachable.
+  let lastFailedProbeMs = Number.NEGATIVE_INFINITY;
   // Serialized so concurrent refreshes never run `trellis shims` twice or
   // let a slower refresh overwrite a newer result.
-  // When an implicit probe last found Trellis unreachable.
-  let lastFailedProbeMs = Number.NEGATIVE_INFINITY;
   const refreshLock = yield* Semaphore.make(1);
-  const refresh = Effect.gen(function* () {
+  const refreshUnlocked = Effect.gen(function* () {
     const previous = yield* Ref.get(state);
     if (!(yield* enabled)) {
       if (previous !== null) yield* Effect.logInfo("Trellis integration turned off");
@@ -500,15 +500,26 @@ const make = Effect.gen(function* () {
     yield* Effect.logInfo("Trellis is available", { root: next.root, shimDir: next.shimDir });
     yield* Ref.set(state, next);
     return next;
-  }).pipe(refreshLock.withPermits(1));
+  });
+  const refresh = refreshUnlocked.pipe(refreshLock.withPermits(1));
 
   const socketRoot = rootFromSocketPath(socketPath);
-  const discover = Effect.gen(function* () {
-    if (!(yield* enabled)) return null;
+  // Known state, or null while a failed probe is recent; checked again under
+  // the lock so callers queued behind an in-flight probe share its result.
+  const settled = Effect.gen(function* () {
+    if (!(yield* enabled)) return Option.some(null);
     const known = yield* Ref.get(state);
-    if (known !== null) return known;
+    if (known !== null) return Option.some(known);
     const now = yield* Clock.currentTimeMillis;
-    return now - lastFailedProbeMs < DISCOVERY_RETRY_MS ? null : yield* refresh;
+    return now - lastFailedProbeMs < DISCOVERY_RETRY_MS ? Option.some(null) : Option.none();
+  });
+  const discover = Effect.gen(function* () {
+    const fast = yield* settled;
+    if (Option.isSome(fast)) return fast.value;
+    return yield* Effect.gen(function* () {
+      const queued = yield* settled;
+      return Option.isSome(queued) ? queued.value : yield* refreshUnlocked;
+    }).pipe(refreshLock.withPermits(1));
   });
 
   const expectedRoots = Effect.gen(function* () {

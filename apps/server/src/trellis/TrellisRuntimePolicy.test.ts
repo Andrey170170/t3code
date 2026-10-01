@@ -178,6 +178,21 @@ describe("TrellisRuntimePolicy", () => {
         Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())),
       );
       assert.equal(message, TrellisRuntimePolicy.TRELLIS_NESTED_WORKSPACE_MESSAGE);
+      const instanceMessage = yield* refusal(
+        resolve({
+          instance: "claudeAgent",
+          projectRoot: idea,
+          providerInstances: {
+            providerInstances: {
+              [ProviderInstanceId.make("claudeAgent")]: {
+                driver: ProviderDriverKind.make("claudeAgent"),
+                environment: [{ name: "TRELLIS_WORKSPACE", value: "ws-9", sensitive: false }],
+              },
+            },
+          },
+        }),
+      );
+      assert.equal(instanceMessage, TrellisRuntimePolicy.TRELLIS_NESTED_WORKSPACE_MESSAGE);
     }),
   );
 
