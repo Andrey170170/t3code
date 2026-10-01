@@ -22,7 +22,7 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import { layer as mcpSessionRegistryTestLayer } from "../mcp/McpSessionRegistry.testkit.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { layer as idAllocatorLayer } from "../orchestration-v2/IdAllocator.ts";
-import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import { OrchestratorProjectionError, OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import type { ProviderAdapterV2Shape } from "../orchestration-v2/ProviderAdapter.ts";
 import {
@@ -236,6 +236,52 @@ describe("planCatalogSync", () => {
         ],
       }),
     ).toEqual([]);
+  });
+
+  it("retires a fork the listing reports as trashed, with threads from its deletion second", () => {
+    const actions = TrellisCatalog.planCatalogSync({
+      root: ROOT,
+      items: [
+        dedicated("prj-b", "Engine", [
+          workspace("ws-b"),
+          { ...workspace("ws-fork", "fork"), deleted_at: 100 },
+        ]),
+      ],
+      projects: [
+        project("p-b", `${ROOT}/workspaces/ws-b/project`, "Engine"),
+        project("p-fork", `${ROOT}/workspaces/ws-fork/project`, "Engine · fork"),
+      ],
+      threads: [
+        {
+          id: ThreadId.make("t-same-second"),
+          projectId: ProjectId.make("p-fork"),
+          archived: false,
+          // Updated during second 100, before the fork was trashed in it.
+          updatedAtMs: 100_500,
+        },
+      ],
+      deletedWorkspaces: noDeletedWorkspaces,
+    });
+    expect(actions).toEqual([
+      {
+        type: "retire",
+        projectId: ProjectId.make("p-fork"),
+        archiveThreadIds: [ThreadId.make("t-same-second")],
+        deleteProject: false,
+      },
+    ]);
+    expect(
+      TrellisCatalog.unlistedWorkspaceIds({
+        root: ROOT,
+        items: [
+          dedicated("prj-b", "Engine", [
+            workspace("ws-b"),
+            { ...workspace("ws-fork", "fork"), deleted_at: 100 },
+          ]),
+        ],
+        projects: [project("p-fork", `${ROOT}/workspaces/ws-fork/project`)],
+      }),
+    ).toEqual(["ws-fork"]);
   });
 
   it("does not re-archive a thread unarchived or used after the item was trashed", () => {
@@ -537,7 +583,35 @@ describe("TrellisCatalog service", () => {
   };
 
   /** Failures the service tests inject. */
-  const faults = { restoreAnswerLost: false, projectListFails: false };
+  const faults = {
+    restoreAnswerLost: false,
+    projectListFails: false,
+    /** Active-thread reads that succeed before the next one fails; null never fails. */
+    activeReadsBeforeFailure: null as number | null,
+  };
+
+  /** The catalog's orchestrator, with active-thread reads failing per `faults`. */
+  const flakyOrchestrator = Layer.effect(
+    OrchestratorV2,
+    Effect.map(OrchestratorV2, (orchestrator) =>
+      OrchestratorV2.of({
+        ...orchestrator,
+        getShellSnapshot: (options) =>
+          Effect.suspend(() => {
+            if (options?.location === "active" && faults.activeReadsBeforeFailure !== null) {
+              if (faults.activeReadsBeforeFailure === 0) {
+                faults.activeReadsBeforeFailure = null;
+                return Effect.fail(
+                  new OrchestratorProjectionError({ threadId: ThreadId.make("shell") }),
+                );
+              }
+              faults.activeReadsBeforeFailure -= 1;
+            }
+            return orchestrator.getShellSnapshot(options);
+          }),
+      }),
+    ),
+  );
 
   /** The catalog's project store, with `list` failing while `faults.projectListFails` is set. */
   const flakyProjectStore = Layer.effect(
@@ -679,7 +753,7 @@ describe("TrellisCatalog service", () => {
 
   const catalogLayer = (state: { items: Array<TrellisProjectView>; trashed: Array<string> }) =>
     TrellisCatalog.layer.pipe(
-      Layer.provide(flakyProjectStore),
+      Layer.provide(Layer.merge(flakyProjectStore, flakyOrchestrator)),
       Layer.provideMerge(
         Layer.mergeAll(
           OrchestrationV2LayerLive,
@@ -824,6 +898,13 @@ describe("TrellisCatalog service", () => {
           );
         assert.include(unverified.message, "Could not check");
         assert.deepEqual(state.trashed, ["idea-a"]);
+
+        // Trashed, but its conversations could not be archived: reported.
+        faults.activeReadsBeforeFailure = 1;
+        const partial = yield* catalog.trashProject(a!.projectId).pipe(Effect.flip);
+        assert.include(partial.message, "is in the Trellis trash, but");
+        assert.deepEqual(state.trashed, ["idea-a", "idea-a"]);
+        yield* catalog.restore({ kind: "idea", id: "idea-a" });
 
         // Once the trash is purged, a project kept for its conversations
         // stays retired.

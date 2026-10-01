@@ -119,6 +119,8 @@ function desiredProjects(items: ReadonlyArray<TrellisProjectView>): ReadonlyArra
       continue;
     }
     for (const workspace of item.workspaces) {
+      // A trashed fork of a live project is retired, not desired.
+      if (workspace.deleted_at !== null) continue;
       const primary = workspace.id === item.workspace_id;
       desired.push({
         workspaceRoot: normalizeRoot(workspace.path),
@@ -152,7 +154,9 @@ export function unlistedWorkspaceIds(input: {
   for (const item of input.items) {
     if (!isLive(item)) continue;
     listed.add(item.workspace_id);
-    for (const workspace of item.workspaces) listed.add(workspace.id);
+    for (const workspace of item.workspaces) {
+      if (workspace.deleted_at === null) listed.add(workspace.id);
+    }
   }
   const unlisted = new Set<string>();
   for (const project of input.projects) {
@@ -203,6 +207,13 @@ export function planCatalogSync(input: {
   const retiredAt = new Map<string, number>();
   for (const item of input.items) {
     if (!isLive(item)) retiredAt.set(normalizeRoot(item.path), item.deleted_at ?? item.updated_at);
+    else {
+      for (const workspace of item.workspaces) {
+        if (workspace.deleted_at !== null) {
+          retiredAt.set(normalizeRoot(workspace.path), workspace.deleted_at);
+        }
+      }
+    }
   }
   for (const [root, project] of projectsByRoot) {
     if (desiredRoots.has(root) || !isTrellisManagedPath(input.root, root)) continue;
@@ -215,7 +226,8 @@ export function planCatalogSync(input: {
     // Only threads untouched since the retirement: one the user unarchived
     // (or kept working in) afterwards stays where it is.
     const archiveThreadIds = threads
-      .filter((thread) => !thread.archived && thread.updatedAtMs < at * 1000)
+      // `at` is in whole seconds: a thread updated during that second is older.
+      .filter((thread) => !thread.archived && thread.updatedAtMs < (at + 1) * 1000)
       .map((thread) => thread.id);
     if (archiveThreadIds.length === 0 && threads.length > 0) continue;
     actions.push({
@@ -856,6 +868,7 @@ const make = Effect.gen(function* () {
           .map((project) => project.id),
       );
       const active = yield* orchestrator.getShellSnapshot({ location: "active" });
+      const failed: Array<string> = [];
       for (const thread of active.threads) {
         if (!projectIds.has(thread.projectId) || thread.archivedAt !== null) continue;
         yield* archiveThread(thread.id).pipe(
@@ -863,15 +876,22 @@ const make = Effect.gen(function* () {
             Effect.logWarning("could not archive a trashed Trellis thread", {
               threadId: thread.id,
               detail: errorMessage(error),
-            }),
+            }).pipe(Effect.andThen(Effect.sync(() => void failed.push(thread.title)))),
           ),
         );
       }
+      if (failed.length > 0) {
+        return yield* new TrellisError({
+          message: `these conversations could not be archived: ${failed.map((title) => `"${title}"`).join(", ")}.`,
+        });
+      }
     }).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("could not archive the threads of a trashed Trellis item", {
-          detail: errorMessage(error),
-        }),
+      Effect.mapError((error) =>
+        isTrellisError(error)
+          ? error
+          : new TrellisError({
+              message: `its conversations could not be read to archive them (${errorMessage(error)}).`,
+            }),
       ),
     );
 
@@ -927,8 +947,15 @@ const make = Effect.gen(function* () {
     // Archive the conversations here rather than through the sync's time
     // heuristic: a session ending as the workspace stops bumps a thread past
     // the deletion time, which would leave it active.
-    yield* archiveThreadsIn(scopes);
+    // Already in the trash: a failure here leaves conversations active
+    // against removed files, so it is reported rather than swallowed.
+    const archived = yield* archiveThreadsIn(scopes).pipe(Effect.result);
     yield* syncNow;
+    if (archived._tag === "Failure") {
+      return yield* new TrellisError({
+        message: `${target.name} is in the Trellis trash, but ${archived.failure.message} Archive them by hand, or restore it from Settings → Trellis.`,
+      });
+    }
     return { trashed: target.kind, name: target.name } satisfies TrellisTrashProjectResult;
   });
 
