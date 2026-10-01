@@ -586,6 +586,7 @@ describe("TrellisCatalog service", () => {
   const faults = {
     restoreAnswerLost: false,
     projectListFails: false,
+    projectGetFails: false,
     /** Active-thread reads that succeed before the next one fails; null never fails. */
     activeReadsBeforeFailure: null as number | null,
   };
@@ -619,6 +620,12 @@ describe("TrellisCatalog service", () => {
     Effect.map(ProjectStore.ProjectStoreV2, (store) =>
       ProjectStore.ProjectStoreV2.of({
         ...store,
+        get: (projectId, options) =>
+          Effect.suspend(() =>
+            faults.projectGetFails
+              ? Effect.fail(new ProjectStore.ProjectStoreV2Error({ operation: "get", cause: null }))
+              : store.get(projectId, options),
+          ),
         list: (options) =>
           Effect.suspend(() =>
             faults.projectListFails
@@ -917,6 +924,15 @@ describe("TrellisCatalog service", () => {
         const refused = yield* catalog.checkProjectDelete(b!.projectId).pipe(Effect.flip);
         assert.include(refused.message, "move it to the Trellis trash");
         yield* catalog.checkProjectDelete(c.projectId);
+        // A failed project read refuses rather than letting the delete through.
+        faults.projectGetFails = true;
+        const unreadable = yield* catalog
+          .checkProjectDelete(c.projectId)
+          .pipe(
+            Effect.flip,
+            Effect.ensuring(Effect.sync(() => void (faults.projectGetFails = false))),
+          );
+        assert.include(unreadable.message, "Could not read the project");
       }),
     );
 

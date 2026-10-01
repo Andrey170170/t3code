@@ -1128,7 +1128,15 @@ const make = Effect.gen(function* () {
   const checkProjectDelete = Effect.fn("TrellisCatalog.checkProjectDelete")(function* (
     projectId: ProjectId,
   ) {
-    const row = yield* projectStore.get(projectId).pipe(Effect.orElseSucceed(() => Option.none()));
+    // Only a project that is really not there passes; a failed read refuses.
+    const row = yield* projectStore.get(projectId).pipe(
+      Effect.mapError(
+        (error) =>
+          new TrellisError({
+            message: `Could not read the project, so it was not removed: ${error.message}`,
+          }),
+      ),
+    );
     if (Option.isNone(row)) return;
     const root = normalizeRoot(row.value.workspaceRoot);
     const roots = yield* trellis.expectedRoots;
