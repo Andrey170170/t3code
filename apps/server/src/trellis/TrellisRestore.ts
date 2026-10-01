@@ -39,6 +39,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Semaphore from "effect/Semaphore";
 import type * as Scope from "effect/Scope";
 
 import {
@@ -69,6 +70,19 @@ export interface TrellisRestoreGateShape {
   readonly hold: (paths: ReadonlyArray<string>) => Effect.Effect<void, never, Scope.Scope>;
   /** Waits until no hold overlaps `path`; true when it had to wait. */
   readonly waitFree: (path: string) => Effect.Effect<boolean>;
+  /** How many times the provider sessions in `directory` were released after a restart. */
+  readonly releases: (directory: string) => number;
+  /**
+   * Runs `release` for `directory` unless a release there ran since `seen`
+   * (a `releases` count read before waiting through the restart): the turns
+   * that waited through one restart release its sessions once, and none
+   * releases a session another turn opened after it.
+   */
+  readonly releaseOnce: (
+    directory: string,
+    seen: number,
+    release: Effect.Effect<unknown>,
+  ) => Effect.Effect<void>;
 }
 
 /** The gate shared by restores, trash and turn admission of one server. */
@@ -79,6 +93,8 @@ export class TrellisRestoreGate extends Context.Service<
 
 function makeRestoreGate(): TrellisRestoreGateShape {
   const holds = new Map<number, ReadonlyArray<string>>();
+  const releaseCounts = new Map<string, number>();
+  const releaseLock = Semaphore.makeUnsafe(1);
   let nextId = 0;
   // Completed and replaced on every release; waiters capture it before they
   // check, so a release between the check and the wait is never missed.
@@ -110,6 +126,14 @@ function makeRestoreGate(): TrellisRestoreGateShape {
           }
         }),
       ),
+    releases: (directory) => releaseCounts.get(directory) ?? 0,
+    releaseOnce: (directory, seen, release) =>
+      Effect.gen(function* () {
+        const count = releaseCounts.get(directory) ?? 0;
+        if (count !== seen) return;
+        yield* release;
+        releaseCounts.set(directory, count + 1);
+      }).pipe(releaseLock.withPermits(1)),
     waitFree: (path) =>
       Effect.gen(function* () {
         let waited = false;
@@ -455,16 +479,22 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | 
               }
               if (yield* gate.waitFree(path)) waited = true;
               if (turns === undefined) return waited;
+              const directory = yield* workspaceProjectOf(trellis, path);
+              const seen = gate.releases(directory);
               // Waits while the workspace is checkpointing.
               const { restarted } = yield* turns.start({ threadId, runId, cwd: path });
               // A checkpoint T3 started holds the gate until it released the
               // workspace's sessions, so this turn opens a fresh one after.
               if (yield* gate.waitFree(path)) waited = true;
               if (restarted && sessions !== undefined) {
-                yield* releaseSessionsWithin(
-                  sessions,
-                  yield* workspaceProjectOf(trellis, path),
-                  "The workspace restarted for a Trellis checkpoint.",
+                yield* gate.releaseOnce(
+                  directory,
+                  seen,
+                  releaseSessionsWithin(
+                    sessions,
+                    directory,
+                    "The workspace restarted for a Trellis checkpoint.",
+                  ),
                 );
               }
               return waited || restarted;

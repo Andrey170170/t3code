@@ -7,13 +7,13 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   type ThreadId,
-  TrellisError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import type { TrellisCheckpointResult } from "./Trellis.ts";
 import { makeTestTrellis, Trellis } from "./Trellis.ts";
 import * as TrellisCheckpointTool from "./TrellisCheckpointTool.ts";
@@ -54,16 +54,31 @@ function makeCheckpointTrellis(result: TrellisCheckpointResult | string) {
     checkpoint: ({ name, thread, interrupt }) =>
       Effect.suspend(() => {
         checkpoints.push({ name, thread, interrupt });
-        return typeof result === "string"
-          ? Effect.fail(new TrellisError({ message: result }))
-          : Effect.succeed(result);
+        return Effect.succeed(
+          typeof result === "string"
+            ? { ok: false as const, error: result, restarted: false }
+            : { ok: true as const, result },
+        );
       }),
   });
   return { trellis, checkpoints, open };
 }
 
+/** Provider sessions the tool released (one live session runs in the workspace). */
+const released: Array<string> = [];
+
 function toolLayer(fake: ReturnType<typeof makeCheckpointTrellis>) {
+  released.length = 0;
   return TrellisCheckpointTool.layer.pipe(
+    Layer.provide(
+      Layer.mock(ProviderSessionManagerV2)({
+        listLive: Effect.succeed([
+          { providerSessionId: ProviderSessionId.make("session-ws"), cwd: WS },
+        ]),
+        release: ({ providerSessionId }) =>
+          Effect.sync(() => void released.push(providerSessionId)),
+      }),
+    ),
     Layer.provideMerge(TrellisOrchestratorTestLayer),
     Layer.provideMerge(TrellisTurns.layer),
     Layer.provideMerge(TrellisRestore.gateLayer),
@@ -153,6 +168,8 @@ it.effect("ends the calling turn, checkpoints, and continues the thread with the
     assert.notInclude(next.text, "claude");
     assert.notInclude(next.text, "playwright-mcp");
     assert.deepEqual(next.runs, ["interrupted", "starting"]);
+    // The stop ended the workspace's providers, so their sessions were released.
+    assert.deepEqual(released, ["session-ws"]);
   }).pipe(Effect.provide(toolLayer(fake)));
 });
 
@@ -192,6 +209,9 @@ it.effect("a failed checkpoint still continues the thread, with the reason", () 
     yield* tool.drain;
     const next = yield* continuationOf(lead.threadId);
     assert.include(next.text, "The checkpoint failed: checkpoint failed: guarded commands");
+    assert.include(next.text, "Nothing was stopped.");
+    // Refused before the stop: the workspace's live sessions are kept.
+    assert.deepEqual(released, []);
   }).pipe(Effect.provide(toolLayer(fake)));
 });
 
@@ -279,6 +299,13 @@ it.effect("with interrupt, ends the caller's worker too and continues both", () 
     assert.include(
       (yield* continuationOf(lead.threadId)).text,
       'The turns of "Tests worker" were ended too',
+    );
+    // The worker's task was not finalized by the interrupt: its later result still reaches the lead.
+    const leadProjection = yield* projectionOf(lead.threadId);
+    assert.isFalse(
+      leadProjection.contextTransfers.some(
+        (transfer) => transfer.type === "subagent_result" && transfer.sourceThreadId === worker.id,
+      ),
     );
     const workerNext = yield* continuationOf(worker.id);
     assert.include(workerNext.text, 'Your turn was ended because "lead" took a checkpoint');

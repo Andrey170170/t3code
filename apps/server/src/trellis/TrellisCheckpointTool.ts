@@ -9,13 +9,15 @@
  * 4: an agent may end only the threads below it). Any other thread mid-turn
  * in the workspace refuses the call by name. Then, in the background:
  *
- * 1. wait until those turns ended, and make Trellis's open turns T3's;
- * 2. holding T3's turn admission in the workspace, `POST /v1/checkpoint
- *    {target, name, thread}` and release every provider session there (their
- *    processes are gone), so a turn admitted as the checkpoint ends opens
- *    fresh ones;
- * 3. continue the caller with the result, and each interrupted worker,
- *    resuming queues the interrupts held.
+ * 1. queue each ended thread's continuation first in its queue (the
+ *    caller's a placeholder for the result), so ending a delegated worker's
+ *    turn does not finalize its task; then interrupt, holding the queues;
+ * 2. wait until those turns ended, and make Trellis's open turns T3's;
+ * 3. holding T3's turn admission in the workspace, `POST /v1/checkpoint
+ *    {target, name, thread}`, and if the workspace stopped release its
+ *    provider sessions (their processes are gone), so a turn admitted as
+ *    the checkpoint ends opens fresh ones;
+ * 4. write the outcome into the caller's continuation and resume the queues.
  *
  * Trellis's `interrupt` is never passed: T3 has ended the workers' turns
  * itself, so Trellis's own conflict check keeps refusing any other thread
@@ -36,7 +38,6 @@ import {
   TrellisCheckpointMcpFailure,
   type TrellisCheckpointMcpInput,
   type TrellisCheckpointMcpResult,
-  type TrellisError,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -50,7 +51,8 @@ import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
-import { Trellis, type TrellisCheckpointResult, trellisRootOf } from "./Trellis.ts";
+import { queuedRunsInDeliveryOrder } from "../orchestration-v2/QueuedRunOrder.ts";
+import { Trellis, type TrellisCheckpointOutcome, trellisRootOf } from "./Trellis.ts";
 import { releaseSessionsWithin, TrellisRestoreGate } from "./TrellisRestore.ts";
 import { TrellisTurns } from "./TrellisTurns.ts";
 
@@ -60,7 +62,7 @@ export class TrellisCheckpointTool extends Context.Service<
     /**
      * Validates the call, ends the calling turn (and workers' turns with
      * `interrupt`) and starts the checkpoint; the result arrives as the
-     * thread's next message. `completion` resolves when it is delivered (tests).
+     * thread's next message.
      */
     readonly checkpoint: (
       scope: McpInvocationScope,
@@ -122,7 +124,7 @@ function shownCommand(cmd: string): string {
 
 /** The message continuing the calling thread with the checkpoint's outcome. */
 function callerContinuation(
-  outcome: Exit.Exit<TrellisCheckpointResult, TrellisError>,
+  outcome: TrellisCheckpointOutcome,
   input: {
     readonly name: string | undefined;
     readonly workers: ReadonlyArray<string>;
@@ -134,29 +136,35 @@ function callerContinuation(
     input.workers.length === 0
       ? ""
       : ` The turns of ${quoted(input.workers)} were ended too; they continue on their own.`;
-  if (Exit.isFailure(outcome)) {
-    const error = Option.getOrUndefined(Exit.findErrorOption(outcome));
-    let reason = error?.message ?? "Trellis did not answer";
+  if (!outcome.ok) {
+    let reason = outcome.error;
     for (const [id, title] of input.titles) reason = reason.replaceAll(id, `"${title}"`);
-    return `[trellis_checkpoint] The checkpoint failed: ${reason}. The workspace may have restarted anyway, ending the processes that ran in it.${workers} Continue the task; call trellis_checkpoint again if you still need a checkpoint.`;
+    const restarted = outcome.restarted
+      ? " The workspace was stopped and restarted anyway, ending the processes that ran in it."
+      : " Nothing was stopped.";
+    return `[trellis_checkpoint] The checkpoint failed: ${reason}.${restarted}${workers} Continue the task; call trellis_checkpoint again if you still need a checkpoint.`;
   }
-  const result = outcome.value;
+  const result = outcome.result;
   const snapshot = result.snapshot?.id ?? "unknown";
   const commands = result.stopped
     .map((proc) => proc.cmd)
     .filter((cmd) => !PROVIDER_PROCESS.test(cmd))
     .map(shownCommand);
+  const listed = commands
+    .slice(0, MAX_LISTED)
+    .map((cmd) => `\`${cmd}\``)
+    .join(", ");
+  const more = commands.length > MAX_LISTED ? ` and ${commands.length - MAX_LISTED} more` : "";
   const stopped =
     commands.length === 0
       ? "Nothing else was running in it."
-      : `These processes were stopped; restart any you still need: ${commands
-          .slice(0, MAX_LISTED)
-          .map((cmd) => `\`${cmd}\``)
-          .join(
-            ", ",
-          )}${commands.length > MAX_LISTED ? ` and ${commands.length - MAX_LISTED} more` : ""}.`;
+      : `These processes were stopped; restart any you still need: ${listed}${more}.`;
   return `[trellis_checkpoint] Checkpoint ${snapshot}${input.name === undefined ? "" : ` ("${input.name}")`} taken. The workspace was stopped and restarted. ${stopped}${workers} Continue the task.`;
 }
+
+/** Stands in for the caller's continuation until the checkpoint's outcome replaces it. */
+const PENDING_CONTINUATION =
+  "[trellis_checkpoint] A checkpoint of this workspace is under way; its result replaces this message.";
 
 /** The message continuing a worker whose turn the checkpoint ended. */
 function workerContinuation(lead: string): string {
@@ -278,7 +286,8 @@ const make = Effect.gen(function* () {
         );
       }
 
-      const interrupted = others;
+      // Workers with a turn T3 runs; a stale Trellis row goes with the resynchronization.
+      const interrupted = others.filter((thread) => running.get(thread) != null);
       const ending = [
         ...(caller.activeRunId === null
           ? []
@@ -290,34 +299,19 @@ const make = Effect.gen(function* () {
       ];
       const dispatched = yield* Deferred.make<void>();
 
-      const interruptRuns = Effect.forEach(
-        ending,
-        ({ threadId, runId }) =>
-          Effect.gen(function* () {
-            yield* threads.dispatch({
-              type: "run.interrupt",
-              commandId: yield* commandId("interrupt"),
-              threadId,
-              runId,
-              reason: "A Trellis checkpoint stops the workspace.",
-              // Queued messages wait for the continuation, not the stop.
-              holdQueue: true,
-            });
-          }).pipe(
+      const failedQuietly =
+        (what: string, threadId: ThreadId) =>
+        <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          effect.pipe(
+            Effect.asVoid,
             Effect.catchCause((cause) =>
-              Effect.logWarning("trellis_checkpoint could not interrupt a run", { runId, cause }),
+              Effect.logWarning(`trellis_checkpoint could not ${what}`, { threadId, cause }),
             ),
-          ),
-        { discard: true },
-      );
-      const awaitEnded = turns
-        .awaitEnded(ending.map((entry) => entry.runId))
-        .pipe(Effect.timeoutOption(TURN_END_TIMEOUT), Effect.asVoid);
-
-      const continueThread = (threadId: ThreadId, projectId: ProjectId, text: string) =>
+          );
+      const send = (threadId: ThreadId, projectId: ProjectId, text: string) =>
         Effect.gen(function* () {
           const id = yield* uuid;
-          yield* threads.sendToThread({
+          return yield* threads.sendToThread({
             projectId,
             commandId: CommandId.make(`command:mcp:trellis-checkpoint:continuation:${id}`),
             threadId,
@@ -328,7 +322,49 @@ const make = Effect.gen(function* () {
             createdBy: "agent",
             creationSource: "mcp",
           });
-          // The interrupt held what was queued before; it follows the continuation.
+        });
+      const projectOf = (threadId: ThreadId) =>
+        shell.threads.find((thread) => thread.id === threadId)?.projectId ?? caller.projectId;
+
+      /**
+       * Queues `threadId`'s continuation behind its running turn, first in its
+       * queue. A delegated worker with a queued message stays working, so the
+       * interrupt does not finalize its task and its later result still reaches
+       * its lead.
+       */
+      const queueContinuation = (threadId: ThreadId, text: string) =>
+        Effect.gen(function* () {
+          const sent = yield* send(threadId, projectOf(threadId), text);
+          if (sent.delivery !== "queued") return undefined;
+          const records = yield* threads.getThreadRecords(threadId, ["runs", "messages"]);
+          const first = queuedRunsInDeliveryOrder(records)[0];
+          if (first !== undefined && first.id !== sent.run.id) {
+            yield* threads.dispatch({
+              type: "queued-run.reorder",
+              commandId: yield* commandId("reorder"),
+              threadId,
+              runId: sent.run.id,
+              beforeRunId: first.id,
+            });
+          }
+          return sent.run.id;
+        });
+
+      const interruptRun = ({ threadId, runId }: { threadId: ThreadId; runId: RunId }) =>
+        Effect.gen(function* () {
+          yield* threads.dispatch({
+            type: "run.interrupt",
+            commandId: yield* commandId("interrupt"),
+            threadId,
+            runId,
+            reason: "A Trellis checkpoint stops the workspace.",
+            // The continuation (and anything queued) waits for the checkpoint.
+            holdQueue: true,
+          });
+        });
+
+      const resumeQueue = (threadId: ThreadId) =>
+        Effect.gen(function* () {
           const records = yield* threads.getThreadRecords(threadId, ["runs"]);
           if (records.runs.some((run) => run.status === "queued" && run.queueHeld === true)) {
             yield* threads.dispatch({
@@ -337,17 +373,33 @@ const make = Effect.gen(function* () {
               threadId,
             });
           }
-        }).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("trellis_checkpoint could not continue a thread", {
-              threadId,
-              cause,
-            }),
-          ),
-        );
+        });
+
+      const awaitEnded = turns
+        .awaitEnded(ending.map((entry) => entry.runId))
+        .pipe(Effect.timeoutOption(TURN_END_TIMEOUT), Effect.asVoid);
 
       const run = Effect.gen(function* () {
-        yield* interruptRuns;
+        // Continuations first, so ending the turns finalizes nothing.
+        const pending = new Map<ThreadId, RunId | undefined>();
+        for (const { threadId } of ending) {
+          const text =
+            threadId === caller.id ? PENDING_CONTINUATION : workerContinuation(caller.title);
+          pending.set(
+            threadId,
+            yield* queueContinuation(threadId, text).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("trellis_checkpoint could not queue a continuation", {
+                  threadId,
+                  cause,
+                }).pipe(Effect.as(undefined)),
+              ),
+            ),
+          );
+        }
+        for (const entry of ending) {
+          yield* interruptRun(entry).pipe(failedQuietly("interrupt a run", entry.threadId));
+        }
         yield* Deferred.succeed(dispatched, undefined);
         // Trellis must see those turns ended, or it refuses them; stale ones go too.
         yield* awaitEnded;
@@ -356,38 +408,59 @@ const make = Effect.gen(function* () {
           Effect.gen(function* () {
             // Turns admitted as the checkpoint ends wait until the sessions are released.
             yield* gate.hold([directory]);
-            const outcome = yield* Effect.exit(
-              trellis.checkpoint({
+            const seen = gate.releases(directory);
+            const outcome: TrellisCheckpointOutcome = yield* trellis
+              .checkpoint({
                 target: directory,
                 name: input.name,
                 thread: caller.id,
                 interrupt: false,
-              }),
-            );
-            yield* releaseSessionsWithin(
-              sessions,
-              directory,
-              "The workspace restarted for a Trellis checkpoint.",
-            );
+              })
+              .pipe(
+                Effect.catch((error) =>
+                  Effect.succeed({ ok: false as const, error: error.message, restarted: false }),
+                ),
+              );
+            // Only a workspace that stopped lost its processes; a refusal keeps them.
+            if (outcome.ok ? outcome.result.restarted : outcome.restarted) {
+              yield* gate.releaseOnce(
+                directory,
+                seen,
+                releaseSessionsWithin(
+                  sessions,
+                  directory,
+                  "The workspace restarted for a Trellis checkpoint.",
+                ),
+              );
+            }
             return outcome;
           }),
         );
         // A run whose interrupt did not land died with the stop; it settles shortly.
         yield* awaitEnded;
-        yield* continueThread(
-          caller.id,
-          caller.projectId,
-          callerContinuation(outcome, {
-            name: input.name,
-            workers: interrupted.map(nameOf),
-            titles,
-          }),
-        );
-        for (const threadId of interrupted) {
-          const worker = shell.threads.find((thread) => thread.id === threadId);
-          if (worker !== undefined) {
-            yield* continueThread(threadId, worker.projectId, workerContinuation(caller.title));
-          }
+        const text = callerContinuation(outcome, {
+          name: input.name,
+          workers: interrupted.map(nameOf),
+          titles,
+        });
+        const callerPending = pending.get(caller.id);
+        if (callerPending === undefined) {
+          yield* send(caller.id, caller.projectId, text).pipe(
+            failedQuietly("continue the thread", caller.id),
+          );
+        } else {
+          yield* Effect.gen(function* () {
+            yield* threads.dispatch({
+              type: "queued-run.edit",
+              commandId: yield* commandId("result"),
+              threadId: caller.id,
+              runId: callerPending,
+              text,
+            });
+          }).pipe(failedQuietly("write the result into the continuation", caller.id));
+        }
+        for (const threadId of new Set([caller.id, ...interrupted])) {
+          yield* resumeQueue(threadId).pipe(failedQuietly("resume the queue", threadId));
         }
       }).pipe(
         Effect.ensuring(

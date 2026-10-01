@@ -164,6 +164,21 @@ export const TrellisCheckpointResult = Schema.Struct({
 });
 export type TrellisCheckpointResult = typeof TrellisCheckpointResult.Type;
 
+/** A checkpoint Trellis refused or that failed; `details` carries how far it got. */
+const TrellisCheckpointRefusal = Schema.Struct({
+  error: Schema.String,
+  details: Schema.optional(Schema.Struct({ restarted: Schema.optional(Schema.Boolean) })),
+});
+
+/**
+ * A checkpoint's outcome: its result, or Trellis's refusal or failure, with
+ * whether the workspace was stopped and restarted anyway (its processes are
+ * gone then).
+ */
+export type TrellisCheckpointOutcome =
+  | { readonly ok: true; readonly result: TrellisCheckpointResult }
+  | { readonly ok: false; readonly error: string; readonly restarted: boolean };
+
 /** Trellis refuses a turn message older than one it applied (409). */
 export const isStaleTurnMessage = (error: TrellisError) =>
   /^turn message -?\d+ is older than one already applied/.test(error.message);
@@ -366,14 +381,15 @@ export class Trellis extends Context.Service<
     /**
      * Takes a checkpoint of a dedicated workspace: waits for guards, stops
      * it, snapshots it and restarts it. Other threads' open turns refuse it
-     * unless `interrupt`.
+     * unless `interrupt`. Trellis's refusals and failures are outcomes; only
+     * an unreachable Trellis fails.
      */
     readonly checkpoint: (input: {
       readonly target: string;
       readonly name?: string | undefined;
       readonly thread: string;
       readonly interrupt: boolean;
-    }) => Effect.Effect<TrellisCheckpointResult, TrellisError>;
+    }) => Effect.Effect<TrellisCheckpointOutcome, TrellisError>;
   }
 >()("t3/trellis/Trellis") {}
 
@@ -547,8 +563,7 @@ const make = Effect.gen(function* () {
     Effect.orElseSucceed(() => false),
   );
 
-  const call = <S extends Schema.Top>(
-    schema: S,
+  const request = (
     method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
     path: string,
     options: { readonly body?: unknown; readonly timeoutMs?: number } = {},
@@ -574,7 +589,15 @@ const make = Effect.gen(function* () {
             message: `Trellis is unavailable: ${cause instanceof Error ? cause.message : String(cause)}`,
           }),
       });
-    }).pipe(
+    });
+
+  const call = <S extends Schema.Top>(
+    schema: S,
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
+    path: string,
+    options: { readonly body?: unknown; readonly timeoutMs?: number } = {},
+  ) =>
+    request(method, path, options).pipe(
       Effect.flatMap((response) =>
         response.status >= 400
           ? // Trellis' own refusals carry `{error}`; a missing route does not.
@@ -846,12 +869,29 @@ const make = Effect.gen(function* () {
     listTurns: (target) =>
       call(Schema.Array(TrellisOpenTurn), "GET", `/v1/turns?${query({ target })}`),
     checkpoint: ({ target, name, thread, interrupt }) =>
-      call(TrellisCheckpointResult, "POST", "/v1/checkpoint", {
+      request("POST", "/v1/checkpoint", {
         body: { target, thread, interrupt, ...(name === undefined ? {} : { name }) },
         // Up to five minutes for guarded commands, the graceful stop, the
         // snapshot and the restart.
         timeoutMs: 10 * 60_000,
-      }),
+      }).pipe(
+        Effect.flatMap((response): Effect.Effect<TrellisCheckpointOutcome, TrellisError> =>
+          response.status >= 400
+            ? decodeJson(TrellisCheckpointRefusal, response.body, response.status).pipe(
+                Effect.mapError(() =>
+                  trellisStatusError("POST", "/v1/checkpoint", response.status),
+                ),
+                Effect.map((body) => ({
+                  ok: false as const,
+                  error: body.error,
+                  restarted: body.details?.restarted === true,
+                })),
+              )
+            : decodeJson(TrellisCheckpointResult, response.body, response.status).pipe(
+                Effect.map((result) => ({ ok: true as const, result })),
+              ),
+        ),
+      ),
   });
 });
 

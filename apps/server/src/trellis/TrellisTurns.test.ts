@@ -207,6 +207,24 @@ it.effect(
   },
 );
 
+it.effect("turns that waited through one restart release its sessions once", () => {
+  const fake = makeTurnsTrellis();
+  const { layer, released } = admissionLayer(fake);
+  return Effect.gen(function* () {
+    const admission = yield* TurnAdmission;
+    const checkpointEnds = yield* Deferred.make<ReadonlyArray<string>>();
+    fake.state.startGate = checkpointEnds;
+    const first = yield* Effect.forkChild(admission.start({ ...turn("one"), cwd: WS_A }));
+    const second = yield* Effect.forkChild(admission.start({ ...turn("two"), cwd: `${WS_A}/x` }));
+    yield* Effect.yieldNow;
+    yield* Deferred.succeed(checkpointEnds, ["ws-a"]);
+    assert.isTrue(yield* Fiber.join(first));
+    assert.isTrue(yield* Fiber.join(second));
+    // The second would otherwise release the session the first opened meanwhile.
+    assert.deepEqual(released, ["session-a", "session-a-idea"]);
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("an end waits for its run's start that is still waiting", () => {
   const fake = makeTurnsTrellis();
   const { layer } = admissionLayer(fake);
