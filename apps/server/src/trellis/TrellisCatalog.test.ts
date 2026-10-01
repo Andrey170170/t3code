@@ -599,6 +599,7 @@ describe("TrellisCatalog service", () => {
     restoreAnswerLost: false,
     projectListFails: false,
     projectGetFails: false,
+    trellisDown: false,
     /** Active-thread reads that succeed before the next one fails; null never fails. */
     activeReadsBeforeFailure: null as number | null,
   };
@@ -657,6 +658,15 @@ describe("TrellisCatalog service", () => {
   const fakeTrellis = (state: CatalogState) =>
     makeTestTrellis({
       env: { root: ROOT, bin: "trellis", shimDir: "/shims" },
+      // Trellis stopped: unreachable while `faults.trellisDown` is set.
+      refresh: Effect.sync(() =>
+        faults.trellisDown ? null : { root: ROOT, bin: "trellis", shimDir: "/shims" },
+      ),
+      connection: Effect.sync(() => ({
+        state: faults.trellisDown ? ("unavailable" as const) : ("ready" as const),
+        root: ROOT,
+        socketPath: "/trellis/state/api.sock",
+      })),
       listProjects: ({ all }) =>
         Effect.sync(() =>
           all
@@ -910,6 +920,16 @@ describe("TrellisCatalog service", () => {
         faults.restoreAnswerLost = true;
         yield* catalog.restore({ kind: "idea", id: "idea-a" }).pipe(Effect.flip);
         assert.isNotNull(yield* archivedAt(kept));
+        // A retry whose sync cannot read T3's projects fails and keeps the
+        // record rather than dropping it unfinished.
+        faults.projectListFails = true;
+        yield* catalog
+          .restore({ kind: "idea", id: "idea-a" })
+          .pipe(
+            Effect.flip,
+            Effect.ensuring(Effect.sync(() => void (faults.projectListFails = false))),
+          );
+        assert.isNotNull(yield* archivedAt(kept));
         const restored = yield* catalog.restore({ kind: "idea", id: "idea-a" });
         assert.equal(restored.projectId, a!.projectId);
         assert.isNull(yield* archivedAt(kept));
@@ -952,6 +972,35 @@ describe("TrellisCatalog service", () => {
             Effect.ensuring(Effect.sync(() => void (faults.projectGetFails = false))),
           );
         assert.include(unreadable.message, "Could not read the project");
+      }),
+    );
+
+    it.effect("archives the conversations of an item purged before T3 saw it trashed", () =>
+      Effect.gen(function* () {
+        const catalog = yield* TrellisCatalog.TrellisCatalog;
+        state.items = [...state.items, idea("idea-e", "Expired")];
+        yield* catalog.syncNow;
+        const e = (yield* projectIdAt(`${SCRATCH}/idea-e`))!;
+        const thread = yield* createThread("catalog-expired", e.projectId);
+        // Expired from the trash while T3 was not looking: gone from the listing.
+        state.items = state.items.filter((item) => item.id !== "idea-e");
+        yield* catalog.syncNow;
+        assert.isNotNull(yield* archivedAt(thread));
+        assert.include((yield* catalog.status).retiredRoots ?? [], `${SCRATCH}/idea-e`);
+      }),
+    );
+
+    it.effect("keeps retired roots while Trellis is stopped", () =>
+      Effect.gen(function* () {
+        const catalog = yield* TrellisCatalog.TrellisCatalog;
+        yield* catalog.syncNow;
+        faults.trellisDown = true;
+        const status = yield* catalog.syncNow.pipe(
+          Effect.andThen(catalog.status),
+          Effect.ensuring(Effect.sync(() => void (faults.trellisDown = false))),
+        );
+        assert.equal(status.state, "unavailable");
+        assert.include(status.retiredRoots ?? [], `${SCRATCH}/idea-c`);
       }),
     );
 
