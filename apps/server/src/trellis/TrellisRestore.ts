@@ -20,7 +20,6 @@
  * @module trellis/TrellisRestore
  */
 import type {
-  OrchestrationV2AppThread,
   OrchestrationV2Run,
   OrchestrationV2ThreadShellSnapshot,
   ProjectId,
@@ -42,6 +41,7 @@ import {
   type CheckpointRestoreRuleShape,
   isolatedWorktreeRestoreRule,
 } from "../orchestration-v2/CheckpointRestoreSafety.ts";
+import { rollbackInFlight } from "../orchestration-v2/CheckpointRollbackService.ts";
 import { EffectOutboxV2 } from "../orchestration-v2/EffectOutbox.ts";
 import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
 import { ProjectStoreV2 } from "../orchestration-v2/ProjectStore.ts";
@@ -169,7 +169,7 @@ const ENDED_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
 
 type ConflictRun = Pick<
   OrchestrationV2Run,
-  "id" | "ordinal" | "status" | "completedAt" | "rollbackRestoredFiles"
+  "id" | "status" | "completedAt" | "checkpointId" | "rollbackRestoredFiles"
 >;
 
 /**
@@ -194,12 +194,13 @@ export interface TrellisRestoreConflicts {
 }
 
 /** What restore conflicts are computed from, so both the rule and the RPC can share it. */
-export interface TrellisRestoreConflictReads<E> {
+export interface TrellisRestoreConflictReads<E, P = E> {
   readonly shell: Effect.Effect<OrchestrationV2ThreadShellSnapshot, E>;
   readonly records: (
     threadId: ThreadId,
   ) => Effect.Effect<{ readonly runs: ReadonlyArray<ConflictRun> }, E>;
-  readonly projectRoot: (projectId: ProjectId) => Effect.Effect<string | undefined>;
+  /** The project's folder; undefined when it has no row. Failures refuse the restore. */
+  readonly projectRoot: (projectId: ProjectId) => Effect.Effect<string | undefined, P>;
   /**
    * Whether `runId`'s checkpoint capture is still queued or running. A
    * restore before it would make that checkpoint record the restored files.
@@ -217,9 +218,9 @@ export interface TrellisRestoreConflictReads<E> {
  * those still running there, and those whose runs there ended after
  * `since`. Archived threads count as idle.
  */
-export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")(function* <E>(
+export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")(function* <E, P>(
   trellis: Trellis["Service"],
-  reads: TrellisRestoreConflictReads<E>,
+  reads: TrellisRestoreConflictReads<E, P>,
   input: {
     readonly threadId: ThreadId;
     readonly scopePath: string;
@@ -235,10 +236,10 @@ export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")
     const requesting = thread.id === input.threadId;
     // A thread works in its worktree or project folder (its checkpoint
     // scopes lie there), so other projects' records are never read.
-    const paths = [thread.worktreePath, yield* reads.projectRoot(thread.projectId)].filter(
-      (path): path is string => path != null,
-    );
-    let inScope = false;
+    const projectRoot = yield* reads.projectRoot(thread.projectId);
+    const paths = [thread.worktreePath, projectRoot].filter((path): path is string => path != null);
+    // Without a folder to place it by, a thread counts as working here.
+    let inScope = paths.length === 0;
     for (const path of paths) {
       if (pathsOverlap(input.scopePath, yield* trellis.canonicalPath(path))) {
         inScope = true;
@@ -249,18 +250,18 @@ export const restoreConflictsIn = Effect.fn("TrellisRestore.restoreConflictsIn")
     if (!inScope && !requesting) continue;
     const records = yield* reads.records(thread.id);
     const entry = { threadId: thread.id, title: thread.title };
-    // Captures run in order per thread, so only the latest stopped run's
-    // can still be outstanding.
-    const latestStopped = records.runs
-      .filter((run) => ENDED_RUN_STATUSES.has(run.status))
-      .reduce<ConflictRun | undefined>(
-        (latest, run) => (latest === undefined || run.ordinal > latest.ordinal ? run : latest),
-        undefined,
-      );
-    const capturing =
-      latestStopped !== undefined && reads.captureOutstanding !== undefined
-        ? yield* reads.captureOutstanding(latestStopped.id)
-        : false;
+    // A failed capture is retried later, so any stopped run without its
+    // checkpoint yet may still have one queued, not only the latest.
+    let capturing = false;
+    if (reads.captureOutstanding !== undefined) {
+      for (const run of records.runs) {
+        if (!ENDED_RUN_STATUSES.has(run.status) || run.checkpointId !== null) continue;
+        if (yield* reads.captureOutstanding(run.id)) {
+          capturing = true;
+          break;
+        }
+      }
+    }
     if (
       (!archived.has(thread.id) &&
         records.runs.some(
@@ -302,23 +303,6 @@ function restoreRefusal(
  */
 const ROLLBACK_POLL_INTERVAL = "250 millis";
 
-/**
- * Whether the thread's latest rollback is accepted but neither done nor
- * failed for good. Servers that predate completion records never set it.
- */
-function isRollbackPending(
-  thread: Pick<
-    OrchestrationV2AppThread,
-    "rollbackRequestId" | "rollbackCompletedRequestId" | "rollbackFailure"
-  >,
-): boolean {
-  return (
-    thread.rollbackRequestId !== undefined &&
-    thread.rollbackCompletedRequestId === null &&
-    thread.rollbackFailure?.requestId !== thread.rollbackRequestId
-  );
-}
-
 export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | ProjectionStoreV2> =
   Layer.effectContext(
     Effect.gen(function* () {
@@ -331,8 +315,11 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | 
       const held = new Set<RunId>();
       const rollbackPendingIn = (threadId: ThreadId) =>
         projections.getThread(threadId).pipe(
-          Effect.map(isRollbackPending),
-          Effect.orElseSucceed(() => false),
+          Effect.flatMap((thread) => rollbackInFlight(thread, Option.some(outbox))),
+          // A thread without a projection has no rollback; any other failure
+          // to read counts as pending, so the turn waits for the next read.
+          Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.succeed(false)),
+          Effect.orElseSucceed(() => true),
         );
       // The capture effect of a run has a fixed id (see RunExecutionService);
       // an unreadable outbox counts as outstanding.
@@ -362,10 +349,9 @@ export const layer: Layer.Layer<never, never, ProjectStoreV2 | EffectOutboxV2 | 
       const trellis = trellisOption.value;
       const gate = gateOption.value;
       const projectRoot = (projectId: ProjectId) =>
-        projects.get(projectId).pipe(
-          Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot),
-          Effect.orElseSucceed(() => undefined),
-        );
+        projects
+          .get(projectId)
+          .pipe(Effect.map((project) => Option.getOrUndefined(project)?.workspaceRoot));
 
       return seams(
         {

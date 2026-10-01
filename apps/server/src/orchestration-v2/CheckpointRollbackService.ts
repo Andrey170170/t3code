@@ -1,6 +1,7 @@
 import {
   CheckpointId,
   CheckpointScopeId,
+  type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2TurnItem,
   ProviderThreadId,
@@ -13,6 +14,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { CheckpointSnapshotUnavailableError } from "../checkpointing/Errors.ts";
@@ -22,6 +24,7 @@ import {
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
+import type { EffectOutboxV2Shape } from "./EffectOutbox.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import { IdAllocatorV2 } from "./IdAllocator.ts";
 import { ProjectionStoreV2 } from "./ProjectionStore.ts";
@@ -71,6 +74,43 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
 }
 
 const isCheckpointRollbackExecutionError = Schema.is(CheckpointRollbackExecutionError);
+
+export const ROLLBACK_IN_FLIGHT_MESSAGE =
+  "This thread is still being reverted. Try again once the current revert finishes.";
+
+/**
+ * Whether the thread's latest rollback may still run: accepted, neither
+ * completed nor failed for good, and its effect not settled in the outbox
+ * (which also covers a failure whose receipt was lost). Without the outbox
+ * the thread's record alone decides. Unreadable counts as in flight.
+ */
+export const rollbackInFlight = (
+  thread: Pick<
+    OrchestrationV2AppThread,
+    "rollbackRequestId" | "rollbackCompletedRequestId" | "rollbackFailure"
+  >,
+  outbox: Option.Option<EffectOutboxV2Shape>,
+): Effect.Effect<boolean> => {
+  const requestId = thread.rollbackRequestId;
+  if (
+    requestId === undefined ||
+    thread.rollbackCompletedRequestId !== null ||
+    thread.rollbackFailure?.requestId === requestId
+  ) {
+    return Effect.succeed(false);
+  }
+  if (Option.isNone(outbox)) return Effect.succeed(true);
+  return outbox.value.listByCommandId(requestId).pipe(
+    Effect.map((effects) =>
+      effects.some(
+        (effect) =>
+          effect.request.type === "provider-thread.rollback" &&
+          (effect.status === "pending" || effect.status === "running"),
+      ),
+    ),
+    Effect.orElseSucceed(() => true),
+  );
+};
 const isCheckpointSnapshotUnavailableError = Schema.is(CheckpointSnapshotUnavailableError);
 
 /** What a client waiting on a failed rollback is told. */
@@ -480,7 +520,10 @@ export const layer: Layer.Layer<
         // Shown after the target run (or at the top for a full rewind).
         const targetRun = projection.runs.find((run) => run.ordinal === targetOrdinal);
         const item: OrchestrationV2TurnItem = {
-          id: TurnItemId.make(`turn-item:checkpoint-restore:${conversationEvents[0]!.id}`),
+          // The same item on every retry of one rollback.
+          id: TurnItemId.make(
+            `turn-item:checkpoint-restore:${input.requestId ?? conversationEvents[0]!.id}`,
+          ),
           type: "system_notice",
           message: notice,
           threadId: input.threadId,

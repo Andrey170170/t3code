@@ -258,11 +258,16 @@ export class Trellis extends Context.Service<
       readonly kind: string;
       readonly limit?: number;
     }) => Effect.Effect<ReadonlyArray<TrellisActivity>, TrellisError>;
-    /** A `turn` snapshot of the target's workspace, tagged with `turn` (and `thread`). */
+    /**
+     * A `turn` snapshot of the target's workspace, tagged with `turn` (and
+     * `thread`). `pinned` pins it as it is created; Trellis versions before
+     * that ignore it and create it unpinned.
+     */
     readonly createSnapshot: (input: {
       readonly target: string;
       readonly thread?: string | undefined;
       readonly turn: string;
+      readonly pinned?: boolean;
     }) => Effect.Effect<TrellisSnapshot, TrellisError>;
     /** Pins or unpins a snapshot; thinning keeps pinned ones. Fails when it is gone. */
     readonly setSnapshotPinned: (
@@ -668,9 +673,15 @@ const make = Effect.gen(function* () {
       ),
     listSnapshots: (target) =>
       call(Schema.Array(TrellisSnapshot), "GET", `/v1/snapshots?${query({ target })}`),
-    createSnapshot: ({ target, thread, turn }) =>
+    createSnapshot: ({ target, thread, turn, pinned }) =>
       call(TrellisSnapshot, "POST", "/v1/snapshots", {
-        body: { target, kind: "turn", turn, ...(thread === undefined ? {} : { thread }) },
+        body: {
+          target,
+          kind: "turn",
+          turn,
+          ...(thread === undefined ? {} : { thread }),
+          ...(pinned === undefined ? {} : { pinned }),
+        },
         // Btrfs snapshots take milliseconds; these run on the shared
         // checkpoint worker, so a hung Trellis must not stall other threads.
         timeoutMs: 15_000,
