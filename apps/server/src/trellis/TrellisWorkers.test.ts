@@ -307,6 +307,8 @@ it.effect("spawns a worker in a fork of the latest checkpoint, in the fork's own
       '[Trellis worker] You work in your own Trellis fork "parser" (ws-fork1)',
     );
     assert.include(prompt, "Add the parser");
+    // The task comes first, so the worker's title is the task's.
+    assert.isTrue(prompt.startsWith("Add the parser"));
 
     // Its project is a worker fork, which clients keep out of the sidebar.
     assert.deepEqual(
@@ -347,6 +349,35 @@ it.effect(
     }).pipe(Effect.provide(testLayer(fake)));
   },
 );
+
+it.effect("the lead's thread tools reach its worker in a fork; other threads' do not", () => {
+  const fake = makeForkTrellis({ checkpoints: ["snap-1"] });
+  return Effect.gen(function* () {
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    const lead = yield* startLead;
+    const forked = yield* service.delegateTask(scopeOf(lead.threadId), {
+      task: "Add the parser",
+      workspace: { fork: { from: "latest" } },
+    });
+    const read = yield* service.readThread(scopeOf(lead.threadId), {
+      threadId: forked.childThreadId,
+    });
+    assert.equal(read.thread.threadId, forked.childThreadId);
+    const sent = yield* service.sendToThread(scopeOf(lead.threadId), {
+      threadId: forked.childThreadId,
+      message: "Also handle empty input.",
+      mode: "queue",
+    });
+    assert.equal(sent.threadId, forked.childThreadId);
+    // Another lead in the project is not the worker's ancestor.
+    const other = yield* createThread("other", pathOf(LEAD_WS));
+    yield* sendMessage(other.threadId, "work");
+    const refused = yield* service
+      .readThread(scopeOf(other.threadId), { threadId: forked.childThreadId })
+      .pipe(Effect.flip);
+    assert.equal(refused.code, "thread_not_found");
+  }).pipe(Effect.provide(testLayer(fake)));
+});
 
 it.effect("concurrent spawns with one clientRequestId leave one fork and report it", () => {
   const fake = makeForkTrellis({ checkpoints: ["snap-1"] });

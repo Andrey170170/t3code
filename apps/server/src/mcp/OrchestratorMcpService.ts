@@ -825,6 +825,46 @@ const make = Effect.gen(function* () {
       )
       .pipe(Effect.mapError(threadManagementFailure));
 
+  /**
+   * Whether `threadId` is a delegated worker below `ancestor` (its child, or
+   * theirs). Workers in Trellis forks live in their fork's project, so thread
+   * tools reach them through this lineage rather than the caller's project.
+   */
+  const isWorkerOf = (ancestor: ThreadId, threadId: ThreadId) =>
+    Effect.gen(function* () {
+      let current = threadId;
+      for (let depth = 0; depth < 32; depth++) {
+        const shell = yield* threadManagement
+          .getThreadShell(current)
+          .pipe(Effect.orElseSucceed(() => null));
+        const parentId = shell?.lineage.parentThreadId ?? null;
+        if (
+          shell == null ||
+          shell.lineage.relationshipToParent !== "subagent" ||
+          parentId === null
+        ) {
+          return false;
+        }
+        if (parentId === ancestor) return true;
+        current = parentId;
+      }
+      return false;
+    });
+
+  /** The caller's own workers outside its project, as `thread_not_found` otherwise. */
+  const orWorkerOf =
+    <A>(
+      scope: McpInvocationScope,
+      threadId: ThreadId,
+      load: () => Effect.Effect<A, OrchestratorMcpFailure>,
+    ) =>
+    (error: OrchestratorMcpFailure) =>
+      error.code !== "thread_not_found"
+        ? Effect.fail(error)
+        : isWorkerOf(scope.threadId, threadId).pipe(
+            Effect.flatMap((worker) => (worker ? load() : Effect.fail(error))),
+          );
+
   const loadScopedThread = (scope: McpInvocationScope, threadId: ThreadId) =>
     Effect.gen(function* () {
       yield* requireCapability(scope);
@@ -832,7 +872,9 @@ const make = Effect.gen(function* () {
       const target =
         threadId === scope.threadId
           ? parent
-          : yield* loadProjectThread(parent.thread.projectId, threadId);
+          : yield* loadProjectThread(parent.thread.projectId, threadId).pipe(
+              Effect.catch(orWorkerOf(scope, threadId, () => loadProjection(threadId))),
+            );
       return { parent, target } as const;
     });
 
@@ -876,6 +918,7 @@ const make = Effect.gen(function* () {
               error.code === "thread_not_found" && userAttachedThreadIds(parent).has(threadId),
             loadTarget,
           ),
+          Effect.catch(orWorkerOf(scope, threadId, loadTarget)),
         );
       if (target.thread.deletedAt !== null) {
         return yield* failure("thread_not_found", `Thread ${threadId} is no longer available.`);
@@ -1448,10 +1491,11 @@ const make = Effect.gen(function* () {
             parentThreadId: scope.threadId,
             parentRunId: parentRun.id,
             parentNodeId: parentRun.rootNodeId,
+            // The guide follows the task, so the child's title still comes from the task.
             task:
               spawned === undefined
                 ? taskPrompt(input)
-                : `${spawned.guide}\n\n${taskPrompt(input)}`,
+                : `${taskPrompt(input)}\n\n${spawned.guide}`,
             ...(spawned === undefined ? {} : { projectId: spawned.projectId }),
             ...(input.title === undefined ? {} : { title: input.title }),
             modelSelection: target.modelSelection,
@@ -1919,7 +1963,8 @@ const make = Effect.gen(function* () {
         });
         const result = yield* threadManagement
           .sendToThread({
-            projectId: parent.thread.projectId,
+            // The target's: a worker in a Trellis fork lives in the fork's project.
+            projectId: target.thread.projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
@@ -1954,10 +1999,10 @@ const make = Effect.gen(function* () {
       }),
     waitForThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { target } = yield* loadScopedThread(scope, input.threadId);
         const result = yield* threadManagement
           .waitForThread({
-            projectId: parent.thread.projectId,
+            projectId: target.thread.projectId,
             threadId: input.threadId,
             ...(input.runId === undefined ? {} : { runId: input.runId }),
             timeoutMs: Math.min(
@@ -1975,11 +2020,11 @@ const make = Effect.gen(function* () {
       }),
     interruptThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent } = yield* loadScopedThread(scope, input.threadId);
+        const { target } = yield* loadScopedThread(scope, input.threadId);
         const key = yield* requestKey(input.clientRequestId);
         const result = yield* threadManagement
           .interruptThread({
-            projectId: parent.thread.projectId,
+            projectId: target.thread.projectId,
             commandId: stableCommandId({
               scope,
               requestKey: key,
