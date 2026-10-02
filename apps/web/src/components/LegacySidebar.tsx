@@ -113,6 +113,7 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useSidebarProjects } from "../hooks/useSidebarProjects";
 import { useTrellisTrash } from "../hooks/useTrellis";
 import { TrellisTrashedUndo } from "./trellis/TrellisTrashedUndo";
+import { trellisTrashedKey, useTrellisTrashedStore } from "../state/trellisTrashed";
 import { trellisRemovalOf } from "../lib/trellis";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { loadTrellisStatus } from "../state/trellis";
@@ -2075,6 +2076,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [handleNewThread, isMobile, setOpenMobile],
   );
 
+  const trashedHere = useTrellisTrashedStore((state) =>
+    project.memberProjects.some(
+      (member) => trellisTrashedKey(member.environmentId, member.id) in state.projects,
+    ),
+  );
   const handleCreateThreadClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
@@ -2492,26 +2498,29 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             </TooltipPopup>
           </Tooltip>
         )}
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <div className="pointer-events-none absolute top-[calc(50%+1px)] right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-focus-within/project-header:pointer-events-auto group-focus-within/project-header:opacity-100">
-                <button
-                  type="button"
-                  aria-label={`Create new thread in ${project.displayName}`}
-                  data-testid="new-thread-button"
-                  className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
-                  onClick={handleCreateThreadClick}
-                >
-                  <SquarePenIcon className="size-3.5" />
-                </button>
-              </div>
-            }
-          />
-          <TooltipPopup side="top">
-            {newThreadShortcutLabel ? `New thread (${newThreadShortcutLabel})` : "New thread"}
-          </TooltipPopup>
-        </Tooltip>
+        {/* A project just moved to the trash takes no new threads, only Undo. */}
+        {trashedHere ? null : (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <div className="pointer-events-none absolute top-[calc(50%+1px)] right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-focus-within/project-header:pointer-events-auto group-focus-within/project-header:opacity-100">
+                  <button
+                    type="button"
+                    aria-label={`Create new thread in ${project.displayName}`}
+                    data-testid="new-thread-button"
+                    className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
+                    onClick={handleCreateThreadClick}
+                  >
+                    <SquarePenIcon className="size-3.5" />
+                  </button>
+                </div>
+              }
+            />
+            <TooltipPopup side="top">
+              {newThreadShortcutLabel ? `New thread (${newThreadShortcutLabel})` : "New thread"}
+            </TooltipPopup>
+          </Tooltip>
+        )}
       </div>
       <TrellisTrashedUndo members={project.memberProjects} className="mb-1 ml-8" />
 
