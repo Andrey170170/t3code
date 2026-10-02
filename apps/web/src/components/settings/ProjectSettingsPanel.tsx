@@ -427,6 +427,7 @@ function ProjectDetail({
         }
         draftStore.clearProjectDraftThreadId(projectRef);
       };
+      let trashedCount = 0;
       for (const member of trashed) {
         const outcome = await trashTrellisProject(
           member.environmentId,
@@ -442,6 +443,7 @@ function ProjectDetail({
           deleted.push(member);
           continue;
         }
+        trashedCount += 1;
         clearProjectDrafts(member);
       }
       for (const member of deleted) {
@@ -472,7 +474,7 @@ function ProjectDetail({
       }
 
       // A trashed project stays on this page, with its Undo.
-      if (isWholeGroup && !hasOtherMembers && deleted.length > 0) {
+      if (isWholeGroup && !hasOtherMembers && deleted.length > 0 && trashedCount === 0) {
         void navigate({ to: "/", replace: true });
       }
     },

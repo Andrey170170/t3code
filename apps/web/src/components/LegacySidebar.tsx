@@ -2076,8 +2076,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [handleNewThread, isMobile, setOpenMobile],
   );
 
+  // Every member just moved to the trash: the row takes no new threads.
   const trashedHere = useTrellisTrashedStore((state) =>
-    project.memberProjects.some(
+    project.memberProjects.every(
       (member) => trellisTrashedKey(member.environmentId, member.id) in state.projects,
     ),
   );
