@@ -25,7 +25,12 @@ import { waitForProject } from "~/state/entities";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useDebouncedValue } from "~/state/queries";
 import { useEnvironmentQuery } from "~/state/query";
-import { loadTrellisStatus, refreshTrellisStatus, trellisEnvironment } from "~/state/trellis";
+import {
+  loadTrellisStatus,
+  readTrellisStatus,
+  refreshTrellisStatus,
+  trellisEnvironment,
+} from "~/state/trellis";
 import { trellisTrashedKey, useTrellisTrashedStore } from "~/state/trellisTrashed";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -315,6 +320,7 @@ export function useTrellisTrash() {
           workspaceRoot,
           restore,
           phase: "trashing",
+          staleStatus: readTrellisStatus(appAtomRegistry, environmentId),
         });
       }
       // Its retired root marks the emptied project trashed. Awaited, so a
@@ -361,7 +367,11 @@ export function useTrellisUndoTrash() {
       useTrellisTrashedStore.getState().setPhase(key, "restoring");
       const result = await run({ environmentId, input: trashed.restore });
       if (result._tag === "Failure") {
-        if (!isAtomCommandInterrupted(result)) {
+        // Interrupted (a disconnect): it may or may not have happened, so the
+        // Undo comes back; a status showing the restore still settles it.
+        if (isAtomCommandInterrupted(result)) {
+          useTrellisTrashedStore.getState().setPhase(key, "trashed");
+        } else {
           useTrellisTrashedStore.getState().remove(key);
           toastManager.add(
             stackedThreadToast({

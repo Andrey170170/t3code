@@ -3,11 +3,12 @@
  * with an Undo until restored or until the page reloads (the Trellis trash in
  * Settings → Trellis holds them after that). Keyed `environmentId:projectId`.
  *
- * Trellis status is the authority, applied by `reconcileTrellisTrashed`: an
- * entry is `trashing` until a status shows its root retired (`trashed`), and
- * is dropped once a status shows it live again after that, whether this
- * client's Undo (`restoring`) or a restore elsewhere brought it back. A status
- * from before the trash therefore never drops a fresh entry.
+ * Trellis status is the authority, applied by `reconcileTrellisTrashed`.
+ * Each entry remembers the status that was cached when it was added
+ * (`staleStatus`), from before the trash, and ignores it; any later status
+ * settles it: its root retired keeps it (`trashing` becomes `trashed`), its
+ * root live drops it, whether this client's Undo (`restoring`) or a restore
+ * elsewhere brought it back.
  */
 import type {
   EnvironmentId,
@@ -23,6 +24,8 @@ export interface TrellisTrashedProject {
   readonly workspaceRoot: string;
   readonly restore: TrellisRestoreInput;
   readonly phase: "trashing" | "trashed" | "restoring";
+  /** The status cached when the entry was added, from before the trash. */
+  readonly staleStatus: TrellisStatus | null;
 }
 
 interface TrellisTrashedStore {
@@ -60,10 +63,10 @@ export function reconcileTrellisTrashed(environmentId: EnvironmentId, status: Tr
   const retired = new Set(status.retiredRoots ?? []);
   const store = useTrellisTrashedStore.getState();
   for (const [key, project] of Object.entries(store.projects)) {
-    if (project.environmentId !== environmentId) continue;
+    if (project.environmentId !== environmentId || status === project.staleStatus) continue;
     if (retired.has(trimTrailingSlashes(project.workspaceRoot))) {
       if (project.phase === "trashing") store.setPhase(key, "trashed");
-    } else if (project.phase !== "trashing") {
+    } else {
       store.remove(key);
     }
   }

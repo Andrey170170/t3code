@@ -18,6 +18,8 @@ const status = (retiredRoots: ReadonlyArray<string>): TrellisStatus =>
     socketPath: "/s",
     retiredRoots,
   }) as TrellisStatus;
+// The status cached when the project was trashed: from before the trash.
+const before = status([]);
 const phase = () => useTrellisTrashedStore.getState().projects[key]?.phase ?? null;
 
 describe("reconcileTrellisTrashed", () => {
@@ -29,11 +31,12 @@ describe("reconcileTrellisTrashed", () => {
       workspaceRoot: `${root}/`,
       restore: { kind: "project", id: "prj-1" },
       phase: "trashing",
+      staleStatus: before,
     });
   });
 
-  it("keeps a fresh entry against a status from before the trash", () => {
-    reconcileTrellisTrashed(environmentId, status([]));
+  it("keeps a fresh entry against the status from before the trash", () => {
+    reconcileTrellisTrashed(environmentId, before);
     expect(phase()).toBe("trashing");
     reconcileTrellisTrashed(environmentId, status([root]));
     expect(phase()).toBe("trashed");
@@ -50,6 +53,11 @@ describe("reconcileTrellisTrashed", () => {
     useTrellisTrashedStore.getState().setPhase(key, "restoring");
     reconcileTrellisTrashed(environmentId, status([root]));
     expect(phase()).toBe("restoring");
+    reconcileTrellisTrashed(environmentId, status([]));
+    expect(phase()).toBeNull();
+  });
+
+  it("drops an entry restored elsewhere before any status showed it trashed", () => {
     reconcileTrellisTrashed(environmentId, status([]));
     expect(phase()).toBeNull();
   });

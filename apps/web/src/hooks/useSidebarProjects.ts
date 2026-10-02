@@ -17,11 +17,15 @@ const NO_THREADS = { leads: 0, workers: 0, forkWorkers: 0 } as const;
 /**
  * The projects the sidebars list: every project, minus Trellis projects whose
  * item is in the trash and worker forks (forks delegated workers run in),
- * unless a lead thread or a draft is there. A project this client just moved
- * to the trash stays, listed as trashed with an Undo. Archived conversations stay in
+ * unless a lead thread or a draft is there. With `keepTrashedHere` (the
+ * sidebars), a project this client just moved to the trash stays, listed as
+ * trashed with an Undo; elsewhere (new-thread targets) it is gone. Archived conversations stay in
  * Settings → Archive; worker forks are listed in their project's settings.
  */
-export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
+export function useSidebarProjects(
+  options: { readonly keepTrashedHere?: boolean } = {},
+): ReadonlyArray<EnvironmentProject> {
+  const keepTrashedHere = options.keepTrashedHere === true;
   const projects = useProjects();
   const threads = useThreadShells();
   const environmentKey = [...new Set(projects.map((project) => project.environmentId))]
@@ -75,7 +79,9 @@ export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
       statuses.size === 0
         ? []
         : projects.filter((project) => {
-            if (`${project.environmentId}:${project.id}` in trashedHere) return false;
+            if (keepTrashedHere && `${project.environmentId}:${project.id}` in trashedHere) {
+              return false;
+            }
             const status = statuses.get(project.environmentId);
             if (status === undefined) return false;
             const counts =
@@ -89,7 +95,7 @@ export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
               isHiddenWorkerProject(project, status, counts, false)
             );
           }),
-    [activeThreads, projects, statuses, trashedHere],
+    [activeThreads, keepTrashedHere, projects, statuses, trashedHere],
   );
   const draftKeys = useComposerDraftStore((store) =>
     candidates
