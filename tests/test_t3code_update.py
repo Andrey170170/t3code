@@ -99,6 +99,8 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
 """,
         )
         self._write_executable(self.bin / "curl", "#!/usr/bin/env bash\nexit 0\n")
+        # The install port check must not see services running on the test host.
+        self._write_executable(self.bin / "ss", "#!/usr/bin/env bash\nexit 0\n")
 
         self.source = Path(self.temp.name) / "source"
         self.source.mkdir()
