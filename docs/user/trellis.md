@@ -15,7 +15,9 @@ reaches Trellis. While the integration is off, T3 Code does not contact Trellis;
 projects keep their conversations, but their agents do not run until you turn it back on.
 Once connected, the page also shows the Trellis service's version, free space and running
 workspaces, what needs attention (missing providers, workspaces needing a restart), and the bases
-new projects start from.
+new projects start from. A base built from an older definition is marked; **Rebuild** builds it
+again from its built-in definition (a few minutes). New workspaces start from the rebuilt base;
+existing ones keep their environment.
 
 T3 Code uses the socket at `/trellis/state/api.sock` unless the server was started with
 `TRELLIS_SOCKET` set.
