@@ -40,7 +40,7 @@ if (values.help) {
 
 Options: --registry URL, --token-file PATH (or PACKAGE_FOGEJO_TOKEN_FILE).
 Defaults to your git-god Forgejo registry and the custom tag, which the default
-instance follows; publish other lines (dev_v2) under their own --tag. Publishing
+instance follows; publish other lines under their own --tag (dev_v2: dev-v2). Publishing
 builds committed source in isolation. Install restarts the Linux user service;
 download does not. A named instance (see t3code-install --help) installs only an
 exact version. Tokens may also be supplied through an existing user npmrc.
@@ -83,8 +83,9 @@ if (values["dry-run"] && command !== "publish") fail("--dry-run applies only to 
 if (command === "download" && !values.output) fail("download requires --output DIR.");
 const customVersion = /^[0-9]+\.[0-9]+\.[0-9]+-forgejo\.[0-9]+(?:\.g[0-9a-f]{12})?$/;
 const distTag = /^[a-z][a-z0-9-]*$/;
-if (!distTag.test(values.tag) || values.tag === "latest")
-  fail("Expected a dist-tag other than latest, such as custom or v2.");
+// npm refuses tags that read as version ranges (v2, 1.x).
+if (!distTag.test(values.tag) || /^v?[0-9]/.test(values.tag) || values.tag === "latest")
+  fail("Expected a dist-tag other than latest that is no version range, such as custom or dev-v2.");
 if (values.tag !== "custom" && command !== "publish") fail("--tag applies only to publish.");
 // A named instance is pinned: it never follows a tag.
 if (command === "install" && instance && !customVersion.test(values.version ?? ""))

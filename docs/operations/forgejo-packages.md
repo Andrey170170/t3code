@@ -123,8 +123,8 @@ published under their own tag so the default instance's `custom` never moves
 to them:
 
 ```bash
-npm run publish:forgejo -- --source ../t3code-dev_v2 --tag v2
-node scripts/t3code-forgejo.mjs check --version v2   # the newest v2 build
+npm run publish:forgejo -- --source ../t3code-dev_v2 --tag dev-v2
+node scripts/t3code-forgejo.mjs check --version dev-v2   # the newest dev_v2 build
 T3CODE_PORT=3774 T3CODE_HOST=100.67.121.9 T3CODE_ORIGIN=https://dev-v2.andrei-homelab.com \
   node scripts/t3code-forgejo.mjs install --yes --instance v2 --version 0.0.44-forgejo.3
 t3code-v2-update 0.0.44-forgejo.4    # later updates name the exact version

@@ -68,7 +68,9 @@ if ((uninstall)); then
   [[ -z $package && -z $build_id ]] || { echo '--uninstall takes no package.' >&2; exit 2; }
   base=""
   if [[ -f $config_dir/service.env ]]; then base=$(source "$config_dir/service.env"; echo "${T3CODE_BASE:-}"); fi
-  systemctl --user disable --now "$unit" 2>/dev/null || true
+  if systemctl --user cat "$unit" >/dev/null 2>&1; then
+    systemctl --user disable --now "$unit" || { echo "Could not stop $unit; nothing was removed." >&2; exit 1; }
+  fi
   rm -f -- "$unit_dir/$unit" "$bin_dir/$prefix-run" "$bin_dir/$prefix-pair" "$bin_dir/$prefix-update"
   systemctl --user daemon-reload
   systemctl --user reset-failed "$unit" 2>/dev/null || true
