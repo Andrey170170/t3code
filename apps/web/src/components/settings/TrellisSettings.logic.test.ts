@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  finishHistoryWrite,
   formatBytes,
   historyDefaultNote,
   historyEdit,
+  historyFieldValue,
+  historyValuesInForce,
+  NO_HISTORY_EDITS,
+  startHistoryWrite,
   lastThinningText,
   snapshotCountsText,
   staleDetailsNotice,
@@ -57,10 +62,12 @@ describe("historyEdit", () => {
   it("sends only the edited key, and nothing when the value did not change", () => {
     expect(historyEdit("ideaTrashDays", 14, 30)).toEqual({
       kind: "change",
+      value: 14,
       patch: { ideaTrashDays: 14 },
     });
     expect(historyEdit("timerMinutes", 0, 1)).toEqual({
       kind: "change",
+      value: 0,
       patch: { timerMinutes: 0 },
     });
     expect(historyEdit("ideaTrashDays", 30, 30)).toEqual({ kind: "unchanged" });
@@ -102,5 +109,65 @@ describe("history display", () => {
     const formatTime = (unixSeconds: number) => `t=${unixSeconds}`;
     expect(lastThinningText(null, formatTime)).toBe("Not since Trellis started");
     expect(lastThinningText({ at: 5, removed: 1 }, formatTime)).toBe("t=5, removed 1 snapshot");
+  });
+});
+
+describe("history writes", () => {
+  const read = { ideaTrashDays: 30, forkTrashDays: 30 };
+  const field = (edits: typeof NO_HISTORY_EDITS, readAt = 0) =>
+    historyFieldValue("ideaTrashDays", historyValuesInForce(read, readAt, edits), edits);
+
+  it("compares an edit with the pending value, so going back before the answer is sent", () => {
+    const sent = startHistoryWrite(NO_HISTORY_EDITS, "ideaTrashDays", 14, 1);
+    expect(field(sent)).toBe(14);
+    expect(historyEdit("ideaTrashDays", 30, field(sent))).toMatchObject({ kind: "change" });
+    expect(historyEdit("ideaTrashDays", 14, field(sent))).toEqual({ kind: "unchanged" });
+  });
+
+  it("shows a write's answer at once, until a newer read replaces it", () => {
+    const sent = startHistoryWrite(NO_HISTORY_EDITS, "ideaTrashDays", 14, 1);
+    const done = finishHistoryWrite(sent, "ideaTrashDays", 1, {
+      ok: true,
+      values: { ...read, ideaTrashDays: 14 },
+      at: 100,
+    });
+    expect(done.pending).toEqual({});
+    expect(field(done, 50)).toBe(14);
+    expect(historyValuesInForce({ ideaTrashDays: 21 }, 200, done)).toEqual({ ideaTrashDays: 21 });
+  });
+
+  it("lets only a field's latest write settle it", () => {
+    let edits = startHistoryWrite(NO_HISTORY_EDITS, "ideaTrashDays", 14, 1);
+    edits = startHistoryWrite(edits, "ideaTrashDays", 20, 2);
+    // The older write fails after the newer edit: the newer draft stays, no error.
+    edits = finishHistoryWrite(edits, "ideaTrashDays", 1, { ok: false, message: "refused" });
+    expect(field(edits)).toBe(20);
+    expect(edits.error).toBeNull();
+    expect(edits.resets).toEqual({});
+    edits = finishHistoryWrite(edits, "ideaTrashDays", 2, {
+      ok: true,
+      values: { ...read, ideaTrashDays: 20 },
+      at: 1,
+    });
+    expect(field(edits)).toBe(20);
+    expect(edits.pending).toEqual({});
+  });
+
+  it("puts a field back and says why when its latest write is refused", () => {
+    const sent = startHistoryWrite(NO_HISTORY_EDITS, "ideaTrashDays", 9999, 1);
+    const refused = finishHistoryWrite(sent, "ideaTrashDays", 1, {
+      ok: false,
+      message: "idea_trash_days must be at most 3650, not 9999",
+    });
+    expect(field(refused)).toBe(30);
+    expect(refused.error).toEqual({
+      key: "ideaTrashDays",
+      message: "idea_trash_days must be at most 3650, not 9999",
+    });
+    expect(refused.resets).toEqual({ ideaTrashDays: 1 });
+    // An interrupted write reverts the field without a message.
+    const interrupted = finishHistoryWrite(sent, "ideaTrashDays", 1, { ok: false, message: null });
+    expect(interrupted.error).toBeNull();
+    expect(interrupted.resets).toEqual({ ideaTrashDays: 1 });
   });
 });

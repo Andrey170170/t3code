@@ -450,12 +450,22 @@ describe("Trellis client", () => {
         const trellis = yield* Trellis.Trellis;
         const settings = yield* trellis.historySettings;
         const updated = yield* trellis.updateHistorySettings({ turnKeepAllDays: 3 });
+        const everyKey = yield* trellis.updateHistorySettings({
+          timerMinutes: 2,
+          turnKeepAllDays: 8,
+          turnKeepDailyDays: 91,
+          timerKeepAllHours: 3,
+          timerKeepHourlyDays: 9,
+          ideaTrashDays: 10,
+          forkTrashDays: 11,
+          incomingDays: 0,
+        });
         const refused = yield* trellis
           .updateHistorySettings({ turnKeepDailyDays: 2 })
           .pipe(Effect.flip);
         historyRoute = false;
         const older = yield* trellis.historySettings.pipe(Effect.flip);
-        return { settings, updated, refused, older };
+        return { settings, updated, everyKey, refused, older };
       }).pipe(Effect.provide(layer));
       const defaults = {
         timerMinutes: 1,
@@ -479,7 +489,30 @@ describe("Trellis client", () => {
         harness.requests
           .filter((request) => request.method === "PUT")
           .map((request) => JSON.parse(request.body)),
-      ).toEqual([{ turn_keep_all_days: 3 }, { turn_keep_daily_days: 2 }]);
+      ).toEqual([
+        { turn_keep_all_days: 3 },
+        {
+          timer_minutes: 2,
+          turn_keep_all_days: 8,
+          turn_keep_daily_days: 91,
+          timer_keep_all_hours: 3,
+          timer_keep_hourly_days: 9,
+          idea_trash_days: 10,
+          fork_trash_days: 11,
+          incoming_days: 0,
+        },
+        { turn_keep_daily_days: 2 },
+      ]);
+      expect(result.everyKey.values).toEqual({
+        timerMinutes: 2,
+        turnKeepAllDays: 8,
+        turnKeepDailyDays: 91,
+        timerKeepAllHours: 3,
+        timerKeepHourlyDays: 9,
+        ideaTrashDays: 10,
+        forkTrashDays: 11,
+        incomingDays: 0,
+      });
       expect(result.updated).toEqual({
         values: { ...defaults, turnKeepAllDays: 3 },
         wouldRemove: 3,

@@ -111,9 +111,11 @@ export const trellisEnvironment = {
     staleTimeMs: 30_000,
     idleTtlMs: 60_000,
   }),
+  /** One write at a time per environment, so they reach Trellis in order. */
   updateHistorySettings: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:update-history-settings",
     tag: WS_METHODS.trellisUpdateHistorySettings,
+    concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
   }),
   graduate: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:graduate",

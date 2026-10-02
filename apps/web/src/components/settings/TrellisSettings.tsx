@@ -13,7 +13,7 @@ import {
   SproutIcon,
   TrashIcon,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 
 import { useTrellisStatusFor } from "../../hooks/useTrellis";
 import { cn } from "../../lib/utils";
@@ -45,10 +45,17 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import {
   formatBytes,
+  finishHistoryWrite,
   HISTORY_SETTINGS,
+  type HistoryEdits,
   type HistoryKey,
   historyDefaultNote,
   historyEdit,
+  historyFieldValue,
+  historyValuesInForce,
+  NO_HISTORY_EDITS,
+  rejectHistoryEdit,
+  startHistoryWrite,
   lastThinningText,
   snapshotCountsText,
   staleDetailsNotice,
@@ -666,8 +673,8 @@ function TrellisTrashSection(props: {
 /**
  * Trellis's snapshot timer, retention and expiry settings, one number per
  * row. A value is sent when its field commits (blur, Enter, the step
- * buttons), only that key; Trellis's refusal shows under the row and the
- * field goes back to the value in force.
+ * buttons), only that key, one write at a time; Trellis's refusal shows
+ * under the row and the field goes back to the value in force.
  */
 function TrellisHistorySection(props: {
   readonly environmentId: EnvironmentId;
@@ -681,37 +688,60 @@ function TrellisHistorySection(props: {
     reportFailure: false,
   });
   const settings = historyQuery.data;
-  // The last edit's refusal, shown under its row until the next commit.
-  const [error, setError] = useState<{ readonly key: HistoryKey; readonly message: string } | null>(
-    null,
-  );
-  // Bumped to reset a field to the value in force after a refused edit.
-  const [revisions, setRevisions] = useState<Partial<Record<HistoryKey, number>>>({});
-
-  const resetField = (key: HistoryKey) =>
-    setRevisions((current) => ({ ...current, [key]: (current[key] ?? 0) + 1 }));
+  // Kept in a ref as well, so commits made before a re-render see each other.
+  const editsRef = useRef(NO_HISTORY_EDITS);
+  const [edits, setEdits] = useState(NO_HISTORY_EDITS);
+  const nextRevision = useRef(0);
+  const apply = (change: (current: HistoryEdits) => HistoryEdits) => {
+    editsRef.current = change(editsRef.current);
+    setEdits(editsRef.current);
+  };
+  const inForce =
+    settings === null
+      ? {}
+      : historyValuesInForce(settings.values, historyQuery.dataUpdatedAt, edits);
+  const staleNotice = staleDetailsNotice({
+    hasData: settings !== null,
+    error: historyQuery.error,
+    updatedAt: historyQuery.dataUpdatedAt,
+  });
 
   const commit = async (key: HistoryKey, input: number | null) => {
-    const edit = historyEdit(key, input, settings?.values[key]);
-    setError(null);
+    if (settings === null) return;
+    const current = historyFieldValue(
+      key,
+      historyValuesInForce(settings.values, historyQuery.dataUpdatedAt, editsRef.current),
+      editsRef.current,
+    );
+    const edit = historyEdit(key, input, current);
     if (edit.kind === "unchanged") return;
     if (edit.kind === "invalid") {
-      setError({ key, message: edit.message });
-      resetField(key);
+      apply((current) => rejectHistoryEdit(current, key, edit.message));
       return;
     }
+    const revision = ++nextRevision.current;
+    apply((current) => startHistoryWrite(current, key, edit.value, revision));
+    // Serial per environment, so writes reach Trellis in the order they were made.
     const result = await update({ environmentId, input: edit.patch });
     if (result._tag === "Failure") {
-      if (!isAtomCommandInterrupted(result)) {
-        setError({ key, message: failureMessage(result, "Trellis did not respond.") });
-      }
-      resetField(key);
+      const message = isAtomCommandInterrupted(result)
+        ? null
+        : failureMessage(result, "Trellis did not respond.");
+      apply((current) => finishHistoryWrite(current, key, revision, { ok: false, message }));
       return;
     }
+    apply((current) =>
+      finishHistoryWrite(current, key, revision, {
+        ok: true,
+        values: result.value.values,
+        at: Date.now(),
+      }),
+    );
     const notice = wouldRemoveText(result.value.wouldRemove);
     if (notice !== null) {
       toastManager.add({ type: "info", title: "History settings saved", description: notice });
     }
+    // For the snapshot counts; the values are already the write's answer.
     historyQuery.refresh();
   };
 
@@ -737,12 +767,18 @@ function TrellisHistorySection(props: {
         />
       ) : (
         <>
+          {staleNotice === null ? null : (
+            <SettingsRow
+              title={<WarningTitle>History settings may be out of date</WarningTitle>}
+              description={staleNotice}
+            />
+          )}
           {HISTORY_SETTINGS.map((setting) => {
-            const value = settings.values[setting.key];
+            const value = historyFieldValue(setting.key, inForce, edits);
             if (value === undefined) return null;
             const defaultValue = settings.defaults[setting.key];
             const defaultNote = historyDefaultNote(value, defaultValue, setting.unit);
-            const message = error?.key === setting.key ? error.message : undefined;
+            const message = edits.error?.key === setting.key ? edits.error.message : undefined;
             return (
               <SettingsRow
                 key={setting.key}
@@ -771,7 +807,7 @@ function TrellisHistorySection(props: {
                 control={
                   <div className="flex shrink-0 items-center gap-2">
                     <NumberField
-                      key={`${value}:${revisions[setting.key] ?? 0}`}
+                      key={`${value}:${edits.resets[setting.key] ?? 0}`}
                       defaultValue={value}
                       min={0}
                       step={1}
