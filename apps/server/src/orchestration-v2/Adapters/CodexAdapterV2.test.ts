@@ -1897,55 +1897,99 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
-  it.effect("fails the session's event stream when the app-server terminates", () =>
-    Effect.gen(function* () {
-      const transcript = makeCodexReplayTranscript({
-        scenario: "terminated",
-        entries: codexReplayPreamble({
-          nativeThreadId: "terminated",
-          nativeTurnId: "unused",
-          prompt: "unused",
-        }).slice(0, 3),
-      });
-      let terminate: ((error: CodexErrors.CodexAppServerError) => Effect.Effect<void>) | undefined;
-      const adapter = CodexAdapterV2.makeCodexAdapterV2({
-        instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
-        settings: DEFAULT_CODEX_SETTINGS,
-        environment: {},
-        clientFactory: {
-          open: (openInput) => {
-            terminate = openInput.onTermination;
-            return Layer.build(CodexReplay.layerReplay(transcript)).pipe(
-              Effect.flatMap((context) =>
-                Effect.service(CodexClient.CodexAppServerClient).pipe(Effect.provide(context)),
-              ),
-              Effect.orDie,
+  // An app-server that exits mid-turn must settle the turn; one that exits
+  // idle (for example, stopped with the T3 server) must not mark the session
+  // failed.
+  for (const working of [true, false]) {
+    it.effect(
+      working
+        ? "fails the session's event stream when the app-server exits mid-turn"
+        : "stops the session quietly when the app-server exits while idle",
+      () =>
+        Effect.gen(function* () {
+          const scenario = working ? "terminated-mid-turn" : "terminated-idle";
+          const preamble = codexReplayPreamble({
+            nativeThreadId: scenario,
+            nativeTurnId: "native-turn-terminated",
+            prompt: "Keep working",
+          });
+          const transcript = makeCodexReplayTranscript({
+            scenario,
+            entries: working ? preamble : preamble.slice(0, 3),
+          });
+          let terminate:
+            | ((error: CodexErrors.CodexAppServerError) => Effect.Effect<void>)
+            | undefined;
+          const adapter = CodexAdapterV2.makeCodexAdapterV2({
+            instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+            settings: DEFAULT_CODEX_SETTINGS,
+            environment: {},
+            clientFactory: {
+              open: (openInput) => {
+                terminate = openInput.onTermination;
+                return Layer.build(CodexReplay.layerReplay(transcript)).pipe(
+                  Effect.flatMap((context) =>
+                    Effect.service(CodexClient.CodexAppServerClient).pipe(Effect.provide(context)),
+                  ),
+                  Effect.orDie,
+                );
+              },
+            },
+            fileSystem: yield* FileSystem.FileSystem,
+            idAllocator: yield* IdAllocator.IdAllocatorV2,
+            serverConfig: yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie),
+            continuationRequests: { offer: () => Effect.void },
+          });
+          const threadId = ThreadId.make(`thread-${scenario}`);
+          const runtime = yield* adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make(`provider-session-${scenario}`),
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          });
+          if (working) {
+            const providerThread = yield* runtime.ensureThread({
+              threadId,
+              modelSelection: CODEX_TEST_MODEL_SELECTION,
+              runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            });
+            yield* runtime.startTurn(
+              makeCodexTestTurnInput({
+                threadId,
+                providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make("terminated-attempt"),
+                text: "Keep working",
+              }),
             );
-          },
-        },
-        fileSystem: yield* FileSystem.FileSystem,
-        idAllocator: yield* IdAllocator.IdAllocatorV2,
-        serverConfig: yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie),
-        continuationRequests: { offer: () => Effect.void },
-      });
-      const runtime = yield* adapter.openSession({
-        threadId: ThreadId.make("thread-terminated"),
-        providerSessionId: ProviderSessionId.make("provider-session-terminated"),
-        modelSelection: CODEX_TEST_MODEL_SELECTION,
-        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
-      });
-      const drained = yield* runtime.events.pipe(Stream.runDrain, Effect.exit, Effect.forkScoped);
-      assert.isDefined(terminate);
-      yield* terminate!(new CodexErrors.CodexAppServerProcessExitedError({ code: 137 }));
-      const exit = yield* Fiber.join(drained);
-      assert.isTrue(exit._tag === "Failure");
-      const error = exit._tag === "Failure" ? Cause.squash(exit.cause) : undefined;
-      assert.equal(
-        (error as { _tag?: string } | undefined)?._tag,
-        "ProviderAdapterEventStreamError",
-      );
-    }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
-  );
+          }
+          const drained = yield* runtime.events.pipe(
+            Stream.runCollect,
+            Effect.exit,
+            Effect.forkScoped,
+          );
+          assert.isDefined(terminate);
+          yield* terminate!(new CodexErrors.CodexAppServerProcessExitedError({ code: 143 }));
+          const exit = yield* Fiber.join(drained);
+          if (working) {
+            assert.isTrue(exit._tag === "Failure");
+            const error = exit._tag === "Failure" ? Cause.squash(exit.cause) : undefined;
+            assert.equal(
+              (error as { _tag?: string } | undefined)?._tag,
+              "ProviderAdapterEventStreamError",
+            );
+            return;
+          }
+          assert.isTrue(exit._tag === "Success");
+          const last = exit._tag === "Success" ? exit.value.at(-1) : undefined;
+          assert.equal(last?.type, "provider_session.updated");
+          assert.equal(
+            last?.type === "provider_session.updated" ? last.providerSession.status : undefined,
+            "stopped",
+          );
+        }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    );
+  }
 
   it.effect("unsubscribes from the native thread when it is unloaded", () =>
     Effect.gen(function* () {

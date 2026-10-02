@@ -64,6 +64,7 @@ import type {
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexSchema from "effect-codex-app-server/schema";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -1640,7 +1641,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           model: input.modelSelection.model,
           now,
         });
-        const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
+        const events = yield* Queue.unbounded<ProviderAdapterV2Event, Cause.Done>();
         const rateLimitSnapshot = yield* Ref.make<CodexRateLimitSnapshot | undefined>(undefined);
         const limitedTurnItems = yield* Ref.make(
           new Map<ProviderThreadId, Extract<OrchestrationV2TurnItem, { type: "error" }>>(),
@@ -5360,17 +5361,35 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           driver: CODEX_PROVIDER,
           providerSessionId: input.providerSessionId,
           providerSession: session,
-          events: Stream.fromEffectRepeat(Queue.take(events)).pipe(
+          events: Stream.fromQueue(events).pipe(
             Stream.interruptWhen(
               Deferred.await(terminated).pipe(
                 Effect.flatMap((cause) =>
-                  Effect.fail(
-                    new ProviderAdapterEventStreamError({
+                  Effect.gen(function* () {
+                    const working =
+                      (yield* Ref.get(activeTurns)).size > 0 ||
+                      (yield* Ref.get(pendingRootTurns)).size > 0;
+                    if (working) {
+                      return yield* new ProviderAdapterEventStreamError({
+                        driver: CODEX_PROVIDER,
+                        providerSessionId: input.providerSessionId,
+                        cause,
+                      });
+                    }
+                    // Nothing was running (for example, the app-server stopped
+                    // with the T3 server), so the session ends without an error.
+                    yield* Queue.offer(events, {
+                      type: "provider_session.updated",
                       driver: CODEX_PROVIDER,
-                      providerSessionId: input.providerSessionId,
-                      cause,
-                    }),
-                  ),
+                      providerSession: {
+                        ...session,
+                        status: "stopped",
+                        updatedAt: yield* DateTime.now,
+                      },
+                    });
+                    yield* Queue.end(events);
+                    return yield* Effect.never;
+                  }),
                 ),
               ),
             ),
