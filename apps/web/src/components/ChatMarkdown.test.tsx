@@ -1005,6 +1005,20 @@ describe("chat Markdown math", () => {
     );
   });
 
+  it("keeps escaped parentheses in link destinations and autolinks literal", () => {
+    const link = "See [the docs](https://example.com/a_\\(b\\)) and \\(x\\).";
+    const autolink = "<https://example.com/it's\\(v1\\)> then \\(y\\)";
+    const displayThenParen = "\\[z\\](note)";
+
+    expect(normalizeMarkdownMathDelimiters(link)).toBe(
+      "See [the docs](https://example.com/a_\\(b\\)) and $$x$$.",
+    );
+    expect(normalizeMarkdownMathDelimiters(autolink)).toBe(
+      "<https://example.com/it's\\(v1\\)> then $$y$$",
+    );
+    expect(normalizeMarkdownMathDelimiters(displayThenParen)).toBe("$$z$$(note)");
+  });
+
   it("does not mistake indented code for a fenced block", () => {
     const markdown = "    ```\n\\(real math\\)";
 
