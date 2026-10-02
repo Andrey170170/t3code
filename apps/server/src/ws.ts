@@ -71,6 +71,7 @@ import {
   ProjectWriteFileError,
   ProjectMutationError,
   ProviderUploadFeedbackError,
+  SideChatError,
   ProviderSetupError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
@@ -113,6 +114,7 @@ import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ThreadManagementService from "./orchestration-v2/ThreadManagementService.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
+import * as SideChatService from "./sideChat/SideChatService.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as IdAllocator from "./orchestration-v2/IdAllocator.ts";
@@ -1086,6 +1088,9 @@ const makeWsRpcLayer = (
       const threadSearch = yield* ThreadSearch.ThreadSearch;
 
       const providerSessionsV2 = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const sideChats = yield* SideChatService.SideChatService;
+      const toSideChatError = (cause: { readonly message: string }) =>
+        new SideChatError({ message: cause.message });
       const analytics = yield* AnalyticsService.AnalyticsService;
       // Client-origin attribution (#7774): every thread/turn the connecting
       // client starts is credited to its surface + app version. Best-effort:
@@ -2302,6 +2307,40 @@ const makeWsRpcLayer = (
                     }),
               ),
             ),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.sideChatOpen]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.sideChatOpen,
+            sideChats.open(input).pipe(Effect.mapError(toSideChatError)),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.sideChatSend]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.sideChatSend,
+            sideChats.send(input).pipe(Effect.mapError(toSideChatError)),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.sideChatInterrupt]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.sideChatInterrupt,
+            sideChats.interrupt(input).pipe(Effect.mapError(toSideChatError)),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.sideChatClose]: (input) =>
+          observeRpcEffect(WS_METHODS.sideChatClose, sideChats.close(input), {
+            "rpc.aggregate": "provider",
+          }),
+        [WS_METHODS.sideChatRespond]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.sideChatRespond,
+            sideChats.respond(input).pipe(Effect.mapError(toSideChatError)),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.sideChatSubscribe]: (input) =>
+          observeRpcStream(
+            WS_METHODS.sideChatSubscribe,
+            sideChats.subscribe(input).pipe(Stream.mapError(toSideChatError)),
             { "rpc.aggregate": "provider" },
           ),
         [WS_METHODS.serverUpdateProvider]: (input) =>

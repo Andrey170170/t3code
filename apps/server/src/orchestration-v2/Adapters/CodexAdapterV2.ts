@@ -4231,6 +4231,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                 if (
                   context.subagent === null &&
                   continuationRequests !== undefined &&
+                  input.detached !== true &&
                   !(yield* Ref.get(interruptingNativeTurns)).has(payload.turnId)
                 ) {
                   const alreadyOffered = yield* Ref.modify(
@@ -6240,6 +6241,68 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                   new ProviderAdapterRollbackThreadError({
                     driver: CODEX_PROVIDER,
                     providerThreadId: threadInput.providerThread.id,
+                    cause: normalizeCodexCause(cause),
+                  }),
+              ),
+            ),
+          // A fork at head of a thread that may belong to another app-server
+          // process: Codex reads the source's persisted rollout, so a running
+          // source contributes everything up to its last completed step.
+          openEphemeralFork: (forkInput) =>
+            Effect.gen(function* () {
+              yield* ensureInitialized;
+              const config = yield* client.request("config/read", {
+                cwd: forkInput.runtimePolicy.cwd,
+                includeLayers: false,
+              });
+              // Fork instructions replace the configured ones, so keep those first.
+              const developerInstructions = [
+                config.config.developer_instructions?.trim(),
+                forkInput.developerInstructions,
+              ]
+                .filter((part): part is string => part !== undefined && part.length > 0)
+                .join("\n\n");
+              const response = yield* client.request("thread/fork", {
+                threadId: forkInput.sourceNativeThreadId,
+                ephemeral: true,
+                // Codex requires this for ephemeral forks, which cannot list turns.
+                excludeTurns: true,
+                developerInstructions,
+                ...codexThreadRuntimeParams({
+                  threadId: forkInput.appThreadId,
+                  modelSelection: forkInput.modelSelection,
+                  runtimePolicy: forkInput.runtimePolicy,
+                }),
+              });
+              if (forkInput.boundaryPrompt !== undefined) {
+                yield* client.request("thread/inject_items", {
+                  threadId: response.thread.id,
+                  items: [
+                    {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: forkInput.boundaryPrompt }],
+                    },
+                  ],
+                });
+              }
+              return providerThreadFromCodexThread({
+                appThreadId: forkInput.appThreadId,
+                idAllocator,
+                ownerNodeId: null,
+                providerSessionId: input.providerSessionId,
+                providerInstanceId: adapterOptions.instanceId,
+                thread: response.thread,
+              });
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterForkThreadError({
+                    driver: CODEX_PROVIDER,
+                    providerThreadId: idAllocator.derive.providerThread({
+                      driver: CODEX_PROVIDER,
+                      nativeThreadId: forkInput.sourceNativeThreadId,
+                    }),
                     cause: normalizeCodexCause(cause),
                   }),
               ),

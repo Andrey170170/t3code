@@ -11,6 +11,15 @@ import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
+  SideChatError,
+  SideChatParentInput,
+  SideChatRespondInput,
+  SideChatSendInput,
+  SideChatSnapshot,
+  SideChatStreamEvent,
+  SideChatTargetInput,
+} from "./sideChat.ts";
+import {
   CodexAuthCallbackInput,
   CodexAuthCallbackState,
   ProviderAuthCancelInput,
@@ -363,6 +372,14 @@ export const WS_METHODS = {
 
   // Provider methods
   providerUploadFeedback: "provider.uploadFeedback",
+
+  // Side chat methods (Codex native side conversations)
+  sideChatOpen: "sideChat.open",
+  sideChatSend: "sideChat.send",
+  sideChatInterrupt: "sideChat.interrupt",
+  sideChatClose: "sideChat.close",
+  sideChatRespond: "sideChat.respond",
+  sideChatSubscribe: "sideChat.subscribe",
   providerAuthStart: "provider.auth.start",
   providerConsumeResetCredit: "provider.consumeResetCredit",
   providerAuthComplete: "provider.auth.complete",
@@ -1228,6 +1245,35 @@ const WsProviderUploadFeedbackRpc = Rpc.make(WS_METHODS.providerUploadFeedback, 
   error: Schema.Union([ProviderUploadFeedbackError, EnvironmentAuthorizationError]),
 });
 
+const sideChatRpcError = Schema.Union([SideChatError, EnvironmentAuthorizationError]);
+const WsSideChatOpenRpc = Rpc.make(WS_METHODS.sideChatOpen, {
+  payload: SideChatParentInput,
+  success: SideChatSnapshot,
+  error: sideChatRpcError,
+});
+const WsSideChatSendRpc = Rpc.make(WS_METHODS.sideChatSend, {
+  payload: SideChatSendInput,
+  error: sideChatRpcError,
+});
+const WsSideChatInterruptRpc = Rpc.make(WS_METHODS.sideChatInterrupt, {
+  payload: SideChatTargetInput,
+  error: sideChatRpcError,
+});
+const WsSideChatCloseRpc = Rpc.make(WS_METHODS.sideChatClose, {
+  payload: SideChatTargetInput,
+  error: sideChatRpcError,
+});
+const WsSideChatRespondRpc = Rpc.make(WS_METHODS.sideChatRespond, {
+  payload: SideChatRespondInput,
+  error: sideChatRpcError,
+});
+const WsSideChatSubscribeRpc = Rpc.make(WS_METHODS.sideChatSubscribe, {
+  payload: SideChatTargetInput,
+  success: SideChatStreamEvent,
+  error: sideChatRpcError,
+  stream: true,
+});
+
 const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
   payload: VcsStatusInput,
   success: VcsStatusStreamEvent,
@@ -1794,6 +1840,12 @@ export const WsRpcGroup = RpcGroup.make(
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,
   WsProviderUploadFeedbackRpc,
+  WsSideChatOpenRpc,
+  WsSideChatSendRpc,
+  WsSideChatInterruptRpc,
+  WsSideChatCloseRpc,
+  WsSideChatRespondRpc,
+  WsSideChatSubscribeRpc,
   WsSubscribeVcsStatusRpc,
   WsSubscribeWorktreeSetupRpc,
   WsWorktreeSetupCancelRpc,

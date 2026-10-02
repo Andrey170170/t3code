@@ -383,6 +383,23 @@ export interface ProviderAdapterV2OpenSessionInput {
   readonly initialNativeThreadId?: string;
   /** Preserves provider item identity across eager activation of a persisted thread. */
   readonly initialProviderItemIdentityVersion?: 2;
+  /**
+   * The session runs outside orchestration (a side chat), so the adapter must
+   * not offer continuation requests for app threads the orchestrator never sees.
+   */
+  readonly detached?: true;
+}
+
+export interface ProviderAdapterV2EphemeralForkInput {
+  readonly sourceNativeThreadId: string;
+  /** Synthetic app thread the fork's turns project into. */
+  readonly appThreadId: ThreadId;
+  readonly modelSelection: ModelSelection;
+  readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
+  /** Appended to the configured developer instructions, which a fork would otherwise replace. */
+  readonly developerInstructions: string;
+  /** Injected as a user message after the fork, marking the end of inherited history. */
+  readonly boundaryPrompt?: string;
 }
 
 export interface ProviderAdapterV2EnsureThreadInput {
@@ -575,6 +592,13 @@ export interface ProviderAdapterV2SessionRuntime {
   ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;
   readonly forkThread: (
     input: ProviderAdapterV2ForkThreadInput,
+  ) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;
+  /**
+   * Forks a native thread (possibly owned by another provider process) at its
+   * head into a temporary thread that is never persisted. Side chats use it.
+   */
+  readonly openEphemeralFork?: (
+    input: ProviderAdapterV2EphemeralForkInput,
   ) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;
 }
 

@@ -50,6 +50,7 @@ import { layer as threadLifecycleServiceLayer } from "./ThreadLifecycleService.t
 import { layer as threadForkServiceLayer } from "./ThreadForkService.ts";
 import { layer as turnItemPositionStoreLayer } from "./TurnItemPositionStore.ts";
 import { layer as scheduledTaskServiceLayer } from "../scheduledTasks/ScheduledTaskService.ts";
+import * as SideChatService from "../sideChat/SideChatService.ts";
 
 /** The shared application event log and its command receipts. */
 export const OrchestrationEventInfrastructureLayerLive = Layer.mergeAll(
@@ -245,6 +246,15 @@ const threadLaunchProvided = threadLaunchServiceLayer.pipe(
     ),
   ),
 );
+const sideChatServiceProvided = SideChatService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      threadManagementProvided,
+      providerAdapterRegistryProvided,
+      runtimePolicyProvided,
+    ),
+  ),
+);
 const threadLifecycleProvided = threadLifecycleServiceLayer.pipe(
   Layer.provide(threadManagementProvided),
 );
@@ -305,6 +315,7 @@ export const OrchestrationV2ProductionLayerLive = Layer.mergeAll(
   managedProjectFoldersProvided,
   threadLaunchProvided,
   threadLifecycleProvided,
+  sideChatServiceProvided,
   scheduledTaskProvided,
   UsageLimitRecoveryWorker.workerLive.pipe(
     Layer.provide(Layer.mergeAll(projectionStoreLayer, threadManagementProvided)),
