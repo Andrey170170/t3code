@@ -363,9 +363,12 @@ describe("TrellisRuntimePolicy", () => {
             },
           },
         });
-      // The reported home runs; a symlink to it does not exist in the container.
-      const { policy } = yield* claudeAt("/trellis/dev/homes/claude", devHomes);
-      assert.equal(policy.launch?.sessionKey, "ws-1");
+      // The reported home runs, also spelled otherwise in the settings, which
+      // the adapters resolve; a symlink to it does not exist in the container.
+      for (const spelling of ["/trellis/dev/homes/claude", "/trellis/dev/homes/x/../claude/"]) {
+        const { policy } = yield* claudeAt(spelling, devHomes);
+        assert.equal(policy.launch?.sessionKey, "ws-1");
+      }
       assert.equal(
         yield* refusal(claudeAt("/srv/claude-link", devHomes)),
         TrellisRuntimePolicy.trellisHomeRefusal(

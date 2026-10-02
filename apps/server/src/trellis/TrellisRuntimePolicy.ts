@@ -190,10 +190,11 @@ const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
  * Why a provider instance cannot run inside a workspace, or null. The
  * container mounts the provider homes Trellis reports (`agentHomes`; the
  * defaults when it reports none) at their host paths, so the home the
- * provider is given (its settings, home-expanded as the adapters do, then
- * its environment merged over the server's, as is, then the default) must be
- * exactly the mounted path: a symlink to it, a literal `~`, a relative path
- * or another spelling of it may not exist in the container. An inherited `TRELLIS_WORKSPACE` is refused too, as
+ * provider is given (its settings, home-expanded and resolved as the adapters
+ * do, then its environment merged over the server's, passed as is, then the
+ * default) must be the mounted path: a symlink to it, or an environment value
+ * with a literal `~`, a relative path or another spelling of it may not exist
+ * in the container. An inherited `TRELLIS_WORKSPACE` is refused too, as
  * it makes the shim fall back to the host.
  */
 function instanceLaunchRefusal(
@@ -212,13 +213,15 @@ function instanceLaunchRefusal(
   }
   const homeOf = (configured: string | undefined, variable: string, defaultDir: string) => {
     if (configured !== undefined && configured.trim().length > 0) {
-      return expandHomePath(configured.trim());
+      return NodePath.resolve(expandHomePath(configured.trim()));
     }
     const value = environment[variable];
     return value === undefined || value.length === 0 ? NodePath.join(homeDir, defaultDir) : value;
   };
   const check = (provider: "Claude" | "Codex", home: string, mounted: string | null) =>
-    mounted !== null && mounted === home ? null : trellisHomeRefusal(provider, home, mounted);
+    mounted !== null && (home === mounted || home === NodePath.resolve(mounted))
+      ? null
+      : trellisHomeRefusal(provider, home, mounted);
   if (driverKind === "codex") {
     const config = decodeCodexSettings(instance?.config ?? {});
     if (Option.isSome(config) && config.value.setupMode === "managed") {
