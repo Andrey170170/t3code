@@ -37,6 +37,7 @@ import {
 import { isLoopbackHostname, normalizePreviewUrl } from "@t3tools/shared/preview";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -249,23 +250,31 @@ const make = Effect.gen(function* () {
 
   // The last read of each workspace's ports, reused by every subscriber
   // polling within the same interval (an old relay can take seconds to fail).
+  // Each read runs in its own fiber, so a subscriber leaving mid-read never
+  // cancels it for the others.
   const portReads = new Map<
     string,
-    { readonly at: number; readonly ports: Effect.Effect<ReadonlyArray<TrellisPort>, TrellisError> }
+    {
+      readonly at: number;
+      readonly ports: Deferred.Deferred<ReadonlyArray<TrellisPort>, TrellisError>;
+    }
   >();
   const portsOf = (workspace: string) =>
     Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
-      const cached = portReads.get(workspace);
-      if (cached !== undefined && now - cached.at < Duration.toMillis(POLL_INTERVAL)) {
-        return yield* cached.ports;
-      }
-      const ports = yield* Effect.cached(trellis.ports(workspace));
-      portReads.set(workspace, { at: now, ports });
       for (const [key, read] of portReads) {
         if (now - read.at >= Duration.toMillis(POLL_INTERVAL)) portReads.delete(key);
       }
-      return yield* ports;
+      const cached = portReads.get(workspace);
+      if (cached !== undefined) return yield* Deferred.await(cached.ports);
+      const ports = yield* Deferred.make<ReadonlyArray<TrellisPort>, TrellisError>();
+      portReads.set(workspace, { at: now, ports });
+      yield* trellis.ports(workspace).pipe(
+        Effect.exit,
+        Effect.flatMap((exit) => Deferred.done(ports, exit)),
+        Effect.forkDetach,
+      );
+      return yield* Deferred.await(ports);
     });
 
   // A thread outside Trellis reads as null: its servers are the host's.

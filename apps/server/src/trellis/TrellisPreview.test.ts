@@ -2,6 +2,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import { ProjectId, ThreadId, TrellisError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Deferred from "effect/Deferred";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -111,6 +113,8 @@ describe("TrellisPreview service", () => {
     readonly previews?: Readonly<Record<string, ReadonlyArray<string>>>;
     /** Ports listening per workspace id; a workspace absent here is not running. */
     readonly ports?: Readonly<Record<string, ReadonlyArray<TrellisPort>>>;
+    /** Port reads wait for it when set. */
+    readonly portsGate?: Deferred.Deferred<void>;
   }) =>
     TrellisPreview.layer.pipe(
       Layer.provide(
@@ -129,11 +133,17 @@ describe("TrellisPreview service", () => {
             ports: (workspace) => {
               portCalls.count += 1;
               const ports = input.ports?.[workspace];
-              return ports === undefined
-                ? Effect.fail(
-                    new TrellisError({ message: `workspace ${workspace} is not running` }),
-                  )
-                : Effect.succeed(ports);
+              return (
+                input.portsGate === undefined ? Effect.void : Deferred.await(input.portsGate)
+              ).pipe(
+                Effect.andThen(
+                  ports === undefined
+                    ? Effect.fail(
+                        new TrellisError({ message: `workspace ${workspace} is not running` }),
+                      )
+                    : Effect.succeed(ports),
+                ),
+              );
             },
           }),
         ),
@@ -384,6 +394,35 @@ describe("TrellisPreview service", () => {
           preview.watchServers(threadId, []).pipe(Stream.take(1), Stream.runCollect);
         yield* Effect.all([first(), first(), first()], { concurrency: "unbounded" });
       }).pipe(Effect.provide(layer));
+      expect(portCalls.count).toBe(1);
+    }),
+  );
+
+  it.effect("keeps a shared port read going when the subscriber that started it leaves", () =>
+    Effect.gen(function* () {
+      portCalls.count = 0;
+      const portsGate = yield* Deferred.make<void>();
+      const layer = makeLayer({
+        workspaceRoot: IDEA,
+        published: [],
+        ports: { "ws-1": [port(8123, "0.0.0.0")] },
+        portsGate,
+      });
+      const urls = yield* Effect.gen(function* () {
+        const preview = yield* TrellisPreview.TrellisPreview;
+        const first = () =>
+          preview.watchServers(threadId, []).pipe(Stream.take(1), Stream.runCollect);
+        const leaving = yield* Effect.forkChild(first());
+        yield* Effect.yieldNow;
+        const staying = yield* Effect.forkChild(first());
+        yield* Effect.yieldNow;
+        yield* Fiber.interrupt(leaving);
+        yield* Deferred.succeed(portsGate, undefined);
+        return yield* Fiber.join(staying);
+      }).pipe(Effect.provide(layer));
+      expect(urls.map((servers) => servers?.map((server) => server.url))).toEqual([
+        ["http://localhost:8123"],
+      ]);
       expect(portCalls.count).toBe(1);
     }),
   );
