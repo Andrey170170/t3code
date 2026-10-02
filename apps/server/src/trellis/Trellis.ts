@@ -342,6 +342,7 @@ const toDetails = (view: typeof TrellisDetailsView.Type): TrellisDetails => ({
   uptimeSecs: view.uptime_secs ?? null,
   bases: view.bases ?? [],
   baseStates: view.base_states ?? null,
+  buildingBases: [],
   defaultBase: view.default_base ?? null,
   missingProviders: view.missing_providers ?? [],
   agentHomes: view.agent_homes ?? null,

@@ -512,6 +512,8 @@ export const TrellisDetails = Schema.Struct({
    * `stale`, `unrecorded` or `custom` (others may come); null when not reported.
    */
   baseStates: Schema.NullOr(Schema.Record(Schema.String, Schema.String)),
+  /** Bases this T3 server is rebuilding now (`trellis.buildBase`). */
+  buildingBases: Schema.Array(Schema.String),
   /** May name a base that is not built (absent from `bases`). */
   defaultBase: Schema.NullOr(Schema.String),
   /** Configured provider CLIs not found on the service's PATH. */

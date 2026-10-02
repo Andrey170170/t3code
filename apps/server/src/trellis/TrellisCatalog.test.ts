@@ -67,6 +67,9 @@ interface CatalogState {
   trashed: Array<string>;
   readonly trashStarted?: Deferred.Deferred<void>;
   readonly trashRelease?: Deferred.Deferred<void>;
+  /** Base builds Trellis was asked for; each waits for `buildRelease` when set. */
+  builds?: number;
+  readonly buildRelease?: Deferred.Deferred<void>;
 }
 
 const ROOT = "/trellis";
@@ -598,6 +601,7 @@ describe("nameDetailsWorkspaces", () => {
         uptimeSecs: null,
         bases: [],
         baseStates: null,
+        buildingBases: [],
         defaultBase: null,
         missingProviders: [],
         agentHomes: null,
@@ -834,6 +838,28 @@ describe("TrellisCatalog service", () => {
             : state.items.filter((item) => item.deleted_at === null && item.graduated_to === null),
         ),
       listWorkspaces: () => Effect.succeed([]),
+      buildBase: (name) =>
+        Effect.gen(function* () {
+          state.builds = (state.builds ?? 0) + 1;
+          if (state.buildRelease !== undefined) yield* Deferred.await(state.buildRelease);
+          return { name, state: "current" };
+        }),
+      details: Effect.succeed({
+        root: ROOT,
+        version: null,
+        commit: null,
+        uptimeSecs: null,
+        bases: ["dev"],
+        baseStates: null,
+        buildingBases: [],
+        defaultBase: "dev",
+        missingProviders: [],
+        agentHomes: null,
+        runningWorkspaces: null,
+        restartNeeded: null,
+        pendingOperations: [],
+        disk: null,
+      }),
       trashProject: (id) =>
         Effect.gen(function* () {
           if (state.trashStarted !== undefined)
@@ -1253,6 +1279,31 @@ describe("TrellisCatalog service", () => {
       }),
     );
   });
+  const buildState: CatalogState = {
+    items: [],
+    trashed: [],
+    buildRelease: Deferred.makeUnsafe<void>(),
+  };
+
+  effectIt.layer(catalogLayer(buildState))("base builds", (it) => {
+    it.effect("outlive their caller and join a repeated request instead of queueing", () =>
+      Effect.gen(function* () {
+        const catalog = yield* TrellisCatalog.TrellisCatalog;
+        const first = yield* Effect.forkChild(catalog.buildBase("dev"));
+        yield* Effect.yieldNow;
+        // The page that asked went away: the build goes on, still reported.
+        yield* Fiber.interrupt(first);
+        assert.deepEqual((yield* catalog.details).buildingBases, ["dev"]);
+        const second = yield* Effect.forkChild(catalog.buildBase("dev"));
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(buildState.buildRelease!, undefined);
+        assert.deepEqual(yield* Fiber.join(second), { name: "dev", state: "current" });
+        assert.equal(buildState.builds, 1);
+        assert.deepEqual((yield* catalog.details).buildingBases, []);
+      }),
+    );
+  });
+
   const raceState: CatalogState = {
     items: [dedicated("prj-race", "Race", [workspace("ws-race")])],
     trashed: [],

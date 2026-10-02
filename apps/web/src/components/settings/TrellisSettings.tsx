@@ -310,6 +310,7 @@ function TrellisDetailsSections(props: {
             environmentId={environmentId}
             bases={details.bases}
             baseStates={details.baseStates}
+            buildingBases={details.buildingBases}
             defaultBase={details.defaultBase}
             onBuilt={refresh}
           />
@@ -427,16 +428,20 @@ function TrellisBaseRows(props: {
   readonly environmentId: EnvironmentId;
   readonly bases: ReadonlyArray<string>;
   readonly baseStates: TrellisDetails["baseStates"];
+  /** Builds the server runs, also ones started before this page opened. */
+  readonly buildingBases: ReadonlyArray<string>;
   readonly defaultBase: string | null;
   readonly onBuilt: () => void;
 }) {
   const { environmentId, bases, defaultBase } = props;
   const defaultMissing = defaultBase !== null && !bases.includes(defaultBase);
   const buildBase = useAtomCommand(trellisEnvironment.buildBase, { reportFailure: false });
-  // One build at a time per root, as Trellis allows.
-  const [building, setBuilding] = useState<string | null>(null);
+  // One build at a time per root, as Trellis allows; the server joins a
+  // repeated request for the same base to the running build.
+  const [startedHere, setStartedHere] = useState<string | null>(null);
+  const building = startedHere ?? props.buildingBases[0] ?? null;
   const rebuild = async (base: string) => {
-    setBuilding(base);
+    setStartedHere(base);
     try {
       const result = await buildBase({ environmentId, input: { name: base } });
       if (result._tag === "Failure") {
@@ -455,7 +460,7 @@ function TrellisBaseRows(props: {
         description: "New workspaces start from it; existing ones keep their environment.",
       });
     } finally {
-      setBuilding(null);
+      setStartedHere(null);
       props.onBuilt();
     }
   };
