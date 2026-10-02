@@ -3684,25 +3684,24 @@ const makeWsRpcLayer = (
             Stream.unwrap(
               Effect.gen(function* () {
                 const configuredUrls = input.configuredUrls ?? [];
-                // A Trellis thread's servers are its workspace's, not the host's.
-                const workspaceServers =
-                  input.threadId === undefined
-                    ? null
-                    : yield* trellisPreview.watchServers(input.threadId, configuredUrls);
-                if (workspaceServers !== null) {
-                  return workspaceServers.pipe(
-                    Stream.mapEffect((servers) =>
-                      DateTime.now.pipe(
-                        Effect.map((now): DiscoveredLocalServerList => ({
-                          servers,
-                          scannedAt: DateTime.formatIso(now),
-                          configuredUrlProbing: true,
-                        })),
-                      ),
-                    ),
-                  );
-                }
-                return hostDiscoveredServers(configuredUrls);
+                if (input.threadId === undefined) return hostDiscoveredServers(configuredUrls);
+                // A Trellis thread's servers are its workspace's, not the host's;
+                // the source follows the thread when it moves.
+                return trellisPreview.watchServers(input.threadId, configuredUrls).pipe(
+                  Stream.switchMap((servers) =>
+                    servers === null
+                      ? hostDiscoveredServers(configuredUrls)
+                      : Stream.fromEffect(
+                          DateTime.now.pipe(
+                            Effect.map((now): DiscoveredLocalServerList => ({
+                              servers,
+                              scannedAt: DateTime.formatIso(now),
+                              configuredUrlProbing: true,
+                            })),
+                          ),
+                        ),
+                  ),
+                );
               }),
             ),
             { "rpc.aggregate": "preview" },

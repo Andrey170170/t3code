@@ -98,8 +98,10 @@ describe("workspaceServers", () => {
 });
 
 describe("TrellisPreview service", () => {
+  const portCalls = { count: 0 };
   const makeLayer = (input: {
-    readonly workspaceRoot: string;
+    /** Read on every lookup, so a test can move the thread. */
+    workspaceRoot: string;
     readonly worktreePath?: string;
     readonly fail?: boolean;
     readonly readFails?: boolean;
@@ -125,6 +127,7 @@ describe("TrellisPreview service", () => {
             listPreviews: (target) =>
               Effect.succeed((input.previews?.[target] ?? []).map((url) => ({ url }))),
             ports: (workspace) => {
+              portCalls.count += 1;
               const ports = input.ports?.[workspace];
               return ports === undefined
                 ? Effect.fail(
@@ -327,9 +330,10 @@ describe("TrellisPreview service", () => {
   const firstServers = (layer: ReturnType<typeof makeLayer>) =>
     Effect.gen(function* () {
       const preview = yield* TrellisPreview.TrellisPreview;
-      const stream = yield* preview.watchServers(threadId, []);
-      if (stream === null) return null;
-      return yield* stream.pipe(Stream.take(1), Stream.runCollect);
+      const [first] = yield* preview
+        .watchServers(threadId, [])
+        .pipe(Stream.take(1), Stream.runCollect);
+      return first ?? null;
     }).pipe(Effect.provide(layer));
 
   it.effect(
@@ -340,9 +344,7 @@ describe("TrellisPreview service", () => {
         const trellisServers = yield* firstServers(
           makeLayer({ workspaceRoot: IDEA, published: [], ports }),
         );
-        expect(trellisServers?.map((servers) => servers.map((server) => server.url))).toEqual([
-          ["http://localhost:8123"],
-        ]);
+        expect(trellisServers?.map((server) => server.url)).toEqual(["http://localhost:8123"]);
         // null: the caller keeps the host scanner's results.
         expect(
           yield* firstServers(makeLayer({ workspaceRoot: "/home/me/code", published: [], ports })),
@@ -353,7 +355,7 @@ describe("TrellisPreview service", () => {
   it.effect("shows no servers, never the host's, when the workspace cannot be asked", () =>
     Effect.gen(function* () {
       // Not running.
-      expect(yield* firstServers(makeLayer({ workspaceRoot: IDEA, published: [] }))).toEqual([[]]);
+      expect(yield* firstServers(makeLayer({ workspaceRoot: IDEA, published: [] }))).toEqual([]);
       // Its localhost is neither the workspace's nor safely the host's.
       expect(
         yield* firstServers(
@@ -364,7 +366,47 @@ describe("TrellisPreview service", () => {
             ports: { "ws-1": [port(8123, "0.0.0.0")] },
           }),
         ),
-      ).toEqual([[]]);
+      ).toEqual([]);
+    }),
+  );
+
+  it.effect("shares one workspace's port reads between subscribers", () =>
+    Effect.gen(function* () {
+      portCalls.count = 0;
+      const layer = makeLayer({
+        workspaceRoot: IDEA,
+        published: [],
+        ports: { "ws-1": [port(8123, "0.0.0.0")] },
+      });
+      yield* Effect.gen(function* () {
+        const preview = yield* TrellisPreview.TrellisPreview;
+        const first = () =>
+          preview.watchServers(threadId, []).pipe(Stream.take(1), Stream.runCollect);
+        yield* Effect.all([first(), first(), first()], { concurrency: "unbounded" });
+      }).pipe(Effect.provide(layer));
+      expect(portCalls.count).toBe(1);
+    }),
+  );
+
+  it.live("switches source when the thread moves between the host and a workspace", () =>
+    Effect.gen(function* () {
+      const input = {
+        workspaceRoot: "/home/me/code",
+        published: [],
+        ports: { "ws-1": [port(8123, "0.0.0.0")] },
+      };
+      const seen = yield* Effect.gen(function* () {
+        const preview = yield* TrellisPreview.TrellisPreview;
+        return yield* preview.watchServers(threadId, []).pipe(
+          Stream.tap(() => Effect.sync(() => void (input.workspaceRoot = IDEA))),
+          Stream.take(2),
+          Stream.runCollect,
+        );
+      }).pipe(Effect.provide(makeLayer(input)));
+      expect(seen.map((servers) => servers?.map((server) => server.url) ?? null)).toEqual([
+        null,
+        ["http://localhost:8123"],
+      ]);
     }),
   );
 });

@@ -127,7 +127,7 @@ const TrellisTestLayer = McpHttpServer.PreviewToolkitRegistrationLive.pipe(
           Effect.succeed(url.replace("localhost:8000", "preview.test:30008")),
         resolvePort: (_threadId, input) =>
           Effect.succeed(`http://preview.test:3${String(input.port).padStart(4, "0")}/`),
-        watchServers: () => Effect.succeed(null),
+        watchServers: () => Stream.make(null),
       }),
     ),
   ),
