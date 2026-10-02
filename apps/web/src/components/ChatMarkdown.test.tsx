@@ -1005,6 +1005,48 @@ describe("chat Markdown math", () => {
     );
   });
 
+  it("keeps escaped parentheses in link destinations and autolinks literal", () => {
+    const link = "See [the docs](https://example.com/a_\\(b\\)) and \\(x\\).";
+    const autolink = "<https://example.com/it's\\(v1\\)> then \\(y\\)";
+    const displayThenParen = "\\[z\\](note)";
+
+    expect(normalizeMarkdownMathDelimiters(link)).toBe(
+      "See [the docs](https://example.com/a_\\(b\\)) and $$x$$.",
+    );
+    expect(normalizeMarkdownMathDelimiters(autolink)).toBe(
+      "<https://example.com/it's\\(v1\\)> then $$y$$",
+    );
+    expect(normalizeMarkdownMathDelimiters(displayThenParen)).toBe("$$z$$(note)");
+  });
+
+  it("leaves every URL the parser reads literal, and math elsewhere", () => {
+    const keep = [
+      '[t](https://e/a\\(b\\) "title (")',
+      "[t](<1\\(x\\)(>)",
+      "[t](\n  https://e/a\\(b\\)\n  'multi\n  line')",
+      "[x](\r\n/a\\(b\\)\r\n)",
+      '[ref]: https://e/a\\(b\\) "title \\(x\\)"',
+      "> [ref]: /a\\(b\\)",
+      "[![alt](img)](/a\\(b\\))",
+      "See https://example.com/a\\(b\\) and www.example.com/c\\(d\\)",
+    ];
+    for (const markdown of keep) {
+      expect(normalizeMarkdownMathDelimiters(markdown)).toBe(markdown);
+    }
+    // No link: a lone `](`, the outer brackets around a link, a split paragraph,
+    // and text that only looks like a reference definition.
+    expect(normalizeMarkdownMathDelimiters("](\\(x\\))")).toBe("]($$x$$)");
+    expect(normalizeMarkdownMathDelimiters("[outer [inner](u)](\\(x\\))")).toBe(
+      "[outer [inner](u)]($$x$$)",
+    );
+    expect(normalizeMarkdownMathDelimiters("[\n\n](\\(x\\))")).toBe("[\n\n]($$x$$)");
+    expect(normalizeMarkdownMathDelimiters("[ref]: \\(x\\) trailing text")).toBe(
+      "[ref]: $$x$$ trailing text",
+    );
+    // Math in link text is still math.
+    expect(normalizeMarkdownMathDelimiters("[see \\(x\\)](u)")).toBe("[see $$x$$](u)");
+  });
+
   it("does not mistake indented code for a fenced block", () => {
     const markdown = "    ```\n\\(real math\\)";
 

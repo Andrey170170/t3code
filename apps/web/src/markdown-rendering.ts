@@ -1,3 +1,8 @@
+import type { Nodes } from "mdast";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { gfmFromMarkdown } from "mdast-util-gfm";
+import { gfm } from "micromark-extension-gfm";
+
 function backtickRunLength(markdown: string, offset: number): number {
   let end = offset;
   while (markdown[end] === "`") end += 1;
@@ -13,11 +18,62 @@ function isEscaped(markdown: string, offset: number): boolean {
 }
 
 /**
+ * Source ranges `[start, end)` that are URLs or titles rather than text, as
+ * the Markdown parser (with GFM, as rendering uses) reads them: an inline
+ * link's destination and title (its text stays text), images, autolinks,
+ * GFM's bare-URL autolinks and reference definitions. Sorted by start.
+ */
+function urlRanges(markdown: string): ReadonlyArray<readonly [number, number]> {
+  // Parsed only for messages with both math delimiters and link syntax; the
+  // renderer parses the same text again, so this at most doubles that cost.
+  if (!/[\]<:@]|www\./i.test(markdown)) return [];
+  const tree = fromMarkdown(markdown, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  });
+  const ranges: Array<readonly [number, number]> = [];
+  const visit = (node: Nodes) => {
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (start !== undefined && end !== undefined) {
+      if (node.type === "definition" || node.type === "image") {
+        ranges.push([start, end]);
+        return;
+      }
+      if (node.type === "link") {
+        const textEnd = node.children.at(-1)?.position?.end.offset;
+        // `[text](…)`: everything after the text; otherwise an autolink.
+        ranges.push([markdown[start] === "[" && textEnd !== undefined ? textEnd : start, end]);
+      }
+    }
+    if ("children" in node) for (const child of node.children) visit(child);
+  };
+  visit(tree);
+  return ranges.toSorted((left, right) => left[0] - right[0]);
+}
+
+/**
  * Normalizes the LaTeX delimiters agents commonly emit to remark-math's
- * same-length dollar syntax. Fences, inline code, and HTML tags remain literal,
- * and unmatched delimiters are preserved while a response is streaming.
+ * same-length dollar syntax. Fences, inline code, HTML tags and URLs (see
+ * `urlRanges`) remain literal, and unmatched delimiters are preserved while a
+ * response is streaming.
  */
 export function normalizeMarkdownMathDelimiters(markdown: string): string {
+  // Without a backslash delimiter there is nothing to rewrite, and no parse.
+  if (!/\\[([]/.test(markdown)) return markdown;
+  // The parse runs only when a delimiter appears outside code, so streamed
+  // code full of `\(` (regexes) never pays for it.
+  const unparsed = rewriteMathDelimiters(markdown, []);
+  return unparsed.delimiterOutsideCode
+    ? rewriteMathDelimiters(markdown, urlRanges(markdown)).output
+    : markdown;
+}
+
+function rewriteMathDelimiters(
+  markdown: string,
+  urls: ReadonlyArray<readonly [number, number]>,
+): { readonly output: string; readonly delimiterOutsideCode: boolean } {
+  let delimiterOutsideCode = false;
   // Every offset below uses JavaScript's UTF-16 indexing. Keep the mutable
   // buffer on the same indexing model so astral characters before math do not
   // shift delimiter writes.
@@ -29,6 +85,7 @@ export function normalizeMarkdownMathDelimiters(markdown: string): string {
   let pending: { offset: number; close: ")" | "]" } | null = null;
   let lineStart = 0;
   let fenceMarkerLineEnd = 0;
+  let nextUrl = 0;
 
   for (let index = 0; index < markdown.length; index += 1) {
     const character = markdown[index];
@@ -84,6 +141,9 @@ export function normalizeMarkdownMathDelimiters(markdown: string): string {
       continue;
     }
 
+    if (character === "\\" && (markdown[index + 1] === "(" || markdown[index + 1] === "[")) {
+      delimiterOutsideCode = true;
+    }
     if (insideHtmlTag) {
       if (htmlQuote) {
         if (character === htmlQuote && !isEscaped(markdown, index)) htmlQuote = null;
@@ -92,6 +152,12 @@ export function normalizeMarkdownMathDelimiters(markdown: string): string {
       } else if (character === ">") {
         insideHtmlTag = false;
       }
+      continue;
+    }
+    while (nextUrl < urls.length && urls[nextUrl]![1] <= index) nextUrl += 1;
+    const url = urls[nextUrl];
+    if (url !== undefined && url[0] <= index) {
+      index = url[1] - 1;
       continue;
     }
     if (character === "<" && /[A-Za-z!/?]/.test(markdown[index + 1] ?? "")) {
@@ -116,5 +182,5 @@ export function normalizeMarkdownMathDelimiters(markdown: string): string {
     }
   }
 
-  return output.join("");
+  return { output: output.join(""), delimiterOutsideCode };
 }
