@@ -157,7 +157,13 @@ export const TrellisTrashView = Schema.Struct({
 });
 export type TrellisTrashView = typeof TrellisTrashView.Type;
 
-const TrellisStatusView = Schema.Struct({ root: Schema.String });
+const TrellisStatusView = Schema.Struct({
+  root: Schema.String,
+  /** Absent from Trellis versions before agent homes were configurable. */
+  agent_homes: Schema.optional(
+    Schema.Struct({ claude: Schema.NullOr(Schema.String), codex: Schema.NullOr(Schema.String) }),
+  ),
+});
 
 /** A service a fork started (`POST /v1/fork {services}`), not yet ready. */
 export const TrellisStartedService = Schema.Struct({
@@ -280,15 +286,29 @@ const TrellisBasesView = Schema.Struct({
   default_base: Schema.optional(Schema.String),
 });
 
+const sameAgentHomes = (a: TrellisAgentHomes | undefined, b: TrellisAgentHomes | undefined) =>
+  a?.claude === b?.claude && a?.codex === b?.codex && (a === undefined) === (b === undefined);
+
 /** Trellis refuses a turn message older than one it applied (409). */
 export const isStaleTurnMessage = (error: TrellisError) =>
   /^turn message -?\d+ is older than one already applied/.test(error.message);
+
+/**
+ * Host paths of the Claude and Codex homes Trellis mounts into workspaces;
+ * null for a provider whose home it does not mount.
+ */
+export interface TrellisAgentHomes {
+  readonly claude: string | null;
+  readonly codex: string | null;
+}
 
 /** Enabled Trellis state. `shimDir` is null when provider shims could not be created. */
 export interface TrellisEnv {
   readonly root: string;
   readonly bin: string;
   readonly shimDir: string | null;
+  /** Absent when Trellis does not report them: it then mounts `~/.claude` and `~/.codex`. */
+  readonly agentHomes?: TrellisAgentHomes;
 }
 
 /** See `TrellisState` in the contracts. */
@@ -817,6 +837,8 @@ const make = Effect.gen(function* () {
       return null;
     }
     if (previous === null) connects += 1;
+    const agentHomes: Partial<Pick<TrellisEnv, "agentHomes">> =
+      status.value.agent_homes === undefined ? {} : { agentHomes: status.value.agent_homes };
     // A failed shim setup is retried at most once a minute.
     const now = yield* Clock.currentTimeMillis;
     if (
@@ -824,7 +846,12 @@ const make = Effect.gen(function* () {
       previous.root === status.value.root &&
       (previous.shimDir !== null || now - lastShimAttemptMs < 60_000)
     ) {
-      return previous;
+      // A restarted Trellis may mount other homes under the same root.
+      if (sameAgentHomes(previous.agentHomes, agentHomes.agentHomes)) return previous;
+      const { agentHomes: _previousHomes, ...rest } = previous;
+      const updated: TrellisEnv = { ...rest, ...agentHomes };
+      yield* Ref.set(state, updated);
+      return updated;
     }
     lastShimAttemptMs = now;
     const known = yield* Ref.get(knownRoots);
@@ -843,6 +870,7 @@ const make = Effect.gen(function* () {
       root: status.value.root,
       bin,
       shimDir: yield* ensureShims,
+      ...agentHomes,
     };
     yield* Effect.logInfo("Trellis is available", { root: next.root, shimDir: next.shimDir });
     yield* Ref.set(state, next);

@@ -1,3 +1,5 @@
+import * as NodeOS from "node:os";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -42,6 +44,9 @@ const thread = (input: {
     interactionMode: "default",
     worktreePath: input.worktreePath ?? null,
   }) as OrchestrationV2AppThread;
+
+const codexRefusal = (home: string) =>
+  TrellisRuntimePolicy.trellisHomeRefusal("Codex", home, `${NodeOS.homedir()}/.codex`);
 
 const resolve = (input: {
   readonly instance: string;
@@ -261,7 +266,14 @@ describe("TrellisRuntimePolicy", () => {
           },
         }),
       );
-      assert.equal(claudeHome, TrellisRuntimePolicy.TRELLIS_CUSTOM_HOME_MESSAGE);
+      assert.equal(
+        claudeHome,
+        TrellisRuntimePolicy.trellisHomeRefusal(
+          "Claude",
+          "/srv/claude-work",
+          `${NodeOS.homedir()}/.claude`,
+        ),
+      );
       const managedCodex = yield* refusal(
         resolve({
           instance: "codex",
@@ -291,7 +303,7 @@ describe("TrellisRuntimePolicy", () => {
           },
         }),
       );
-      assert.equal(instanceEnvHome, TrellisRuntimePolicy.TRELLIS_CUSTOM_HOME_MESSAGE);
+      assert.equal(instanceEnvHome, codexRefusal("/srv/codex-work"));
       // Duplicate entries: the last one is the one the provider starts with.
       const codexWith = (values: ReadonlyArray<string>) =>
         resolve({
@@ -312,7 +324,7 @@ describe("TrellisRuntimePolicy", () => {
         });
       assert.equal(
         yield* refusal(codexWith(["~/.codex", "/srv/codex-work"])),
-        TrellisRuntimePolicy.TRELLIS_CUSTOM_HOME_MESSAGE,
+        codexRefusal("/srv/codex-work"),
       );
       const { policy: lastDefault } = yield* codexWith(["/srv/codex-work", "~/.codex"]);
       assert.equal(lastDefault.launch?.sessionKey, "ws-1");
@@ -320,7 +332,85 @@ describe("TrellisRuntimePolicy", () => {
       const inheritedHome = yield* refusal(
         resolve({ instance: "claudeAgent", projectRoot: idea }),
       ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
-      assert.equal(inheritedHome, TrellisRuntimePolicy.TRELLIS_CUSTOM_HOME_MESSAGE);
+      assert.equal(
+        inheritedHome,
+        TrellisRuntimePolicy.trellisHomeRefusal(
+          "Claude",
+          "/srv/claude-inherited",
+          `${NodeOS.homedir()}/.claude`,
+        ),
+      );
+    }),
+  );
+
+  it.effect("accepts exactly the provider homes Trellis reports as mounted", () =>
+    Effect.gen(function* () {
+      const devHomes: TrellisEnv = {
+        ...env,
+        agentHomes: { claude: "/trellis/dev/homes/claude", codex: "/trellis/dev/homes/codex" },
+      };
+      const claudeAt = (homePath: string | undefined, trellisEnv: TrellisEnv) =>
+        resolve({
+          instance: "claudeAgent",
+          projectRoot: idea,
+          trellisEnv,
+          providerInstances: {
+            providerInstances: {
+              [ProviderInstanceId.make("claudeAgent")]: {
+                driver: ProviderDriverKind.make("claudeAgent"),
+                config: homePath === undefined ? {} : { homePath },
+              },
+            },
+          },
+        });
+      // The reported home runs, through a symlink to it too.
+      const { policy } = yield* claudeAt("/trellis/dev/homes/claude", devHomes);
+      assert.equal(policy.launch?.sessionKey, "ws-1");
+      const { policy: aliased } = yield* resolve({
+        instance: "claudeAgent",
+        projectRoot: idea,
+        trellisEnv: devHomes,
+        aliases: { "/srv/claude-link": "/trellis/dev/homes/claude" },
+        providerInstances: {
+          providerInstances: {
+            [ProviderInstanceId.make("claudeAgent")]: {
+              driver: ProviderDriverKind.make("claudeAgent"),
+              config: { homePath: "/srv/claude-link" },
+            },
+          },
+        },
+      });
+      assert.equal(aliased.launch?.sessionKey, "ws-1");
+      // The default home is refused when Trellis mounts another one.
+      assert.equal(
+        yield* refusal(claudeAt(undefined, devHomes)),
+        TrellisRuntimePolicy.trellisHomeRefusal(
+          "Claude",
+          `${NodeOS.homedir()}/.claude`,
+          "/trellis/dev/homes/claude",
+        ),
+      );
+      const { policy: codex } = yield* resolve({
+        instance: "codex",
+        projectRoot: idea,
+        trellisEnv: devHomes,
+        providerInstances: {
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              environment: [
+                { name: "CODEX_HOME", value: "/trellis/dev/homes/codex", sensitive: false },
+              ],
+            },
+          },
+        },
+      });
+      assert.equal(codex.launch?.sessionKey, "ws-1");
+      // A provider whose home Trellis does not mount cannot run at all.
+      const unmounted = yield* refusal(
+        claudeAt(undefined, { ...env, agentHomes: { claude: null, codex: "/home/me/.codex" } }),
+      );
+      assert.include(unmounted, "Trellis mounts no Claude home");
     }),
   );
 

@@ -99,7 +99,7 @@ send "Create clock.py here that prints the current time in green using rich, run
 R3=$(wait_run "$IDEA_THREAD" 3 400)
 shot 01-idea-three-turns
 SID=$(native_session "$IDEA_THREAD")
-TRANSCRIPT_A="$HOME/.claude/projects/$(slug "$IDEA_PATH")/$SID.jsonl"
+TRANSCRIPT_A="$CLAUDE_HOME/projects/$(slug "$IDEA_PATH")/$SID.jsonl"
 THINKING_A=$(thinking_of "$TRANSCRIPT_A")
 {
   echo "thread $IDEA_THREAD runs: $R1 $R2 $R3; idea $IDEA_PATH; session $SID"
@@ -141,7 +141,7 @@ send "Which six-letter word did you pick at the very start of this conversation?
 RECALL=$(wait_new_run_done "$IDEA_THREAD" "$N" 300)
 WORD=$(last_reply "$IDEA_THREAD" | tr -cd 'a-zA-Z' | tr 'A-Z' 'a-z')
 shot 03-recall
-TRANSCRIPT_B="$HOME/.claude/projects/$(slug "$PROJECT_PATH")/$SID.jsonl"
+TRANSCRIPT_B="$CLAUDE_HOME/projects/$(slug "$PROJECT_PATH")/$SID.jsonl"
 FIRST_REPLY=$(assistant_texts "$IDEA_THREAD" | head -1)
 {
   echo "recall run: $RECALL; word: $WORD; same session $SID"

@@ -35,8 +35,14 @@ name, is never replaced.
 
 Codex and Claude threads in a Trellis project run inside its workspace; other providers are refused
 there. Git worktrees are not available in Trellis projects, since they would run outside the
-workspace: use a Trellis fork for parallel work instead. Instances with a custom provider home
-directory cannot run Trellis threads.
+workspace: use a Trellis fork for parallel work instead.
+
+Workspaces see the Claude and Codex homes Trellis mounts into them (by default `~/.claude` and
+`~/.codex`; Trellis's `config.json` can name others, and `trellis status` lists them). A Trellis
+thread runs only with a provider instance whose home, from its settings or `CLAUDE_CONFIG_DIR` and
+`CODEX_HOME`, is the mounted one; otherwise the turn fails and names both homes. To run Trellis
+threads from other homes, set the instance's home path to the one Trellis mounts. Codex instances
+with a shadow home or a managed ChatGPT connection cannot run Trellis threads.
 
 A terminal opened in a Trellis project is a shell inside the workspace, at the same path you see on
 the host.
