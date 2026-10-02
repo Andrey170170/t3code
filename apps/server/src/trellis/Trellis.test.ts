@@ -229,6 +229,33 @@ describe("Trellis client", () => {
     }),
   );
 
+  it.effect("follows the agent homes Trellis reports, also across a restart", () =>
+    Effect.gen(function* () {
+      let agentHomes: unknown = { claude: "/dev/homes/claude", codex: null };
+      const harness = setup(({ url }) =>
+        url === "/v1/status"
+          ? { body: { root: "/trellis", role: "user", agent_homes: agentHomes } }
+          : { body: [] },
+      );
+      const layer = yield* Effect.promise(() => harness.listen());
+      const homes = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        const first = (yield* trellis.refresh)?.agentHomes;
+        agentHomes = { claude: "/home/me/.claude", codex: "/home/me/.codex" };
+        const second = (yield* trellis.refresh)?.agentHomes;
+        // An older Trellis reports none: the default homes are assumed.
+        agentHomes = undefined;
+        const third = (yield* trellis.refresh)?.agentHomes;
+        return { first, second, third };
+      }).pipe(Effect.provide(layer));
+      expect(homes).toEqual({
+        first: { claude: "/dev/homes/claude", codex: null },
+        second: { claude: "/home/me/.claude", codex: "/home/me/.codex" },
+        third: undefined,
+      });
+    }),
+  );
+
   it.effect("tells a checkpoint refused before the stop from one that failed after it", () =>
     Effect.gen(function* () {
       const bodies = [

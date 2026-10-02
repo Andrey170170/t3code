@@ -13,7 +13,8 @@
 # /trellis/dev-t3; it must be a /trellis/dev-* root with the `dev` base),
 # playwright-cli with a cached Chromium, Codex and Claude logins, `vp i` done
 # in this checkout. It starts its own dev T3 with a fresh home in a temporary
-# directory and stops only the processes it started. Costs a few Haiku turns
+# directory, its providers using the Claude and Codex homes the dev root
+# mounts, and stops only the processes it started. Costs a few Haiku turns
 # and a few Codex turns.
 set -uo pipefail
 
@@ -55,6 +56,30 @@ for path in "${TRELLIS_SOCKET:-}" "${TRELLIS_BIN:-}"; do
 done
 export TRELLIS_ROOT TRELLIS_SOCKET
 HOST_NAME=$(hostname)
+
+# The provider homes the dev root mounts into its workspaces (`agent_homes`
+# in /v1/status; an older Trellis reports none and mounts ~/.claude and
+# ~/.codex). The dev T3 and its providers use the same homes, so T3 reads the
+# transcripts the workspaces write and Trellis threads are not refused.
+STATUS_JSON=$(curl -sf --unix-socket "$TRELLIS_SOCKET" http://trellis/v1/status) ||
+  die "Trellis at $TRELLIS_SOCKET did not answer /v1/status (is the dev root up?)"
+CLAUDE_HOME=$(jq -r --arg d "$HOME/.claude" 'if has("agent_homes") then .agent_homes.claude // "" else $d end' <<<"$STATUS_JSON")
+CODEX_HOME_DIR=$(jq -r --arg d "$HOME/.codex" 'if has("agent_homes") then .agent_homes.codex // "" else $d end' <<<"$STATUS_JSON")
+[[ -n $CLAUDE_HOME && -n $CODEX_HOME_DIR ]] ||
+  die "$TRELLIS_DEV_ROOT mounts no Claude or no Codex home: $(jq -c .agent_homes <<<"$STATUS_JSON")"
+# The dev runner fills unset variables from the repository's env files, which
+# would give the providers other homes than the ones checked here.
+# Parsed as the runner parses them (util.parseEnv).
+node -e 'const fs = require("node:fs"), util = require("node:util");
+for (const file of process.argv.slice(1)) {
+  if (!fs.existsSync(file)) continue;
+  const env = util.parseEnv(fs.readFileSync(file, "utf8"));
+  if ("CLAUDE_CONFIG_DIR" in env || "CODEX_HOME" in env) process.exit(1);
+}' "$REPO/.env" "$REPO/.env.local" ||
+  die "$REPO/.env or .env.local sets CLAUDE_CONFIG_DIR or CODEX_HOME; remove them for the demo"
+unset CLAUDE_CONFIG_DIR CODEX_HOME
+[[ $CLAUDE_HOME == "$HOME/.claude" ]] || export CLAUDE_CONFIG_DIR=$CLAUDE_HOME
+[[ $CODEX_HOME_DIR == "$HOME/.codex" ]] || export CODEX_HOME=$CODEX_HOME_DIR
 
 log() { printf '[%s] %s\n' "$(date +%T)" "$*" | tee -a "$OUT/demo.log" >&2; }
 tr_() { "$TRELLIS_BIN" "$@"; }
@@ -724,7 +749,7 @@ echo "A=$IDEA_PATH B=$B_PATH shim=$SPIKE_SHIM" >"$OUT/11-recall-spike.log"
   >>"$OUT/11-recall-spike.log" 2>&1
 SPIKE_RC=$?
 SPIKE_B=$B_PATH
-SLUG_DIR=$HOME/.claude/projects/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$SPIKE_B")
+SLUG_DIR=$CLAUDE_HOME/projects/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$SPIKE_B")
 {
   echo "--- transcripts the run wrote beside B ($SLUG_DIR)"
   find "$SLUG_DIR" -maxdepth 1 -name '*.jsonl' -newermt "@$SPIKE_START" -printf '%T@ %p\n' | sort -n | while read -r _ f; do

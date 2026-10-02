@@ -47,6 +47,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import {
   TRELLIS_DISABLED_MESSAGE,
   Trellis,
+  type TrellisAgentHomes,
   type TrellisEnv,
   trellisRootOf,
   trellisWorkspaceOf,
@@ -62,8 +63,21 @@ export const TRELLIS_OUTSIDE_WORKSPACE_MESSAGE =
 const TRELLIS_LANDING_PAD_MESSAGE =
   "This new idea has no folder yet: send its first message from T3 Code, which creates the idea.";
 
-export const TRELLIS_CUSTOM_HOME_MESSAGE =
-  "Trellis workspaces mount only the default ~/.claude and ~/.codex, so a provider instance with a custom home or config directory cannot run inside them yet. Use an instance with the default home for this project.";
+/**
+ * Refusal for a provider instance whose home Trellis does not mount: the
+ * provider would run in the workspace without its login and history.
+ */
+export const trellisHomeRefusal = (
+  provider: "Claude" | "Codex",
+  home: string,
+  mounted: string | null,
+): string =>
+  mounted === null
+    ? `Trellis mounts no ${provider} home into its workspaces, so ${provider} cannot run inside them. Configure the ${provider} home in Trellis's config.json.`
+    : `This ${provider} instance uses the home ${home}, but Trellis mounts ${mounted} into its workspaces. Use an instance whose home is ${mounted} for this project, or change the home Trellis mounts.`;
+
+const TRELLIS_SHADOW_HOME_MESSAGE =
+  "A Codex instance with a shadow home cannot run inside Trellis workspaces, which mount only the Codex home itself. Use an instance without a shadow home for this project.";
 
 export const TRELLIS_NESTED_WORKSPACE_MESSAGE =
   "TRELLIS_WORKSPACE is set in this server's or provider's environment (is T3 itself running inside a Trellis workspace?), so the Trellis shim would run the provider on the host. Unset it for this server or provider instance.";
@@ -174,46 +188,61 @@ const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 
 /**
  * Why a provider instance cannot run inside a workspace, or null. The
- * container mounts only the default provider homes at their host paths, so a
- * home set in the instance settings, the instance environment or the
- * environment the server inherited is refused; so is an inherited
- * `TRELLIS_WORKSPACE`, which makes the shim fall back to the host.
+ * container mounts the provider homes Trellis reports (`agentHomes`; the
+ * defaults when it reports none) at their host paths, so the home the
+ * provider is given (its settings, home-expanded and resolved as the adapters
+ * do, then its environment merged over the server's, passed as is, then the
+ * default) must be the mounted path: a symlink to it, or an environment value
+ * with a literal `~`, a relative path or another spelling of it may not exist
+ * in the container. An inherited `TRELLIS_WORKSPACE` is refused too, as
+ * it makes the shim fall back to the host.
  */
 function instanceLaunchRefusal(
   driverKind: string,
   instance: ProviderInstanceConfig | undefined,
   homeDir: string,
   hostEnvironment: NodeJS.ProcessEnv,
+  agentHomes: TrellisAgentHomes | undefined,
 ): string | null {
-  const isCustomHome = (value: string | undefined, defaultDir: string) =>
-    value !== undefined &&
-    value.trim().length > 0 &&
-    NodePath.resolve(expandHomePath(value.trim())) !== NodePath.join(homeDir, defaultDir);
-  // The environment the provider starts with: the instance's merged over the inherited one.
+  // The environment the provider starts with: the instance's merged over the
+  // inherited one (instance values are home-expanded, inherited ones are not).
   const environment = mergeProviderInstanceEnvironment(instance?.environment, hostEnvironment);
-  const environmentValue = (name: string) => environment[name];
   // The shim runs the host binary whenever this is set, even empty.
-  if (environmentValue("TRELLIS_WORKSPACE") !== undefined) {
+  if (environment.TRELLIS_WORKSPACE !== undefined) {
     return TRELLIS_NESTED_WORKSPACE_MESSAGE;
   }
+  const homeOf = (configured: string | undefined, variable: string, defaultDir: string) => {
+    if (configured !== undefined && configured.trim().length > 0) {
+      return NodePath.resolve(expandHomePath(configured.trim()));
+    }
+    const value = environment[variable];
+    return value === undefined || value.length === 0 ? NodePath.join(homeDir, defaultDir) : value;
+  };
+  const check = (provider: "Claude" | "Codex", home: string, mounted: string | null) =>
+    mounted !== null && (home === mounted || home === NodePath.resolve(mounted))
+      ? null
+      : trellisHomeRefusal(provider, home, mounted);
   if (driverKind === "codex") {
     const config = decodeCodexSettings(instance?.config ?? {});
     if (Option.isSome(config) && config.value.setupMode === "managed") {
       return TRELLIS_MANAGED_CODEX_MESSAGE;
     }
-    const custom =
-      (Option.isSome(config) &&
-        (isCustomHome(config.value.homePath, ".codex") ||
-          config.value.shadowHomePath.trim().length > 0)) ||
-      isCustomHome(environmentValue("CODEX_HOME"), ".codex");
-    return custom ? TRELLIS_CUSTOM_HOME_MESSAGE : null;
+    if (Option.isSome(config) && config.value.shadowHomePath.trim().length > 0) {
+      return TRELLIS_SHADOW_HOME_MESSAGE;
+    }
+    return check(
+      "Codex",
+      homeOf(Option.getOrUndefined(config)?.homePath, "CODEX_HOME", ".codex"),
+      agentHomes === undefined ? NodePath.join(homeDir, ".codex") : agentHomes.codex,
+    );
   }
   if (driverKind === "claudeAgent") {
     const config = decodeClaudeSettings(instance?.config ?? {});
-    const custom =
-      (Option.isSome(config) && isCustomHome(config.value.homePath, ".claude")) ||
-      isCustomHome(environmentValue("CLAUDE_CONFIG_DIR"), ".claude");
-    return custom ? TRELLIS_CUSTOM_HOME_MESSAGE : null;
+    return check(
+      "Claude",
+      homeOf(Option.getOrUndefined(config)?.homePath, "CLAUDE_CONFIG_DIR", ".claude"),
+      agentHomes === undefined ? NodePath.join(homeDir, ".claude") : agentHomes.claude,
+    );
   }
   return null;
 }
@@ -293,6 +322,7 @@ export const layer: Layer.Layer<
           deriveProviderInstanceConfigMap(settings)[input.modelSelection.instanceId],
           NodeOS.homedir(),
           process.env,
+          env?.agentHomes,
         );
         if (homeRefusal !== null) return yield* refuse(homeRefusal);
 
