@@ -2,23 +2,40 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, TrellisTrashItem } from "@t3tools/contracts";
-import { LightbulbIcon, SproutIcon, TrashIcon } from "lucide-react";
-import { useState } from "react";
+import type { EnvironmentId, TrellisDetails, TrellisTrashItem } from "@t3tools/contracts";
+import { formatDuration } from "@t3tools/shared/usageLimits";
+import {
+  ActivityIcon,
+  AlertTriangleIcon,
+  BoxesIcon,
+  LightbulbIcon,
+  SproutIcon,
+  TrashIcon,
+} from "lucide-react";
+import { type ReactNode, useState } from "react";
 
 import { useTrellisStatusFor } from "../../hooks/useTrellis";
+import { cn } from "../../lib/utils";
 import { readLocalApi } from "../../localApi";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { refreshTrellisStatus, trellisEnvironment } from "../../state/trellis";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { RefreshIcon } from "../ui/refresh-icon";
 import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
+import {
+  formatBytes,
+  staleDetailsNotice,
+  trellisVersionText,
+  workspaceLabel,
+} from "./TrellisSettings.logic";
 import { SettingsScopeNotice } from "./SettingsScopeNotice";
 import { useSettingsScope } from "./SettingsScopeContext";
 
@@ -58,6 +75,9 @@ function trashItemNotes(
   return notes.length === 0 ? null : notes.join(" · ");
 }
 
+/** A search anchor id as a prop, or none. */
+const idProp = (id: string | undefined) => (id === undefined ? {} : { id });
+
 const KIND_LABELS: Readonly<Record<TrellisTrashItem["kind"], string>> = {
   idea: "Idea",
   project: "Project",
@@ -65,8 +85,9 @@ const KIND_LABELS: Readonly<Record<TrellisTrashItem["kind"], string>> = {
 };
 
 /**
- * Trellis settings of each selected environment: the integration switch, its
- * connection state, and the Trellis trash with restore.
+ * Trellis settings of each selected environment: the integration switch, the
+ * service's status, its bases, and the Trellis trash with restore. Each topic
+ * is its own section, so more (previews, history) slot in beside them.
  */
 export function TrellisSettingsPanel() {
   const { connectedEnvironments, scope } = useSettingsScope();
@@ -103,6 +124,7 @@ export function TrellisSettingsPanel() {
 
 function TrellisEnvironmentSettings(props: {
   readonly environmentId: EnvironmentId;
+  /** Shown above the environment's sections when several are selected. */
   readonly label: string | null;
   readonly enabled: boolean;
   /** The first environment carries the search anchors. */
@@ -115,8 +137,8 @@ function TrellisEnvironmentSettings(props: {
     reportFailure: false,
   });
   const [saving, setSaving] = useState(false);
-  const integration = searchableSetting("trellis-integration");
-  const trash = searchableSetting("trellis-trash");
+  const anchor = (id: Parameters<typeof searchableSetting>[0]) =>
+    props.anchors ? searchableSetting(id).id : undefined;
 
   const setEnabled = async (next: boolean) => {
     setSaving(true);
@@ -146,21 +168,24 @@ function TrellisEnvironmentSettings(props: {
   const socketPath = statusQuery.data?.socketPath ?? null;
   const statusText =
     state === "disabled"
-      ? "Off. T3 does not contact Trellis on this environment."
+      ? "Off. Existing Trellis projects keep their conversations, but their agents do not run."
       : state === "ready"
         ? `Connected${status?.root ? ` · workspaces in ${status.root}` : ""}.`
         : `On, but Trellis is not answering${socketPath ? ` at ${socketPath}` : ""}. Start it with \`trellis serve\`.`;
 
   return (
     <>
+      {label === null ? null : (
+        <h2 className="px-3 pt-2 text-base font-medium text-foreground sm:px-4">{label}</h2>
+      )}
       <SettingsSection
-        {...(props.anchors ? { id: integration.id } : {})}
-        title={label === null ? "Trellis" : `Trellis · ${label}`}
+        {...idProp(anchor("trellis-integration"))}
+        title="Trellis"
         icon={<SproutIcon className="size-3.5" />}
       >
         <SettingsRow
           title="Use Trellis workspaces"
-          description="Ideas and Trellis projects run in isolated workspaces with snapshots. While off, existing Trellis projects keep their conversations, but their agents do not run."
+          description="Ideas and Trellis projects run in isolated workspaces with snapshots."
           status={statusText}
           control={
             <Switch
@@ -173,10 +198,260 @@ function TrellisEnvironmentSettings(props: {
         />
       </SettingsSection>
       {state === "ready" ? (
-        <TrellisTrashSection
-          environmentId={environmentId}
-          title={label === null ? trash.title : `${trash.title} · ${label}`}
-          {...(props.anchors ? { id: trash.id } : {})}
+        <>
+          <TrellisDetailsSections
+            environmentId={environmentId}
+            statusId={anchor("trellis-status")}
+            basesId={anchor("trellis-bases")}
+          />
+          <TrellisTrashSection
+            environmentId={environmentId}
+            title="Trash"
+            id={anchor("trellis-trash")}
+          />
+        </>
+      ) : null}
+    </>
+  );
+}
+
+/** A read-only value in a settings row's control slot. */
+function Value(props: { readonly children: ReactNode; readonly mono?: boolean }) {
+  return (
+    <span
+      className={cn(
+        "min-w-0 truncate text-sm text-muted-foreground @min-[32rem]/settings-row:text-right",
+        props.mono === true && "font-mono text-xs",
+      )}
+    >
+      {props.children}
+    </span>
+  );
+}
+
+const UNKNOWN = "Not reported";
+
+/**
+ * The service's status and bases, from one `/v1/status` read. Older Trellis
+ * versions report little beyond the root; their rows read "Not reported".
+ * Trellis does not report its preview host, so it is not shown.
+ */
+function TrellisDetailsSections(props: {
+  readonly environmentId: EnvironmentId;
+  readonly statusId: string | undefined;
+  readonly basesId: string | undefined;
+}) {
+  const { environmentId } = props;
+  const detailsQuery = useEnvironmentQuery(
+    trellisEnvironment.details({ environmentId, input: {} }),
+  );
+  const details = detailsQuery.data;
+  const refreshing = detailsQuery.isPending;
+  // A failed refresh keeps the last details; they must not look current.
+  const staleNotice = staleDetailsNotice({
+    hasData: details !== null,
+    error: detailsQuery.error,
+    updatedAt: detailsQuery.dataUpdatedAt,
+  });
+
+  const refresh = () => {
+    detailsQuery.refresh();
+    refreshTrellisStatus(appAtomRegistry, environmentId);
+  };
+
+  return (
+    <>
+      <SettingsSection
+        {...idProp(props.statusId)}
+        title="Service"
+        icon={<ActivityIcon className="size-3.5" />}
+        headerAction={
+          <Button
+            size="icon-xs"
+            variant="ghost-muted"
+            aria-label="Refresh Trellis status"
+            disabled={refreshing}
+            onClick={refresh}
+          >
+            <RefreshIcon refreshing={refreshing} />
+          </Button>
+        }
+      >
+        {details === null ? (
+          <SettingsRow
+            title={
+              <span className="inline-flex items-center gap-2">
+                {refreshing ? <Spinner size="sm" tone="muted" /> : null}
+                {refreshing ? "Asking Trellis" : "Could not read the Trellis status"}
+              </span>
+            }
+            description={detailsQuery.error ?? undefined}
+          />
+        ) : (
+          <>
+            {staleNotice === null ? null : (
+              <SettingsRow
+                title={<WarningTitle>Status may be out of date</WarningTitle>}
+                description={staleNotice}
+              />
+            )}
+            <TrellisStatusRows details={details} />
+          </>
+        )}
+      </SettingsSection>
+      {details === null ? null : (
+        <SettingsSection
+          {...idProp(props.basesId)}
+          title="Bases"
+          icon={<BoxesIcon className="size-3.5" />}
+        >
+          <TrellisBaseRows bases={details.bases} defaultBase={details.defaultBase} />
+        </SettingsSection>
+      )}
+    </>
+  );
+}
+
+function TrellisStatusRows({ details }: { readonly details: TrellisDetails }) {
+  const running = details.runningWorkspaces;
+  const restartNeeded = details.restartNeeded ?? [];
+  const homes = details.agentHomes;
+  return (
+    <>
+      <SettingsRow
+        title="Version"
+        control={
+          trellisVersionText(details) === null ? (
+            <Value>{UNKNOWN}</Value>
+          ) : (
+            <Value mono>{trellisVersionText(details)}</Value>
+          )
+        }
+      />
+      <SettingsRow
+        title="Uptime"
+        control={
+          <Value>
+            {details.uptimeSecs === null ? UNKNOWN : formatDuration(details.uptimeSecs * 1000)}
+          </Value>
+        }
+      />
+      <SettingsRow
+        title="Free space"
+        control={
+          <Value>
+            {details.disk === null
+              ? UNKNOWN
+              : `${formatBytes(details.disk.freeBytes)} of ${formatBytes(details.disk.totalBytes)}`}
+          </Value>
+        }
+      />
+      <SettingsRow
+        title="Running workspaces"
+        description={
+          running === null || running.length === 0
+            ? undefined
+            : running.map(workspaceLabel).join(", ")
+        }
+        control={
+          <Value>
+            {running === null ? "Unknown" : running.length === 0 ? "None" : running.length}
+          </Value>
+        }
+      />
+      {restartNeeded.length === 0 ? null : (
+        <SettingsRow
+          title={<WarningTitle>Workspaces needing a restart</WarningTitle>}
+          description="They run with an older mount layout or Trellis binary until they restart."
+          status={restartNeeded.map((entry) => (
+            <span key={entry.id} className="block">
+              {`${workspaceLabel(entry)}: ${entry.reason}`}
+            </span>
+          ))}
+          control={<Value>{restartNeeded.length}</Value>}
+        />
+      )}
+      {details.missingProviders.length === 0 ? null : (
+        <SettingsRow
+          title={<WarningTitle>Missing providers</WarningTitle>}
+          description="Not found on the Trellis service's PATH, so they cannot run in workspaces."
+          control={<Value mono>{details.missingProviders.join(", ")}</Value>}
+        />
+      )}
+      {details.pendingOperations.length === 0 ? null : (
+        <SettingsRow
+          title={<WarningTitle>Unfinished operations</WarningTitle>}
+          description="Journaled operations an interruption left unfinished."
+          status={details.pendingOperations
+            .map((operation) =>
+              operation.target === null ? operation.kind : `${operation.kind} ${operation.target}`,
+            )
+            .join(", ")}
+          control={<Value>{details.pendingOperations.length}</Value>}
+        />
+      )}
+      <SettingsRow
+        title="Agent homes"
+        description={homes === null ? undefined : "Provider homes mounted into workspaces."}
+        status={
+          homes === null ? undefined : (
+            <>
+              <span className="block font-mono">Claude: {homes.claude ?? "not mounted"}</span>
+              <span className="block font-mono">Codex: {homes.codex ?? "not mounted"}</span>
+            </>
+          )
+        }
+        control={homes === null ? <Value>{UNKNOWN}</Value> : undefined}
+      />
+    </>
+  );
+}
+
+function WarningTitle({ children }: { readonly children: ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <AlertTriangleIcon className="size-3.5 shrink-0 text-warning" />
+      {children}
+    </span>
+  );
+}
+
+function TrellisBaseRows(props: {
+  readonly bases: ReadonlyArray<string>;
+  readonly defaultBase: string | null;
+}) {
+  const { bases, defaultBase } = props;
+  const defaultMissing = defaultBase !== null && !bases.includes(defaultBase);
+  return (
+    <>
+      {bases.length === 0 && !defaultMissing ? <SettingsRow title="No bases reported" /> : null}
+      {bases.map((base) => (
+        <SettingsRow
+          key={base}
+          title={<span className="font-mono">{base}</span>}
+          description={base === defaultBase ? "New projects start from this base." : undefined}
+          control={
+            base === defaultBase ? (
+              <Badge variant="secondary" size="sm">
+                Default
+              </Badge>
+            ) : null
+          }
+        />
+      ))}
+      {defaultMissing ? (
+        <SettingsRow
+          title={
+            <WarningTitle>
+              <span className="font-mono">{defaultBase}</span>
+            </WarningTitle>
+          }
+          description="The default base is not built, so new projects cannot start from it."
+          control={
+            <Badge variant="warning" size="sm">
+              Default
+            </Badge>
+          }
         />
       ) : null}
     </>
@@ -186,7 +461,7 @@ function TrellisEnvironmentSettings(props: {
 function TrellisTrashSection(props: {
   readonly environmentId: EnvironmentId;
   readonly title: string;
-  readonly id?: string;
+  readonly id: string | undefined;
 }) {
   const { environmentId } = props;
   const trashQuery = useEnvironmentQuery(trellisEnvironment.trash({ environmentId, input: {} }));
@@ -281,7 +556,7 @@ function TrellisTrashSection(props: {
 
   return (
     <SettingsSection
-      {...(props.id === undefined ? {} : { id: props.id })}
+      {...idProp(props.id)}
       title={props.title}
       icon={<TrashIcon className="size-3.5" />}
       headerAction={

@@ -570,6 +570,43 @@ describe("splitFindHits", () => {
   });
 });
 
+describe("nameDetailsWorkspaces", () => {
+  it("names primary workspaces, forks and the scratch workspace; leaves unknown ones unnamed", () => {
+    const details = TrellisCatalog.nameDetailsWorkspaces(
+      {
+        root: ROOT,
+        version: null,
+        commit: null,
+        uptimeSecs: null,
+        bases: [],
+        defaultBase: null,
+        missingProviders: [],
+        agentHomes: null,
+        runningWorkspaces: [
+          { id: "ws-scratch", name: null },
+          { id: "ws-app", name: null },
+          { id: "ws-gone", name: null },
+        ],
+        restartNeeded: [{ id: "ws-fork", name: null, reason: "older binary" }],
+        pendingOperations: [],
+        disk: null,
+      },
+      [
+        idea("idea-1", "Sketch"),
+        dedicated("prj-app", "App", [workspace("ws-app"), workspace("ws-fork", "try-sqlite")]),
+      ],
+    );
+    expect(details.runningWorkspaces).toEqual([
+      { id: "ws-scratch", name: "Ideas" },
+      { id: "ws-app", name: "App" },
+      { id: "ws-gone", name: null },
+    ]);
+    expect(details.restartNeeded).toEqual([
+      { id: "ws-fork", name: "App · try-sqlite", reason: "older binary" },
+    ]);
+  });
+});
+
 describe("trashItems", () => {
   it("folds forks trashed with their project and lists earlier-trashed forks", () => {
     const items = TrellisCatalog.trashItems({

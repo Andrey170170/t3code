@@ -480,3 +480,45 @@ export const TrellisBasesResult = Schema.Struct({
   defaultBase: Schema.NullOr(Schema.String),
 });
 export type TrellisBasesResult = typeof TrellisBasesResult.Type;
+
+/** A Trellis workspace named by id, with its display name when T3 knows its project. */
+export const TrellisWorkspaceRef = Schema.Struct({
+  id: Schema.String,
+  /** The project's name for its primary workspace, `project · fork` for a fork, `Ideas` for the scratch workspace. */
+  name: Schema.NullOr(Schema.String),
+});
+export type TrellisWorkspaceRef = typeof TrellisWorkspaceRef.Type;
+
+/**
+ * The Trellis service as `GET /v1/status` reports it, for the settings page.
+ * Older Trellis versions lack most fields: those read as null (or empty).
+ */
+export const TrellisDetails = Schema.Struct({
+  root: Schema.String,
+  version: Schema.NullOr(Schema.String),
+  /** The build's commit; `-dirty` marks uncommitted changes. */
+  commit: Schema.NullOr(Schema.String),
+  uptimeSecs: Schema.NullOr(Schema.Finite),
+  bases: Schema.Array(Schema.String),
+  /** May name a base that is not built (absent from `bases`). */
+  defaultBase: Schema.NullOr(Schema.String),
+  /** Configured provider CLIs not found on the service's PATH. */
+  missingProviders: Schema.Array(Schema.String),
+  /** Host paths of the provider homes mounted into workspaces; null when not reported. */
+  agentHomes: Schema.NullOr(
+    Schema.Struct({ claude: Schema.NullOr(Schema.String), codex: Schema.NullOr(Schema.String) }),
+  ),
+  /** Null when Trellis could not ask podman or does not report them. */
+  runningWorkspaces: Schema.NullOr(Schema.Array(TrellisWorkspaceRef)),
+  /** Running workspaces started with an older mount layout or binary; null when not reported. */
+  restartNeeded: Schema.NullOr(
+    Schema.Array(Schema.Struct({ ...TrellisWorkspaceRef.fields, reason: Schema.String })),
+  ),
+  /** Journaled operations an interruption left unfinished, with the workspace or project they touch. */
+  pendingOperations: Schema.Array(
+    Schema.Struct({ kind: Schema.String, target: Schema.NullOr(Schema.String) }),
+  ),
+  /** The root's filesystem; null when not reported. */
+  disk: Schema.NullOr(Schema.Struct({ freeBytes: Schema.Finite, totalBytes: Schema.Finite })),
+});
+export type TrellisDetails = typeof TrellisDetails.Type;

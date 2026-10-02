@@ -28,6 +28,7 @@ import {
   TRELLIS_LANDING_PAD_PROJECT_ID,
   TrellisError,
   type TrellisBasesResult,
+  type TrellisDetails,
   type TrellisCreateResult,
   type TrellisFindHit,
   type TrellisFindResult,
@@ -176,6 +177,39 @@ export function workerRoots(items: ReadonlyArray<TrellisProjectView>): ReadonlyA
   return desiredProjects(items)
     .filter((entry) => entry.worker)
     .map((entry) => entry.workspaceRoot);
+}
+
+/**
+ * Names the workspaces `details` lists from a catalog listing: the project's
+ * name for its primary workspace, `project · fork` for a fork, `Ideas` for
+ * the scratch workspace. Workspaces the listing lacks stay unnamed.
+ */
+export function nameDetailsWorkspaces(
+  details: TrellisDetails,
+  items: ReadonlyArray<TrellisProjectView>,
+): TrellisDetails {
+  const names = new Map<string, string>();
+  for (const item of items) {
+    for (const workspace of item.workspaces) {
+      names.set(
+        workspace.id,
+        workspace.kind === "scratch"
+          ? "Ideas"
+          : workspace.id === item.workspace_id
+            ? item.name
+            : `${item.name} · ${workspace.name}`,
+      );
+    }
+  }
+  const named = <T extends { readonly id: string }>(entry: T) => ({
+    ...entry,
+    name: names.get(entry.id) ?? null,
+  });
+  return {
+    ...details,
+    runningWorkspaces: details.runningWorkspaces?.map(named) ?? null,
+    restartNeeded: details.restartNeeded?.map(named) ?? null,
+  };
 }
 
 /** `<ws>` when `root` is exactly `<trellis root>/workspaces/<ws>/project`. */
@@ -708,6 +742,8 @@ export class TrellisCatalog extends Context.Service<
     readonly discardFork: (workspaceId: string) => Effect.Effect<boolean, TrellisError>;
     /** The bases a new project (or a graduating idea) can start from. */
     readonly listBases: Effect.Effect<TrellisBasesResult, TrellisError>;
+    /** The Trellis service's status in full, workspaces named from the last sync. */
+    readonly details: Effect.Effect<TrellisDetails, TrellisError>;
     /** The T3 project for a Trellis item just created (a graduation's), made now rather than at the next poll. */
     readonly projectFor: (
       item: TrellisProjectView,
@@ -1841,6 +1877,10 @@ const make = Effect.gen(function* () {
       restoreConflicts(input).pipe(asTrellisError("Could not check the restore")),
     projectFor,
     listBases: requireReady.pipe(Effect.andThen(trellis.bases)),
+    details: requireReady.pipe(
+      Effect.andThen(Effect.all([trellis.details, Ref.get(lastApplied)])),
+      Effect.map(([details, applied]) => nameDetailsWorkspaces(details, applied?.items ?? [])),
+    ),
   });
 });
 

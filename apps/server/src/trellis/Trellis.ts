@@ -19,7 +19,7 @@
 import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 
-import { TrellisError, type TrellisStatus } from "@t3tools/contracts";
+import { type TrellisDetails, TrellisError, type TrellisStatus } from "@t3tools/contracts";
 import {
   isTrellisManagedPath as isSharedTrellisManagedPath,
   trellisWorkspaceIdOf,
@@ -284,6 +284,67 @@ export type TrellisGraduationOutcome =
 const TrellisBasesView = Schema.Struct({
   bases: Schema.optional(Schema.Array(Schema.String)),
   default_base: Schema.optional(Schema.String),
+});
+
+/**
+ * `GET /v1/status` in full, for the settings page. Every field but `root` is
+ * absent from some Trellis version; `restart_needed` from all before Ops 2.
+ */
+const TrellisDetailsView = Schema.Struct({
+  root: Schema.String,
+  version: Schema.optional(Schema.String),
+  commit: Schema.optional(Schema.String),
+  uptime_secs: Schema.optional(Schema.Finite),
+  bases: Schema.optional(Schema.Array(Schema.String)),
+  default_base: Schema.optional(Schema.NullOr(Schema.String)),
+  missing_providers: Schema.optional(Schema.Array(Schema.String)),
+  agent_homes: Schema.optional(
+    Schema.Struct({ claude: Schema.NullOr(Schema.String), codex: Schema.NullOr(Schema.String) }),
+  ),
+  running_workspaces: Schema.optional(Schema.NullOr(Schema.Array(Schema.String))),
+  restart_needed: Schema.optional(
+    Schema.NullOr(Schema.Array(Schema.Struct({ workspace: Schema.String, reason: Schema.String }))),
+  ),
+  pending_operations: Schema.optional(
+    Schema.Array(Schema.Struct({ kind: Schema.String, data: Schema.optional(Schema.Unknown) })),
+  ),
+  disk: Schema.optional(
+    Schema.NullOr(Schema.Struct({ free_bytes: Schema.Finite, total_bytes: Schema.Finite })),
+  ),
+});
+
+/** The workspace (`ws`) or project a pending operation's journal data names. */
+function pendingTarget(data: unknown): string | null {
+  for (const key of ["ws", "project"]) {
+    if (Predicate.hasProperty(data, key) && typeof data[key] === "string") return data[key];
+  }
+  return null;
+}
+
+const toDetails = (view: typeof TrellisDetailsView.Type): TrellisDetails => ({
+  root: view.root,
+  version: view.version ?? null,
+  commit: view.commit ?? null,
+  uptimeSecs: view.uptime_secs ?? null,
+  bases: view.bases ?? [],
+  defaultBase: view.default_base ?? null,
+  missingProviders: view.missing_providers ?? [],
+  agentHomes: view.agent_homes ?? null,
+  runningWorkspaces: view.running_workspaces?.map((id) => ({ id, name: null })) ?? null,
+  restartNeeded:
+    view.restart_needed?.map((entry) => ({
+      id: entry.workspace,
+      name: null,
+      reason: entry.reason,
+    })) ?? null,
+  pendingOperations: (view.pending_operations ?? []).map((operation) => ({
+    kind: operation.kind,
+    target: pendingTarget(operation.data),
+  })),
+  disk:
+    view.disk == null
+      ? null
+      : { freeBytes: view.disk.free_bytes, totalBytes: view.disk.total_bytes },
 });
 
 const sameAgentHomes = (a: TrellisAgentHomes | undefined, b: TrellisAgentHomes | undefined) =>
@@ -563,6 +624,8 @@ export class Trellis extends Context.Service<
       { readonly bases: ReadonlyArray<string>; readonly defaultBase: string | null },
       TrellisError
     >;
+    /** Everything `/v1/status` reports, for display; workspace names are left null. */
+    readonly details: Effect.Effect<TrellisDetails, TrellisError>;
   }
 >()("t3/trellis/Trellis") {}
 
@@ -1178,6 +1241,7 @@ const make = Effect.gen(function* () {
     bases: call(TrellisBasesView, "GET", "/v1/status").pipe(
       Effect.map((view) => ({ bases: view.bases ?? [], defaultBase: view.default_base ?? null })),
     ),
+    details: call(TrellisDetailsView, "GET", "/v1/status").pipe(Effect.map(toDetails)),
   });
 });
 
@@ -1292,6 +1356,7 @@ export function makeTestTrellis(
     graduate: unused,
     getProject: unused,
     bases: Effect.die(new Error("unused Trellis operation")),
+    details: Effect.die(new Error("unused Trellis operation")),
     ...rest,
   });
 }
