@@ -1019,6 +1019,33 @@ describe("chat Markdown math", () => {
     expect(normalizeMarkdownMathDelimiters(displayThenParen)).toBe("$$z$$(note)");
   });
 
+  it("reads link titles, angle destinations and reference definitions as CommonMark does", () => {
+    const keep = [
+      '[t](https://e/a\\(b\\) "title (")',
+      "[t](<1\\(x\\)(>)",
+      "[t](\n  https://e/a\\(b\\)\n  'multi\n  line')",
+      "[ref]: https://e/a\\(b\\)",
+    ];
+    for (const markdown of keep) {
+      expect(normalizeMarkdownMathDelimiters(markdown)).toBe(markdown);
+    }
+    // No link: a lone `](`, and the outer brackets around a link.
+    expect(normalizeMarkdownMathDelimiters("](\\(x\\))")).toBe("]($$x$$)");
+    expect(normalizeMarkdownMathDelimiters("[outer [inner](u)](\\(x\\))")).toBe(
+      "[outer [inner](u)]($$x$$)",
+    );
+    // Math in link text is still math.
+    expect(normalizeMarkdownMathDelimiters("[see \\(x\\)](u)")).toBe("[see $$x$$](u)");
+  });
+
+  it("stays fast on text full of unfinished links", () => {
+    const markdown = '[x](u "'.repeat(20_000) + "\\(y\\)";
+    const started = performance.now();
+    normalizeMarkdownMathDelimiters(markdown);
+    normalizeMarkdownMathDelimiters("[x](".repeat(20_000));
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   it("does not mistake indented code for a fenced block", () => {
     const markdown = "    ```\n\\(real math\\)";
 

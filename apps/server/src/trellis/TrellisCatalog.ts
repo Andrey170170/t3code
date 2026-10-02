@@ -728,14 +728,29 @@ const make = Effect.gen(function* () {
   // server restart: kept in a file.
   const missingSincePath = NodePath.join(serverConfig.stateDir, "trellis-missing-roots.json");
   const missingSinceJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Finite));
-  const missingSince = new Map<string, number>(
-    Object.entries(
-      yield* fileSystem.readFileString(missingSincePath).pipe(
+  // An unreadable file is set aside rather than overwritten, and logged:
+  // its roots then count as missing from the next sync on.
+  const persistedMissing = (yield* fileSystem
+    .exists(missingSincePath)
+    .pipe(Effect.orElseSucceed(() => false)))
+    ? yield* fileSystem.readFileString(missingSincePath).pipe(
         Effect.flatMap(Schema.decodeUnknownEffect(missingSinceJson)),
-        Effect.orElseSucceed(() => ({})),
-      ),
-    ),
-  );
+        Effect.catchCause((cause) =>
+          Effect.logWarning("unreadable record of missing Trellis roots; set aside", {
+            path: missingSincePath,
+            cause,
+          }).pipe(
+            Effect.andThen(fileSystem.rename(missingSincePath, `${missingSincePath}.unreadable`)),
+            Effect.ignore,
+            Effect.as({}),
+          ),
+        ),
+      )
+    : {};
+  const missingSince = new Map<string, number>(Object.entries(persistedMissing));
+  // Set when the map changed and the file does not have it yet; a failed
+  // write is retried on the next sync.
+  let missingSinceDirty = false;
   const persistMissingSince = Effect.gen(function* () {
     const partial = `${missingSincePath}.partial`;
     yield* fileSystem.writeFileString(
@@ -743,6 +758,7 @@ const make = Effect.gen(function* () {
       yield* Schema.encodeEffect(missingSinceJson)(Object.fromEntries(missingSince)),
     );
     yield* fileSystem.rename(partial, missingSincePath);
+    missingSinceDirty = false;
   }).pipe(
     Effect.catchCause((cause) =>
       Effect.logWarning("could not persist when Trellis roots went missing", { cause }),
@@ -921,20 +937,19 @@ const make = Effect.gen(function* () {
       }
     }
     const nowSeconds = Math.floor(DateTime.toEpochMillis(yield* DateTime.now) / 1000);
-    let missingChanged = false;
     for (const root of purgedRoots) {
       if (!missingSince.has(root)) {
         missingSince.set(root, nowSeconds);
-        missingChanged = true;
+        missingSinceDirty = true;
       }
     }
     for (const root of missingSince.keys()) {
       if (!purgedRoots.includes(root)) {
         missingSince.delete(root);
-        missingChanged = true;
+        missingSinceDirty = true;
       }
     }
-    if (missingChanged) yield* persistMissingSince;
+    if (missingSinceDirty) yield* persistMissingSince;
     const actions = planCatalogSync({
       root: env.root,
       items,
