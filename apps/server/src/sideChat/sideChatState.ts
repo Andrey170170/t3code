@@ -1,11 +1,15 @@
 import type {
   OrchestrationV2RuntimeRequest,
   OrchestrationV2TurnItem,
+  ProviderThreadId,
   SideChatSnapshot,
   SideChatStreamEvent,
 } from "@t3tools/contracts";
+import type * as DateTime from "effect/DateTime";
 
+import type { IdAllocatorV2Shape } from "../orchestration-v2/IdAllocator.ts";
 import type { ProviderAdapterV2Event } from "../orchestration-v2/ProviderAdapter.ts";
+import { makeProviderFailureTurnItem } from "../orchestration-v2/ProviderFailure.ts";
 
 /** The next snapshot plus the stream frames that describe the change to subscribers. */
 export interface SideChatTransition {
@@ -90,7 +94,7 @@ export function upsertSideChatRuntimeRequest(
   };
 }
 
-function chain(
+export function chain(
   first: SideChatTransition,
   step: (snapshot: SideChatSnapshot) => SideChatTransition,
 ): SideChatTransition {
@@ -98,17 +102,59 @@ function chain(
   return { snapshot: second.snapshot, events: [...first.events, ...second.events] };
 }
 
-/** Ends the active turn and expires the requests it left pending. */
+/**
+ * Ends the active turn and expires the live requests it left pending. Message-mode
+ * questions (Codex async questions) outlive their turn: the answer is a new message.
+ */
 function settleActiveTurn(snapshot: SideChatSnapshot): SideChatTransition {
   const activeProviderTurnId = snapshot.activeProviderTurnId;
   let transition = patchSideChat(snapshot, { status: "idle", activeProviderTurnId: null });
   for (const request of snapshot.runtimeRequests) {
-    if (request.status !== "pending" || request.providerTurnId !== activeProviderTurnId) continue;
+    if (
+      request.status !== "pending" ||
+      request.providerTurnId !== activeProviderTurnId ||
+      request.responseCapability.type === "message"
+    )
+      continue;
     transition = chain(transition, (current) =>
       upsertSideChatRuntimeRequest(current, { ...request, status: "expired" }),
     );
   }
   return transition;
+}
+
+/** What folding a provider event needs beyond the snapshot. */
+export interface SideChatEventContext {
+  /** The side chat's own native thread, once the fork exists. */
+  readonly providerThreadId: ProviderThreadId | null;
+  readonly idAllocator: IdAllocatorV2Shape;
+  readonly now: DateTime.Utc;
+}
+
+/** Records a failed turn's error in the timeline, the way orchestration does. */
+function recordTurnFailure(
+  snapshot: SideChatSnapshot,
+  event: Extract<ProviderAdapterV2Event, { readonly type: "turn.terminal"; status: "failed" }>,
+  context: SideChatEventContext,
+): SideChatTransition {
+  const userMessage = snapshot.turnItems.findLast((item) => item.type === "user_message");
+  return upsertSideChatTurnItem(
+    snapshot,
+    makeProviderFailureTurnItem({
+      idAllocator: context.idAllocator,
+      driver: event.driver,
+      threadId: snapshot.sideChatId,
+      runId: userMessage?.runId ?? null,
+      nodeId: userMessage?.nodeId ?? null,
+      providerThreadId: event.providerThreadId,
+      providerTurnId: event.providerTurnId,
+      itemOrdinal: event.failureItemOrdinal,
+      failure: event.failure,
+      ...(event.retry === undefined ? {} : { retry: event.retry }),
+      ...(event.retryStartedAt === undefined ? {} : { retryStartedAt: event.retryStartedAt }),
+      occurredAt: context.now,
+    }),
+  );
 }
 
 /**
@@ -119,6 +165,7 @@ function settleActiveTurn(snapshot: SideChatSnapshot): SideChatTransition {
 export function applySideChatProviderEvent(
   snapshot: SideChatSnapshot,
   event: ProviderAdapterV2Event,
+  context: SideChatEventContext,
 ): SideChatTransition {
   if (snapshot.status === "closed") return unchanged(snapshot);
   switch (event.type) {
@@ -142,10 +189,16 @@ export function applySideChatProviderEvent(
         ? settleActiveTurn(snapshot)
         : unchanged(snapshot);
     }
-    case "turn.terminal":
-      return event.providerTurnId === snapshot.activeProviderTurnId
-        ? settleActiveTurn(snapshot)
-        : unchanged(snapshot);
+    case "turn.terminal": {
+      // Codex settles the provider turn first, so the turn is usually already idle here.
+      const settled =
+        event.providerTurnId === snapshot.activeProviderTurnId
+          ? settleActiveTurn(snapshot)
+          : unchanged(snapshot);
+      return event.status === "failed" && event.providerThreadId === context.providerThreadId
+        ? chain(settled, (current) => recordTurnFailure(current, event, context))
+        : settled;
+    }
     default:
       return unchanged(snapshot);
   }

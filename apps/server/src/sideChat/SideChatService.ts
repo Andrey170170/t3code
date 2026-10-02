@@ -1,13 +1,19 @@
 import {
   MessageId,
+  type ModelSelection,
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2RuntimeRequest,
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
+  type ProviderInteractionMode,
   ProviderSessionId,
+  type ProviderThreadId,
+  type ProviderTurnId,
   RunAttemptId,
   RunId,
+  type RuntimeMode,
   type SideChatRespondInput,
   type SideChatSendInput,
   type SideChatSnapshot,
@@ -22,6 +28,8 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as Latch from "effect/Latch";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
@@ -35,13 +43,16 @@ import type {
   ProviderAdapterV2SessionRuntime,
   ProviderAdapterV2Shape,
 } from "../orchestration-v2/ProviderAdapter.ts";
+import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import { randomUuidV4 } from "../orchestration-v2/RandomUuid.ts";
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { forkParked } from "../serverActivation.ts";
 import { SIDE_BOUNDARY_PROMPT, SIDE_DEVELOPER_INSTRUCTIONS } from "./sideChatInstructions.ts";
 import {
   applySideChatProviderEvent,
+  chain,
   patchSideChat,
   type SideChatTransition,
   upsertSideChatRuntimeRequest,
@@ -141,6 +152,16 @@ interface SideChat {
     SideChatSession,
     SideChatRejectedError | SideChatNotFoundError
   >;
+  /** A stop that arrived before Codex reported the turn's id; applied once it does. Guarded by `lock`. */
+  interruptRequested: boolean;
+}
+
+/** The message a side turn starts with, and the selection overrides it carries. */
+interface SideTurnInput {
+  readonly text: string;
+  readonly modelSelection?: ModelSelection | undefined;
+  readonly interactionMode?: ProviderInteractionMode | undefined;
+  readonly runtimeMode?: RuntimeMode | undefined;
 }
 
 const failureMessage = (cause: Cause.Cause<unknown>): string => {
@@ -148,10 +169,67 @@ const failureMessage = (cause: Cause.Cause<unknown>): string => {
   return failure instanceof Error ? failure.message : String(failure);
 };
 
+const unchanged = (snapshot: SideChatSnapshot): SideChatTransition => ({ snapshot, events: [] });
+
+/** Frames with the same key replace one another: each carries its entry's whole current state. */
+const frameKey = (event: SideChatStreamEvent): string => {
+  switch (event.type) {
+    case "turn-item":
+      return `turn-item:${event.turnItem.id}`;
+    case "runtime-request":
+      return `runtime-request:${event.runtimeRequest.id}`;
+    default:
+      return event.type;
+  }
+};
+
+/**
+ * Delivers a subscription's frames, folding the ones the client has not taken yet. While a slow
+ * client acknowledges a batch, a streaming answer rewrites its pending frame in place instead of
+ * queueing every partial copy, so a subscriber holds at most one frame per entry. Map insertion
+ * order keeps first-seen order for new entries.
+ */
+const coalescedFrames = (
+  sideChatId: ThreadId,
+  subscription: PubSub.Subscription<SideChatStreamEvent>,
+): Stream.Stream<SideChatStreamEvent> =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const pending = new Map<string, SideChatStreamEvent>();
+      const ready = yield* Latch.make(false);
+      yield* Stream.runForEachArray(Stream.fromSubscription(subscription), (events) =>
+        Effect.sync(() => {
+          for (const event of events) pending.set(frameKey(event), event);
+        }).pipe(Effect.andThen(ready.open)),
+      ).pipe(
+        // A shut-down PubSub can drop the final frame; the subscriber still has to end.
+        Effect.ensuring(
+          Effect.sync(() => pending.set("closed", { type: "closed", sideChatId })).pipe(
+            Effect.andThen(ready.open),
+          ),
+        ),
+        Effect.forkScoped,
+      );
+      return Stream.fromEffectRepeat(
+        ready.await.pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              const batch = Array.from(pending.values());
+              pending.clear();
+              ready.closeUnsafe();
+              return batch;
+            }),
+          ),
+        ),
+      ).pipe(Stream.flattenIterable);
+    }),
+  );
+
 const make = Effect.gen(function* () {
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const runtimePolicies = yield* RuntimePolicy.RuntimePolicyV2;
+  const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const layerScope = yield* Effect.scope;
   const openLock = yield* Semaphore.make(1);
   const byParent = new Map<ThreadId, SideChat>();
@@ -169,8 +247,13 @@ const make = Effect.gen(function* () {
         return result;
       }),
     );
+  /** Changes an open side chat. Closing is final, so late writers leave a closed one alone. */
   const update = (chat: SideChat, f: (snapshot: SideChatSnapshot) => SideChatTransition) =>
-    modify(chat, (snapshot) => [undefined, f(snapshot)] as const);
+    modify(
+      chat,
+      (snapshot) =>
+        [undefined, snapshot.status === "closed" ? unchanged(snapshot) : f(snapshot)] as const,
+    );
 
   const reject = (parentThreadId: ThreadId, detail: string) => (cause?: unknown) =>
     new SideChatRejectedError({ parentThreadId, detail, ...(cause ? { cause } : {}) });
@@ -182,29 +265,62 @@ const make = Effect.gen(function* () {
       : Effect.succeed(chat);
   };
 
+  /**
+   * Forgets the side chat and tells its subscribers, then ends its scope in the background:
+   * stopping the provider process can take a while, and callers hold the global `openLock` or
+   * an RPC that a disconnect may interrupt.
+   */
   const closeChat = (chat: SideChat) =>
     Effect.gen(function* () {
       if (byId.get(chat.sideChatId) !== chat) return;
       byId.delete(chat.sideChatId);
       byParent.delete(chat.parentThread.id);
-      yield* update(chat, (snapshot) => {
-        const transition = patchSideChat(snapshot, {
-          status: "closed",
-          activeProviderTurnId: null,
-        });
-        return {
-          snapshot: transition.snapshot,
-          events: [{ type: "closed", sideChatId: chat.sideChatId }],
-        };
+      yield* modify(chat, (snapshot) => {
+        const closed = patchSideChat(snapshot, { status: "closed", activeProviderTurnId: null });
+        return [
+          undefined,
+          { snapshot: closed.snapshot, events: [{ type: "closed", sideChatId: chat.sideChatId }] },
+        ] as const;
       });
       yield* Deferred.fail(
         chat.session,
         new SideChatNotFoundError({ sideChatId: chat.sideChatId }),
       );
       // Interrupts the event fiber, then stops the side chat's provider process.
-      yield* Scope.close(chat.scope, Exit.void);
-      yield* PubSub.shutdown(chat.changes);
-    });
+      yield* Scope.close(chat.scope, Exit.void).pipe(
+        Effect.exit,
+        Effect.flatMap((exit) =>
+          Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)
+            ? Effect.logWarning("Failed to stop a side chat's provider process.", {
+                cause: exit.cause,
+              })
+            : Effect.void,
+        ),
+        Effect.ensuring(PubSub.shutdown(chat.changes)),
+        Effect.forkDetach({ startImmediately: true }),
+      );
+    }).pipe(Effect.uninterruptible);
+
+  const closeWhere = (matches: (chat: SideChat) => boolean) =>
+    openLock.withPermit(
+      Effect.suspend(() =>
+        Effect.forEach(Array.from(byId.values()).filter(matches), closeChat, { discard: true }),
+      ),
+    );
+
+  /** Stops a provider turn on behalf of a stop the user requested before it had an id. */
+  const interruptLater = (chat: SideChat, providerTurnId: ProviderTurnId) =>
+    Deferred.await(chat.session).pipe(
+      Effect.flatMap(({ runtime, providerThread }) =>
+        runtime.interruptTurn({ providerThread, providerTurnId }),
+      ),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : Effect.logWarning("Failed to stop the side chat.", { cause }),
+      ),
+      Effect.forkIn(chat.scope),
+    );
 
   /** Starts the side chat's own provider process and forks the parent into it. */
   const start = (
@@ -229,23 +345,39 @@ const make = Effect.gen(function* () {
       if (runtime.openEphemeralFork === undefined) {
         return yield* reject(chat.parentThread.id, "This provider does not support side chats.")();
       }
+      let providerThreadId: ProviderThreadId | null = null;
       yield* Stream.runForEach(runtime.events, (event) =>
-        update(chat, (current) => applySideChatProviderEvent(current, event)),
+        Effect.gen(function* () {
+          const now = yield* DateTime.now;
+          const turnToInterrupt = yield* modify(chat, (current) => {
+            if (current.status === "closed") return [null, unchanged(current)] as const;
+            const transition = applySideChatProviderEvent(current, event, {
+              providerThreadId,
+              idAllocator,
+              now,
+            });
+            const turnId = transition.snapshot.activeProviderTurnId;
+            if (!chat.interruptRequested || turnId === null) return [null, transition] as const;
+            chat.interruptRequested = false;
+            return [turnId, transition] as const;
+          });
+          if (turnToInterrupt !== null) yield* interruptLater(chat, turnToInterrupt);
+        }),
       ).pipe(
         Effect.catchCause((cause) =>
-          Effect.logWarning("Side chat provider event stream failed.", { cause }).pipe(
-            Effect.andThen(
-              update(chat, (current) =>
-                current.status === "closed"
-                  ? { snapshot: current, events: [] }
-                  : patchSideChat(current, {
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.void
+            : Effect.logWarning("Side chat provider event stream failed.", { cause }).pipe(
+                Effect.andThen(
+                  update(chat, (current) =>
+                    patchSideChat(current, {
                       status: "error",
                       activeProviderTurnId: null,
                       error: "The side chat's Codex process stopped.",
                     }),
+                  ),
+                ),
               ),
-            ),
-          ),
         ),
         Effect.forkIn(chat.scope),
       );
@@ -257,8 +389,14 @@ const make = Effect.gen(function* () {
         developerInstructions: SIDE_DEVELOPER_INSTRUCTIONS,
         boundaryPrompt: SIDE_BOUNDARY_PROMPT,
       });
+      providerThreadId = providerThread.id;
+      // Idle first: a send that wakes on the session must find the side chat ready.
+      yield* update(chat, (current) =>
+        current.status === "starting"
+          ? patchSideChat(current, { status: "idle" })
+          : unchanged(current),
+      );
       yield* Deferred.succeed(chat.session, { runtime, providerThread });
-      yield* update(chat, (current) => patchSideChat(current, { status: "idle" }));
     }).pipe(
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
@@ -286,6 +424,32 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  /** The Codex model the parent last ran on its active Codex thread. */
+  const lastCodexModelSelection = (
+    parentThreadId: ThreadId,
+    providerThread: OrchestrationV2ProviderThread,
+  ) =>
+    threads.getThreadRecords(parentThreadId, ["runs"]).pipe(
+      Effect.mapError(reject(parentThreadId, "The thread could not be loaded.")),
+      Effect.flatMap(({ runs }) => {
+        const lastRun = runs
+          .filter(
+            (run) =>
+              run.providerThreadId === providerThread.id &&
+              run.modelSelection.instanceId === providerThread.providerInstanceId,
+          )
+          .reduce<(typeof runs)[number] | undefined>(
+            (latest, run) => (latest === undefined || run.ordinal > latest.ordinal ? run : latest),
+            undefined,
+          );
+        return lastRun === undefined
+          ? Effect.fail(
+              reject(parentThreadId, "Switch this thread back to Codex to start a side chat.")(),
+            )
+          : Effect.succeed(lastRun.modelSelection);
+      }),
+    );
+
   const open: SideChatService["Service"]["open"] = ({ parentThreadId }) =>
     openLock.withPermit(
       Effect.gen(function* () {
@@ -300,6 +464,9 @@ const make = Effect.gen(function* () {
           .getThreadRecords(parentThreadId, ["providerThreads"])
           .pipe(Effect.mapError(reject(parentThreadId, "The thread could not be loaded.")));
         const parentThread = records.thread;
+        if (parentThread.deletedAt !== null) {
+          return yield* reject(parentThreadId, "The thread could not be loaded.")();
+        }
         const providerThread = records.providerThreads.find(
           (candidate) => candidate.id === parentThread.activeProviderThreadId,
         );
@@ -315,10 +482,11 @@ const make = Effect.gen(function* () {
           .pipe(
             Effect.mapError(reject(parentThreadId, "The thread's Codex provider is unavailable.")),
           );
+        // A parent whose picker moved to another provider still forks with its Codex model.
         const modelSelection =
           parentThread.modelSelection.instanceId === providerThread.providerInstanceId
             ? parentThread.modelSelection
-            : { ...parentThread.modelSelection, instanceId: providerThread.providerInstanceId };
+            : yield* lastCodexModelSelection(parentThreadId, providerThread);
         const runtimePolicy = yield* runtimePolicies
           .resolve({ thread: parentThread, modelSelection })
           .pipe(Effect.mapError(reject(parentThreadId, "The thread's workspace is unavailable.")));
@@ -348,6 +516,7 @@ const make = Effect.gen(function* () {
             SideChatSession,
             SideChatRejectedError | SideChatNotFoundError
           >(),
+          interruptRequested: false,
         };
         byParent.set(parentThreadId, chat);
         byId.set(sideChatId, chat);
@@ -358,10 +527,10 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const send: SideChatService["Service"]["send"] = (input) =>
+  /** Claims the idle side chat for a turn, records the user's message, and starts the turn. */
+  const startSideTurn = (chat: SideChat, session: SideChatSession, input: SideTurnInput) =>
     Effect.gen(function* () {
-      const chat = yield* requireChat(input);
-      const { runtime, providerThread } = yield* Deferred.await(chat.session);
+      const { runtime, providerThread } = session;
       const current = yield* Ref.get(chat.state);
       const modelSelection = input.modelSelection ?? current.modelSelection;
       if (modelSelection.instanceId !== current.modelSelection.instanceId) {
@@ -390,7 +559,8 @@ const make = Effect.gen(function* () {
 
       // The blocking status, or this turn's 1-based ordinal once the turn is claimed.
       const claim = yield* modify<SideChatSnapshot["status"] | number>(chat, (snapshot) => {
-        if (snapshot.status !== "idle") return [snapshot.status, { snapshot, events: [] }] as const;
+        if (snapshot.status !== "idle") return [snapshot.status, unchanged(snapshot)] as const;
+        chat.interruptRequested = false;
         const ordinal =
           snapshot.turnItems.filter((item) => item.type === "user_message").length + 1;
         const userMessage: OrchestrationV2TurnItem = {
@@ -407,7 +577,7 @@ const make = Effect.gen(function* () {
           title: null,
           type: "user_message",
           messageId,
-          text: input.input,
+          text: input.text,
           attachments: [],
           createdBy: "user",
           creationSource: "web",
@@ -455,7 +625,7 @@ const make = Effect.gen(function* () {
           providerThread,
           message: {
             messageId,
-            text: input.input,
+            text: input.text,
             attachments: [],
             createdBy: "user",
             creationSource: "web",
@@ -464,17 +634,24 @@ const make = Effect.gen(function* () {
           runtimePolicy,
         })
         .pipe(
-          Effect.tapError(() =>
-            update(chat, (snapshot) =>
-              snapshot.status !== "running"
-                ? { snapshot, events: [] }
-                : patchSideChat(snapshot, {
-                    status: "idle",
-                    activeProviderTurnId: null,
-                    error: "Failed to send the side chat message.",
-                  }),
-            ),
+          // Release the claim on failure or interruption, or the side chat stays "running".
+          Effect.onError((cause) =>
+            update(chat, (snapshot) => {
+              if (snapshot.status !== "running") return unchanged(snapshot);
+              chat.interruptRequested = false;
+              return patchSideChat(snapshot, {
+                status: "idle",
+                activeProviderTurnId: null,
+                ...(Cause.hasInterruptsOnly(cause)
+                  ? {}
+                  : { error: "Failed to send the side chat message." }),
+              });
+            }),
           ),
+          // The start belongs to the side chat, not to the request: a dropped RPC must not
+          // leave Codex running a turn nobody tracks. Closing the side chat still interrupts it.
+          Effect.forkIn(chat.scope),
+          Effect.flatMap(Fiber.join),
           Effect.mapError(
             (cause) =>
               new SideChatProviderError({ sideChatId: chat.sideChatId, operation: "send", cause }),
@@ -482,13 +659,90 @@ const make = Effect.gen(function* () {
         );
     });
 
+  /** Adds a message to the running turn, the way the main chat steers an active run. */
+  const steerSideTurn = (
+    chat: SideChat,
+    session: SideChatSession,
+    input: { readonly providerTurnId: ProviderTurnId; readonly text: string },
+  ) =>
+    Effect.gen(function* () {
+      const snapshot = yield* Ref.get(chat.state);
+      const userMessages = snapshot.turnItems.filter((item) => item.type === "user_message");
+      const runId = userMessages.at(-1)?.runId;
+      if (runId === undefined || runId === null) {
+        return yield* reject(chat.parentThread.id, "The side chat is still answering.")();
+      }
+      const uuid = yield* randomUuidV4;
+      const messageId = MessageId.make(`side-message:${uuid}`);
+      const message = {
+        messageId,
+        text: input.text,
+        attachments: [],
+        createdBy: "user",
+        creationSource: "web",
+      } as const;
+      yield* session.runtime
+        .steerTurn({
+          threadId: chat.sideChatId,
+          runId,
+          providerThread: session.providerThread,
+          providerTurnId: input.providerTurnId,
+          message,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new SideChatProviderError({ sideChatId: chat.sideChatId, operation: "send", cause }),
+          ),
+        );
+      const now = yield* DateTime.now;
+      yield* update(chat, (current) =>
+        upsertSideChatTurnItem(current, {
+          ...message,
+          id: TurnItemId.make(`side-user:${uuid}`),
+          threadId: chat.sideChatId,
+          runId,
+          nodeId: null,
+          providerThreadId: session.providerThread.id,
+          providerTurnId: input.providerTurnId,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: userMessages.length * 100 + 50,
+          status: "completed",
+          title: null,
+          type: "user_message",
+          inputIntent: "steer",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        }),
+      );
+    });
+
+  const send: SideChatService["Service"]["send"] = (input) =>
+    Effect.gen(function* () {
+      const chat = yield* requireChat(input);
+      const session = yield* Deferred.await(chat.session);
+      yield* startSideTurn(chat, session, {
+        text: input.input,
+        modelSelection: input.modelSelection,
+        interactionMode: input.interactionMode,
+        runtimeMode: input.runtimeMode,
+      });
+    });
+
   const interrupt: SideChatService["Service"]["interrupt"] = (input) =>
     Effect.gen(function* () {
       const chat = yield* requireChat(input);
       const { runtime, providerThread } = yield* Deferred.await(chat.session);
-      const { activeProviderTurnId } = yield* Ref.get(chat.state);
-      if (activeProviderTurnId === null) return;
-      yield* runtime.interruptTurn({ providerThread, providerTurnId: activeProviderTurnId }).pipe(
+      const providerTurnId = yield* modify(chat, (snapshot) => {
+        if (snapshot.status !== "running") return [null, unchanged(snapshot)] as const;
+        // Codex has not reported the turn yet; stop it as soon as it does.
+        if (snapshot.activeProviderTurnId === null) chat.interruptRequested = true;
+        return [snapshot.activeProviderTurnId, unchanged(snapshot)] as const;
+      });
+      if (providerTurnId === null) return;
+      yield* runtime.interruptTurn({ providerThread, providerTurnId }).pipe(
         Effect.mapError(
           (cause) =>
             new SideChatProviderError({
@@ -500,11 +754,117 @@ const make = Effect.gen(function* () {
       );
     });
 
+  /** Records a request's answer the way orchestration does; providers do not report it. */
+  const resolveRequest = (
+    chat: SideChat,
+    request: OrchestrationV2RuntimeRequest,
+    input: SideChatRespondInput,
+  ) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const cancelled = input.decision === "decline" || input.decision === "cancel";
+      yield* update(chat, (snapshot) => {
+        const resolved = upsertSideChatRuntimeRequest(snapshot, {
+          ...request,
+          status: "resolved",
+          resolvedAt: now,
+          ...(input.decision === undefined ? {} : { decision: input.decision }),
+          ...(input.answers === undefined ? {} : { answers: input.answers }),
+        });
+        if (request.responseCapability.type !== "message") return resolved;
+        const item = snapshot.turnItems.findLast(
+          (candidate) =>
+            candidate.type === "user_input_request" && candidate.requestId === request.id,
+        );
+        if (item?.type !== "user_input_request") return resolved;
+        const answers = input.answers;
+        return chain(resolved, (current) =>
+          upsertSideChatTurnItem(current, {
+            ...item,
+            ...(!cancelled && answers !== undefined
+              ? {
+                  questionAnswer: {
+                    requestId: request.id,
+                    answers,
+                    attachmentsByQuestionId: {},
+                    questionTextById: Object.fromEntries(
+                      item.questions.map((question) => [question.id, question.question]),
+                    ),
+                  },
+                }
+              : {}),
+            status: cancelled ? "cancelled" : "completed",
+            completedAt: now,
+            updatedAt: now,
+          }),
+        );
+      });
+    });
+
+  /**
+   * Codex async questions are not live provider requests: the answer is an ordinary user
+   * message (steering the running turn when it can, otherwise starting the next turn) and a
+   * dismissal only resolves the question here.
+   */
+  const respondByMessage = (
+    chat: SideChat,
+    session: SideChatSession,
+    request: OrchestrationV2RuntimeRequest,
+    input: SideChatRespondInput,
+  ) =>
+    Effect.gen(function* () {
+      if (input.decision === "decline" || input.decision === "cancel") {
+        return yield* resolveRequest(chat, request, input);
+      }
+      const snapshot = yield* Ref.get(chat.state);
+      const item = snapshot.turnItems.findLast(
+        (candidate) =>
+          candidate.type === "user_input_request" && candidate.requestId === request.id,
+      );
+      if (item?.type !== "user_input_request") {
+        return yield* reject(
+          chat.parentThread.id,
+          "The question for this request was not found.",
+        )();
+      }
+      const replies: string[] = [];
+      for (const question of item.questions) {
+        const answer = input.answers?.[question.id];
+        if (typeof answer !== "string" || answer.trim().length === 0) {
+          if (question.required === false) continue;
+          return yield* reject(chat.parentThread.id, "Answer each question before sending.")();
+        }
+        replies.push(`${question.question}\n${answer.trim()}`);
+      }
+      if (replies.length === 0) {
+        return yield* reject(chat.parentThread.id, "Enter an answer before sending.")();
+      }
+      const text = replies.join("\n\n");
+      const activeProviderTurnId =
+        snapshot.status === "running" ? snapshot.activeProviderTurnId : null;
+      if (
+        activeProviderTurnId !== null &&
+        session.runtime.providerSession.capabilities.turns.supportsActiveSteering
+      ) {
+        yield* steerSideTurn(chat, session, { providerTurnId: activeProviderTurnId, text });
+      } else {
+        yield* startSideTurn(chat, session, { text });
+      }
+      yield* resolveRequest(chat, request, input);
+    });
+
   const respond: SideChatService["Service"]["respond"] = (input) =>
     Effect.gen(function* () {
       const chat = yield* requireChat(input);
-      const { runtime } = yield* Deferred.await(chat.session);
-      yield* runtime
+      const session = yield* Deferred.await(chat.session);
+      const request = (yield* Ref.get(chat.state)).runtimeRequests.find(
+        (candidate) => candidate.id === input.requestId,
+      );
+      if (request?.responseCapability.type === "message") {
+        if (request.status !== "pending") return;
+        return yield* respondByMessage(chat, session, request, input);
+      }
+      yield* session.runtime
         .respondToRuntimeRequest({
           requestId: input.requestId,
           ...(input.decision === undefined ? {} : { decision: input.decision }),
@@ -520,32 +880,13 @@ const make = Effect.gen(function* () {
               }),
           ),
         );
-      // Providers do not report resolution; orchestration records it the same way.
-      const resolvedAt = yield* DateTime.now;
-      yield* update(chat, (snapshot) => {
-        const request = snapshot.runtimeRequests.find(
-          (candidate) => candidate.id === input.requestId,
-        );
-        return request === undefined
-          ? { snapshot, events: [] }
-          : upsertSideChatRuntimeRequest(snapshot, {
-              ...request,
-              status: "resolved",
-              resolvedAt,
-              ...(input.decision === undefined ? {} : { decision: input.decision }),
-              ...(input.answers === undefined ? {} : { answers: input.answers }),
-            });
-      });
+      if (request !== undefined) yield* resolveRequest(chat, request, input);
     });
 
   const close: SideChatService["Service"]["close"] = (input) =>
-    openLock.withPermit(
-      Effect.suspend(() => {
-        const chat = byId.get(input.sideChatId);
-        return chat === undefined || chat.parentThread.id !== input.parentThreadId
-          ? Effect.void
-          : closeChat(chat);
-      }),
+    closeWhere(
+      (chat) =>
+        chat.sideChatId === input.sideChatId && chat.parentThread.id === input.parentThreadId,
     );
 
   const subscribe: SideChatService["Service"]["subscribe"] = (input) =>
@@ -557,11 +898,29 @@ const make = Effect.gen(function* () {
           Effect.all([PubSub.subscribe(chat.changes), Ref.get(chat.state)]),
         );
         const initial: SideChatStreamEvent = { type: "snapshot", snapshot };
-        return Stream.concat(Stream.make(initial), Stream.fromSubscription(subscription)).pipe(
-          Stream.takeUntil((event) => event.type === "closed"),
-        );
+        // It closed between the lookup and the read; nothing more will arrive.
+        if (snapshot.status === "closed") return Stream.make(initial);
+        return Stream.concat(
+          Stream.make(initial),
+          coalescedFrames(chat.sideChatId, subscription),
+        ).pipe(Stream.takeUntil((event) => event.type === "closed"));
       }),
     );
+
+  // A deleted thread can never be reached again, so neither can its side chat.
+  yield* forkParked(
+    Stream.runForEach(threads.streamDomainEvents, (event) =>
+      event.type === "thread.deleted"
+        ? closeWhere((chat) => chat.parentThread.id === event.threadId)
+        : Effect.void,
+    ).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : Effect.logWarning("Side chats stopped following thread deletions.", { cause }),
+      ),
+    ),
+  );
 
   return SideChatService.of({ open, send, interrupt, respond, close, subscribe });
 });

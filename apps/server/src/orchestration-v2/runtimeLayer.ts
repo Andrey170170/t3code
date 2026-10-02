@@ -252,6 +252,7 @@ const sideChatServiceProvided = SideChatService.layer.pipe(
       threadManagementProvided,
       providerAdapterRegistryProvided,
       runtimePolicyProvided,
+      idAllocatorLayer,
     ),
   ),
 );
