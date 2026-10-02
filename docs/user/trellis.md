@@ -13,6 +13,9 @@ running on that machine.
 Open **Settings** > **Trellis** and turn on **Use Trellis workspaces**. The row shows whether T3 Code
 reaches Trellis. While the integration is off, T3 Code does not contact Trellis; existing Trellis
 projects keep their conversations, but their agents do not run until you turn it back on.
+Once connected, the page also shows the Trellis service's version, free space and running
+workspaces, what needs attention (missing providers, workspaces needing a restart), and the bases
+new projects start from.
 
 T3 Code uses the socket at `/trellis/state/api.sock` unless the server was started with
 `TRELLIS_SOCKET` set.

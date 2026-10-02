@@ -96,6 +96,14 @@ export const trellisEnvironment = {
     staleTimeMs: 30_000,
     idleTtlMs: 60_000,
   }),
+  /** The service's version, uptime, disk, bases and running workspaces, for Settings. */
+  details: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:details",
+    tag: WS_METHODS.trellisGetDetails,
+    staleTimeMs: 30_000,
+    idleTtlMs: 60_000,
+    refreshIntervalMs: 60_000,
+  }),
   graduate: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:graduate",
     tag: WS_METHODS.trellisGraduate,

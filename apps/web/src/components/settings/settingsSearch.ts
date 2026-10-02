@@ -691,6 +691,22 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["trellis enable disable socket ideas workspaces snapshots isolated"],
   },
   {
+    id: "trellis-status",
+    title: "Trellis service",
+    to: "/settings/trellis",
+    scope: "environment-defaults",
+    searchTerms: [
+      "trellis status version uptime root disk free space running workspaces restart agent homes providers",
+    ],
+  },
+  {
+    id: "trellis-bases",
+    title: "Trellis bases",
+    to: "/settings/trellis",
+    scope: "environment-defaults",
+    searchTerms: ["trellis bases base image default container"],
+  },
+  {
     id: "trellis-trash",
     title: "Trellis trash",
     to: "/settings/trellis",

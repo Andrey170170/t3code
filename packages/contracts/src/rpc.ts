@@ -18,6 +18,7 @@ import {
   TrellisGraduateInput,
   TrellisGraduateResult,
   TrellisBasesResult,
+  TrellisDetails,
   TrellisRestoreConflicts,
   TrellisRestoreConflictsInput,
   TrellisRestoreInput,
@@ -401,6 +402,7 @@ export const WS_METHODS = {
   trellisPurge: "trellis.purge",
   trellisGraduate: "trellis.graduate",
   trellisListBases: "trellis.listBases",
+  trellisGetDetails: "trellis.getDetails",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1302,6 +1304,12 @@ const WsTrellisListBasesRpc = Rpc.make(WS_METHODS.trellisListBases, {
   error: TrellisRpcError,
 });
 
+const WsTrellisGetDetailsRpc = Rpc.make(WS_METHODS.trellisGetDetails, {
+  payload: Schema.Struct({}),
+  success: TrellisDetails,
+  error: TrellisRpcError,
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1931,6 +1939,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsTrellisPurgeRpc,
   WsTrellisGraduateRpc,
   WsTrellisListBasesRpc,
+  WsTrellisGetDetailsRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,

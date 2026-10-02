@@ -326,6 +326,83 @@ describe("Trellis client", () => {
       expect(result.failed.message).toBe("Trellis answered GET /v1/projects with HTTP 502.");
     }),
   );
+
+  it.effect("decodes the full status for display, reading absent fields as unknown", () =>
+    Effect.gen(function* () {
+      let body: unknown = {
+        root: "/trellis",
+        role: "user",
+        version: "0.1.0",
+        commit: "abc1234-dirty.5f2e",
+        pid: 42,
+        started_at: 1_700_000_000,
+        uptime_secs: 93_784,
+        bases: ["dev", "py"],
+        default_base: "dev",
+        node: "local",
+        missing_providers: ["codex"],
+        agent_homes: { claude: "/homes/claude", codex: null },
+        running_workspaces: ["ws-a", "ws-b"],
+        restart_needed: [{ workspace: "ws-b", reason: "started with another trellis binary" }],
+        pending_operations: [
+          { id: 1, kind: "rollback", data: { ws: "ws-a" } },
+          { id: 2, kind: "graduate", data: { project: "prj-1" } },
+          { id: 3, kind: "purge", data: null },
+        ],
+        disk: { free_bytes: 1_610_612_736, total_bytes: 1_099_511_627_776 },
+      };
+      const harness = setup(() => ({ body }));
+      const layer = yield* Effect.promise(() => harness.listen());
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        const full = yield* trellis.details;
+        // An older Trellis reports little more than its root.
+        body = { root: "/trellis", role: "user" };
+        const old = yield* trellis.details;
+        // Podman failed: running workspaces and restarts are unknown, not none.
+        body = { root: "/trellis", running_workspaces: null, restart_needed: null, disk: null };
+        const podmanFailed = yield* trellis.details;
+        return { full, old, podmanFailed };
+      }).pipe(Effect.provide(layer));
+      expect(result.full).toEqual({
+        root: "/trellis",
+        version: "0.1.0",
+        commit: "abc1234-dirty.5f2e",
+        uptimeSecs: 93_784,
+        bases: ["dev", "py"],
+        defaultBase: "dev",
+        missingProviders: ["codex"],
+        agentHomes: { claude: "/homes/claude", codex: null },
+        runningWorkspaces: [
+          { id: "ws-a", name: null },
+          { id: "ws-b", name: null },
+        ],
+        restartNeeded: [{ id: "ws-b", name: null, reason: "started with another trellis binary" }],
+        pendingOperations: [
+          { kind: "rollback", target: "ws-a" },
+          { kind: "graduate", target: "prj-1" },
+          { kind: "purge", target: null },
+        ],
+        disk: { freeBytes: 1_610_612_736, totalBytes: 1_099_511_627_776 },
+      });
+      const unknown = {
+        root: "/trellis",
+        version: null,
+        commit: null,
+        uptimeSecs: null,
+        bases: [],
+        defaultBase: null,
+        missingProviders: [],
+        agentHomes: null,
+        runningWorkspaces: null,
+        restartNeeded: null,
+        pendingOperations: [],
+        disk: null,
+      };
+      expect(result.old).toEqual(unknown);
+      expect(result.podmanFailed).toEqual(unknown);
+    }),
+  );
 });
 
 describe("parseKnownRoots", () => {
