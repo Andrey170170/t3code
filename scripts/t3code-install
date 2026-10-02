@@ -57,6 +57,11 @@ config_dir="$HOME/.config/$prefix"
 unit="$prefix.service"
 bin_dir="$HOME/.local/bin"
 unit_dir="$HOME/.config/systemd/user"
+# Installs and uninstalls are serialized across instances, so two installs
+# cannot claim the same port or state folder.
+install -d "$HOME/.config"
+exec 9>"$HOME/.config/t3code-install.lock"
+flock 9
 
 if ((uninstall)); then
   [[ -n $instance ]] || { echo 'Only a named instance (--instance) can be uninstalled.' >&2; exit 2; }
@@ -97,10 +102,6 @@ if [[ -z $instance ]]; then : "${T3CODE_PORT:=3773}"; fi
 : "${T3CODE_ORIGIN:=http://localhost:$T3CODE_PORT}"
 : "${T3CODE_BASE:=$HOME/.local/share/$prefix}" "${T3CODE_WORKDIR:=$HOME}"
 : "${T3CODE_NODE:=$(command -v node)}"
-# Checks and the switch are serialized across instances, so two installs
-# cannot claim the same port or state folder.
-exec 9>"$HOME/.config/t3code-install.lock"
-flock 9
 [[ $(realpath -m -- "$T3CODE_BASE")/ != "$(realpath -m -- "$config_dir")"/* ]] || {
   echo "The state folder must not be inside $config_dir." >&2; exit 1;
 }
@@ -172,8 +173,9 @@ systemctl --user enable "$unit"
 rm -f -- "$config_dir/service.env.previous"
 if [[ -f $config_dir/service.env ]]; then cp -p -- "$config_dir/service.env" "$config_dir/service.env.previous"; fi
 mv -f -- "$env_tmp" "$config_dir/service.env"
-# Failures from here on go through the health check and its rollback.
-systemctl --user restart "$unit" || true
+# Failures from here on go through the rollback below.
+restarted=0
+systemctl --user restart "$unit" && restarted=1
 # An IPv6 literal needs brackets in a URL.
 ready_host=$T3CODE_HOST
 [[ $ready_host == *:* && $ready_host != \[* ]] && ready_host="[$ready_host]"
@@ -187,7 +189,7 @@ serving() {
   done
   return 1
 }
-if serving "$T3CODE_PORT"; then
+if ((restarted)) && serving "$T3CODE_PORT"; then
   echo "T3 $installed_version ($T3CODE_BUILD_ID) is serving as $unit. Pair a browser with: $prefix-pair DEVICE"
   exit 0
 fi
