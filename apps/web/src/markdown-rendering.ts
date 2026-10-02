@@ -13,9 +13,27 @@ function isEscaped(markdown: string, offset: number): boolean {
 }
 
 /**
+ * The offset of the `)` closing an inline link destination opened at
+ * `offset` (its `(`), or -1. Escapes are skipped and parentheses balanced, as
+ * CommonMark reads destinations; a destination never spans lines.
+ */
+function linkDestinationEnd(markdown: string, offset: number): number {
+  let depth = 0;
+  for (let index = offset; index < markdown.length; index += 1) {
+    const character = markdown[index];
+    if (character === "\\") index += 1;
+    else if (character === "\n") return -1;
+    else if (character === "(") depth += 1;
+    else if (character === ")" && --depth === 0) return index;
+  }
+  return -1;
+}
+
+/**
  * Normalizes the LaTeX delimiters agents commonly emit to remark-math's
- * same-length dollar syntax. Fences, inline code, and HTML tags remain literal,
- * and unmatched delimiters are preserved while a response is streaming.
+ * same-length dollar syntax. Fences, inline code, HTML tags, autolinks and
+ * link destinations remain literal, and unmatched delimiters are preserved
+ * while a response is streaming.
  */
 export function normalizeMarkdownMathDelimiters(markdown: string): string {
   // Every offset below uses JavaScript's UTF-16 indexing. Keep the mutable
@@ -93,6 +111,24 @@ export function normalizeMarkdownMathDelimiters(markdown: string): string {
         insideHtmlTag = false;
       }
       continue;
+    }
+    // An autolink (<https://…>, <me@host>) ends at its `>`, quotes and all.
+    if (character === "<") {
+      const autolink = /^<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[^\s<>@]+@[^\s<>@]+)>/.exec(
+        markdown.slice(index, index + 2048),
+      );
+      if (autolink) {
+        index += autolink[0].length - 1;
+        continue;
+      }
+    }
+    // A link destination, `[text](…)`, is a URL: `\(` there is an escaped paren.
+    if (character === "(" && markdown[index - 1] === "]" && !isEscaped(markdown, index - 1)) {
+      const end = linkDestinationEnd(markdown, index);
+      if (end !== -1) {
+        index = end;
+        continue;
+      }
     }
     if (character === "<" && /[A-Za-z!/?]/.test(markdown[index + 1] ?? "")) {
       insideHtmlTag = true;
