@@ -2,7 +2,7 @@ import type { DiscoveredLocalServer } from "@t3tools/contracts";
 import { isLoopbackHost } from "@t3tools/shared/preview";
 import { useMemo } from "react";
 
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import { useDiscoveredPortsState } from "~/portDiscoveryState";
 
@@ -18,6 +18,8 @@ export interface PreviewableServer extends DiscoveredLocalServer {
 interface UseDiscoveredLocalServersInput {
   environmentId: EnvironmentId;
   configuredUrls?: ReadonlyArray<string> | undefined;
+  /** The thread whose localhost the servers are on (a Trellis thread's is its workspace). */
+  threadId?: ThreadId | undefined;
 }
 
 /**
@@ -27,7 +29,11 @@ interface UseDiscoveredLocalServersInput {
 export function useDiscoveredLocalServers(
   input: UseDiscoveredLocalServersInput,
 ): ReadonlyArray<PreviewableServer> {
-  const scannerState = useDiscoveredPortsState(input.environmentId, input.configuredUrls);
+  const scannerState = useDiscoveredPortsState(
+    input.environmentId,
+    input.configuredUrls,
+    input.threadId,
+  );
 
   return useMemo(
     () =>

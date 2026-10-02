@@ -40,7 +40,7 @@ import {
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   CodexAuthCallbackInput,
   CodexAuthCallbackState,
@@ -1563,6 +1563,8 @@ const WsSubscribePreviewEventsRpc = Rpc.make(WS_METHODS.subscribePreviewEvents, 
 const WsSubscribeDiscoveredLocalServersRpc = Rpc.make(WS_METHODS.subscribeDiscoveredLocalServers, {
   payload: Schema.Struct({
     configuredUrls: Schema.optional(ConfiguredLocalServerUrls),
+    /** Scopes discovery to this thread's environment: a Trellis thread sees its workspace's servers. */
+    threadId: Schema.optional(ThreadId),
   }),
   success: DiscoveredLocalServerList,
   error: EnvironmentAuthorizationError,

@@ -192,6 +192,19 @@ const TrellisDescribeView = Schema.Struct({
 });
 const TrellisPreviewView = Schema.Struct({ host_port: Schema.Finite, url: Schema.String });
 const TrellisPrimerView = Schema.Struct({ primer: Schema.String });
+
+/**
+ * A TCP port listening inside a running workspace. `reachable`: a preview of
+ * it can connect (bound to loopback or all addresses); `preview`: the URL of
+ * its existing preview, if any.
+ */
+export const TrellisPort = Schema.Struct({
+  port: Schema.Int,
+  address: Schema.String,
+  reachable: Schema.Boolean,
+  preview: Schema.NullOr(Schema.String),
+});
+export type TrellisPort = typeof TrellisPort.Type;
 const TrellisErrorBody = Schema.Struct({ error: Schema.String });
 const TrellisTurnsView = Schema.Struct({ restarted: Schema.Array(Schema.String) });
 
@@ -558,6 +571,13 @@ export class Trellis extends Context.Service<
     readonly listPreviews: (
       target: string,
     ) => Effect.Effect<ReadonlyArray<{ readonly url: string }>, TrellisError>;
+    /**
+     * Ports listening inside workspace `workspaceId`. Fails while it is not
+     * running or its relay is too old to list them.
+     */
+    readonly ports: (
+      workspaceId: string,
+    ) => Effect.Effect<ReadonlyArray<TrellisPort>, TrellisError>;
     /** Short agent orientation for sessions started in `target`. */
     readonly primer: (target: string) => Effect.Effect<string, TrellisError>;
     /**
@@ -1138,6 +1158,13 @@ const make = Effect.gen(function* () {
       ),
     listPreviews: (target) =>
       call(Schema.Array(TrellisPreviewView), "GET", `/v1/previews?${query({ target })}`),
+    ports: (workspaceId) =>
+      call(
+        Schema.Array(TrellisPort),
+        "GET",
+        `/v1/workspaces/${encodeURIComponent(workspaceId)}/ports`,
+        { timeoutMs: 5_000 },
+      ),
     primer: (target) =>
       call(TrellisPrimerView, "GET", `/v1/primer?${query({ target })}`, { timeoutMs: 5_000 }).pipe(
         Effect.map((view) => view.primer),
@@ -1347,6 +1374,7 @@ export function makeTestTrellis(
     rollback: unused,
     preview: unused,
     listPreviews: unused,
+    ports: unused,
     primer: unused,
     connects: Effect.succeed(1),
     reportTurn: () => Effect.succeed({ restarted: [] }),

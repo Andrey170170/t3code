@@ -50,9 +50,14 @@ function useDiscoveredPorts(
   return useDiscoveredPortsState(environmentId, configuredUrls).servers;
 }
 
+/**
+ * Live local servers of an environment. With `threadId`, the servers that
+ * thread's localhost reaches: a Trellis thread's are its workspace's.
+ */
 export function useDiscoveredPortsState(
   environmentId: EnvironmentId | null,
   configuredUrls?: ReadonlyArray<string>,
+  threadId?: ThreadId,
 ): DiscoveredPortsState {
   const boundedConfiguredUrls = boundConfiguredLocalServerUrls(configuredUrls);
   const query = useEnvironmentQuery(
@@ -60,7 +65,10 @@ export function useDiscoveredPortsState(
       ? null
       : previewEnvironment.discoveredServers({
           environmentId,
-          input: boundedConfiguredUrls.length ? { configuredUrls: boundedConfiguredUrls } : {},
+          input: {
+            ...(boundedConfiguredUrls.length ? { configuredUrls: boundedConfiguredUrls } : {}),
+            ...(threadId === undefined ? {} : { threadId }),
+          },
         }),
   );
   return useMemo(

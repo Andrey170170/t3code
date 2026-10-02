@@ -1155,6 +1155,32 @@ const makeWsRpcLayer = (
       const trellisPreview = yield* TrellisPreview.TrellisPreview;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
+      // The host's listening servers, rescanned while the stream runs.
+      const hostDiscoveredServers = (configuredUrls: ReadonlyArray<string>) =>
+        Stream.callback<DiscoveredLocalServerList>((queue) =>
+          Effect.gen(function* () {
+            yield* portDiscovery.retain;
+            const initial = yield* portDiscovery.scan(configuredUrls);
+            const initialScannedAt = DateTime.formatIso(yield* DateTime.now);
+            yield* Queue.offer(queue, {
+              servers: initial,
+              scannedAt: initialScannedAt,
+              configuredUrlProbing: true,
+            });
+            yield* portDiscovery.subscribe(
+              { configuredUrls, initialSnapshot: initial },
+              (servers) =>
+                Effect.gen(function* () {
+                  const scannedAt = DateTime.formatIso(yield* DateTime.now);
+                  yield* Queue.offer(queue, {
+                    servers,
+                    scannedAt,
+                    configuredUrlProbing: true,
+                  });
+                }),
+            );
+          }),
+        );
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const modelManifest = yield* ModelManifest.ModelManifest;
       const providerVersionCache = yield* ProviderMaintenance.ProviderVersionCache;
@@ -3655,28 +3681,26 @@ const makeWsRpcLayer = (
         [WS_METHODS.subscribeDiscoveredLocalServers]: (input) =>
           observeRpcStream(
             WS_METHODS.subscribeDiscoveredLocalServers,
-            Stream.callback<DiscoveredLocalServerList>((queue) =>
+            Stream.unwrap(
               Effect.gen(function* () {
                 const configuredUrls = input.configuredUrls ?? [];
-                yield* portDiscovery.retain;
-                const initial = yield* portDiscovery.scan(configuredUrls);
-                const initialScannedAt = DateTime.formatIso(yield* DateTime.now);
-                yield* Queue.offer(queue, {
-                  servers: initial,
-                  scannedAt: initialScannedAt,
-                  configuredUrlProbing: true,
-                });
-                yield* portDiscovery.subscribe(
-                  { configuredUrls, initialSnapshot: initial },
-                  (servers) =>
-                    Effect.gen(function* () {
-                      const scannedAt = DateTime.formatIso(yield* DateTime.now);
-                      yield* Queue.offer(queue, {
-                        servers,
-                        scannedAt,
-                        configuredUrlProbing: true,
-                      });
-                    }),
+                if (input.threadId === undefined) return hostDiscoveredServers(configuredUrls);
+                // A Trellis thread's servers are its workspace's, not the host's;
+                // the source follows the thread when it moves.
+                return trellisPreview.watchServers(input.threadId, configuredUrls).pipe(
+                  Stream.switchMap((servers) =>
+                    servers === null
+                      ? hostDiscoveredServers(configuredUrls)
+                      : Stream.fromEffect(
+                          DateTime.now.pipe(
+                            Effect.map((now): DiscoveredLocalServerList => ({
+                              servers,
+                              scannedAt: DateTime.formatIso(now),
+                              configuredUrlProbing: true,
+                            })),
+                          ),
+                        ),
+                  ),
                 );
               }),
             ),

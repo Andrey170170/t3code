@@ -21,20 +21,36 @@
  * `trellis.resolvePreviewUrl` RPC (the address bar of an open tab) and the
  * `preview_open`/`preview_navigate` MCP tools.
  *
+ * Discovered servers follow the same rule: the host port scanner cannot see
+ * a workspace's listeners, so a Trellis thread's local servers are the ports
+ * Trellis lists inside its workspace, offered as `http://localhost:PORT` so
+ * opening one goes through the mapping above.
+ *
  * @module trellis/TrellisPreview
  */
-import { PreviewTrellisError, type ThreadId } from "@t3tools/contracts";
+import {
+  type DiscoveredLocalServer,
+  PreviewTrellisError,
+  type ThreadId,
+  type TrellisError,
+} from "@t3tools/contracts";
 import { isLoopbackHostname, normalizePreviewUrl } from "@t3tools/shared/preview";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
+import * as Stream from "effect/Stream";
 
 import { isIssuedAssetUrl } from "../assets/AssetAccess.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
+import { POLL_INTERVAL } from "../preview/PortScanner.ts";
 import { ProjectService } from "../project/ProjectService.ts";
-import { Trellis, trellisRootOf, trellisWorkspaceOf } from "./Trellis.ts";
+import { Trellis, type TrellisPort, trellisRootOf, trellisWorkspaceOf } from "./Trellis.ts";
 
 /** The port of a loopback `http(s)` URL, or null for any other URL. */
 export function loopbackPort(url: string): number | null {
@@ -62,6 +78,36 @@ export function rewriteToPreview(original: string, previewUrl: string): string {
   return source.toString();
 }
 
+/**
+ * The reachable workspace ports as discovered local servers, one per port.
+ * A configured loopback URL on the same port stands in for the bare origin,
+ * as the host scanner does.
+ */
+export function workspaceServers(
+  ports: ReadonlyArray<TrellisPort>,
+  configuredUrls: ReadonlyArray<string>,
+): ReadonlyArray<DiscoveredLocalServer> {
+  const servers = new Map<number, DiscoveredLocalServer>();
+  for (const { port, reachable } of ports) {
+    if (!reachable || servers.has(port) || port <= 0 || port >= 65536) continue;
+    const configured = configuredUrls.find((url) => loopbackPort(url) === port);
+    servers.set(port, {
+      host: "localhost",
+      port,
+      url: configured ?? `http://localhost:${port}`,
+      processName: null,
+      pid: null,
+      terminal: null,
+    });
+  }
+  return [...servers.values()].toSorted((left, right) => left.port - right.port);
+}
+
+const sameServers = (
+  left: ReadonlyArray<DiscoveredLocalServer>,
+  right: ReadonlyArray<DiscoveredLocalServer>,
+) => left.length === right.length && left.every((server, i) => server.url === right[i]?.url);
+
 export class TrellisPreview extends Context.Service<
   TrellisPreview,
   {
@@ -80,6 +126,19 @@ export class TrellisPreview extends Context.Service<
         readonly path?: string | undefined;
       },
     ) => Effect.Effect<string | null, PreviewTrellisError>;
+    /**
+     * The local servers `threadId`'s localhost reaches, polled while the
+     * stream runs: its workspace's for a Trellis thread, `null` (meaning the
+     * host's, which the caller scans) for one outside Trellis. Where the
+     * thread runs is checked on every poll, so a move switches the source. A
+     * workspace that is not running, or a thread whose localhost is not its
+     * workspace's, has none. Reads of one workspace's ports are shared by its
+     * subscribers.
+     */
+    readonly watchServers: (
+      threadId: ThreadId,
+      configuredUrls: ReadonlyArray<string>,
+    ) => Stream.Stream<ReadonlyArray<DiscoveredLocalServer> | null>;
   }
 >()("t3/trellis/TrellisPreview") {}
 
@@ -189,7 +248,67 @@ const make = Effect.gen(function* () {
     );
   });
 
-  return TrellisPreview.of({ resolveUrl, resolvePort });
+  // The last read of each workspace's ports, reused by every subscriber
+  // polling within the same interval (an old relay can take seconds to fail).
+  // Each read runs in its own fiber, so a subscriber leaving mid-read never
+  // cancels it for the others.
+  const portReads = new Map<
+    string,
+    {
+      readonly at: number;
+      readonly ports: Deferred.Deferred<ReadonlyArray<TrellisPort>, TrellisError>;
+    }
+  >();
+  const portsOf = (workspace: string) =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      for (const [key, read] of portReads) {
+        if (now - read.at >= Duration.toMillis(POLL_INTERVAL)) portReads.delete(key);
+      }
+      const cached = portReads.get(workspace);
+      if (cached !== undefined) return yield* Deferred.await(cached.ports);
+      const ports = yield* Deferred.make<ReadonlyArray<TrellisPort>, TrellisError>();
+      portReads.set(workspace, { at: now, ports });
+      yield* trellis.ports(workspace).pipe(
+        Effect.exit,
+        Effect.flatMap((exit) => Deferred.done(ports, exit)),
+        Effect.forkDetach,
+      );
+      return yield* Deferred.await(ports);
+    });
+
+  // A thread outside Trellis reads as null: its servers are the host's.
+  const serversOf = (threadId: ThreadId, configuredUrls: ReadonlyArray<string>) =>
+    Effect.gen(function* () {
+      const cwd = yield* trellisCwdOf(threadId).pipe(
+        // A thread that cannot be placed shows nothing rather than the host's servers.
+        Effect.catch(() => Effect.succeed(undefined)),
+      );
+      if (cwd === null) return null;
+      const workspace =
+        cwd === undefined ? null : trellisWorkspaceOf(yield* trellis.expectedRoots, cwd);
+      if (workspace === null) return [];
+      return workspaceServers(yield* portsOf(workspace), configuredUrls);
+    }).pipe(
+      // Not running (or no Trellis) means no servers, never the host's.
+      Effect.catch((error) =>
+        Effect.logDebug("no Trellis workspace ports", { threadId, detail: error.message }).pipe(
+          Effect.as([]),
+        ),
+      ),
+    );
+
+  const watchServers: TrellisPreview["Service"]["watchServers"] = (threadId, configuredUrls) =>
+    Stream.fromEffectSchedule(
+      serversOf(threadId, configuredUrls),
+      Schedule.spaced(POLL_INTERVAL),
+    ).pipe(
+      Stream.changesWith((left, right) =>
+        left === null || right === null ? left === right : sameServers(left, right),
+      ),
+    );
+
+  return TrellisPreview.of({ resolveUrl, resolvePort, watchServers });
 });
 
 export const layer = Layer.effect(TrellisPreview, make);
@@ -200,5 +319,6 @@ export const layerDisabled = Layer.succeed(
   TrellisPreview.of({
     resolveUrl: (_threadId, url) => Effect.succeed(url),
     resolvePort: () => Effect.succeed(null),
+    watchServers: () => Stream.make(null),
   }),
 );

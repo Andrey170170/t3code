@@ -327,6 +327,41 @@ describe("Trellis client", () => {
     }),
   );
 
+  it.effect("lists a workspace's listening ports, and refuses a stopped one", () =>
+    Effect.gen(function* () {
+      const harness = setup(({ url }) => {
+        if (url === "/v1/status") return { body: { root: "/trellis", role: "user" } };
+        if (url === "/v1/workspaces/ws-1/ports")
+          return {
+            body: [
+              { port: 8123, address: "0.0.0.0", reachable: true, preview: null },
+              {
+                port: 5173,
+                address: "127.0.0.1",
+                reachable: true,
+                preview: "http://node:21001/",
+              },
+            ],
+          };
+        return { status: 400, body: { error: "workspace ws-2 is not running" } };
+      });
+      const layer = yield* Effect.promise(() => harness.listen());
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        yield* trellis.refresh;
+        return {
+          ports: yield* trellis.ports("ws-1"),
+          stopped: yield* trellis.ports("ws-2").pipe(Effect.flip),
+        };
+      }).pipe(Effect.provide(layer));
+      expect(result.ports).toEqual([
+        { port: 8123, address: "0.0.0.0", reachable: true, preview: null },
+        { port: 5173, address: "127.0.0.1", reachable: true, preview: "http://node:21001/" },
+      ]);
+      expect(result.stopped.message).toBe("workspace ws-2 is not running");
+    }),
+  );
+
   it.effect("decodes the full status for display, reading absent fields as unknown", () =>
     Effect.gen(function* () {
       let body: unknown = {
