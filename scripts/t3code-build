@@ -260,7 +260,9 @@ node -e '
     Object.entries(dependencies ?? {}).map(([name, spec]) => {
       if (typeof spec !== "string" || !spec.startsWith("catalog:")) return [name, spec];
       const explicit = spec.slice("catalog:".length).trim();
-      const key = explicit || name;
+      // Like pnpm, a bare catalog: on an override selector such as
+      // `@scope/parent>effect` names the package the selector ends in.
+      const key = explicit || (name.split(">").at(-1) ?? name);
       const value = catalog[key];
       if (typeof value !== "string" || !value) {
         throw new Error(`Unable to resolve ${spec} for ${packageName} dependency ${name}`);
