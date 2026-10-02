@@ -69,7 +69,13 @@ CODEX_HOME_DIR=$(jq -r --arg d "$HOME/.codex" 'if has("agent_homes") then .agent
   die "$TRELLIS_DEV_ROOT mounts no Claude or no Codex home: $(jq -c .agent_homes <<<"$STATUS_JSON")"
 # The dev runner fills unset variables from the repository's env files, which
 # would give the providers other homes than the ones checked here.
-! grep -qsE '^(export +)?(CLAUDE_CONFIG_DIR|CODEX_HOME)=' "$REPO/.env" "$REPO/.env.local" ||
+# Parsed as the runner parses them (util.parseEnv).
+node -e 'const fs = require("node:fs"), util = require("node:util");
+for (const file of process.argv.slice(1)) {
+  if (!fs.existsSync(file)) continue;
+  const env = util.parseEnv(fs.readFileSync(file, "utf8"));
+  if ("CLAUDE_CONFIG_DIR" in env || "CODEX_HOME" in env) process.exit(1);
+}' "$REPO/.env" "$REPO/.env.local" ||
   die "$REPO/.env or .env.local sets CLAUDE_CONFIG_DIR or CODEX_HOME; remove them for the demo"
 unset CLAUDE_CONFIG_DIR CODEX_HOME
 [[ $CLAUDE_HOME == "$HOME/.claude" ]] || export CLAUDE_CONFIG_DIR=$CLAUDE_HOME
