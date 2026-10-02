@@ -30,7 +30,12 @@ import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
-import { formatBytes, trellisVersionText, workspaceLabel } from "./TrellisSettings.logic";
+import {
+  formatBytes,
+  staleDetailsNotice,
+  trellisVersionText,
+  workspaceLabel,
+} from "./TrellisSettings.logic";
 import { SettingsScopeNotice } from "./SettingsScopeNotice";
 import { useSettingsScope } from "./SettingsScopeContext";
 
@@ -242,6 +247,12 @@ function TrellisDetailsSections(props: {
   );
   const details = detailsQuery.data;
   const refreshing = detailsQuery.isPending;
+  // A failed refresh keeps the last details; they must not look current.
+  const staleNotice = staleDetailsNotice({
+    hasData: details !== null,
+    error: detailsQuery.error,
+    updatedAt: detailsQuery.dataUpdatedAt,
+  });
 
   const refresh = () => {
     detailsQuery.refresh();
@@ -277,7 +288,15 @@ function TrellisDetailsSections(props: {
             description={detailsQuery.error ?? undefined}
           />
         ) : (
-          <TrellisStatusRows details={details} />
+          <>
+            {staleNotice === null ? null : (
+              <SettingsRow
+                title={<WarningTitle>Status may be out of date</WarningTitle>}
+                description={staleNotice}
+              />
+            )}
+            <TrellisStatusRows details={details} />
+          </>
         )}
       </SettingsSection>
       {details === null ? null : (
