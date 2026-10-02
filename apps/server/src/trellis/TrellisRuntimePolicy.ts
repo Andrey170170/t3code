@@ -76,7 +76,7 @@ export const trellisHomeRefusal = (
     ? `Trellis mounts no ${provider} home into its workspaces, so ${provider} cannot run inside them. Configure the ${provider} home in Trellis's config.json.`
     : `This ${provider} instance uses the home ${home}, but Trellis mounts ${mounted} into its workspaces. Use an instance whose home is ${mounted} for this project, or change the home Trellis mounts.`;
 
-export const TRELLIS_SHADOW_HOME_MESSAGE =
+const TRELLIS_SHADOW_HOME_MESSAGE =
   "A Codex instance with a shadow home cannot run inside Trellis workspaces, which mount only the Codex home itself. Use an instance without a shadow home for this project.";
 
 export const TRELLIS_NESTED_WORKSPACE_MESSAGE =
