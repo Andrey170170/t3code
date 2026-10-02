@@ -724,8 +724,30 @@ const make = Effect.gen(function* () {
   } | null>(null);
   const dirty = yield* Ref.make(true);
   // When each purged root was first found missing (see `syncOnce`), so a
-  // conversation unarchived afterwards is not archived again.
-  const missingSince = new Map<string, number>();
+  // conversation unarchived afterwards is not archived again, also after a
+  // server restart: kept in a file.
+  const missingSincePath = NodePath.join(serverConfig.stateDir, "trellis-missing-roots.json");
+  const missingSinceJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Finite));
+  const missingSince = new Map<string, number>(
+    Object.entries(
+      yield* fileSystem.readFileString(missingSincePath).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(missingSinceJson)),
+        Effect.orElseSucceed(() => ({})),
+      ),
+    ),
+  );
+  const persistMissingSince = Effect.gen(function* () {
+    const partial = `${missingSincePath}.partial`;
+    yield* fileSystem.writeFileString(
+      partial,
+      yield* Schema.encodeEffect(missingSinceJson)(Object.fromEntries(missingSince)),
+    );
+    yield* fileSystem.rename(partial, missingSincePath);
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("could not persist when Trellis roots went missing", { cause }),
+    ),
+  );
 
   const commandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(
@@ -899,12 +921,20 @@ const make = Effect.gen(function* () {
       }
     }
     const nowSeconds = Math.floor(DateTime.toEpochMillis(yield* DateTime.now) / 1000);
+    let missingChanged = false;
     for (const root of purgedRoots) {
-      if (!missingSince.has(root)) missingSince.set(root, nowSeconds);
+      if (!missingSince.has(root)) {
+        missingSince.set(root, nowSeconds);
+        missingChanged = true;
+      }
     }
     for (const root of missingSince.keys()) {
-      if (!purgedRoots.includes(root)) missingSince.delete(root);
+      if (!purgedRoots.includes(root)) {
+        missingSince.delete(root);
+        missingChanged = true;
+      }
     }
+    if (missingChanged) yield* persistMissingSince;
     const actions = planCatalogSync({
       root: env.root,
       items,

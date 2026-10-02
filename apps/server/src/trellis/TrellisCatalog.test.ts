@@ -1,3 +1,5 @@
+import * as NodePath from "node:path";
+import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it as effectIt } from "@effect/vitest";
 import {
@@ -867,7 +869,7 @@ describe("TrellisCatalog service", () => {
           ),
         ),
       ),
-      Layer.provide(ServerConfigLayer),
+      Layer.provideMerge(ServerConfigLayer),
       Layer.provide(ServerSettingsService.layerTest()),
       Layer.provide(
         Layer.succeed(ProviderInstanceRegistry, {
@@ -1069,6 +1071,13 @@ describe("TrellisCatalog service", () => {
         yield* catalog.syncNow;
         assert.isNotNull(yield* archivedAt(thread));
         assert.include((yield* catalog.status).retiredRoots ?? [], `${SCRATCH}/idea-e`);
+        // When it went missing survives a restart, so a conversation the user
+        // unarchives later is not archived again by the next server.
+        const { stateDir } = yield* ServerConfig;
+        const persisted = JSON.parse(
+          NodeFS.readFileSync(NodePath.join(stateDir, "trellis-missing-roots.json"), "utf8"),
+        );
+        assert.isNumber(persisted[`${SCRATCH}/idea-e`]);
       }),
     );
 
