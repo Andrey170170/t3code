@@ -76,7 +76,9 @@ if ((uninstall)); then
   systemctl --user reset-failed "$unit" 2>/dev/null || true
   # Only the files the helpers write; anything else stays, and so does the folder then.
   rm -f -- "$config_dir"/{service.env,service.env.previous,install.lock,update.lock}
-  rmdir -- "$config_dir" 2>/dev/null || echo "Kept $config_dir: it holds other files." >&2
+  if [[ -d $config_dir ]]; then
+    rmdir -- "$config_dir" 2>/dev/null || echo "Kept $config_dir: it holds other files." >&2
+  fi
   echo "Removed $unit and its helpers.${base:+ State kept in $base.}"
   exit 0
 fi
