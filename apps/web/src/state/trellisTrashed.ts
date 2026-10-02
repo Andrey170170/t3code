@@ -68,9 +68,3 @@ export function reconcileTrellisTrashed(environmentId: EnvironmentId, status: Tr
     }
   }
 }
-
-/** The trash record of one project, or null when this client did not trash it. */
-export const useTrellisTrashed = (environmentId: EnvironmentId, projectId: ProjectId) =>
-  useTrellisTrashedStore(
-    (state) => state.projects[trellisTrashedKey(environmentId, projectId)] ?? null,
-  );
