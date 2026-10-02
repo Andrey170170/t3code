@@ -529,3 +529,39 @@ export const TrellisDetails = Schema.Struct({
   disk: Schema.NullOr(Schema.Struct({ freeBytes: Schema.Finite, totalBytes: Schema.Finite })),
 });
 export type TrellisDetails = typeof TrellisDetails.Type;
+
+/**
+ * Trellis's history settings (`GET /v1/settings/history`): the snapshot
+ * timer, how long turn and timer snapshots are kept, and when trashed ideas,
+ * discarded forks and incoming copies expire. Whole numbers; 0 turns the timer
+ * off, keeps nothing past the head rules for a retention, and means never for
+ * an expiry. A key an older or newer Trellis lacks is absent.
+ */
+export const TrellisHistoryValues = Schema.Struct({
+  timerMinutes: Schema.optionalKey(NonNegativeInt),
+  turnKeepAllDays: Schema.optionalKey(NonNegativeInt),
+  turnKeepDailyDays: Schema.optionalKey(NonNegativeInt),
+  timerKeepAllHours: Schema.optionalKey(NonNegativeInt),
+  timerKeepHourlyDays: Schema.optionalKey(NonNegativeInt),
+  ideaTrashDays: Schema.optionalKey(NonNegativeInt),
+  forkTrashDays: Schema.optionalKey(NonNegativeInt),
+  incomingDays: Schema.optionalKey(NonNegativeInt),
+});
+export type TrellisHistoryValues = typeof TrellisHistoryValues.Type;
+
+export const TrellisHistorySettings = Schema.Struct({
+  values: TrellisHistoryValues,
+  defaults: TrellisHistoryValues,
+  /** Live snapshots per kind (`turn`, `timer`, ...) across live workspaces. */
+  snapshots: Schema.Record(Schema.String, Schema.Finite),
+  /** The last thinning run (`at` in Unix seconds); null before the first. */
+  lastThinning: Schema.NullOr(Schema.Struct({ at: Schema.Finite, removed: Schema.Finite })),
+});
+export type TrellisHistorySettings = typeof TrellisHistorySettings.Type;
+
+export const TrellisHistorySettingsUpdateResult = Schema.Struct({
+  values: TrellisHistoryValues,
+  /** Snapshots the next thinning would remove under the new values. */
+  wouldRemove: Schema.Finite,
+});
+export type TrellisHistorySettingsUpdateResult = typeof TrellisHistorySettingsUpdateResult.Type;

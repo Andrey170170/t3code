@@ -19,7 +19,14 @@
 import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 
-import { type TrellisDetails, TrellisError, type TrellisStatus } from "@t3tools/contracts";
+import {
+  type TrellisDetails,
+  TrellisError,
+  type TrellisHistorySettings,
+  type TrellisHistorySettingsUpdateResult,
+  type TrellisHistoryValues,
+  type TrellisStatus,
+} from "@t3tools/contracts";
 import {
   isTrellisManagedPath as isSharedTrellisManagedPath,
   trellisWorkspaceIdOf,
@@ -347,6 +354,58 @@ const toDetails = (view: typeof TrellisDetailsView.Type): TrellisDetails => ({
       : { freeBytes: view.disk.free_bytes, totalBytes: view.disk.total_bytes },
 });
 
+/** T3's history setting names and Trellis's. */
+const HISTORY_KEYS = {
+  timerMinutes: "timer_minutes",
+  turnKeepAllDays: "turn_keep_all_days",
+  turnKeepDailyDays: "turn_keep_daily_days",
+  timerKeepAllHours: "timer_keep_all_hours",
+  timerKeepHourlyDays: "timer_keep_hourly_days",
+  ideaTrashDays: "idea_trash_days",
+  forkTrashDays: "fork_trash_days",
+  incomingDays: "incoming_days",
+} as const satisfies Record<keyof TrellisHistoryValues, string>;
+
+const HistoryValuesView = Schema.Record(Schema.String, Schema.Unknown);
+
+/**
+ * `GET /v1/settings/history`. Values are read key by key (see
+ * `toHistoryValues`), so a key T3 does not know is ignored.
+ */
+const TrellisHistorySettingsView = Schema.Struct({
+  values: HistoryValuesView,
+  defaults: HistoryValuesView,
+  snapshots: Schema.optional(Schema.Record(Schema.String, Schema.Finite)),
+  last_thinning: Schema.optional(
+    Schema.NullOr(Schema.Struct({ at: Schema.Finite, removed: Schema.Finite })),
+  ),
+});
+
+const TrellisHistoryUpdateView = Schema.Struct({
+  values: HistoryValuesView,
+  would_remove: Schema.optional(Schema.Finite),
+});
+
+/** The history values T3 knows, skipping any that are absent or not whole numbers. */
+function toHistoryValues(raw: Readonly<Record<string, unknown>>): TrellisHistoryValues {
+  const values: { -readonly [K in keyof TrellisHistoryValues]: number } = {};
+  for (const key of Object.keys(HISTORY_KEYS) as Array<keyof typeof HISTORY_KEYS>) {
+    const value = raw[HISTORY_KEYS[key]];
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0) values[key] = value;
+  }
+  return values;
+}
+
+/** A history settings update in Trellis's names. */
+function toHistoryPatch(values: TrellisHistoryValues): Record<string, number> {
+  const patch: Record<string, number> = {};
+  for (const key of Object.keys(HISTORY_KEYS) as Array<keyof typeof HISTORY_KEYS>) {
+    const value = values[key];
+    if (value !== undefined) patch[HISTORY_KEYS[key]] = value;
+  }
+  return patch;
+}
+
 const sameAgentHomes = (a: TrellisAgentHomes | undefined, b: TrellisAgentHomes | undefined) =>
   a?.claude === b?.claude && a?.codex === b?.codex && (a === undefined) === (b === undefined);
 
@@ -626,6 +685,15 @@ export class Trellis extends Context.Service<
     >;
     /** Everything `/v1/status` reports, for display; workspace names are left null. */
     readonly details: Effect.Effect<TrellisDetails, TrellisError>;
+    /** The history settings in force, their defaults, snapshot counts and the last thinning. */
+    readonly historySettings: Effect.Effect<TrellisHistorySettings, TrellisError>;
+    /**
+     * Changes the given history settings (user socket). Trellis refuses
+     * values out of bounds or a daily turn horizon shorter than the keep-all one.
+     */
+    readonly updateHistorySettings: (
+      values: TrellisHistoryValues,
+    ) => Effect.Effect<TrellisHistorySettingsUpdateResult, TrellisError>;
   }
 >()("t3/trellis/Trellis") {}
 
@@ -708,6 +776,10 @@ const ROUTE_MINIMUM: ReadonlyArray<{ readonly route: string; readonly since: str
     route: "POST /v1/trash/purge-requests",
     since: "main at or after PR #26 (core/stage-b-forks, 90c1ab6)",
   },
+  ...["GET /v1/settings/history", "PUT /v1/settings/history"].map((route) => ({
+    route,
+    since: "main at or after PR #40 (records/history-settings, 0bed1e8)",
+  })),
 ];
 
 /** The error for a failed response whose body is not Trellis' `{error}`. */
@@ -1242,6 +1314,23 @@ const make = Effect.gen(function* () {
       Effect.map((view) => ({ bases: view.bases ?? [], defaultBase: view.default_base ?? null })),
     ),
     details: call(TrellisDetailsView, "GET", "/v1/status").pipe(Effect.map(toDetails)),
+    historySettings: call(TrellisHistorySettingsView, "GET", "/v1/settings/history").pipe(
+      Effect.map((view) => ({
+        values: toHistoryValues(view.values),
+        defaults: toHistoryValues(view.defaults),
+        snapshots: view.snapshots ?? {},
+        lastThinning: view.last_thinning ?? null,
+      })),
+    ),
+    updateHistorySettings: (values) =>
+      call(TrellisHistoryUpdateView, "PUT", "/v1/settings/history", {
+        body: toHistoryPatch(values),
+      }).pipe(
+        Effect.map((view) => ({
+          values: toHistoryValues(view.values),
+          wouldRemove: view.would_remove ?? 0,
+        })),
+      ),
   });
 });
 
@@ -1357,6 +1446,8 @@ export function makeTestTrellis(
     getProject: unused,
     bases: Effect.die(new Error("unused Trellis operation")),
     details: Effect.die(new Error("unused Trellis operation")),
+    historySettings: Effect.die(new Error("unused Trellis operation")),
+    updateHistorySettings: unused,
     ...rest,
   });
 }

@@ -714,6 +714,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["trellis trash restore deleted ideas projects forks empty purge"],
   },
   {
+    id: "trellis-history",
+    title: "Trellis history",
+    to: "/settings/trellis",
+    scope: "environment-defaults",
+    searchTerms: [
+      "trellis history snapshots timer retention keep thinning expiry expire trash incoming days",
+    ],
+  },
+  {
     id: "automatic-pull",
     title: "Automatically pull",
     to: "/settings/source-control",

@@ -76,6 +76,8 @@ const FakeCatalog = Layer.effect(
       projectFor: unused,
       listBases: Effect.die("unused catalog operation"),
       details: Effect.die("unused catalog operation"),
+      historySettings: Effect.die("unused catalog operation"),
+      updateHistorySettings: unused,
     });
   }),
 );

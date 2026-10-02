@@ -19,6 +19,9 @@ import {
   TrellisGraduateResult,
   TrellisBasesResult,
   TrellisDetails,
+  TrellisHistorySettings,
+  TrellisHistorySettingsUpdateResult,
+  TrellisHistoryValues,
   TrellisRestoreConflicts,
   TrellisRestoreConflictsInput,
   TrellisRestoreInput,
@@ -403,6 +406,8 @@ export const WS_METHODS = {
   trellisGraduate: "trellis.graduate",
   trellisListBases: "trellis.listBases",
   trellisGetDetails: "trellis.getDetails",
+  trellisGetHistorySettings: "trellis.getHistorySettings",
+  trellisUpdateHistorySettings: "trellis.updateHistorySettings",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1310,6 +1315,19 @@ const WsTrellisGetDetailsRpc = Rpc.make(WS_METHODS.trellisGetDetails, {
   error: TrellisRpcError,
 });
 
+const WsTrellisGetHistorySettingsRpc = Rpc.make(WS_METHODS.trellisGetHistorySettings, {
+  payload: Schema.Struct({}),
+  success: TrellisHistorySettings,
+  error: TrellisRpcError,
+});
+
+/** Changes the given history settings; Trellis validates the merged result. */
+const WsTrellisUpdateHistorySettingsRpc = Rpc.make(WS_METHODS.trellisUpdateHistorySettings, {
+  payload: TrellisHistoryValues,
+  success: TrellisHistorySettingsUpdateResult,
+  error: TrellisRpcError,
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1940,6 +1958,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsTrellisGraduateRpc,
   WsTrellisListBasesRpc,
   WsTrellisGetDetailsRpc,
+  WsTrellisGetHistorySettingsRpc,
+  WsTrellisUpdateHistorySettingsRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,

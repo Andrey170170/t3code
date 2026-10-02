@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { formatBytes, staleDetailsNotice, trellisVersionText } from "./TrellisSettings.logic";
+import {
+  formatBytes,
+  historyDefaultNote,
+  historyEdit,
+  lastThinningText,
+  snapshotCountsText,
+  staleDetailsNotice,
+  trellisVersionText,
+  wouldRemoveText,
+} from "./TrellisSettings.logic";
 
 describe("formatBytes", () => {
   it("uses the largest decimal unit, with one decimal below ten", () => {
@@ -41,5 +50,57 @@ describe("trellisVersionText", () => {
     );
     expect(trellisVersionText({ version: "0.1.0", commit: null })).toBe("0.1.0");
     expect(trellisVersionText({ version: null, commit: null })).toBeNull();
+  });
+});
+
+describe("historyEdit", () => {
+  it("sends only the edited key, and nothing when the value did not change", () => {
+    expect(historyEdit("ideaTrashDays", 14, 30)).toEqual({
+      kind: "change",
+      patch: { ideaTrashDays: 14 },
+    });
+    expect(historyEdit("timerMinutes", 0, 1)).toEqual({
+      kind: "change",
+      patch: { timerMinutes: 0 },
+    });
+    expect(historyEdit("ideaTrashDays", 30, 30)).toEqual({ kind: "unchanged" });
+  });
+
+  it("refuses an empty field, a fraction or a negative number before sending", () => {
+    for (const input of [null, 2.5, -1, Number.NaN]) {
+      expect(historyEdit("turnKeepAllDays", input, 7)).toEqual({
+        kind: "invalid",
+        message: "Enter a whole number, 0 or more.",
+      });
+    }
+  });
+});
+
+describe("history display", () => {
+  it("names the default only when the value differs from a known one", () => {
+    expect(historyDefaultNote(14, 30, "day")).toBe("Default: 30 days");
+    expect(historyDefaultNote(0, 1, "minute")).toBe("Default: 1 minute");
+    expect(historyDefaultNote(30, 30, "day")).toBeNull();
+    expect(historyDefaultNote(14, undefined, "day")).toBeNull();
+  });
+
+  it("mentions removals only when the next thinning would remove some", () => {
+    expect(wouldRemoveText(0)).toBeNull();
+    expect(wouldRemoveText(1)).toBe("The next thinning removes 1 snapshot.");
+    expect(wouldRemoveText(12)).toBe("The next thinning removes 12 snapshots.");
+  });
+
+  it("totals snapshots and lists kinds, most first", () => {
+    expect(snapshotCountsText({ timer: 12, turn: 40, label: 1 })).toEqual({
+      total: 53,
+      byKind: "40 turn · 12 timer · 1 label",
+    });
+    expect(snapshotCountsText({})).toEqual({ total: 0, byKind: null });
+  });
+
+  it("describes the last thinning, or its absence", () => {
+    const formatTime = (unixSeconds: number) => `t=${unixSeconds}`;
+    expect(lastThinningText(null, formatTime)).toBe("Not since Trellis started");
+    expect(lastThinningText({ at: 5, removed: 1 }, formatTime)).toBe("t=5, removed 1 snapshot");
   });
 });

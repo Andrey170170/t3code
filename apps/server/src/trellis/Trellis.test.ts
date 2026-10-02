@@ -403,6 +403,95 @@ describe("Trellis client", () => {
       expect(result.podmanFailed).toEqual(unknown);
     }),
   );
+
+  it.effect("reads and changes the history settings, passing on Trellis's refusals", () =>
+    Effect.gen(function* () {
+      const values = {
+        timer_minutes: 1,
+        turn_keep_all_days: 7,
+        turn_keep_daily_days: 90,
+        timer_keep_all_hours: 2,
+        timer_keep_hourly_days: 7,
+        idea_trash_days: 30,
+        fork_trash_days: 30,
+        incoming_days: 30,
+      };
+      let historyRoute = true;
+      const harness = setup(({ method, url, body }) => {
+        if (url === "/v1/status") return { body: { root: "/trellis", role: "user" } };
+        if (url !== "/v1/settings/history" || !historyRoute) {
+          return { status: 404, body: null, raw: "" };
+        }
+        if (method === "GET") {
+          return {
+            body: {
+              // A key this T3 does not know is ignored; a missing one stays absent.
+              values: { ...values, idea_trash_days: 14, future_key: 3, incoming_days: undefined },
+              defaults: values,
+              snapshots: { timer: 12, turn: 40 },
+              last_thinning: { at: 1_700_000_000, removed: 5 },
+              free_space: 1,
+            },
+          };
+        }
+        const patch = JSON.parse(body) as Record<string, number>;
+        if ((patch.turn_keep_daily_days ?? 90) < 7) {
+          return {
+            status: 400,
+            body: {
+              error: `turn_keep_daily_days (${patch.turn_keep_daily_days}) must not be shorter than turn_keep_all_days (7)`,
+            },
+          };
+        }
+        return { body: { values: { ...values, ...patch }, would_remove: 3 } };
+      });
+      const layer = yield* Effect.promise(() => harness.listen());
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        const settings = yield* trellis.historySettings;
+        const updated = yield* trellis.updateHistorySettings({ turnKeepAllDays: 3 });
+        const refused = yield* trellis
+          .updateHistorySettings({ turnKeepDailyDays: 2 })
+          .pipe(Effect.flip);
+        historyRoute = false;
+        const older = yield* trellis.historySettings.pipe(Effect.flip);
+        return { settings, updated, refused, older };
+      }).pipe(Effect.provide(layer));
+      const defaults = {
+        timerMinutes: 1,
+        turnKeepAllDays: 7,
+        turnKeepDailyDays: 90,
+        timerKeepAllHours: 2,
+        timerKeepHourlyDays: 7,
+        ideaTrashDays: 30,
+        forkTrashDays: 30,
+        incomingDays: 30,
+      };
+      const { incomingDays: _, ...withoutIncoming } = defaults;
+      expect(result.settings).toEqual({
+        values: { ...withoutIncoming, ideaTrashDays: 14 },
+        defaults,
+        snapshots: { timer: 12, turn: 40 },
+        lastThinning: { at: 1_700_000_000, removed: 5 },
+      });
+      // Only the changed key goes out, in Trellis's name.
+      expect(
+        harness.requests
+          .filter((request) => request.method === "PUT")
+          .map((request) => JSON.parse(request.body)),
+      ).toEqual([{ turn_keep_all_days: 3 }, { turn_keep_daily_days: 2 }]);
+      expect(result.updated).toEqual({
+        values: { ...defaults, turnKeepAllDays: 3 },
+        wouldRemove: 3,
+      });
+      expect(result.refused.message).toBe(
+        "turn_keep_daily_days (2) must not be shorter than turn_keep_all_days (7)",
+      );
+      expect(result.older.message).toBe(
+        "This Trellis does not support GET /v1/settings/history, which T3 needs here. Update Trellis to main at or after PR #40 (records/history-settings, 0bed1e8).",
+      );
+    }),
+  );
 });
 
 describe("parseKnownRoots", () => {

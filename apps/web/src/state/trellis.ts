@@ -104,6 +104,17 @@ export const trellisEnvironment = {
     idleTtlMs: 60_000,
     refreshIntervalMs: 60_000,
   }),
+  /** Trellis's snapshot timer, retention and expiry settings, with snapshot counts. */
+  historySettings: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:history-settings",
+    tag: WS_METHODS.trellisGetHistorySettings,
+    staleTimeMs: 30_000,
+    idleTtlMs: 60_000,
+  }),
+  updateHistorySettings: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:update-history-settings",
+    tag: WS_METHODS.trellisUpdateHistorySettings,
+  }),
   graduate: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:graduate",
     tag: WS_METHODS.trellisGraduate,
