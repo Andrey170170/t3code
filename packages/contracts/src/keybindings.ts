@@ -93,6 +93,7 @@ export const STATIC_KEYBINDING_COMMANDS = [
   "chat.new",
   "chat.newLocal",
   "trellis.newIdea",
+  "chat.newWithoutProject",
   "editor.openFavorite",
   "usage.cost",
   "usage.tokens",
