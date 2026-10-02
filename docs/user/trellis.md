@@ -40,7 +40,8 @@ workspace: use a Trellis fork for parallel work instead.
 Workspaces see the Claude and Codex homes Trellis mounts into them (by default `~/.claude` and
 `~/.codex`; Trellis's `config.json` can name others, and `trellis status` lists them). A Trellis
 thread runs only with a provider instance whose home, from its settings or `CLAUDE_CONFIG_DIR` and
-`CODEX_HOME`, is the mounted one; otherwise the turn fails and names both homes. To run Trellis
+`CODEX_HOME`, is exactly the mounted path; otherwise the turn fails and names both homes (or says
+that Trellis mounts no home for that provider). To run Trellis
 threads from other homes, set the instance's home path to the one Trellis mounts. Codex instances
 with a shadow home or a managed ChatGPT connection cannot run Trellis threads.
 

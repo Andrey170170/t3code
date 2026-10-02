@@ -190,10 +190,10 @@ const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
  * Why a provider instance cannot run inside a workspace, or null. The
  * container mounts the provider homes Trellis reports (`agentHomes`; the
  * defaults when it reports none) at their host paths, so the home the
- * provider is given (its settings, then its environment merged over the
- * server's, then the default, resolved as the adapters do) must be exactly
- * a mounted path: a symlink to it, a literal `~` or a relative path does not
- * exist in the container. An inherited `TRELLIS_WORKSPACE` is refused too, as
+ * provider is given (its settings, home-expanded as the adapters do, then
+ * its environment merged over the server's, as is, then the default) must be
+ * exactly the mounted path: a symlink to it, a literal `~`, a relative path
+ * or another spelling of it may not exist in the container. An inherited `TRELLIS_WORKSPACE` is refused too, as
  * it makes the shim fall back to the host.
  */
 function instanceLaunchRefusal(
@@ -212,16 +212,13 @@ function instanceLaunchRefusal(
   }
   const homeOf = (configured: string | undefined, variable: string, defaultDir: string) => {
     if (configured !== undefined && configured.trim().length > 0) {
-      return NodePath.resolve(expandHomePath(configured.trim()));
+      return expandHomePath(configured.trim());
     }
-    const value = environment[variable]?.trim() ?? "";
-    if (value.length === 0) return NodePath.join(homeDir, defaultDir);
-    return NodePath.isAbsolute(value) ? NodePath.resolve(value) : value;
+    const value = environment[variable];
+    return value === undefined || value.length === 0 ? NodePath.join(homeDir, defaultDir) : value;
   };
   const check = (provider: "Claude" | "Codex", home: string, mounted: string | null) =>
-    mounted !== null && NodePath.resolve(mounted) === home
-      ? null
-      : trellisHomeRefusal(provider, home, mounted);
+    mounted !== null && mounted === home ? null : trellisHomeRefusal(provider, home, mounted);
   if (driverKind === "codex") {
     const config = decodeCodexSettings(instance?.config ?? {});
     if (Option.isSome(config) && config.value.setupMode === "managed") {

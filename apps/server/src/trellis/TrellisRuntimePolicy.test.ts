@@ -412,11 +412,42 @@ describe("TrellisRuntimePolicy", () => {
         },
       });
       assert.equal(codex.launch?.sessionKey, "ws-1");
+      // Another spelling of the mounted path reaches the provider as is.
+      const codexEnvHome = (value: string) =>
+        resolve({
+          instance: "codex",
+          projectRoot: idea,
+          trellisEnv: devHomes,
+          providerInstances: {
+            providerInstances: {
+              [ProviderInstanceId.make("codex")]: {
+                driver: ProviderDriverKind.make("codex"),
+                environment: [{ name: "CODEX_HOME", value, sensitive: false }],
+              },
+            },
+          },
+        });
+      for (const spelling of ["/trellis/dev/homes/codex/", "/trellis/dev/homes/x/../codex"]) {
+        assert.equal(
+          yield* refusal(codexEnvHome(spelling)),
+          TrellisRuntimePolicy.trellisHomeRefusal("Codex", spelling, "/trellis/dev/homes/codex"),
+        );
+      }
       // A provider whose home Trellis does not mount cannot run at all.
       const unmounted = yield* refusal(
         claudeAt(undefined, { ...env, agentHomes: { claude: null, codex: "/home/me/.codex" } }),
       );
       assert.include(unmounted, "Trellis mounts no Claude home");
+      assert.include(
+        yield* refusal(
+          resolve({
+            instance: "codex",
+            projectRoot: idea,
+            trellisEnv: { ...env, agentHomes: { claude: "/home/me/.claude", codex: null } },
+          }),
+        ),
+        "Trellis mounts no Codex home",
+      );
     }),
   );
 
