@@ -67,8 +67,10 @@ if ((uninstall)); then
   rm -f -- "$unit_dir/$unit" "$bin_dir/$prefix-run" "$bin_dir/$prefix-pair" "$bin_dir/$prefix-update"
   systemctl --user daemon-reload
   systemctl --user reset-failed "$unit" 2>/dev/null || true
-  rm -rf -- "$config_dir"
-  echo "Removed $unit, its helpers and $config_dir.${base:+ State kept in $base.}"
+  # Only the files the helpers write; anything else stays, and so does the folder then.
+  rm -f -- "$config_dir"/{service.env,service.env.previous,install.lock,update.lock}
+  rmdir -- "$config_dir" 2>/dev/null || echo "Kept $config_dir: it holds other files." >&2
+  echo "Removed $unit and its helpers.${base:+ State kept in $base.}"
   exit 0
 fi
 
@@ -95,19 +97,25 @@ if [[ -z $instance ]]; then : "${T3CODE_PORT:=3773}"; fi
 : "${T3CODE_ORIGIN:=http://localhost:$T3CODE_PORT}"
 : "${T3CODE_BASE:=$HOME/.local/share/$prefix}" "${T3CODE_WORKDIR:=$HOME}"
 : "${T3CODE_NODE:=$(command -v node)}"
-if ((first_install)); then
-  # Instances must not share a port or a state folder.
-  for other in "$HOME"/.config/t3code*/service.env; do
-    [[ -f $other && $other != "$config_dir/service.env" ]] || continue
-    read -r other_port other_base < <(source "$other"; echo "${T3CODE_PORT:-} ${T3CODE_BASE:-}")
-    [[ $other_port != "$T3CODE_PORT" ]] || { echo "Port $T3CODE_PORT is used by $other." >&2; exit 1; }
-    [[ $(realpath -m -- "$other_base") != $(realpath -m -- "$T3CODE_BASE") ]] || {
-      echo "State folder $T3CODE_BASE is used by $other." >&2; exit 1;
-    }
-  done
-  if ss -Hltn "sport = :$T3CODE_PORT" 2>/dev/null | grep -q .; then
-    echo "Port $T3CODE_PORT is already in use." >&2; exit 1
-  fi
+# Checks and the switch are serialized across instances, so two installs
+# cannot claim the same port or state folder.
+exec 9>"$HOME/.config/t3code-install.lock"
+flock 9
+[[ $(realpath -m -- "$T3CODE_BASE")/ != "$(realpath -m -- "$config_dir")"/* ]] || {
+  echo "The state folder must not be inside $config_dir." >&2; exit 1;
+}
+# Instances must not share a port or a state folder, also after an edit of service.env.
+for other in "$HOME"/.config/t3code*/service.env; do
+  [[ -f $other && $other != "$config_dir/service.env" ]] || continue
+  read -r other_port other_base < <(source "$other"; echo "${T3CODE_PORT:-} ${T3CODE_BASE:-}")
+  [[ $other_port != "$T3CODE_PORT" ]] || { echo "Port $T3CODE_PORT is used by $other." >&2; exit 1; }
+  [[ $(realpath -m -- "$other_base") != $(realpath -m -- "$T3CODE_BASE") ]] || {
+    echo "State folder $T3CODE_BASE is used by $other." >&2; exit 1;
+  }
+done
+# An installed instance listens on its own port.
+if ((first_install)) && ss -Hltn "sport = :$T3CODE_PORT" 2>/dev/null | grep -q .; then
+  echo "Port $T3CODE_PORT is already in use." >&2; exit 1
 fi
 # Volta shims resolve to volta-shim, so resolve Node through its own runtime.
 T3CODE_NODE=$("$T3CODE_NODE" -p 'process.execPath')
@@ -119,8 +127,6 @@ else
   runtime="$T3CODE_BASE/runtime/versions/$version"
 fi
 install -d -m 700 "$config_dir" "$T3CODE_BASE" "$runtime"
-exec 9>"$config_dir/install.lock"
-flock 9
 if [[ -n $package ]]; then
   package_hash=$(sha256sum -- "$package")
   package_hash=${package_hash%% *}
@@ -149,10 +155,6 @@ trap 'rm -f -- "$env_tmp" ${unit_tmp:+"$unit_tmp"}' EXIT
 for name in T3CODE_BUILD_ID T3CODE_NODE T3CODE_ENTRY T3CODE_HOST T3CODE_PORT T3CODE_ORIGIN T3CODE_BASE T3CODE_WORKDIR; do
   printf '%s=%q\n' "$name" "${!name}"
 done > "$env_tmp"
-# The configuration being replaced, so a build that does not come up is switched back.
-rm -f -- "$config_dir/service.env.previous"
-if [[ -f $config_dir/service.env ]]; then cp -p -- "$config_dir/service.env" "$config_dir/service.env.previous"; fi
-mv -f -- "$env_tmp" "$config_dir/service.env"
 install -d "$bin_dir" "$unit_dir"
 # The helpers find their instance from their own names.
 install -m 755 "$repo/scripts/t3code-run" "$bin_dir/$prefix-run"
@@ -166,7 +168,12 @@ chmod 644 "$unit_tmp"
 mv -f -- "$unit_tmp" "$unit_dir/$unit"
 systemctl --user daemon-reload
 systemctl --user enable "$unit"
-systemctl --user restart "$unit"
+# The configuration being replaced, so a build that does not come up is switched back.
+rm -f -- "$config_dir/service.env.previous"
+if [[ -f $config_dir/service.env ]]; then cp -p -- "$config_dir/service.env" "$config_dir/service.env.previous"; fi
+mv -f -- "$env_tmp" "$config_dir/service.env"
+# Failures from here on go through the health check and its rollback.
+systemctl --user restart "$unit" || true
 # An IPv6 literal needs brackets in a URL.
 ready_host=$T3CODE_HOST
 [[ $ready_host == *:* && $ready_host != \[* ]] && ready_host="[$ready_host]"
@@ -190,7 +197,7 @@ if [[ -f $config_dir/service.env.previous ]]; then
     source "$config_dir/service.env.previous"; echo "${T3CODE_BUILD_ID:-} ${T3CODE_HOST:-} ${T3CODE_PORT:-}"
   )
   mv -f -- "$config_dir/service.env.previous" "$config_dir/service.env"
-  systemctl --user restart "$unit"
+  systemctl --user restart "$unit" || true
   ready_host=$previous_host
   [[ $ready_host == *:* && $ready_host != \[* ]] && ready_host="[$ready_host]"
   if serving "$previous_port"; then
@@ -200,7 +207,7 @@ if [[ -f $config_dir/service.env.previous ]]; then
   fi
 else
   # Nothing to go back to: stop rather than leave the service restarting.
-  systemctl --user stop "$unit"
+  systemctl --user stop "$unit" || true
   echo "Stopped $unit; this was its first install." >&2
 fi
 exit 1

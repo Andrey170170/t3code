@@ -113,7 +113,8 @@ its own `~/.config/t3code-NAME/service.env`, `t3code-NAME.service`,
 `~/.local/share/t3code-NAME` state and `t3code-NAME-run`, `-pair` and
 `-update` helpers; the default instance keeps the unsuffixed names. Its first
 install needs a port no other instance uses, and refuses one another
-instance's `service.env` names or something already listens on. A named
+instance's `service.env` names or something already listens on; every install
+checks the port and state folder against the other instances again. A named
 instance is pinned: it installs only an exact Forgejo version or a source
 build, never a tag and never upstream npm.
 
@@ -123,7 +124,7 @@ to them:
 
 ```bash
 npm run publish:forgejo -- --source ../t3code-dev_v2 --tag v2
-t3code-v2-update --check v2          # the newest v2 build
+node scripts/t3code-forgejo.mjs check --version v2   # the newest v2 build
 T3CODE_PORT=3774 T3CODE_HOST=100.67.121.9 T3CODE_ORIGIN=https://dev-v2.andrei-homelab.com \
   node scripts/t3code-forgejo.mjs install --yes --instance v2 --version 0.0.44-forgejo.3
 t3code-v2-update 0.0.44-forgejo.4    # later updates name the exact version
@@ -131,8 +132,8 @@ t3code-v2-pair DEVICE
 ```
 
 Every install keeps the replaced configuration as `service.env.previous`; when
-the restarted service does not answer within 30 seconds, it is put back and
-the service restarted with it (a first install is stopped instead).
+the restarted service does not answer, it is put back and the service
+restarted with it (a first install is stopped instead).
 `scripts/t3code-install --instance NAME --uninstall` removes a named
 instance's service, helpers and configuration and keeps its state folder.
 
