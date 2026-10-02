@@ -25,7 +25,7 @@ import { waitForProject } from "~/state/entities";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useDebouncedValue } from "~/state/queries";
 import { useEnvironmentQuery } from "~/state/query";
-import { loadTrellisStatus, trellisEnvironment } from "~/state/trellis";
+import { loadTrellisStatus, refreshTrellisStatus, trellisEnvironment } from "~/state/trellis";
 import { trellisTrashedKey, useTrellisTrashedStore } from "~/state/trellisTrashed";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -288,6 +288,7 @@ export function useTrellisTrash() {
       environmentId: EnvironmentId,
       projectId: ProjectId,
       title: string,
+      workspaceRoot: string,
     ): Promise<"trashed" | "gone" | "failed"> => {
       const result = await run({ environmentId, input: { projectId } });
       if (result._tag === "Failure") {
@@ -307,16 +308,18 @@ export function useTrellisTrash() {
       }
       if (result.value.trashed === null) return "gone";
       const { name, restore } = result.value;
-      // Its retired root marks the emptied project trashed. Awaited, so a
-      // caller that navigates next never lands on a new draft in it, and so
-      // the trashed entry below is not dropped as stale by a status from
-      // before the trash.
-      await loadTrellisStatus(appAtomRegistry, environmentId);
       if (restore !== undefined) {
-        useTrellisTrashedStore
-          .getState()
-          .add(trellisTrashedKey(environmentId, projectId), { name, restore });
+        useTrellisTrashedStore.getState().add(trellisTrashedKey(environmentId, projectId), {
+          name,
+          environmentId,
+          workspaceRoot,
+          restore,
+          phase: "trashing",
+        });
       }
+      // Its retired root marks the emptied project trashed. Awaited, so a
+      // caller that navigates next never lands on a new draft in it.
+      await loadTrellisStatus(appAtomRegistry, environmentId);
       const toastId = toastManager.add(
         stackedThreadToast({
           type: "success",
@@ -343,9 +346,10 @@ export function useTrellisTrash() {
 
 /**
  * Restores a project this client moved to the Trellis trash, with its
- * conversations, and stops listing it as trashed once a fresh status shows
- * it live (so the sidebar never hides it in between). A failed restore drops
- * the entry too: the trash in Settings → Trellis is then the way back.
+ * conversations. The entry stays (`restoring`) until a status shows the
+ * project live (see `state/trellisTrashed`), so the sidebar never hides it in
+ * between. A failed restore drops the entry: the trash in Settings → Trellis
+ * is then the way back.
  */
 export function useTrellisUndoTrash() {
   const run = useAtomCommand(trellisEnvironment.restore, { reportFailure: false });
@@ -353,7 +357,8 @@ export function useTrellisUndoTrash() {
     async (environmentId: EnvironmentId, projectId: ProjectId): Promise<boolean> => {
       const key = trellisTrashedKey(environmentId, projectId);
       const trashed = useTrellisTrashedStore.getState().projects[key];
-      if (trashed === undefined) return false;
+      if (trashed === undefined || trashed.phase === "restoring") return false;
+      useTrellisTrashedStore.getState().setPhase(key, "restoring");
       const result = await run({ environmentId, input: trashed.restore });
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
@@ -371,8 +376,7 @@ export function useTrellisUndoTrash() {
         }
         return false;
       }
-      await loadTrellisStatus(appAtomRegistry, environmentId);
-      useTrellisTrashedStore.getState().remove(key);
+      refreshTrellisStatus(appAtomRegistry, environmentId);
       toastManager.add(
         stackedThreadToast({ type: "success", title: `Restored "${trashed.name}"` }),
       );

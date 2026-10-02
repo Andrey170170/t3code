@@ -4,13 +4,13 @@ import type { EnvironmentId, TrellisStatus } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { isHiddenRetiredProject, isHiddenWorkerProject } from "~/lib/trellis";
 import { useProjects, useThreadShells } from "~/state/entities";
 import { trellisEnvironment } from "~/state/trellis";
-import { useTrellisTrashedStore } from "~/state/trellisTrashed";
+import { reconcileTrellisTrashed, useTrellisTrashedStore } from "~/state/trellisTrashed";
 
 const NO_THREADS = { leads: 0, workers: 0, forkWorkers: 0 } as const;
 
@@ -45,6 +45,10 @@ export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
   );
   const statuses = useAtomValue(statusAtom);
   const trashedHere = useTrellisTrashedStore((state) => state.projects);
+  // Every status read settles this client's trashed entries.
+  useEffect(() => {
+    for (const [environmentId, status] of statuses) reconcileTrellisTrashed(environmentId, status);
+  }, [statuses]);
   // Active lead and worker threads per project; a fork worker's lead is in another project.
   const activeThreads = useMemo(() => {
     const projectOf = new Map(

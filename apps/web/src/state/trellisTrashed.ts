@@ -2,18 +2,33 @@
  * Projects this client moved to the Trellis trash, kept visible as trashed
  * with an Undo until restored or until the page reloads (the Trellis trash in
  * Settings → Trellis holds them after that). Keyed `environmentId:projectId`.
+ *
+ * Trellis status is the authority, applied by `reconcileTrellisTrashed`: an
+ * entry is `trashing` until a status shows its root retired (`trashed`), and
+ * is dropped once a status shows it live again after that, whether this
+ * client's Undo (`restoring`) or a restore elsewhere brought it back. A status
+ * from before the trash therefore never drops a fresh entry.
  */
-import type { EnvironmentId, ProjectId, TrellisRestoreInput } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ProjectId,
+  TrellisRestoreInput,
+  TrellisStatus,
+} from "@t3tools/contracts";
 import { create } from "zustand";
 
 export interface TrellisTrashedProject {
   readonly name: string;
+  readonly environmentId: EnvironmentId;
+  readonly workspaceRoot: string;
   readonly restore: TrellisRestoreInput;
+  readonly phase: "trashing" | "trashed" | "restoring";
 }
 
 interface TrellisTrashedStore {
   readonly projects: Readonly<Record<string, TrellisTrashedProject>>;
   readonly add: (key: string, project: TrellisTrashedProject) => void;
+  readonly setPhase: (key: string, phase: TrellisTrashedProject["phase"]) => void;
   readonly remove: (key: string) => void;
 }
 
@@ -23,6 +38,12 @@ export const trellisTrashedKey = (environmentId: EnvironmentId, projectId: Proje
 export const useTrellisTrashedStore = create<TrellisTrashedStore>((set) => ({
   projects: {},
   add: (key, project) => set((state) => ({ projects: { ...state.projects, [key]: project } })),
+  setPhase: (key, phase) =>
+    set((state) => {
+      const project = state.projects[key];
+      if (project === undefined || project.phase === phase) return state;
+      return { projects: { ...state.projects, [key]: { ...project, phase } } };
+    }),
   remove: (key) =>
     set((state) => {
       if (!(key in state.projects)) return state;
@@ -30,6 +51,23 @@ export const useTrellisTrashedStore = create<TrellisTrashedStore>((set) => ({
       return { projects: rest };
     }),
 }));
+
+const trimTrailingSlashes = (path: string) => path.replace(/(.)\/+$/, "$1");
+
+/** Applies one environment's Trellis status to that environment's entries. */
+export function reconcileTrellisTrashed(environmentId: EnvironmentId, status: TrellisStatus) {
+  if (status.state !== "ready") return;
+  const retired = new Set(status.retiredRoots ?? []);
+  const store = useTrellisTrashedStore.getState();
+  for (const [key, project] of Object.entries(store.projects)) {
+    if (project.environmentId !== environmentId) continue;
+    if (retired.has(trimTrailingSlashes(project.workspaceRoot))) {
+      if (project.phase === "trashing") store.setPhase(key, "trashed");
+    } else if (project.phase !== "trashing") {
+      store.remove(key);
+    }
+  }
+}
 
 /** The trash record of one project, or null when this client did not trash it. */
 export const useTrellisTrashed = (environmentId: EnvironmentId, projectId: ProjectId) =>

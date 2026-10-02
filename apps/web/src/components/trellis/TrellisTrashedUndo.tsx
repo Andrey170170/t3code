@@ -1,22 +1,26 @@
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { useEffect, useState } from "react";
 
-import { useTrellisStatusFor, useTrellisUndoTrash } from "~/hooks/useTrellis";
-import { trellisTrashedKey, useTrellisTrashedStore } from "~/state/trellisTrashed";
+import { useTrellisUndoTrash } from "~/hooks/useTrellis";
+import { useEnvironmentQuery } from "~/state/query";
+import { trellisEnvironment } from "~/state/trellis";
+import {
+  reconcileTrellisTrashed,
+  trellisTrashedKey,
+  useTrellisTrashedStore,
+} from "~/state/trellisTrashed";
 import { Button } from "../ui/button";
 
 /**
- * "In trash · Undo" for a project row whose Trellis item this client moved to
- * the trash; renders nothing otherwise. Undo restores the item and its
- * conversations. An entry whose project Trellis no longer has in the trash
- * (restored elsewhere: Settings → Trellis, the CLI, another client) is
- * dropped.
+ * "In trash · Undo" for a project row whose Trellis items (any of its
+ * members) this client moved to the trash; renders nothing otherwise. Undo
+ * restores them and their conversations. Each member environment's status is
+ * applied to the entries, so one restored elsewhere stops showing here.
  */
 export function TrellisTrashedUndo(props: {
   readonly members: ReadonlyArray<{
     readonly environmentId: EnvironmentId;
     readonly id: ProjectId;
-    readonly workspaceRoot: string;
   }>;
   readonly className?: string;
   /** False where the surrounding text already says it is in the trash. */
@@ -27,32 +31,24 @@ export function TrellisTrashedUndo(props: {
     (member) => trellisTrashedKey(member.environmentId, member.id) in trashedHere,
   );
   const undo = useTrellisUndoTrash();
-  const status = useTrellisStatusFor(props.members[0]?.environmentId ?? null);
-  const live = trashed.filter(
-    (member) =>
-      status !== null &&
-      member.environmentId === status.environmentId &&
-      status.state === "ready" &&
-      !status.retiredRoots.includes(member.workspaceRoot.replace(/(.)\/+$/, "$1")),
-  );
-  const liveKeys = live
-    .map((member) => trellisTrashedKey(member.environmentId, member.id))
-    .join("\n");
-  useEffect(() => {
-    if (liveKeys.length === 0) return;
-    for (const key of liveKeys.split("\n")) useTrellisTrashedStore.getState().remove(key);
-  }, [liveKeys]);
   const [pending, setPending] = useState(false);
   if (trashed.length === 0) return null;
+  const restoring = trashed.every(
+    (member) =>
+      trashedHere[trellisTrashedKey(member.environmentId, member.id)]?.phase === "restoring",
+  );
   return (
     <span className={`inline-flex shrink-0 items-center gap-1 ${props.className ?? ""}`}>
+      {[...new Set(trashed.map((member) => member.environmentId))].map((environmentId) => (
+        <TrellisTrashedReconciler key={environmentId} environmentId={environmentId} />
+      ))}
       {props.label === false ? null : (
         <span className="text-muted-foreground text-xs">In trash</span>
       )}
       <Button
         size="xs"
         variant="outline"
-        disabled={pending}
+        disabled={pending || restoring}
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.preventDefault();
@@ -63,8 +59,21 @@ export function TrellisTrashedUndo(props: {
           );
         }}
       >
-        Undo
+        {restoring ? "Restoring…" : "Undo"}
       </Button>
     </span>
   );
+}
+
+/** Applies an environment's Trellis status to this client's trashed entries. */
+function TrellisTrashedReconciler(props: { readonly environmentId: EnvironmentId }) {
+  const status = useEnvironmentQuery(
+    trellisEnvironment.status({ environmentId: props.environmentId, input: {} }),
+  ).data;
+  useEffect(() => {
+    if (status !== undefined && status !== null) {
+      reconcileTrellisTrashed(props.environmentId, status);
+    }
+  }, [props.environmentId, status]);
+  return null;
 }

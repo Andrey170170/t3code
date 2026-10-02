@@ -1580,7 +1580,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
       if (trellisRemoval === "trash") {
         // No confirmation: the toast and the row offer Undo.
-        const outcome = await trashTrellisProject(member.environmentId, member.id, member.title);
+        const outcome = await trashTrellisProject(
+          member.environmentId,
+          member.id,
+          member.title,
+          member.workspaceRoot,
+        );
         if (outcome === "trashed") {
           const trashedProjectRef = scopeProjectRef(member.environmentId, member.id);
           const draftStore = useComposerDraftStore.getState();

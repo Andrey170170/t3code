@@ -29,7 +29,7 @@ import {
 } from "../../lib/trellis";
 import { openGraduateIdeaDialog } from "../trellis/GraduateIdeaDialog";
 import { TrellisTrashedUndo } from "../trellis/TrellisTrashedUndo";
-import { useTrellisTrashed } from "../../state/trellisTrashed";
+import { trellisTrashedKey, useTrellisTrashedStore } from "../../state/trellisTrashed";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { loadTrellisStatus } from "../../state/trellis";
 import {
@@ -313,7 +313,10 @@ function ProjectDetail({
   const hasMultipleCheckouts = group.memberProjects.length > 1;
 
   const trashTrellisProject = useTrellisTrash();
-  const trashedHere = useTrellisTrashed(representative.environmentId, representative.id);
+  const trashedProjects = useTrellisTrashedStore((state) => state.projects);
+  const trashedHere = group.memberProjects.some(
+    (member) => trellisTrashedKey(member.environmentId, member.id) in trashedProjects,
+  );
   const representativeTrellis = useTrellisStatusFor(representative.environmentId);
   const trellisRemoval =
     group.memberProjects.length === 1
@@ -425,7 +428,12 @@ function ProjectDetail({
         draftStore.clearProjectDraftThreadId(projectRef);
       };
       for (const member of trashed) {
-        const outcome = await trashTrellisProject(member.environmentId, member.id, member.title);
+        const outcome = await trashTrellisProject(
+          member.environmentId,
+          member.id,
+          member.title,
+          member.workspaceRoot,
+        );
         if (outcome === "failed") return;
         if (outcome === "gone") {
           // Already out of Trellis (e.g. in its trash): only T3's entry is left.
@@ -622,11 +630,11 @@ function ProjectDetail({
           </SettingsSection>
         ) : null}
         <SettingsSection title="Danger">
-          {trashedHere !== null ? (
+          {trashedHere ? (
             <SettingsRow
               title="In the Trellis trash"
               description="Its files and history are in the Trellis trash and its conversations are archived. Undo brings both back; later, restore it from Settings → Trellis."
-              control={<TrellisTrashedUndo members={[representative]} label={false} />}
+              control={<TrellisTrashedUndo members={group.memberProjects} label={false} />}
             />
           ) : (
             <SettingsRow
