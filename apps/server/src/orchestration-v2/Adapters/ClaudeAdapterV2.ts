@@ -2928,6 +2928,11 @@ export function makeClaudeAdapterV2(
         const steeredTurns = yield* Ref.make(new Set<OrchestrationV2ProviderTurn["id"]>());
         const queryContext = yield* Ref.make<ClaudeLiveQueryContext | null>(null);
         const openedNativeThreads = yield* Ref.make(new Set<string>());
+        // Native sessions this runtime allocated and never opened. The
+        // provider-thread row can carry turns of an earlier native session (a
+        // resume fallback keeps the row), so its turn ordinal does not prove
+        // that this session exists.
+        const freshNativeThreads = yield* Ref.make(new Set<string>());
         const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
         const planIdsByNativeItem = yield* Ref.make(
           new Map<string, OrchestrationV2PlanArtifact["id"]>(),
@@ -6801,7 +6806,9 @@ export function makeClaudeAdapterV2(
           // proves the native session already exists, so the query must resume
           // it; reopening with a fixed session id makes the CLI fail fast with
           // "Session ID ... is already in use".
-          const hasPersistedProviderTurn = turnInput.providerTurnOrdinal > 1;
+          const hasPersistedProviderTurn =
+            turnInput.providerTurnOrdinal > 1 &&
+            !(yield* Ref.get(freshNativeThreads)).has(nativeThreadId);
           const shouldResume =
             resumeSessionAt !== undefined || openedWithResume || hasPersistedProviderTurn;
           const querySession = yield* queryRunner
@@ -6855,6 +6862,12 @@ export function makeClaudeAdapterV2(
             }
             const updated = new Set(current);
             updated.add(nativeThreadId);
+            return updated;
+          });
+          yield* Ref.update(freshNativeThreads, (current) => {
+            if (!current.has(nativeThreadId)) return current;
+            const updated = new Set(current);
+            updated.delete(nativeThreadId);
             return updated;
           });
           // Level is per CLI process: reset Waiting roster and wake
@@ -7312,6 +7325,9 @@ export function makeClaudeAdapterV2(
             function* (threadInput: ProviderAdapter.ProviderAdapterV2EnsureThreadInput) {
               const createdAt = yield* DateTime.now;
               const nativeThreadId = yield* queryRunner.allocateSessionId;
+              yield* Ref.update(freshNativeThreads, (current) =>
+                new Set(current).add(nativeThreadId),
+              );
               return makeProviderThread({
                 idAllocator,
                 providerInstanceId: adapterOptions.instanceId,
