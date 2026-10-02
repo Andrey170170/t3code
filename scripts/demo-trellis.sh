@@ -637,14 +637,20 @@ async page => {
   await page.waitForTimeout(2000);
   const own = page.getByRole('button', { name: $(js "Remove checkout $C_PATH"), exact: true });
   const used = (await own.count()) > 0 ? 'Remove checkout (grouped entry)' : 'Move to trash';
-  if ((await own.count()) > 0) await own.click();
-  else await page.getByRole('button', { name: 'Move to trash' }).click();
-  const dialog = page.getByRole('alertdialog');
-  await dialog.waitFor();
-  const title = await dialog.getByRole('heading').innerText();
-  await dialog.getByRole('button', { name: 'Confirm' }).click();
-  await page.waitForTimeout(4000);
-  return used + ': ' + title;
+  if ((await own.count()) > 0) {
+    // Removing a grouped entry deletes it for good, so it still confirms.
+    await own.click();
+    const dialog = page.getByRole('alertdialog');
+    await dialog.waitFor();
+    const title = await dialog.getByRole('heading').innerText();
+    await dialog.getByRole('button', { name: 'Confirm' }).click();
+    await page.waitForTimeout(4000);
+    return used + ': ' + title;
+  }
+  // A trash asks nothing: the page stays, offering Undo.
+  await page.getByRole('button', { name: 'Move to trash' }).click();
+  await page.getByRole('heading', { name: 'In the Trellis trash' }).waitFor({ timeout: 60000 });
+  return used + ': in place, with Undo';
 }
 JS
 goto "/$ENV_ID/$B_THREAD"
@@ -658,7 +664,7 @@ c9a() {
   tr_ --json trash | jq -e --arg id "$C_ID" 'any(.projects[]; .id==$id)' && [[ -n $C_ARCHIVED ]] &&
     ! grep -qF -- "$C_TITLE" <<<"$SIDEBAR_AFTER_DELETE"
 }
-check 9a "Deleting click moves it to the Trellis trash, archives its thread and removes it from the sidebar" \
+check 9a "Deleting click moves it to the Trellis trash without a dialog, archives its thread and removes it from the sidebar's threads" \
   "$OUT/09a-sidebar-after-delete.png, $OUT/09b-trash.png" \
   c9a
 pwc <<JS >>"$OUT/09-trash.log"
