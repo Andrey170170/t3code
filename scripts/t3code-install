@@ -86,8 +86,11 @@ install -m 644 "$repo/config/t3code/t3code.service" "$HOME/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable t3code.service
 systemctl --user restart t3code.service
+# An IPv6 literal needs brackets in a URL.
+ready_host=$T3CODE_HOST
+[[ $ready_host == *:* && $ready_host != \[* ]] && ready_host="[$ready_host]"
 for ((attempt=0; attempt<30; attempt++)); do
-  if curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 "http://$T3CODE_HOST:$T3CODE_PORT/" >/dev/null 2>&1; then
+  if curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 "http://$ready_host:$T3CODE_PORT/" >/dev/null 2>&1; then
     echo "T3 $installed_version ($T3CODE_BUILD_ID) is serving. Pair a browser with: t3code-pair DEVICE"
     exit 0
   fi
