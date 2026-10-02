@@ -144,6 +144,16 @@ pwc() { # JS function `async page => ...` on stdin; prints its JSON result
   local f
   f=$(mktemp "$WORK/pw-XXXX.js")
   cat >"$f"
+  # A full load of the dev app fetches about 3000 unbundled modules, and
+  # Chromium allows 2700 outstanding loaders per renderer. Loaders of earlier
+  # documents stay counted until V8 collects them, so after a few reloads a
+  # load fails (net::ERR_INSUFFICIENT_RESOURCES) and the renderer crashes.
+  # Collecting garbage before each navigation keeps that from piling up.
+  local fn
+  fn=$(<"$f")
+  if [[ $fn == *.goto\(* ]]; then
+    printf 'async page => {\n  const cdp = await page.context().newCDPSession(page);\n  await cdp.send("HeapProfiler.collectGarbage");\n  await cdp.detach();\n  return await (%s)(page);\n}\n' "$fn" >"$f"
+  fi
   local out rc
   out=$(cd "$WORK/pw" && playwright-cli -s="$SESSION" --raw run-code --filename="$f" 2>&1)
   rc=$?
