@@ -9,7 +9,7 @@
 import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import { limitTitleMessage } from "./ThreadTitleContext.ts";
-import type { ChatAttachment } from "@t3tools/contracts";
+import type { BranchNamingOptions, ChatAttachment } from "@t3tools/contracts";
 
 import { limitSection } from "./TextGenerationUtils.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
@@ -144,6 +144,7 @@ export function buildPrContentPrompt(input: PrContentPromptInput) {
 // ---------------------------------------------------------------------------
 
 export interface BranchNamePromptInput {
+  naming?: BranchNamingOptions | undefined;
   message: string;
   attachments?: ReadonlyArray<ChatAttachment> | undefined;
   policy?: TextGenerationPolicy | undefined;
@@ -190,13 +191,29 @@ export function buildBranchNamePrompt(input: BranchNamePromptInput) {
     responseShape: "Return a JSON object with key: branch.",
     rules: [
       "Branch should describe the requested work from the user message.",
-      "Keep it short and specific (2-6 words).",
-      "Use plain words only, no issue prefixes and no punctuation-heavy text.",
+      "Return a valid Git branch name without spaces.",
+      ...(input.naming?.mode === "custom"
+        ? [
+            "Return the complete branch name, following the user's naming instructions. No prefix or suffix will be added.",
+          ]
+        : [
+            "Keep it short and specific (2-6 words), in lowercase with hyphen-separated words.",
+            ...(input.naming?.mode === "semantic"
+              ? [
+                  "Include a semantic prefix and a slash in the branch name, for example feat/add-search, fix/login-error, refactor/auth, docs/setup, or chore/update-deps. Choose the prefix that best describes the work.",
+                ]
+              : [
+                  "Return only the descriptive branch fragment, without a prefix or namespace. The application adds the configured prefix.",
+                ]),
+          ]),
       "If images are attached, use them as primary context for visual/UI issues.",
     ],
     message: input.message,
     attachments: input.attachments,
-    additionalInstructions: input.policy?.branchInstructions,
+    additionalInstructions:
+      input.naming?.mode === "custom"
+        ? input.naming.instructions
+        : input.policy?.branchInstructions,
   });
   const outputSchema = Schema.Struct({
     branch: Schema.String,
@@ -325,36 +342,5 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
     needsRefinement: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   });
 
-  return { prompt, outputSchema };
-}
-
-export interface ProjectNamePromptInput {
-  /** The first user message, or the thread contents for a refinement. */
-  message: string;
-  /** Present when refining a name generated earlier. */
-  previousName?: string | undefined;
-}
-
-const PROJECT_NAME_PROMPT = `Name a new project so the user can find it again weeks later in a list of projects.
-Return JSON with keys name and description.
-
-Rules for name:
-- 2-4 words naming the subject, like a folder or notebook title.
-- No quotes, emoji, dates, version numbers, or trailing punctuation.
-- Do not describe the process (research, plan, fix, help) unless it is the subject.
-
-Rules for description:
-- One plain sentence, under 120 characters, saying what the project is about.`;
-
-/** Name and one-line description for a Trellis project, from its first thread. */
-export function buildProjectNamePrompt(input: ProjectNamePromptInput) {
-  const prompt =
-    input.previousName === undefined
-      ? `${PROJECT_NAME_PROMPT}\n\nFirst user message:\n${limitTitleMessage(input.message, 8_000)}`
-      : `${PROJECT_NAME_PROMPT}\nThe project is currently named ${JSON.stringify(input.previousName)}. Keep that name if it is still accurate.\n\nThread contents so far:\n${limitTitleMessage(input.message, 8_000)}`;
-  const outputSchema = Schema.Struct({
-    name: Schema.String,
-    description: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
-  });
   return { prompt, outputSchema };
 }

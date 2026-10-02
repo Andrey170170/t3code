@@ -10,8 +10,6 @@ import {
   useComposerMenuProps,
 } from "./composerEventScope";
 
-import { SideChatFocusContext } from "./sideChatFocus";
-
 class FakeElement {
   constructor(private readonly matchingSelector: string | null) {}
 
@@ -28,36 +26,6 @@ afterEach(() => {
 });
 
 describe("composer menu focus", () => {
-  it("does not send a side chat menu's focus to the parent composer", async () => {
-    const focusAtEnd = vi.fn();
-    const composerRef = { current: { focusAtEnd } } as unknown as ComposerHandleRef;
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    let menuProps: ReturnType<typeof useComposerMenuProps> | undefined;
-    function Probe() {
-      const props = useComposerMenuProps();
-      useLayoutEffect(() => {
-        menuProps = props;
-      }, [props]);
-      return null;
-    }
-    const renderer = await act(() =>
-      create(
-        createElement(
-          ComposerHandleContext,
-          { value: composerRef },
-          createElement(SideChatFocusContext, { value: true }, createElement(Probe)),
-        ),
-      ),
-    );
-    try {
-      menuProps?.finalFocus?.();
-      expect(focusAtEnd).not.toHaveBeenCalled();
-      expect(menuProps?.finalFocus).toBeUndefined();
-    } finally {
-      await act(() => renderer.unmount());
-    }
-  });
-
   it.each([
     ["an open menu", '[data-chat-composer-floating-layer="true"]', true],
     ["an unmounted menu", null, true],

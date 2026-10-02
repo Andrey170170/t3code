@@ -48,7 +48,7 @@ import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hos
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 
 import * as ServerConfig from "../config.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -110,26 +110,6 @@ const CodexTurnMetadata = Schema.Struct({
   turn_id: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
 });
 
-const CodexSubagentSource = Schema.Union([
-  Schema.Literals(["review", "compact", "memory_consolidation"]),
-  Schema.Struct({
-    thread_spawn: Schema.Struct({
-      parent_thread_id: Schema.String,
-      depth: Schema.Number,
-      agent_path: Schema.optional(Schema.Unknown),
-      agent_nickname: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
-      agent_role: Schema.optional(Schema.Union([Schema.String, Schema.Null])),
-    }),
-  }),
-  Schema.Struct({ other: Schema.String }),
-]);
-
-const CodexSessionSource = Schema.Union([
-  Schema.Literals(["cli", "vscode", "exec", "app_server", "unknown"]),
-  Schema.Struct({ custom: Schema.String }),
-  Schema.Struct({ subagent: CodexSubagentSource }),
-]);
-
 const TranscriptRecord = Schema.Struct({
   type: Schema.optional(Schema.String),
   timestamp: Schema.optional(Schema.String),
@@ -149,7 +129,6 @@ const TranscriptRecord = Schema.Struct({
       message: Schema.optional(Schema.String),
       model: Schema.optional(Schema.String),
       cwd: Schema.optional(Schema.String),
-      source: Schema.optional(CodexSessionSource),
       content: Schema.optional(Schema.Array(TranscriptContentBlock)),
       internal_chat_message_metadata_passthrough: Schema.optional(Schema.Unknown),
     }),
@@ -162,17 +141,6 @@ const decodeTranscriptRecord = Schema.decodeUnknownOption(Schema.fromJsonString(
 const decodeTranscriptValue = Schema.decodeUnknownOption(TranscriptRecord);
 const selectTranscriptPath = createTranscriptJsonSelector(TranscriptRecord);
 const decodeCodexTurnMetadata = Schema.decodeUnknownOption(CodexTurnMetadata);
-const decodeCodexSessionMetadata = Schema.decodeUnknownOption(
-  Schema.fromJsonString(
-    Schema.Struct({
-      type: Schema.Literal("session_meta"),
-      payload: Schema.Struct({
-        cwd: Schema.optional(Schema.String),
-        source: Schema.optional(CodexSessionSource),
-      }),
-    }),
-  ),
-);
 
 type DecodedTranscriptRecord = typeof TranscriptRecord.Type;
 
@@ -224,7 +192,6 @@ export class AgentSessionScanner extends Context.Service<
     readonly recentThreads: (
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
-      options?: { readonly refresh?: boolean },
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
   }
 >()("t3/project/AgentSessionScanner") {}
@@ -332,18 +299,6 @@ function parseAgentSessionRecords(
   input: AgentSessionTranscriptMetadata,
   records: ReadonlyArray<DecodedTranscriptRecord>,
 ): AgentSessionThread | null {
-  if (
-    input.source === "codex" &&
-    records.some(
-      (record) =>
-        record.type === "session_meta" &&
-        typeof record.payload?.source === "object" &&
-        record.payload.source !== null &&
-        "subagent" in record.payload.source,
-    )
-  ) {
-    return null;
-  }
   const fallbackTimestamp = DateTime.formatIso(DateTime.makeUnsafe(input.lastActiveAtMs));
   // Claude filenames are session IDs. Codex rollout filenames include extra
   // timestamp text, so only transcript metadata can provide a resumable ID.
@@ -607,23 +562,8 @@ function isT3ManagedWorktree(
   );
 }
 
-/** Extract `cwd` from a session-meta record, excluding native Codex subagents. */
-function extractCwd(line: string, source: AgentSessionSource): string | null {
-  if (source === "codex") {
-    const metadata = decodeCodexSessionMetadata(line);
-    if (Option.isNone(metadata)) return null;
-    const sessionSource = metadata.value.payload.source;
-    if (
-      typeof sessionSource === "object" &&
-      sessionSource !== null &&
-      "subagent" in sessionSource
-    ) {
-      return null;
-    }
-    const cwd = metadata.value.payload.cwd?.trim();
-    return cwd && cwd.length > 0 ? cwd : null;
-  }
-
+/** Extract `cwd` from a session-meta record, tolerating the shapes each CLI writes. */
+function extractCwd(line: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -684,7 +624,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
-  const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const projectStore = yield* ProjectStore.ProjectStoreV2;
   const baseDir = path.resolve(serverConfig.baseDir);
   const worktreesDir = path.resolve(serverConfig.worktreesDir);
   // Windows filesystems are case-insensitive, so path prefix checks there
@@ -790,7 +730,6 @@ export const make = Effect.gen(function* () {
   // A large history snapshot can precede session metadata. Read bounded
   // chunks until a complete record names its cwd or the safety budget ends.
   const readCwd = Effect.fn("AgentSessionScanner.readCwd")(function* (
-    source: AgentSessionSource,
     transcript: TranscriptCandidate,
     budget: MetadataReadBudget,
   ) {
@@ -827,9 +766,7 @@ export const make = Effect.gen(function* () {
             };
             const readLastRecord = () => {
               const record = remaining + decoder.decode();
-              return record.length === 0 || !reserveRecord()
-                ? null
-                : extractCwd(record.trim(), source);
+              return record.length === 0 || !reserveRecord() ? null : extractCwd(record.trim());
             };
 
             while (bytesRead < maxBytes) {
@@ -856,7 +793,7 @@ export const make = Effect.gen(function* () {
 
               for (const line of lines) {
                 if (!reserveRecord()) return null;
-                const cwd = extractCwd(line.trim(), source);
+                const cwd = extractCwd(line.trim());
                 if (cwd !== null) return cwd;
               }
             }
@@ -1118,7 +1055,7 @@ export const make = Effect.gen(function* () {
     >();
 
     for (const transcript of transcripts) {
-      const cwd = yield* readCwd(source, transcript, budget);
+      const cwd = yield* readCwd(transcript, budget);
       if (cwd === null) continue;
       const key = `${transcript.providerInstanceId}\0${cwd}`;
       const existing = byOwnerAndCwd.get(key);
@@ -1202,7 +1139,6 @@ export const make = Effect.gen(function* () {
           const config = decodeCodexSettings(instance.config ?? {});
           if (Option.isNone(config)) continue;
           const codexSettings =
-            config.value.setupMode !== "managed" &&
             config.value.homePath.trim().length === 0 &&
             config.value.shadowHomePath.trim().length === 0 &&
             environmentHome?.trim()
@@ -1337,15 +1273,15 @@ export const make = Effect.gen(function* () {
 
     // Resolve persisted roots too. A project and a transcript can name
     // different symlinks to the same directory.
-    const shellSnapshot = yield* projectionSnapshotQuery
-      .getShellSnapshot()
+    const importedProjects = yield* projectStore
+      .listShells()
       .pipe(
         Effect.mapError(
           (cause) => new AgentSessionScanError({ operation: "read-projects", cause }),
         ),
       );
-    const importedProjectsByRoot = new Map<string, (typeof shellSnapshot.projects)[number]>();
-    for (const project of shellSnapshot.projects) {
+    const importedProjectsByRoot = new Map<string, (typeof importedProjects)[number]>();
+    for (const project of importedProjects) {
       const projectRoot = path.resolve(expandHomePath(project.workspaceRoot));
       importedProjectsByRoot.set(normalizeProjectPathForComparison(projectRoot), project);
       importedProjectsByRoot.set(yield* directoryIdentity(projectRoot), project);
@@ -1392,7 +1328,6 @@ export const make = Effect.gen(function* () {
   const prepareRecentThreads = Effect.fn("AgentSessionScanner.prepareRecentThreads")(function* (
     workspaceRoot: string,
     completedSources: ReadonlyArray<AgentSessionImportSource>,
-    refresh: boolean,
   ) {
     const root = path.resolve(expandHomePath(workspaceRoot));
     const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
@@ -1401,10 +1336,7 @@ export const make = Effect.gen(function* () {
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
     const cutoffMs = nowMs - RECENT_THREAD_WINDOW_MS;
 
-    // Explicit imports must rediscover files added since an earlier onboarding scan.
-    const candidates = refresh
-      ? (yield* collectCandidates()).candidates
-      : (cachedCandidates ?? (yield* collectCandidates()).candidates);
+    const candidates = cachedCandidates ?? (yield* collectCandidates()).candidates;
     cachedCandidates = candidates;
 
     const eligibleTranscripts: Array<{
@@ -1555,9 +1487,7 @@ export const make = Effect.gen(function* () {
   const recentThreads: AgentSessionScanner["Service"]["recentThreads"] = (
     workspaceRoot,
     completedSources = [],
-    options = {},
-  ) =>
-    Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources, options.refresh ?? false));
+  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
 
   return AgentSessionScanner.of({ scan, recentThreads });
 });

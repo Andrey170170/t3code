@@ -9,7 +9,6 @@ import {
   type ServerSettings as ContractServerSettings,
 } from "@t3tools/contracts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -20,7 +19,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 
@@ -34,39 +33,12 @@ const makeProjectShell = (workspaceRoot: string): OrchestrationProjectShell => (
   updatedAt: "2026-01-01T00:00:00.000Z",
 });
 
-/** Only `getShellSnapshot` is exercised; the rest must not be called. */
-const makeProjectionSnapshotQueryLayer = (importedWorkspaceRoots: ReadonlyArray<string>) =>
-  Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
-    getCommandReadModel: () => Effect.die("unused"),
-    getUserInputActivity: () => Effect.die("unused"),
-    listActivitiesByKind: () => Effect.die("unused"),
-    getSnapshot: () => Effect.die("unused"),
-    getShellSnapshot: () =>
-      Effect.succeed({
-        snapshotSequence: 0,
-        projects: importedWorkspaceRoots.map((workspaceRoot) => makeProjectShell(workspaceRoot)),
-        threads: [],
-        updatedAt: "2026-01-01T00:00:00.000Z",
-      }),
-    getDeletedWorktreeThreads: () => Effect.die("unused"),
-    listThreadsWithPullRequests: () => Effect.die("unused"),
-    getArchivedShellSnapshot: () => Effect.die("unused"),
-    getSnapshotSequence: () => Effect.die("unused"),
-    getCounts: () => Effect.die("unused"),
-    getEventReplayStats: () => Effect.die("unused"),
-    getActiveProjectByWorkspaceRoot: () => Effect.die("unused"),
-    getProjectShells: () => Effect.die("unused"),
-    getProjectShellById: () => Effect.die("unused"),
-    getImportedAgentSessionSources: () => Effect.succeed([]),
-    getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
-    getThreadCheckpointContext: () => Effect.die("unused"),
-    getFullThreadDiffContext: () => Effect.die("unused"),
-    getThreadShellById: () => Effect.die("unused"),
-    getThreadRuntimeContext: () => Effect.die("unused"),
-    getTurnStartMessage: () => Effect.die("unused"),
-    getThreadDetailById: () => Effect.die("unused"),
-    getThreadDetailSnapshot: () => Effect.die("unused"),
-    searchThreads: () => Effect.die("unused"),
+const makeProjectStoreLayer = (importedWorkspaceRoots: ReadonlyArray<string>) =>
+  Layer.mock(ProjectStore.ProjectStoreV2)({
+    listShells: () =>
+      Effect.succeed(
+        importedWorkspaceRoots.map((workspaceRoot) => makeProjectShell(workspaceRoot)),
+      ),
   });
 
 /**
@@ -99,7 +71,7 @@ const makeScannerTestLayer = (input: ScannerTestInput) =>
           input.claudeHomePath,
           input.configBaseDir ?? { prefix: "t3code-scanner-config-" },
         ),
-        makeProjectionSnapshotQueryLayer(input.importedWorkspaceRoots ?? []),
+        makeProjectStoreLayer(input.importedWorkspaceRoots ?? []),
       ),
     ),
   );
@@ -281,118 +253,6 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
             alreadyImported: false,
             git: null,
           },
-        ]);
-      }),
-    );
-
-    it.effect("excludes spawned and guardian Codex subagents", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
-        yield* TestClock.setTime(nowMs);
-        const claudeHomePath = yield* makeTempDir("t3code-subagents-claude-");
-        const codexHomePath = yield* makeTempDir("t3code-subagents-codex-");
-        const workspace = yield* makeTempDir("t3code-subagents-workspace-");
-        const directory = path.join(codexHomePath, "sessions", "2026", "08", "24");
-        const transcript = (id: string, source: unknown, prompt: string) =>
-          [
-            encodeTranscriptRecord({
-              type: "session_meta",
-              payload: { id, cwd: workspace, source },
-            }),
-            encodeTranscriptRecord({
-              type: "event_msg",
-              payload: { type: "user_message", message: prompt },
-            }),
-          ].join("\n");
-
-        yield* writeTranscript({
-          filePath: path.join(directory, "rollout-human.jsonl"),
-          contents: transcript("human-session", "vscode", "Human-started conversation"),
-          mtimeMs: nowMs,
-        });
-        for (let index = 0; index < 15; index++) {
-          yield* writeTranscript({
-            filePath: path.join(directory, `rollout-spawn-${String(index).padStart(2, "0")}.jsonl`),
-            contents: transcript(
-              `spawn-${index}`,
-              {
-                subagent: {
-                  thread_spawn: {
-                    parent_thread_id: "human-session",
-                    depth: index === 0 ? 1 : 2,
-                  },
-                },
-              },
-              `Spawned subagent ${index}`,
-            ),
-            mtimeMs: nowMs - index - 1,
-          });
-          yield* writeTranscript({
-            filePath: path.join(
-              directory,
-              `rollout-guardian-${String(index).padStart(2, "0")}.jsonl`,
-            ),
-            contents: transcript(
-              `guardian-${index}`,
-              { subagent: { other: "guardian" } },
-              `Guardian subagent ${index}`,
-            ),
-            mtimeMs: nowMs - index - 16,
-          });
-        }
-
-        const result = yield* runScan({ claudeHomePath, codexHomePath });
-        expect(result.candidates).toMatchObject([{ path: workspace, threadCount: 1 }]);
-
-        const threads = yield* runRecentThreads({
-          claudeHomePath,
-          codexHomePath,
-          workspaceRoot: workspace,
-        });
-        expect(threads.map((thread) => thread.providerSessionId)).toEqual(["human-session"]);
-      }),
-    );
-
-    it.effect("keeps top-level Codex threads created through app server", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
-        yield* TestClock.setTime(nowMs);
-        const claudeHomePath = yield* makeTempDir("t3code-app-server-claude-");
-        const codexHomePath = yield* makeTempDir("t3code-app-server-codex-");
-        const workspace = yield* makeTempDir("t3code-app-server-workspace-");
-        yield* writeTranscript({
-          filePath: path.join(
-            codexHomePath,
-            "sessions",
-            "2026",
-            "08",
-            "24",
-            "rollout-app-server.jsonl",
-          ),
-          contents: [
-            encodeTranscriptRecord({
-              type: "session_meta",
-              payload: { id: "agent-created-session", cwd: workspace, source: "app_server" },
-            }),
-            encodeTranscriptRecord({
-              type: "event_msg",
-              payload: { type: "user_message", message: "Agent-created conversation" },
-            }),
-          ].join("\n"),
-          mtimeMs: nowMs,
-        });
-
-        const result = yield* runScan({ claudeHomePath, codexHomePath });
-        expect(result.candidates).toMatchObject([{ path: workspace, threadCount: 1 }]);
-        const threads = yield* runRecentThreads({
-          claudeHomePath,
-          codexHomePath,
-          workspaceRoot: workspace,
-        });
-        expect(threads.map((thread) => thread.providerSessionId)).toEqual([
-          "agent-created-session",
         ]);
       }),
     );
@@ -824,60 +684,6 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           claudeWorkspace,
         ]);
       }),
-    );
-
-    it.effect.each(["cli", "managed"] as const)(
-      "scans the %s home consistently with its runtime when CODEX_HOME is set",
-      (setupMode) =>
-        Effect.gen(function* () {
-          const path = yield* Path.Path;
-          const fs = yield* FileSystem.FileSystem;
-          const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
-          const codexHomePath = yield* makeTempDir("t3code-codex-native-home-");
-          const environmentHome = yield* makeTempDir("t3code-codex-env-home-");
-          const nativeWorkspace = yield* makeTempDir("t3code-workspace-native-");
-          const environmentWorkspace = yield* makeTempDir("t3code-workspace-env-");
-          for (const [home, workspace] of [
-            [codexHomePath, nativeWorkspace],
-            [environmentHome, environmentWorkspace],
-          ] as const) {
-            yield* writeTranscript({
-              filePath: path.join(home, "sessions", "2026", "01", "01", "rollout-session.jsonl"),
-              contents: codexRolloutLine(workspace),
-              mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
-            });
-          }
-          // Redirect reads of the default native home into the fixture, keeping live history out of the scan.
-          const nativeHome = path.join(NodeOS.homedir(), ".codex");
-          const fixturePath = (target: string) =>
-            target === nativeHome || target.startsWith(nativeHome + path.sep)
-              ? codexHomePath + target.slice(nativeHome.length)
-              : target;
-          const fixtureFs = FileSystem.FileSystem.of({
-            ...fs,
-            readDirectory: (target) => fs.readDirectory(fixturePath(target)),
-            stat: (target) => fs.stat(fixturePath(target)),
-            open: (target, options) => fs.open(fixturePath(target), options),
-            realPath: (target) => fs.realPath(fixturePath(target)),
-          });
-          const result = yield* runScan({
-            claudeHomePath,
-            codexHomePath,
-            providerInstances: {
-              [ProviderInstanceId.make("codex")]: {
-                driver: ProviderDriverKind.make("codex"),
-                environment: [{ name: "CODEX_HOME", value: environmentHome, sensitive: false }],
-                config: { setupMode: setupMode === "cli" ? "existing" : "managed" },
-              },
-            },
-          }).pipe(
-            Effect.provideService(FileSystem.FileSystem, fixtureFs),
-            Effect.provideService(HostProcessEnvironment, { CODEX_HOME: environmentHome }),
-          );
-          expect(result.candidates.map((candidate) => candidate.path)).toEqual([
-            setupMode === "managed" ? nativeWorkspace : environmentWorkspace,
-          ]);
-        }),
     );
 
     it.effect("ignores invalid provider instances while scanning the remaining providers", () =>
@@ -1542,48 +1348,6 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
   });
 
   describe("recentThreads", () => {
-    it.effect("refreshes bounded import candidates after an earlier scan", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
-        yield* TestClock.setTime(nowMs);
-        const claudeHomePath = yield* makeTempDir("t3code-refresh-claude-");
-        const codexHomePath = yield* makeTempDir("t3code-refresh-codex-");
-        const workspace = yield* makeTempDir("t3code-refresh-workspace-");
-        yield* Effect.gen(function* () {
-          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
-          expect((yield* scanner.scan).candidates).toEqual([]);
-          yield* writeTranscript({
-            filePath: path.join(codexHomePath, "sessions", "2026", "08", "24", "rollout-new.jsonl"),
-            contents: [
-              encodeTranscriptRecord({
-                type: "session_meta",
-                payload: { id: "new-after-scan", cwd: workspace },
-              }),
-              encodeTranscriptRecord({
-                type: "event_msg",
-                payload: { type: "user_message", message: "A newly started conversation" },
-              }),
-            ].join("\n"),
-            mtimeMs: nowMs,
-          });
-          expect(yield* scanner.recentThreads(workspace).pipe(Stream.runCollect)).toEqual([]);
-          const refreshed = yield* scanner
-            .recentThreads(workspace, [], { refresh: true })
-            .pipe(Stream.runCollect);
-          expect(refreshed).toMatchObject([
-            {
-              _tag: "Importable",
-              thread: {
-                providerSessionId: "new-after-scan",
-                messages: [{ text: "A newly started conversation" }],
-              },
-            },
-          ]);
-        }).pipe(Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })));
-      }),
-    );
-
     it.effect.each([false, true])(
       "counts terminal newlines correctly with record overflow=%s",
       (overflow) =>

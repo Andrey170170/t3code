@@ -1,7 +1,3 @@
-import { serverEnvironment } from "../../state/server";
-import { useAtomCommand } from "../../state/use-atom-command";
-import { useEnvironments } from "../../state/environments";
-import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { useAuth, useUser } from "@clerk/expo";
 import { useNavigation } from "@react-navigation/native";
@@ -157,6 +153,10 @@ function SettingsIndexSections() {
         ) : null}
       </SettingsSection>
 
+      <SettingsSection title="Automations">
+        <SettingsRow icon="clock" label="Scheduled tasks" target="SettingsScheduledTasks" />
+      </SettingsSection>
+
       <SettingsSection title="Projects & threads">
         {selectedProjectKey !== null ? (
           <SettingsRow
@@ -166,18 +166,19 @@ function SettingsIndexSections() {
             target="SettingsProjectOverview"
           />
         ) : null}
-        <SettingsRow
-          icon="square.and.arrow.down"
-          label="Import Codex Chats"
-          target="SettingsCodexImport"
-        />
         <SettingsRow icon="folder" label="Organization" target="SettingsOrganization" />
         <SettingsRow icon="text.bubble" label="Thread behavior" target="SettingsThreads" />
+        <SettingsRow icon="arrow.turn.left.up" label="Follow-ups" target="SettingsFollowUp" />
         <SettingsRow icon="archivebox" label="Archived Threads" target="SettingsArchive" />
       </SettingsSection>
 
       <SettingsSection title="Server settings">
-        <AgentTaskAccessRows />
+        <SettingsRow
+          icon="person.crop.circle"
+          label="Provider accounts"
+          target="SettingsProviderAccounts"
+          disabled={noServerTargets}
+        />
         <SettingsRow
           icon="text.bubble"
           label="New threads"
@@ -210,32 +211,4 @@ function SettingsIndexSections() {
       </SettingsSection>
     </>
   );
-}
-
-/** Task permissions belong to the server where the agent runs. */
-function AgentTaskAccessRows() {
-  const { environments } = useEnvironments();
-  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
-    label: "agent task access update",
-    reportFailure: true,
-  });
-  return environments
-    .filter(
-      (environment) => environment.connection.phase === "connected" && environment.serverConfig,
-    )
-    .map((environment) => (
-      <SettingsSwitchRow
-        key={environment.environmentId}
-        icon="arrow.triangle.branch"
-        label="Agent task access"
-        subtitle={`${environment.label}: allow Codex agents to create chats and send follow-ups with approval. Applies to new sessions.`}
-        value={environment.serverConfig?.settings.enableAgentTaskAccess ?? true}
-        onValueChange={(value) => {
-          void updateSettings({
-            environmentId: environment.environmentId,
-            input: { patch: { enableAgentTaskAccess: value } },
-          });
-        }}
-      />
-    ));
 }

@@ -5,7 +5,6 @@ import {
   PREVIEW_VIEWPORT_MAX_AREA,
   PreviewRenderedViewportSize,
   PreviewTabId,
-  PreviewTrellisError,
   PreviewViewportPresetId,
   PreviewViewportSetting,
   PreviewViewportSize,
@@ -942,7 +941,6 @@ export const PreviewAutomationError = Schema.Union([
   PreviewAutomationRequestQueueClosedError,
   PreviewAutomationRemoteUnavailableError,
   PreviewAutomationMalformedResponseError,
-  PreviewTrellisError,
 ]);
 export type PreviewAutomationError = typeof PreviewAutomationError.Type;
 

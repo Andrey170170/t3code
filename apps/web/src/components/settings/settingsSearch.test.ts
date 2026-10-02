@@ -284,6 +284,10 @@ describe("searchSettings", () => {
       id: "word-wrap",
       to: "/settings/appearance",
     });
+    expect(searchSettings("composer context")[0]).toMatchObject({
+      id: "composer-context",
+      to: "/settings/appearance",
+    });
     expect(searchSettings("environment identification")[0]).toMatchObject({
       id: "environment-identification",
       to: "/settings/appearance",
@@ -339,7 +343,6 @@ describe("searchSettings", () => {
 
   it.each([
     ["default model", "default-model", "/settings/general"],
-    ["import conversations", "import-conversations", "/settings/general"],
     ["new threads", "new-threads", "/settings/general"],
     ["agent browser access", "agent-browser-access", "/settings/integrations"],
     ["automatically pull", "automatic-pull", "/settings/source-control"],
@@ -365,12 +368,6 @@ describe("searchSettings", () => {
 });
 
 describe("settings search targets", () => {
-  it("allows conversation imports before any project is selected", () => {
-    const target = getSettingsSearchTargetScope("import-conversations")!;
-    expect(isSettingsSearchScopeAvailable(target.scope, "all")).toBe(true);
-    expect(isSettingsSearchScopeAvailable(target.scope, "environment")).toBe(true);
-  });
-
   it.each([
     "auto-settle-inactive-threads",
     "auto-settle-merged-threads",

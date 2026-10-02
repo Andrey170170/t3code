@@ -9,12 +9,10 @@ import {
   DEFAULT_BROWSER_PROFILE_ID,
   FILL_PREVIEW_VIEWPORT,
   type PreviewAnnotationPayload,
-  PreviewTrellisError,
   type PreviewViewportSetting,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
-import * as Schema from "effect/Schema";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -35,8 +33,6 @@ import {
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
-import { trellisEnvironment } from "~/state/trellis";
-import { isLoopbackPreviewUrl } from "~/lib/trellis";
 import { useAtomCommand } from "~/state/use-atom-command";
 import {
   browserMiniPlayerSource,
@@ -76,8 +72,6 @@ import {
 } from "~/browser/browserRecording";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
-
-const isPreviewTrellisError = Schema.is(PreviewTrellisError);
 
 interface Props {
   threadRef: ScopedThreadRef;
@@ -134,9 +128,6 @@ export function PreviewView({
     ? new URL(environmentHttpBaseUrl).hostname
     : null;
   const open = useAtomCommand(previewEnvironment.open);
-  const resolveTrellisPreviewUrl = useAtomCommand(trellisEnvironment.resolvePreviewUrl, {
-    reportFailure: false,
-  });
   const resize = useAtomCommand(previewEnvironment.resize, "preview viewport resize");
 
   usePreviewSession(threadRef);
@@ -195,30 +186,7 @@ export function PreviewView({
   }, [environmentHostname, latestHistoryUrl, navTitle, navUrl, threadKey]);
 
   const navigateToResolvedUrl = useCallback(
-    async (requestedUrl: string) => {
-      // Opens are mapped by the server; an in-place navigation must ask it
-      // first, because `localhost` in a Trellis thread means its workspace.
-      let resolvedUrl = requestedUrl;
-      if (runtimeTabId && previewBridge && isLoopbackPreviewUrl(requestedUrl)) {
-        const result = await resolveTrellisPreviewUrl({
-          environmentId: threadRef.environmentId,
-          input: { threadId: threadRef.threadId, url: requestedUrl },
-        });
-        if (result._tag === "Success") {
-          resolvedUrl = result.value.url;
-        } else if (!isAtomCommandInterrupted(result)) {
-          const error = squashAtomCommandFailure(result);
-          // Servers without Trellis support load the URL as before.
-          if (isPreviewTrellisError(error)) {
-            toastManager.add({
-              type: "error",
-              title: "Unable to open workspace port",
-              description: error.message,
-            });
-            return false;
-          }
-        }
-      }
+    async (resolvedUrl: string) => {
       if (runtimeTabId && previewBridge) {
         // The bridge mirrors the resolved URL back to the server.
         await previewBridge.navigate(runtimeTabId, resolvedUrl);
@@ -238,7 +206,7 @@ export function PreviewView({
       }
       return result._tag === "Success";
     },
-    [open, resolveTrellisPreviewUrl, runtimeTabId, threadRef],
+    [open, runtimeTabId, threadRef],
   );
 
   const handleSubmitUrl = useCallback(

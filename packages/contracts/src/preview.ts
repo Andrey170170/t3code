@@ -350,22 +350,5 @@ export class PreviewInvalidUrlError extends Schema.TaggedError<PreviewInvalidUrl
   }
 }
 
-/**
- * A loopback preview in a Trellis workspace could not be mapped to the
- * workspace's preview address. T3 does not fall back to the host's localhost.
- */
-export class PreviewTrellisError extends Schema.TaggedError<PreviewTrellisError>()(
-  "PreviewTrellisError",
-  { detail: Schema.String },
-) {
-  override get message() {
-    return `Could not open this Trellis workspace port: ${this.detail}`;
-  }
-}
-
-export const PreviewError = Schema.Union([
-  PreviewSessionLookupError,
-  PreviewInvalidUrlError,
-  PreviewTrellisError,
-]);
+export const PreviewError = Schema.Union([PreviewSessionLookupError, PreviewInvalidUrlError]);
 export type PreviewError = typeof PreviewError.Type;

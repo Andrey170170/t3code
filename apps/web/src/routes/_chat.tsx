@@ -13,8 +13,6 @@ import { selectProjectGroupingSettings } from "../logicalProject";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
-import { useTrellisCreate, useTrellisEnvironment } from "../hooks/useTrellis";
-import { NewTrellisProjectDialogHost } from "../components/trellis/NewTrellisProjectDialog";
 import { useScratchProject } from "../hooks/useScratchProject";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { isPreviewFocused } from "../lib/previewFocus";
@@ -36,8 +34,6 @@ function ChatRouteGlobalShortcuts() {
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread, routeThreadRef } =
     useHandleNewThread();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
-  const trellis = useTrellisEnvironment();
-  const { newIdea: newTrellisIdea } = useTrellisCreate();
   const legacySidebarEnabled = useLegacySidebarEnabled();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const projects = useProjects();
@@ -141,15 +137,6 @@ function ChatRouteGlobalShortcuts() {
         return;
       }
 
-      if (command === "trellis.newIdea") {
-        if (trellis === null) return;
-        event.preventDefault();
-        event.stopPropagation();
-        if (event.repeat) return;
-        void newTrellisIdea(trellis.environmentId);
-        return;
-      }
-
       if (command === "preview.toggle") {
         event.preventDefault();
         event.stopPropagation();
@@ -213,9 +200,7 @@ function ChatRouteGlobalShortcuts() {
     selectedThreadKeysSize,
     startScratchThread,
     legacySidebarEnabled,
-    newTrellisIdea,
     terminalOpen,
-    trellis,
   ]);
 
   return null;
@@ -231,7 +216,6 @@ function ChatRouteLayout() {
   return (
     <>
       <ChatRouteGlobalShortcuts />
-      <NewTrellisProjectDialogHost />
       {threadTarget ? <ThreadRouteView target={threadTarget} /> : <Outlet />}
     </>
   );

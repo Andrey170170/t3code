@@ -28,6 +28,7 @@ import { PREFERRED_DEFAULT_CODEX_MODELS, ServerSettingsError } from "@t3tools/co
 import {
   codexModelFamily,
   createModelCapabilities,
+  formatCodexModelName,
   readCustomModelEntries,
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -221,19 +222,12 @@ export function mapCodexModelCapabilities(
   });
 }
 
-const toDisplayName = (model: CodexSchema.V2ModelListResponse__Model): string => {
-  // Capitalize 'gpt' to 'GPT-' and capitalize any letter following a dash
-  return model.displayName
-    .replace(/^gpt/i, "GPT") // Handle start with 'gpt' or 'GPT'
-    .replace(/-([a-z])/g, (_, c) => "-" + c.toUpperCase());
-};
-
 function parseCodexModelListResponse(
   response: CodexSchema.V2ModelListResponse,
 ): ReadonlyArray<ServerProviderModel> {
   return response.data.map((model) => ({
     slug: model.model,
-    name: toDisplayName(model),
+    name: formatCodexModelName(model.displayName),
     isCustom: false,
     ...(model.isDefault ? { isDefault: true } : {}),
     capabilities: mapCodexModelCapabilities(model),
@@ -379,7 +373,7 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
   // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
   // "CODEX_HOME points to '~/.codex_work', but that path does not exist".
-  // Expand here for parity with `CodexTextGeneration`/`CodexSessionRuntime`.
+  // Expand here for parity with `CodexTextGeneration`.
   const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const environment = {
@@ -689,32 +683,29 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
             checkedAt,
           });
 
-  return {
-    ...buildServerProvider({
-      presentation: CODEX_PRESENTATION,
-      enabled: codexSettings.enabled,
-      checkedAt,
-      models: snapshot.models,
-      skills: snapshot.skills,
-      slashCommands: [
-        COMPACT_SLASH_COMMAND,
-        {
-          name: "feedback",
-          description: "Send this thread and Codex logs to OpenAI",
-          input: { hint: "Describe the issue (optional)" },
-        },
-      ],
-      probe: {
-        installed: true,
-        version: snapshot.version ?? null,
-        status: accountStatus.status,
-        auth: accountStatus.auth,
-        ...(accountStatus.message ? { message: accountStatus.message } : {}),
-        ...(managedAuth ? {} : { usageLimits }),
+  return buildServerProvider({
+    presentation: CODEX_PRESENTATION,
+    enabled: codexSettings.enabled,
+    checkedAt,
+    models: snapshot.models,
+    skills: snapshot.skills,
+    slashCommands: [
+      COMPACT_SLASH_COMMAND,
+      {
+        name: "feedback",
+        description: "Send this thread and Codex logs to OpenAI",
+        input: { hint: "Describe the issue (optional)" },
       },
-    }),
-    supportsSideChat: !managedAuth,
-  };
+    ],
+    probe: {
+      installed: true,
+      version: snapshot.version ?? null,
+      status: accountStatus.status,
+      auth: accountStatus.auth,
+      ...(accountStatus.message ? { message: accountStatus.message } : {}),
+      ...(managedAuth ? {} : { usageLimits }),
+    },
+  });
 });
 
 // NOTE: the singleton `CodexProviderLive` Layer has been removed as part of

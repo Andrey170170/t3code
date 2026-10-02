@@ -2,8 +2,7 @@
  * The sidebar header: one row holding search, project scope and new thread.
  *
  * Search owns the row's text and spans it. Project scope collapses to an icon
- * that sits with new-project, new-idea (only while Trellis runs) and new-thread
- * as a segmented group at the end.
+ * that sits with new-project and new-thread as a segmented group at the end.
  * The scope icon swaps to the project favicon while a project is selected,
  * so the header still names the scope after the row that showed it is gone.
  *
@@ -11,7 +10,7 @@
  * of the sidebar's scope logic. `searchFieldRef` lands on the search field so
  * the picker's popup can anchor to that width rather than to its 28px trigger.
  */
-import { FolderPlusIcon, LightbulbIcon, SearchIcon, SquarePenIcon, XIcon } from "lucide-react";
+import { FolderPlusIcon, SearchIcon, SquarePenIcon, XIcon } from "lucide-react";
 import {
   type ComponentProps,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -33,14 +32,6 @@ export interface SidebarThreadHeaderProps {
   /** The project scope combobox, rendered as the first icon of the group. */
   projectScope: ReactNode;
   onNewProject: () => void;
-  /**
-   * Present only while an environment runs Trellis; opens a draft that
-   * becomes a Trellis idea on its first message.
-   */
-  onNewIdea?: (() => void) | undefined;
-  /** Names the environment the idea goes to when several are connected. */
-  newIdeaEnvironmentLabel?: string | null | undefined;
-  newIdeaShortcutLabel?: string | null | undefined;
   /** Receives the click so Shift+click can skip the project picker. */
   onNewThread: (event: ReactMouseEvent) => void;
   newThreadDisabled: boolean;
@@ -63,9 +54,6 @@ export function SidebarThreadHeader({
   hasProjects,
   projectScope,
   onNewProject,
-  onNewIdea,
-  newIdeaEnvironmentLabel,
-  newIdeaShortcutLabel,
   onNewThread,
   newThreadDisabled,
   newThreadShortcutLabel,
@@ -143,15 +131,6 @@ export function SidebarThreadHeader({
               <FolderPlusIcon />
             </SidebarHeaderIconButton>
           </>
-        ) : null}
-        {onNewIdea ? (
-          <SidebarHeaderIconButton
-            label="New idea"
-            tooltip={`New idea${newIdeaEnvironmentLabel ? ` on ${newIdeaEnvironmentLabel}` : ""}${newIdeaShortcutLabel ? ` (${newIdeaShortcutLabel})` : ""}`}
-            onClick={onNewIdea}
-          >
-            <LightbulbIcon />
-          </SidebarHeaderIconButton>
         ) : null}
         <SidebarHeaderIconButton
           label="New thread"

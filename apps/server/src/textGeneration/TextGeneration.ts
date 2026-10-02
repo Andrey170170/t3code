@@ -1,7 +1,12 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import type { ChatAttachment, ModelSelection, ProviderInstanceId } from "@t3tools/contracts";
+import type {
+  BranchNamingOptions,
+  ChatAttachment,
+  ModelSelection,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import { TextGenerationError } from "@t3tools/contracts";
 
 import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstanceRegistry.ts";
@@ -48,6 +53,7 @@ export interface PrContentGenerationResult {
 }
 
 export interface BranchNameGenerationInput {
+  naming?: BranchNamingOptions | undefined;
   cwd: string;
   message: string;
   attachments?: ReadonlyArray<ChatAttachment> | undefined;
@@ -73,22 +79,6 @@ export interface ThreadTitleGenerationInput {
 export interface ThreadTitleGenerationResult {
   title: string;
   needsRefinement?: boolean | undefined;
-}
-
-export interface ProjectNameGenerationInput {
-  cwd: string;
-  /** The first user message, or the thread contents for a refinement. */
-  message: string;
-  /** Present when refining a name generated earlier. */
-  previousName?: string | undefined;
-  /** What model and provider to use for generation. */
-  modelSelection: ModelSelection;
-}
-
-export interface ProjectNameGenerationResult {
-  /** Empty when the model returned nothing usable. */
-  name: string;
-  description: string;
 }
 
 /**
@@ -122,11 +112,6 @@ export class TextGeneration extends Context.Service<
     readonly generateThreadTitle: (
       input: ThreadTitleGenerationInput,
     ) => Effect.Effect<ThreadTitleGenerationResult, TextGenerationError>;
-
-    /** Generate a short project name and description (used to name Trellis items). */
-    readonly generateProjectName: (
-      input: ProjectNameGenerationInput,
-    ) => Effect.Effect<ProjectNameGenerationResult, TextGenerationError>;
   }
 >()("t3/textGeneration/TextGeneration") {}
 
@@ -134,8 +119,7 @@ type TextGenerationOp =
   | "generateCommitMessage"
   | "generatePrContent"
   | "generateBranchName"
-  | "generateThreadTitle"
-  | "generateProjectName";
+  | "generateThreadTitle";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -187,10 +171,6 @@ export const make = Effect.gen(function* () {
             return yield* textGeneration.generateThreadTitle({ ...input, linkedContext });
           }),
         ),
-      ),
-    generateProjectName: (input) =>
-      resolveInstance(registry, "generateProjectName", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateProjectName(input)),
       ),
   });
 });

@@ -1,7 +1,5 @@
 "use client";
 
-import { CodexThreadImportDialog } from "./CodexThreadImport";
-import { ImportIcon } from "lucide-react";
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
@@ -55,7 +53,6 @@ import {
   FolderGit2Icon,
   FolderIcon,
   FolderPlusIcon,
-  LightbulbIcon,
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
@@ -64,7 +61,6 @@ import {
   PaletteIcon,
   RotateCcwIcon,
   SettingsIcon,
-  SproutIcon,
   SquarePenIcon,
   SunIcon,
   TextSearchIcon,
@@ -86,9 +82,6 @@ import { useAtomValue } from "@effect/atom-react";
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
-import { useTrellisCreate, useTrellisEnvironment, useTrellisFind } from "../hooks/useTrellis";
-import { trellisFindHitSummary } from "../lib/trellis";
-import { openNewTrellisProjectDialog } from "./trellis/NewTrellisProjectDialog";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { useClientSettings } from "../hooks/useSettings";
@@ -131,7 +124,6 @@ import {
   resolveProjectPathForDispatch,
 } from "../lib/projectPaths";
 import { onOpenCommandPalette } from "../commandPaletteBus";
-import { openSideChat } from "../sideChatBus";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import {
@@ -199,7 +191,11 @@ import {
 } from "./ThreadCommandSubtitle";
 import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
 import { primaryServerKeybindingsAtom, primaryServerProvidersAtom } from "../state/server";
-import { deriveProviderInstanceEntries, type ProviderInstanceEntry } from "../providerInstances";
+import {
+  applyProviderInstanceSettings,
+  deriveProviderInstanceEntries,
+  type ProviderInstanceEntry,
+} from "../providerInstances";
 import { resolveShortcutCommand, threadJumpIndexFromCommand } from "../keybindings";
 import { CommandDialog, CommandDialogPopup, CommandFooterAction } from "./ui/command";
 import { Button } from "./ui/button";
@@ -219,58 +215,6 @@ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { readPullRequestListPreferences } from "~/components/pullRequest/pullRequestListPreferences";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
-
-const APPEARANCE_OPTIONS = [
-  { mode: "system", label: "System", icon: MonitorIcon },
-  { mode: "light", label: "Light", icon: SunIcon },
-  { mode: "dark", label: "Dark", icon: MoonIcon },
-] as const;
-
-function notifyThemeSaveFailure(): void {
-  toastManager.add(
-    stackedThreadToast({
-      type: "error",
-      title: "Couldn't save theme selection",
-      description: "Try again.",
-    }),
-  );
-}
-
-function projectFavicon(project: Project) {
-  return <ProjectFavicon project={project} className="size-4" />;
-}
-
-function ProjectSearchDescription(props: {
-  readonly environmentLabels: ReadonlyArray<string>;
-  readonly grouped: boolean;
-  readonly location: {
-    readonly kind: "local" | "remote";
-    readonly label: string;
-    readonly machine: EnvironmentMachineKind;
-  };
-  readonly workspaceRoot: string;
-}) {
-  if (!props.grouped) {
-    return (
-      <span className="flex min-w-0 items-center gap-1">
-        <span className="inline-flex min-w-0 items-center gap-1">
-          {props.location.kind === "remote" ? (
-            <EnvironmentMachineIcon
-              aria-hidden
-              kind={props.location.machine}
-              className={COMMAND_PALETTE_META_ICON_CLASS}
-            />
-          ) : null}
-          <span className="truncate">{props.location.label}</span>
-        </span>
-        <CommandPaletteMetaDot />
-        <span className="truncate">{props.workspaceRoot}</span>
-      </span>
-    );
-  }
-
-  return <span className="truncate">{props.environmentLabels.join(" · ")}</span>;
-}
 
 function getEnvironmentBrowsePlatform(os: string | null | undefined): string {
   if (os === "windows") {
@@ -387,6 +331,10 @@ function remoteProjectSourceIcon(source: AddProjectRemoteSource, className: stri
   }
 }
 
+function projectFaviconIcon(project: Project): ReactNode {
+  return <ProjectFavicon project={project} className={ITEM_ICON_CLASS} />;
+}
+
 function remoteProjectInputPlaceholder(flow: AddProjectCloneFlow | null): string | null {
   if (!flow) return null;
   if (flow.step === "confirm") return null;
@@ -477,8 +425,6 @@ function errorMessage(error: unknown): string {
   return "An error occurred.";
 }
 
-const TRELLIS_FIND_GROUP = "trellis-find";
-
 const OVERLAY_MODE_BY_COMMAND = {
   "commandPalette.toggle": "command",
   "filePicker.toggle": "files",
@@ -492,17 +438,27 @@ function overlayModeForCommand(command: string | null): SearchOverlayMode | null
     : null;
 }
 
-export function CommandPalette({ children }: { children: ReactNode }) {
-  const [importEnvironmentId, setImportEnvironmentId] = useState<EnvironmentId | null>(null);
-  const [importOpen, setImportOpen] = useState(false);
-  const [importBusy, setImportBusy] = useState(false);
-  const openImport = useCallback(
-    (environmentId: EnvironmentId) => {
-      if (!importBusy) setImportEnvironmentId(environmentId);
-      setImportOpen(true);
-    },
-    [importBusy],
+const APPEARANCE_OPTIONS = [
+  { mode: "system", label: "System", icon: MonitorIcon },
+  { mode: "light", label: "Light", icon: SunIcon },
+  { mode: "dark", label: "Dark", icon: MoonIcon },
+] as const;
+
+function notifyThemeSaveFailure(): void {
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: "Couldn't save theme selection",
+      description: "Try again.",
+    }),
   );
+}
+
+function projectFavicon(project: Project) {
+  return <ProjectFavicon project={project} className="size-4" />;
+}
+
+export function CommandPalette({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
   const [state, dispatch] = useReducer(reduceCommandPaletteUiState, {
     open: false,
@@ -665,7 +621,6 @@ export function CommandPalette({ children }: { children: ReactNode }) {
           {children}
         </div>
         <CommandPaletteDialog
-          openImport={openImport}
           mode={state.mode}
           openIntent={state.openIntent}
           setOpen={setOpen}
@@ -673,21 +628,11 @@ export function CommandPalette({ children }: { children: ReactNode }) {
           clearOpenIntent={clearOpenIntent}
         />
       </CommandDialog>
-      {importEnvironmentId ? (
-        <CodexThreadImportDialog
-          key={importEnvironmentId}
-          environmentId={importEnvironmentId}
-          open={importOpen}
-          onOpenChange={setImportOpen}
-          onImportingChange={setImportBusy}
-        />
-      ) : null}
     </ComposerHandleContext>
   );
 }
 
 function CommandPaletteDialog(props: {
-  readonly openImport: (environmentId: EnvironmentId) => void;
   readonly mode: SearchOverlayMode;
   readonly openIntent: CommandPaletteOpenIntent | null;
   readonly setOpen: (open: boolean) => void;
@@ -723,7 +668,6 @@ function CommandPaletteDialog(props: {
         <ProjectContentSearchDialog onOpenChange={props.setOpen} />
       ) : (
         <OpenCommandPaletteDialog
-          openImport={props.openImport}
           openIntent={props.openIntent}
           setOpen={props.setOpen}
           openOverlayMode={props.openOverlayMode}
@@ -735,7 +679,6 @@ function CommandPaletteDialog(props: {
 }
 
 function OpenCommandPaletteDialog(props: {
-  readonly openImport: (environmentId: EnvironmentId) => void;
   readonly openIntent: CommandPaletteOpenIntent | null;
   readonly setOpen: (open: boolean) => void;
   readonly openOverlayMode: (mode: SearchOverlayMode) => void;
@@ -859,10 +802,17 @@ function OpenCommandPaletteDialog(props: {
   const providerEntryByEnvironmentAndInstanceId = useMemo(() => {
     const map = new Map<string, ProviderInstanceEntry>();
     for (const environment of environments) {
+      const serverConfig = environment.serverConfig;
       const environmentProviders =
-        environment.serverConfig?.providers ??
+        serverConfig?.providers ??
         (environment.environmentId === primaryEnvironmentId ? providers : []);
-      for (const entry of deriveProviderInstanceEntries(environmentProviders)) {
+      const derived = deriveProviderInstanceEntries(environmentProviders);
+      // Settings fill the ACP registry identity (agent id, icon URL) the
+      // derived entries alone do not carry.
+      const entries = serverConfig
+        ? applyProviderInstanceSettings(derived, serverConfig.settings)
+        : derived;
+      for (const entry of entries) {
         map.set(`${environment.environmentId}:${entry.instanceId}`, entry);
       }
     }
@@ -870,15 +820,6 @@ function OpenCommandPaletteDialog(props: {
   }, [environments, primaryEnvironmentId, providers]);
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);
   const currentView = viewStack.at(-1) ?? null;
-  const trellis = useTrellisEnvironment();
-  const { newIdea: newTrellisIdea } = useTrellisCreate();
-  // The find view is marked by an empty group; its results come from the
-  // server query below instead of the palette's local filtering.
-  const isTrellisFindView = currentView?.groups[0]?.value === TRELLIS_FIND_GROUP;
-  const trellisFind = useTrellisFind(
-    isTrellisFindView ? (trellis?.environmentId ?? null) : null,
-    isTrellisFindView ? query : "",
-  );
   const environmentIds = useMemo(
     () =>
       environments
@@ -1134,17 +1075,12 @@ function OpenCommandPaletteDialog(props: {
       getFilesystemBrowsePath(
         query,
         browseEnvironmentPlatform,
-        // Find in Trellis takes free text; a query like "/tmp" is not a path.
-        browseEnvironmentId !== null &&
-          !isRemoteProjectRepositoryStep &&
-          !isTrellisFindView &&
-          newProjectFlow === null,
+        browseEnvironmentId !== null && !isRemoteProjectRepositoryStep && newProjectFlow === null,
       ),
     [
       browseEnvironmentId,
       browseEnvironmentPlatform,
       isRemoteProjectRepositoryStep,
-      isTrellisFindView,
       newProjectFlow,
       query,
     ],
@@ -1313,23 +1249,6 @@ function OpenCommandPaletteDialog(props: {
     ],
   );
 
-  // A find hit's project may reach the client store just after the search does.
-  const openTrellisProject = useCallback(
-    async (environmentId: EnvironmentId, projectId: ProjectId) => {
-      const project = projects.find(
-        (candidate) => candidate.environmentId === environmentId && candidate.id === projectId,
-      );
-      if (project) {
-        await openProjectFromSearch(project);
-        return;
-      }
-      const projectRef = scopeProjectRef(environmentId, projectId);
-      await waitForProject(projectRef, 3_000).catch(() => null);
-      await handleNewThread(projectRef);
-    },
-    [handleNewThread, openProjectFromSearch, projects],
-  );
-
   const projectSearchItems = useMemo(
     () =>
       buildProjectActionItems({
@@ -1364,7 +1283,7 @@ function OpenCommandPaletteDialog(props: {
             />
           );
         },
-        icon: projectFavicon,
+        icon: projectFaviconIcon,
         runProject: openProjectFromSearch,
       }),
     [
@@ -1416,7 +1335,7 @@ function OpenCommandPaletteDialog(props: {
               </span>
             );
           },
-          icon: projectFavicon,
+          icon: projectFaviconIcon,
           runProject: async (project) => {
             const group = projectGroupByTargetKey.get(`${project.environmentId}:${project.id}`);
             const contextualRefBelongsToGroup =
@@ -1471,7 +1390,7 @@ function OpenCommandPaletteDialog(props: {
         renderTrailingContent: (thread) => <ThreadRowTrailingStatus thread={thread} />,
         renderDescription: (thread, { projectTitle }) => {
           const modelInstanceId =
-            thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
+            thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId;
           const providerEntry =
             providerEntryByEnvironmentAndInstanceId.get(
               `${thread.environmentId}:${modelInstanceId}`,
@@ -1488,8 +1407,10 @@ function OpenCommandPaletteDialog(props: {
               isCurrent={thread.id === activeThreadId}
               driverKind={providerEntry?.driverKind ?? null}
               providerDisplayName={
-                thread.session?.providerName ?? providerEntry?.displayName ?? modelInstanceId
+                thread.runtime?.providerName ?? providerEntry?.displayName ?? modelInstanceId
               }
+              acpRegistryAgentId={providerEntry?.acpRegistryAgentId}
+              acpRegistryIconUrl={providerEntry?.acpRegistryIconUrl}
             />
           );
         },
@@ -1519,6 +1440,7 @@ function OpenCommandPaletteDialog(props: {
       activeThreadId,
       clientSettings.sidebarThreadSortOrder,
       navigate,
+      projectCwdById,
       projectByKey,
       projectEnvironmentLocationById,
       projectTitleById,
@@ -1754,20 +1676,6 @@ function OpenCommandPaletteDialog(props: {
         });
       }
 
-      if (trellis?.environmentId === environmentId) {
-        sourceItems.push({
-          kind: "action",
-          value: `action:add-project:${environmentId}:trellis`,
-          searchTerms: ["trellis", "workspace", "new project", "clone", "git"],
-          title: "Trellis project",
-          description: "Create a project with its own Trellis workspace",
-          icon: <SproutIcon className={ITEM_ICON_CLASS} />,
-          run: async () => {
-            openNewTrellisProjectDialog(environmentId);
-          },
-        });
-      }
-
       return [{ value: `sources:${environmentId}`, label: "Sources", items: sourceItems }];
     },
     [
@@ -1776,7 +1684,6 @@ function OpenCommandPaletteDialog(props: {
       startAddProjectBrowse,
       startAddProjectClone,
       startNewProject,
-      trellis,
     ],
   );
 
@@ -2022,47 +1929,6 @@ function OpenCommandPaletteDialog(props: {
     });
   }
 
-  if (activeThread) {
-    const providerInstanceId =
-      activeThread.session?.providerInstanceId ?? activeThread.modelSelection.instanceId;
-    const providerEntry = providerEntryByEnvironmentAndInstanceId.get(
-      `${activeThread.environmentId}:${providerInstanceId}`,
-    );
-    const connected = environments.some(
-      (environment) =>
-        environment.environmentId === activeThread.environmentId &&
-        environment.connection.phase === "connected",
-    );
-    const available =
-      providerEntry?.driverKind === "codex" &&
-      providerEntry.snapshot.supportsSideChat === true &&
-      activeThread.session != null &&
-      connected;
-    actionItems.push({
-      kind: "action",
-      value: "action:open-side-chat",
-      searchTerms: ["side chat", "side conversation", "codex", "branch", "temporary"],
-      title: "Open side chat",
-      description: available
-        ? "Ask a side question using this chat’s context."
-        : providerEntry?.driverKind !== "codex"
-          ? "Side chats are available with Codex."
-          : providerEntry.snapshot.supportsSideChat !== true
-            ? "Update this environment’s server to use side chats."
-            : !connected
-              ? "Reconnect to this environment to start a side chat."
-              : "Send a message in the main chat first.",
-      icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
-      shortcutCommand: "sideChat.open",
-      disabled: !available,
-      run: async () => {
-        if (available) {
-          openSideChat({ environmentId: activeThread.environmentId, threadId: activeThread.id });
-        }
-      },
-    });
-  }
-
   if (
     activeThread !== null &&
     threadPullRequestLinkMode(activeThreadServerConfig?.environment.capabilities) !== "unsupported"
@@ -2107,7 +1973,7 @@ function OpenCommandPaletteDialog(props: {
       // Failures throw into executeItem's error toast.
       run: async () => {
         const { environmentId } = thread;
-        if (thread.session && thread.session.status !== "stopped") {
+        if (thread.runtime !== null) {
           const stopped = await stopThreadSession({
             environmentId,
             input: { threadId: thread.id },
@@ -2126,7 +1992,7 @@ function OpenCommandPaletteDialog(props: {
         const refreshed = await refreshProviders({
           environmentId,
           input: {
-            instanceId: thread.session?.providerInstanceId ?? thread.modelSelection.instanceId,
+            instanceId: thread.runtime?.providerInstanceId ?? thread.modelSelection.instanceId,
             cwd: thread.worktreePath ?? project.workspaceRoot,
             fresh: true,
           },
@@ -2205,53 +2071,6 @@ function OpenCommandPaletteDialog(props: {
       openAddProjectFlow();
     },
   });
-
-  if (trellis !== null) {
-    const trellisEnvironmentId = trellis.environmentId;
-    // Names the destination when several environments are connected.
-    const onEnvironment = trellis.label === null ? "" : ` on ${trellis.label}`;
-    const trellisFindView: CommandPaletteView = {
-      addonIcon: <SproutIcon className={ADDON_ICON_CLASS} />,
-      groups: [{ value: TRELLIS_FIND_GROUP, label: "Trellis", items: [] }],
-    };
-    actionItems.push(
-      {
-        kind: "action",
-        value: "action:trellis:new-idea",
-        searchTerms: ["new idea", "trellis", "scratch", "sketch", "workspace"],
-        title: "New idea",
-        description: `Draft a thread; its Trellis idea is created when you send${onEnvironment}`,
-        icon: <LightbulbIcon className={ITEM_ICON_CLASS} />,
-        shortcutCommand: "trellis.newIdea",
-        run: async () => {
-          await newTrellisIdea(trellisEnvironmentId);
-        },
-      },
-      {
-        kind: "action",
-        value: "action:trellis:new-project",
-        searchTerms: ["new trellis project", "trellis", "workspace", "clone", "git", "project"],
-        title: "New Trellis project...",
-        ...(trellis.label === null ? {} : { description: `On ${trellis.label}` }),
-        icon: <SproutIcon className={ITEM_ICON_CLASS} />,
-        run: async () => {
-          openNewTrellisProjectDialog(trellisEnvironmentId);
-        },
-      },
-      {
-        kind: "action",
-        value: "action:trellis:find",
-        searchTerms: ["find in trellis", "trellis", "search", "ideas", "projects", "workspace"],
-        title: "Find in Trellis...",
-        ...(trellis.label === null ? {} : { description: `On ${trellis.label}` }),
-        icon: <SproutIcon className={ITEM_ICON_CLASS} />,
-        keepOpen: true,
-        run: async () => {
-          pushPaletteView(trellisFindView);
-        },
-      },
-    );
-  }
 
   if (wslAddProjectEnvironmentOption) {
     actionItems.push({
@@ -2405,18 +2224,6 @@ function OpenCommandPaletteDialog(props: {
     shortcutCommand: "usage.open",
     run: async () => {
       await navigate({ to: "/usage" });
-    },
-  });
-
-  actionItems.push({
-    kind: "action",
-    value: "action:import-conversations",
-    searchTerms: ["import", "conversations", "codex", "history"],
-    title: "Import conversations…",
-    disabled: primaryEnvironmentId === null,
-    icon: <ImportIcon className={ITEM_ICON_CLASS} />,
-    run: async () => {
-      if (primaryEnvironmentId) props.openImport(primaryEnvironmentId);
     },
   });
 
@@ -3118,45 +2925,7 @@ function OpenCommandPaletteDialog(props: {
         ];
 
   let displayedGroups: CommandPaletteView["groups"] = filteredGroups;
-  // Hits for an earlier query stay hidden until the current one is searched.
-  const trellisFindHitsCurrent = trellisFind.searchedQuery === query.trim();
-  if (isTrellisFindView) {
-    displayedGroups =
-      trellis === null || !trellisFindHitsCurrent || trellisFind.hits.length === 0
-        ? []
-        : [
-            {
-              value: TRELLIS_FIND_GROUP,
-              label: "Trellis",
-              items: trellisFind.hits.map((hit): CommandPaletteActionItem => {
-                const projectId = hit.projectId;
-                return {
-                  kind: "action",
-                  value: `trellis-hit:${hit.path}`,
-                  searchTerms: [],
-                  title: hit.name,
-                  description: [
-                    hit.kind === "idea" ? "Idea" : "Project",
-                    projectId === null ? "no T3 project" : trellisFindHitSummary(hit),
-                  ]
-                    .filter((part) => part.length > 0)
-                    .join(" · "),
-                  icon:
-                    hit.kind === "idea" ? (
-                      <LightbulbIcon className={ITEM_ICON_CLASS} />
-                    ) : (
-                      <SproutIcon className={ITEM_ICON_CLASS} />
-                    ),
-                  disabled: projectId === null,
-                  run: async () => {
-                    if (projectId === null) return;
-                    await openTrellisProject(trellis.environmentId, projectId);
-                  },
-                };
-              }),
-            },
-          ];
-  } else if (newProjectFlow !== null) {
+  if (newProjectFlow !== null) {
     displayedGroups = [
       ...(newProjectMachineGroup ? [newProjectMachineGroup] : []),
       ...newProjectOptionGroups,
@@ -3670,28 +3439,50 @@ function OpenCommandPaletteDialog(props: {
                   ? "Enter a Git clone URL and press Enter to continue."
                   : "Enter a repository path and press Enter to look it up.",
             }
-          : isTrellisFindView
-            ? {
-                emptyStateMessage:
-                  query.trim().length === 0
-                    ? "Search Trellis ideas and projects by name or content."
-                    : trellisFind.isPending || !trellisFindHitsCurrent
-                      ? "Searching Trellis…"
-                      : (trellisFind.error ?? "No matching ideas or projects."),
-              }
-            : addProjectCloneFlow?.step === "confirm"
-              ? { emptyStateMessage: "Choose a destination path and press Enter to clone." }
-              : relativePathNeedsActiveProject
-                ? { emptyStateMessage: "Relative paths require an active project." }
-                : willCreateProjectPath
-                  ? {
-                      emptyStateMessage:
-                        "Press Enter to create this folder and add it as a project.",
-                    }
-                  : threadSearch.isPending
-                    ? { emptyStateMessage: "Searching thread messages…" }
-                    : {})}
+          : addProjectCloneFlow?.step === "confirm"
+            ? { emptyStateMessage: "Choose a destination path and press Enter to clone." }
+            : relativePathNeedsActiveProject
+              ? { emptyStateMessage: "Relative paths require an active project." }
+              : willCreateProjectPath
+                ? {
+                    emptyStateMessage: "Press Enter to create this folder and add it as a project.",
+                  }
+                : threadSearch.isPending
+                  ? { emptyStateMessage: "Searching thread messages…" }
+                  : {})}
       />
     </CommandPaletteContent>
   );
+}
+
+function ProjectSearchDescription(props: {
+  readonly environmentLabels: ReadonlyArray<string>;
+  readonly grouped: boolean;
+  readonly location: {
+    readonly kind: "local" | "remote";
+    readonly label: string;
+    readonly machine: EnvironmentMachineKind;
+  };
+  readonly workspaceRoot: string;
+}) {
+  if (!props.grouped) {
+    return (
+      <span className="flex min-w-0 items-center gap-1">
+        <span className="inline-flex min-w-0 items-center gap-1">
+          {props.location.kind === "remote" ? (
+            <EnvironmentMachineIcon
+              aria-hidden
+              kind={props.location.machine}
+              className={COMMAND_PALETTE_META_ICON_CLASS}
+            />
+          ) : null}
+          <span className="truncate">{props.location.label}</span>
+        </span>
+        <CommandPaletteMetaDot />
+        <span className="truncate">{props.workspaceRoot}</span>
+      </span>
+    );
+  }
+
+  return <span className="truncate">{props.environmentLabels.join(" · ")}</span>;
 }

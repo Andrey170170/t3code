@@ -7,9 +7,15 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
-import { TaskError } from "./TaskSchemas.ts";
 
-export type McpCapability = "preview" | "device" | "pull-requests" | "tasks";
+const ALL_MCP_CAPABILITIES = [
+  "preview",
+  "orchestration",
+  "worktree",
+  "device",
+  "pull-requests",
+] as const;
+export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
 
 export interface McpInvocationScope {
   readonly environmentId: EnvironmentId;
@@ -28,17 +34,12 @@ export class McpInvocationContext extends Context.Service<
 /** The error a missing capability surfaces as; preview keeps its own so the broker can route it. */
 export type McpCapabilityError<C extends McpCapability> = C extends "preview"
   ? PreviewAutomationUnavailableError
-  : C extends "tasks"
-    ? TaskError
-    : McpCapabilityUnavailableError;
+  : McpCapabilityUnavailableError;
 
 const missingCapability = (
   invocation: McpInvocationScope,
   capability: McpCapability,
-): PreviewAutomationUnavailableError | McpCapabilityUnavailableError | TaskError => {
-  if (capability === "tasks") {
-    return new TaskError({ message: "Agent task access is disabled for this session." });
-  }
+): PreviewAutomationUnavailableError | McpCapabilityUnavailableError => {
   const fields = {
     environmentId: invocation.environmentId,
     threadId: invocation.threadId,

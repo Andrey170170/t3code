@@ -31,7 +31,6 @@ import {
 import * as GitManager from "./GitManager.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
-import * as Trellis from "../trellis/Trellis.ts";
 
 export class GitWorkflowService extends Context.Service<
   GitWorkflowService,
@@ -72,6 +71,7 @@ export class GitWorkflowService extends Context.Service<
       input: VcsCreateWorktreeInput,
       options?: GitVcsDriver.CreateWorktreeOptions,
     ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
+    readonly listLocalBranchNames: (cwd: string) => Effect.Effect<string[], GitCommandError>;
     readonly fetchRemote: (input: {
       readonly cwd: string;
       readonly remoteName: string;
@@ -100,6 +100,9 @@ export class GitWorkflowService extends Context.Service<
     readonly pruneWorktrees: (input: {
       readonly cwd: string;
     }) => Effect.Effect<void, GitCommandError>;
+    readonly deleteLocalBranch: (
+      input: GitVcsDriver.GitDeleteLocalBranchInput,
+    ) => Effect.Effect<void, GitCommandError>;
     readonly createRef: (
       input: VcsCreateRefInput,
     ) => Effect.Effect<VcsCreateRefResult, GitCommandError>;
@@ -107,6 +110,7 @@ export class GitWorkflowService extends Context.Service<
       input: VcsSwitchRefInput,
     ) => Effect.Effect<VcsSwitchRefResult, GitCommandError>;
     readonly renameBranch: (input: {
+      readonly exactName?: boolean;
       readonly cwd: string;
       readonly oldBranch: string;
       readonly newBranch: string;
@@ -155,7 +159,6 @@ export const make = Effect.gen(function* () {
   const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const gitManager = yield* GitManager.GitManager;
-  const trellis = yield* Effect.serviceOption(Trellis.Trellis);
 
   const ensureGit = Effect.fn("GitWorkflowService.ensureGit")(function* (
     operation: string,
@@ -332,27 +335,10 @@ export const make = Effect.gen(function* () {
       "GitWorkflowService.resolvePullRequest",
       gitManager.resolvePullRequest,
     ),
-    preparePullRequestThread: (input) =>
-      (input.mode === "worktree"
-        ? Trellis.refuseWorktreeIn(
-            trellis,
-            input.cwd,
-            (detail) =>
-              new GitManagerError({
-                operation: "GitWorkflowService.preparePullRequestThread",
-                cwd: input.cwd,
-                detail,
-              }),
-          )
-        : Effect.void
-      ).pipe(
-        Effect.andThen(
-          routeGitManager(
-            "GitWorkflowService.preparePullRequestThread",
-            gitManager.preparePullRequestThread,
-          )(input),
-        ),
-      ),
+    preparePullRequestThread: routeGitManager(
+      "GitWorkflowService.preparePullRequestThread",
+      gitManager.preparePullRequestThread,
+    ),
     listRefs: (input) =>
       detectGitRepositoryForCommand("GitWorkflowService.listRefs", input.cwd).pipe(
         Effect.flatMap((isGitRepository) =>
@@ -360,19 +346,12 @@ export const make = Effect.gen(function* () {
         ),
       ),
     createWorktree: (input, options) =>
-      Trellis.refuseWorktreeIn(
-        trellis,
-        input.cwd,
-        (detail) =>
-          new GitCommandError({
-            operation: "GitWorkflowService.createWorktree",
-            command: "git worktree add",
-            cwd: input.cwd,
-            detail,
-          }),
-      ).pipe(
-        Effect.andThen(ensureGitCommand("GitWorkflowService.createWorktree", input.cwd)),
+      ensureGitCommand("GitWorkflowService.createWorktree", input.cwd).pipe(
         Effect.andThen(git.createWorktree(input, options)),
+      ),
+    listLocalBranchNames: (cwd) =>
+      ensureGitCommand("GitWorkflowService.listLocalBranchNames", cwd).pipe(
+        Effect.andThen(git.listLocalBranchNames(cwd)),
       ),
     fetchRemote: (input) =>
       ensureGitCommand("GitWorkflowService.fetchRemote", input.cwd).pipe(
@@ -397,6 +376,10 @@ export const make = Effect.gen(function* () {
     pruneWorktrees: (input) =>
       ensureGitCommand("GitWorkflowService.pruneWorktrees", input.cwd).pipe(
         Effect.andThen(git.pruneWorktrees(input)),
+      ),
+    deleteLocalBranch: (input) =>
+      ensureGitCommand("GitWorkflowService.deleteLocalBranch", input.cwd).pipe(
+        Effect.andThen(git.deleteLocalBranch(input)),
       ),
     createRef: (input) =>
       ensureGitCommand("GitWorkflowService.createRef", input.cwd).pipe(

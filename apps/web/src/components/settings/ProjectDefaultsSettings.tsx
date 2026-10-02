@@ -78,7 +78,6 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const mixedWorkspace = useScopedSettingsMixed(["defaultThreadEnvMode"]);
   const mixedSubmodules = useScopedSettingsMixed(["worktreeSubmodules"]);
   const mixedBrowser = useScopedSettingsMixed(["enableAgentBrowserAccess"]);
-  const mixedTask = useScopedSettingsMixed(["enableAgentTaskAccess"]);
   const mixedAutoPull = useScopedSettingsMixed(["defaultAutoPull"]);
   const mixedMergeMethod = useScopedSettingsMixed(["pullRequestMergeMethod"]);
   const modelSource = useScopedSettingSource(["defaultModelSelection"]);
@@ -261,7 +260,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
         category === "general" || category === "project"
           ? "New threads"
           : category === "integrations"
-            ? "Agent access"
+            ? "Browser"
             : "Repositories"
       }
     >
@@ -494,35 +493,6 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                 mixed={mixedBrowser}
                 checked={mixedBrowser ? false : settings.enableAgentBrowserAccess}
                 onCheckedChange={(enabled) => updateSettings({ enableAgentBrowserAccess: enabled })}
-              />
-            }
-          />
-          <SettingsRow
-            serverScoped
-            settingKeys={["enableAgentTaskAccess"]}
-            mixed={mixedTask}
-            id={searchableSetting("agent-task-access").id}
-            title="Agent task access"
-            description="Allow Codex agents to create chats and send follow-ups with approval. Applies to new sessions."
-            resetAction={
-              !isProjectScope &&
-              settings.enableAgentTaskAccess !== DEFAULT_SERVER_SETTINGS.enableAgentTaskAccess ? (
-                <SettingResetButton
-                  label="default task access"
-                  onClick={() =>
-                    updateSettings({
-                      enableAgentTaskAccess: DEFAULT_SERVER_SETTINGS.enableAgentTaskAccess,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <Switch
-                aria-label="Agent task access"
-                mixed={mixedTask}
-                checked={mixedTask ? false : settings.enableAgentTaskAccess}
-                onCheckedChange={(enabled) => updateSettings({ enableAgentTaskAccess: enabled })}
               />
             }
           />

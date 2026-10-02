@@ -15,13 +15,17 @@
       "types": "./src/rpc.ts",
       "import": "./src/rpc.ts"
     },
+    "./protocol": {
+      "types": "./src/protocol.ts",
+      "import": "./src/protocol.ts"
+    },
+    "./replay": {
+      "types": "./src/replay.ts",
+      "import": "./src/replay.ts"
+    },
     "./errors": {
       "types": "./src/errors.ts",
       "import": "./src/errors.ts"
-    },
-    "./thread-history": {
-      "types": "./src/thread-history.ts",
-      "import": "./src/thread-history.ts"
     }
   },
   "scripts": {

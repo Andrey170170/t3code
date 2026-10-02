@@ -14,6 +14,7 @@ import {
   BlocksIcon,
   BotIcon,
   createLucideIcon,
+  CalendarClockIcon,
   GitBranchIcon,
   HardDriveIcon,
   PanelsTopLeftIcon,
@@ -22,7 +23,6 @@ import {
   PaletteIcon,
   SearchIcon,
   Settings2Icon,
-  SproutIcon,
   XIcon,
 } from "lucide-react";
 import { useLocation, useNavigate } from "@tanstack/react-router";
@@ -84,7 +84,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/snap-shot": SnapShotIcon,
   "/settings/providers": BotIcon,
   "/settings/integrations": BlocksIcon,
-  "/settings/trellis": SproutIcon,
+  "/settings/scheduled-tasks": CalendarClockIcon,
   "/settings/source-control": GitBranchIcon,
   "/settings/storage": HardDriveIcon,
   "/settings/connections": Link2Icon,

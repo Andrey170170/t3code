@@ -23,7 +23,7 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
           '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', ${now}, ${now}
         )
       `;
-        yield* migrateAutoSettleDisabledAt;
+        yield* runMigrations({ toMigrationInclusive: 54 });
         const migrated = yield* sql<{ readonly autoSettleDisabledAt: string | null }>`
         SELECT auto_settle_disabled_at AS "autoSettleDisabledAt" FROM projection_threads WHERE thread_id = 'thread-1'
       `;

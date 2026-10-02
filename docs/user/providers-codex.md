@@ -12,8 +12,6 @@ Manage shared usage and credits in ChatGPT through **Manage usage** in T3 Code.
 If a request uses a feature that ChatGPT sharing does not support, use another
 provider for that request.
 
-Side chats and Trellis workspaces currently require an existing Codex CLI login.
-
 When reconnecting, choose the same account in T3 Code and on OpenAI's sign-in
 page. Disconnecting stops running threads but keeps their history and lets you
 reconnect later.
@@ -26,72 +24,6 @@ localhost page into the sign-in panel, even if that page could not load.
 T3 Code can use your installed Codex and its existing login. Run `codex login`
 on the environment's machine to sign in. [Provider setup](./install.md#providers)
 covers installation and custom configuration.
-
-## Import existing conversations
-
-Open **Settings > General > Import conversations**, or use **Import conversations**
-from the command palette. Select a project or checkout in Settings to narrow the
-picker to its conversations. On mobile, use **Settings > Import Codex Chats**.
-Choose the Codex account on the environment that holds the conversations, then
-select whole projects or open a project to choose individual conversations. Imports
-keep their original folders and create missing T3 projects as needed. Git worktrees
-are grouped under their main project, with a worktree label on conversations from
-other checkouts. Subagents
-stay attached to their parent conversation and are not imported as separate chats.
-
-If a worktree was removed, choose an existing checkout for its conversations before
-importing. The choice applies to removed worktrees in that project; conversations
-whose worktrees still exist keep their original checkout.
-
-Search titles or full messages, and filter by conversation origin or archive state.
-Already imported conversations are hidden by default unless Codex has recorded new
-turns since the import; those show **Update available** and can be selected again
-to append the new turns. Imports follow your automatic settling setting using their
-original activity time, so look under **Settled** for inactive conversations.
-Importing an archived conversation restores it in Codex. A batch continues if you
-close the picker; reopen it to retry any failures. Meaningful native titles are
-preserved; unnamed conversations receive a title using your configured title model.
-
-Finish work in the original client before importing. Import does not synchronize
-with a conversation still running elsewhere. The checkout you continue in must
-exist on the environment.
-
-An imported conversation contains the complete history: every user message, reply,
-and tool result becomes a normal message in the thread, and the conversation keeps
-its Codex context when you continue it in T3 Code. Turns run in T3 Code and turns
-imported earlier are never duplicated.
-
-**Import recent conversations** remains available for the previous batch import:
-it selects recent Claude/Codex conversations and retains a limited text preview.
-Use the Codex import picker for complete history.
-
-## Ask a side question
-
-In a started Codex chat, open the right panel and choose **Side chat**. It inherits
-the conversation up to that point, so you can ask a related question while the main
-chat continues. Side-chat messages do not become part of the main conversation.
-
-You can change its model, reasoning effort, speed, permissions, and Build/Plan mode.
-It shares the main chat's workspace; the branch indicator does not switch branches.
-Side chats are temporary and do not appear in the thread list. Hiding the panel
-keeps the conversation available while its parent provider session is running.
-Closing the tab ends it. Start a new side chat to take a fresh copy of the main
-conversation's context.
-
-## Ask Codex to start another chat
-
-Ask explicitly, for example: “Start a separate chat to review the parser, and keep
-working on the UI here.” Approve the task action when prompted. The new chat appears
-in the same project's sidebar and uses the current workspace, Codex account, model,
-and permission mode. It shares that workspace; it does not create a new worktree.
-
-You can open the new chat and continue it yourself, or ask the original agent to
-read its progress and send a follow-up. Messages sent by another agent are labeled
-in the receiving chat. Each chat handles its own questions and approvals.
-
-**Agent task access** in **Settings > Integrations** controls these tools for new Codex sessions,
-independently of browser access. Task tools operate within the current T3 project;
-other providers do not yet receive agent-authored task messages.
 
 ## Use multiple accounts
 
