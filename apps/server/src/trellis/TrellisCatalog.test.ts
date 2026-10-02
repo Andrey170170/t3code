@@ -70,6 +70,7 @@ interface CatalogState {
   /** Base builds Trellis was asked for; each waits for `buildRelease` when set. */
   builds?: number;
   readonly buildRelease?: Deferred.Deferred<void>;
+  baseStates?: Record<string, string>;
 }
 
 const ROOT = "/trellis";
@@ -843,15 +844,18 @@ describe("TrellisCatalog service", () => {
         Effect.gen(function* () {
           state.builds = (state.builds ?? 0) + 1;
           if (state.buildRelease !== undefined) yield* Deferred.await(state.buildRelease);
+          if (name === "broken") {
+            return yield* new TrellisError({ message: "definition for broken failed" });
+          }
           return { name, state: "current" };
         }),
-      details: Effect.succeed({
+      details: Effect.sync(() => ({
         root: ROOT,
         version: null,
         commit: null,
         uptimeSecs: null,
-        bases: ["dev"],
-        baseStates: null,
+        bases: ["dev", "broken"],
+        baseStates: state.baseStates ?? null,
         buildingBases: [],
         baseBuildFailures: {},
         defaultBase: "dev",
@@ -861,7 +865,7 @@ describe("TrellisCatalog service", () => {
         restartNeeded: null,
         pendingOperations: [],
         disk: null,
-      }),
+      })),
       trashProject: (id) =>
         Effect.gen(function* () {
           if (state.trashStarted !== undefined)
@@ -1309,6 +1313,13 @@ describe("TrellisCatalog service", () => {
         });
         assert.deepEqual(a, b);
         assert.equal(buildState.builds, before + 1);
+        // A failure stays reported until the base is current again (rebuilt from the CLI).
+        yield* catalog.buildBase("broken").pipe(Effect.flip);
+        assert.deepEqual((yield* catalog.details).baseBuildFailures, {
+          broken: "definition for broken failed",
+        });
+        buildState.baseStates = { broken: "current" };
+        assert.deepEqual((yield* catalog.details).baseBuildFailures, {});
       }),
     );
   });

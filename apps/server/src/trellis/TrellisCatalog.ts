@@ -1942,7 +1942,14 @@ const make = Effect.gen(function* () {
       Effect.map(([details, applied]) => ({
         ...nameDetailsWorkspaces(details, applied?.items ?? []),
         buildingBases: [...baseBuilds.keys()],
-        baseBuildFailures: Object.fromEntries(baseBuildFailures),
+        baseBuildFailures: Object.fromEntries(
+          [...baseBuildFailures].filter(([base]) => {
+            // Rebuilt since (from the CLI, or an answer that was lost): no longer failed.
+            if (details.baseStates?.[base] !== "current") return true;
+            baseBuildFailures.delete(base);
+            return false;
+          }),
+        ),
       })),
     ),
   });
