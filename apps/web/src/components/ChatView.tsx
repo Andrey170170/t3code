@@ -383,7 +383,7 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
-import { sideChatEnvironment } from "../state/sideChat";
+import { closeSideChat } from "../state/sideChat";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
@@ -677,14 +677,16 @@ const DevicePanel = lazy(() =>
 );
 const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
-/** Global commands that still apply while focus is inside a side chat. */
-const SIDE_CHAT_PASSTHROUGH_COMMANDS: ReadonlySet<string> = new Set([
-  "rightPanel.toggle",
-  "rightPanel.toggleMaximized",
-  "rightPanel.close",
-  "threadPanel.toggle",
-  "sideChat.open",
-]);
+/** Commands aimed at the main composer or turn; a focused side chat owns or ignores them. */
+function isComposerScopedCommand(command: string): boolean {
+  return (
+    command.startsWith("composer.") ||
+    command === "modelPicker.toggle" ||
+    command === "thread.stop" ||
+    command === "thread.steerQueuedMessage" ||
+    command === "thread.editQueuedMessage"
+  );
+}
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
   "input",
   "textarea",
@@ -1544,7 +1546,6 @@ export default function ChatView(props: ChatViewProps) {
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const createThread = useAtomCommand(threadEnvironment.create, { reportFailure: false });
-  const closeSideChat = useAtomCommand(sideChatEnvironment.close, { reportFailure: false });
   const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -5604,12 +5605,9 @@ export default function ChatView(props: ChatViewProps) {
         }
         // Closing the tab ends the side chat; hiding the panel keeps it.
         if (surface.kind === "side-chat" && surface.sideChatId) {
-          void closeSideChat({
-            environmentId: activeThreadRef.environmentId,
-            input: {
-              parentThreadId: activeThreadRef.threadId,
-              sideChatId: ThreadId.make(surface.sideChatId),
-            },
+          closeSideChat(activeThreadRef.environmentId, {
+            parentThreadId: activeThreadRef.threadId,
+            sideChatId: ThreadId.make(surface.sideChatId),
           });
         }
         if (surface.kind === "terminal") {
@@ -5627,7 +5625,6 @@ export default function ChatView(props: ChatViewProps) {
       activeThreadRef,
       activePreviewState.sessions,
       closePreview,
-      closeSideChat,
       closeTerminalMutation,
       storeCloseTerminal,
     ],
@@ -7384,8 +7381,8 @@ export default function ChatView(props: ChatViewProps) {
         context: shortcutContext,
       });
       if (!command) return;
-      // A side chat owns its composer shortcuts; only panel-level commands pass through.
-      if (sideChatFocused && !SIDE_CHAT_PASSTHROUGH_COMMANDS.has(command)) return;
+      // A side chat owns its composer shortcuts; workspace commands still apply.
+      if (sideChatFocused && isComposerScopedCommand(command)) return;
 
       if (command === "sideChat.open") {
         if (!sideChatAvailable) return;
