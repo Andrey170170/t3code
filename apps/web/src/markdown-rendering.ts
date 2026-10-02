@@ -61,6 +61,19 @@ function urlRanges(markdown: string): ReadonlyArray<readonly [number, number]> {
 export function normalizeMarkdownMathDelimiters(markdown: string): string {
   // Without a backslash delimiter there is nothing to rewrite, and no parse.
   if (!/\\[([]/.test(markdown)) return markdown;
+  // The parse runs only when a delimiter appears outside code, so streamed
+  // code full of `\(` (regexes) never pays for it.
+  const unparsed = rewriteMathDelimiters(markdown, []);
+  return unparsed.delimiterOutsideCode
+    ? rewriteMathDelimiters(markdown, urlRanges(markdown)).output
+    : markdown;
+}
+
+function rewriteMathDelimiters(
+  markdown: string,
+  urls: ReadonlyArray<readonly [number, number]>,
+): { readonly output: string; readonly delimiterOutsideCode: boolean } {
+  let delimiterOutsideCode = false;
   // Every offset below uses JavaScript's UTF-16 indexing. Keep the mutable
   // buffer on the same indexing model so astral characters before math do not
   // shift delimiter writes.
@@ -72,7 +85,6 @@ export function normalizeMarkdownMathDelimiters(markdown: string): string {
   let pending: { offset: number; close: ")" | "]" } | null = null;
   let lineStart = 0;
   let fenceMarkerLineEnd = 0;
-  const urls = urlRanges(markdown);
   let nextUrl = 0;
 
   for (let index = 0; index < markdown.length; index += 1) {
@@ -129,6 +141,9 @@ export function normalizeMarkdownMathDelimiters(markdown: string): string {
       continue;
     }
 
+    if (character === "\\" && (markdown[index + 1] === "(" || markdown[index + 1] === "[")) {
+      delimiterOutsideCode = true;
+    }
     if (insideHtmlTag) {
       if (htmlQuote) {
         if (character === htmlQuote && !isEscaped(markdown, index)) htmlQuote = null;
@@ -167,5 +182,5 @@ export function normalizeMarkdownMathDelimiters(markdown: string): string {
     }
   }
 
-  return output.join("");
+  return { output: output.join(""), delimiterOutsideCode };
 }
