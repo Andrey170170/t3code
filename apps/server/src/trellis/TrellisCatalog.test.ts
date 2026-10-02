@@ -1,5 +1,3 @@
-import * as NodePath from "node:path";
-import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it as effectIt } from "@effect/vitest";
 import {
@@ -16,6 +14,8 @@ import {
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -1074,8 +1074,15 @@ describe("TrellisCatalog service", () => {
         // When it went missing survives a restart, so a conversation the user
         // unarchives later is not archived again by the next server.
         const { stateDir } = yield* ServerConfig;
-        const persisted = JSON.parse(
-          NodeFS.readFileSync(NodePath.join(stateDir, "trellis-missing-roots.json"), "utf8"),
+        const persisted = yield* FileSystem.FileSystem.use((fileSystem) =>
+          fileSystem.readFileString(`${stateDir}/trellis-missing-roots.json`),
+        ).pipe(
+          Effect.flatMap(
+            Schema.decodeUnknownEffect(
+              Schema.fromJsonString(Schema.Record(Schema.String, Schema.Finite)),
+            ),
+          ),
+          Effect.provide(NodeServices.layer),
         );
         assert.isNumber(persisted[`${SCRATCH}/idea-e`]);
       }),
