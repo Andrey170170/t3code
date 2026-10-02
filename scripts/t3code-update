@@ -76,7 +76,7 @@ if [[ $mode == forgejo ]]; then
   done
   if [[ -n $instance ]]; then
     [[ " ${args[*]-} " == *" --version "* ]] || {
-      echo "Instance $instance is pinned: give the exact VERSION to install (or a tag to --check, such as v2)." >&2
+      echo "Instance $instance is pinned: give the exact VERSION to install (or a tag to --check, such as dev-v2)." >&2
       exit 2
     }
     [[ $command == check ]] || args+=("${instance_args[@]}")
