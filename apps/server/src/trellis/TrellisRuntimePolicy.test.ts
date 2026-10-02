@@ -363,24 +363,30 @@ describe("TrellisRuntimePolicy", () => {
             },
           },
         });
-      // The reported home runs, through a symlink to it too.
+      // The reported home runs; a symlink to it does not exist in the container.
       const { policy } = yield* claudeAt("/trellis/dev/homes/claude", devHomes);
       assert.equal(policy.launch?.sessionKey, "ws-1");
-      const { policy: aliased } = yield* resolve({
-        instance: "claudeAgent",
-        projectRoot: idea,
-        trellisEnv: devHomes,
-        aliases: { "/srv/claude-link": "/trellis/dev/homes/claude" },
-        providerInstances: {
-          providerInstances: {
-            [ProviderInstanceId.make("claudeAgent")]: {
-              driver: ProviderDriverKind.make("claudeAgent"),
-              config: { homePath: "/srv/claude-link" },
-            },
-          },
-        },
-      });
-      assert.equal(aliased.launch?.sessionKey, "ws-1");
+      assert.equal(
+        yield* refusal(claudeAt("/srv/claude-link", devHomes)),
+        TrellisRuntimePolicy.trellisHomeRefusal(
+          "Claude",
+          "/srv/claude-link",
+          "/trellis/dev/homes/claude",
+        ),
+      );
+      // An inherited `~` is not expanded for the provider, so it is not the mount.
+      vi.stubEnv("CLAUDE_CONFIG_DIR", "~/.claude");
+      const literalTilde = yield* refusal(claudeAt(undefined, env)).pipe(
+        Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())),
+      );
+      assert.equal(
+        literalTilde,
+        TrellisRuntimePolicy.trellisHomeRefusal(
+          "Claude",
+          "~/.claude",
+          `${NodeOS.homedir()}/.claude`,
+        ),
+      );
       // The default home is refused when Trellis mounts another one.
       assert.equal(
         yield* refusal(claudeAt(undefined, devHomes)),

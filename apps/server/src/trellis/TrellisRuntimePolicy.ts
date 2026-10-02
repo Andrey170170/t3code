@@ -190,45 +190,38 @@ const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
  * Why a provider instance cannot run inside a workspace, or null. The
  * container mounts the provider homes Trellis reports (`agentHomes`; the
  * defaults when it reports none) at their host paths, so the home the
- * instance resolves (its settings, then the instance environment, then the
- * environment the server inherited, then the default) must be the mounted
- * one; an inherited `TRELLIS_WORKSPACE` is refused too, as it makes the shim
- * fall back to the host. `canonical` resolves symlinks on both sides.
+ * provider is given (its settings, then its environment merged over the
+ * server's, then the default, resolved as the adapters do) must be exactly
+ * a mounted path: a symlink to it, a literal `~` or a relative path does not
+ * exist in the container. An inherited `TRELLIS_WORKSPACE` is refused too, as
+ * it makes the shim fall back to the host.
  */
-const instanceLaunchRefusal = Effect.fn("TrellisRuntimePolicy.instanceLaunchRefusal")(function* (
+function instanceLaunchRefusal(
   driverKind: string,
   instance: ProviderInstanceConfig | undefined,
   homeDir: string,
   hostEnvironment: NodeJS.ProcessEnv,
   agentHomes: TrellisAgentHomes | undefined,
-  canonical: (path: string) => Effect.Effect<string>,
-) {
-  // The environment the provider starts with: the instance's merged over the inherited one.
+): string | null {
+  // The environment the provider starts with: the instance's merged over the
+  // inherited one (instance values are home-expanded, inherited ones are not).
   const environment = mergeProviderInstanceEnvironment(instance?.environment, hostEnvironment);
   // The shim runs the host binary whenever this is set, even empty.
   if (environment.TRELLIS_WORKSPACE !== undefined) {
     return TRELLIS_NESTED_WORKSPACE_MESSAGE;
   }
   const homeOf = (configured: string | undefined, variable: string, defaultDir: string) => {
-    const value = [configured, environment[variable]]
-      .map((candidate) => candidate?.trim() ?? "")
-      .find((candidate) => candidate.length > 0);
-    return NodePath.resolve(
-      value === undefined ? NodePath.join(homeDir, defaultDir) : expandHomePath(value),
-    );
+    if (configured !== undefined && configured.trim().length > 0) {
+      return NodePath.resolve(expandHomePath(configured.trim()));
+    }
+    const value = environment[variable]?.trim() ?? "";
+    if (value.length === 0) return NodePath.join(homeDir, defaultDir);
+    return NodePath.isAbsolute(value) ? NodePath.resolve(value) : value;
   };
-  const check = Effect.fn("TrellisRuntimePolicy.checkHome")(function* (
-    provider: "Claude" | "Codex",
-    home: string,
-    mounted: string | null,
-  ) {
-    if (mounted === null) return trellisHomeRefusal(provider, home, null);
-    const [actual, expected] = [
-      yield* canonical(home),
-      yield* canonical(NodePath.resolve(mounted)),
-    ];
-    return actual === expected ? null : trellisHomeRefusal(provider, home, mounted);
-  });
+  const check = (provider: "Claude" | "Codex", home: string, mounted: string | null) =>
+    mounted !== null && NodePath.resolve(mounted) === home
+      ? null
+      : trellisHomeRefusal(provider, home, mounted);
   if (driverKind === "codex") {
     const config = decodeCodexSettings(instance?.config ?? {});
     if (Option.isSome(config) && config.value.setupMode === "managed") {
@@ -237,7 +230,7 @@ const instanceLaunchRefusal = Effect.fn("TrellisRuntimePolicy.instanceLaunchRefu
     if (Option.isSome(config) && config.value.shadowHomePath.trim().length > 0) {
       return TRELLIS_SHADOW_HOME_MESSAGE;
     }
-    return yield* check(
+    return check(
       "Codex",
       homeOf(Option.getOrUndefined(config)?.homePath, "CODEX_HOME", ".codex"),
       agentHomes === undefined ? NodePath.join(homeDir, ".codex") : agentHomes.codex,
@@ -245,14 +238,14 @@ const instanceLaunchRefusal = Effect.fn("TrellisRuntimePolicy.instanceLaunchRefu
   }
   if (driverKind === "claudeAgent") {
     const config = decodeClaudeSettings(instance?.config ?? {});
-    return yield* check(
+    return check(
       "Claude",
       homeOf(Option.getOrUndefined(config)?.homePath, "CLAUDE_CONFIG_DIR", ".claude"),
       agentHomes === undefined ? NodePath.join(homeDir, ".claude") : agentHomes.claude,
     );
   }
   return null;
-});
+}
 
 /** `RuntimePolicyV2` with Trellis launches; provide the base policy beneath it. */
 export const layer: Layer.Layer<
@@ -324,13 +317,12 @@ export const layer: Layer.Layer<
         const settings = yield* serverSettings.getSettings.pipe(
           Effect.mapError((error) => refuse(error.message)),
         );
-        const homeRefusal = yield* instanceLaunchRefusal(
+        const homeRefusal = instanceLaunchRefusal(
           driverKind,
           deriveProviderInstanceConfigMap(settings)[input.modelSelection.instanceId],
           NodeOS.homedir(),
           process.env,
           env?.agentHomes,
-          trellis.canonicalPath,
         );
         if (homeRefusal !== null) return yield* refuse(homeRefusal);
 
