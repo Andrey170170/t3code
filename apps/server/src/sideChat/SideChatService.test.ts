@@ -24,6 +24,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
@@ -520,6 +521,38 @@ it.effect("deleting the parent thread closes its side chat", () =>
     const frames = yield* Fiber.join(ended);
     assert.equal(frames.at(-1)?.type, "closed");
     yield* sessionClosed;
+  }).pipe(Effect.scoped),
+);
+
+it.effect("archiving the parent thread closes its side chat", () =>
+  Effect.gen(function* () {
+    const { service, domainEvents, sessionClosed } = yield* makeHarness();
+    const target = yield* openIdle(service);
+
+    yield* Queue.offer(domainEvents, {
+      type: "thread.archived",
+      threadId: parentThreadId,
+    } as unknown as OrchestrationV2DomainEvent);
+
+    yield* sessionClosed;
+    const lookup = yield* service.subscribe(target).pipe(Stream.runCollect, Effect.flip);
+    assert.equal(lookup._tag, "SideChatNotFoundError");
+  }).pipe(Effect.scoped),
+);
+
+it.effect("a side chat with no activity for 30 minutes closes", () =>
+  Effect.gen(function* () {
+    const { service, sessionClosed } = yield* makeHarness();
+    const target = yield* openIdle(service);
+    const firstFrame = service.subscribe(target).pipe(Stream.take(1), Stream.runCollect);
+
+    yield* TestClock.adjust("29 minutes");
+    assert.equal((yield* firstFrame)[0]?.type, "snapshot");
+
+    yield* TestClock.adjust("2 minutes");
+    yield* sessionClosed;
+    const lookup = yield* firstFrame.pipe(Effect.flip);
+    assert.equal(lookup._tag, "SideChatNotFoundError");
   }).pipe(Effect.scoped),
 );
 

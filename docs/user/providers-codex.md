@@ -98,8 +98,9 @@ A side chat has its own model, reasoning, permission mode, and Build/Plan mode,
 and answers its own approvals and questions. It shares the main chat's workspace.
 
 Side chats are temporary: they do not appear in your threads, and each chat has at
-most one. Closing the tab ends it, as does restarting the server; start a new one to
-take a fresh copy of the main conversation. Side chats are available on web and
+most one. A side chat ends when you close its tab, after 30 minutes without
+activity, when its chat is archived or deleted, or when the server restarts; start
+a new one to take a fresh copy of the main conversation. Side chats are available on web and
 desktop, not on mobile.
 
 ## Approve app access

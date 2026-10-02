@@ -23,6 +23,7 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -33,6 +34,7 @@ import * as Latch from "effect/Latch";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
@@ -154,7 +156,12 @@ interface SideChat {
   >;
   /** A stop that arrived before Codex reported the turn's id; applied once it does. Guarded by `lock`. */
   interruptRequested: boolean;
+  /** When its state last changed, in epoch milliseconds. Guarded by `lock`. */
+  lastActivityAt: number;
 }
+
+/** Like Codex's own side conversations, a side chat with nothing happening for this long ends. */
+const IDLE_CLOSE_AFTER_MS = 30 * 60 * 1000;
 
 /** The message a side turn starts with, and the selection overrides it carries. */
 interface SideTurnInput {
@@ -243,6 +250,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const [result, transition] = f(yield* Ref.get(chat.state));
         yield* Ref.set(chat.state, transition.snapshot);
+        chat.lastActivityAt = yield* Clock.currentTimeMillis;
         if (transition.events.length > 0) yield* PubSub.publishAll(chat.changes, transition.events);
         return result;
       }),
@@ -517,6 +525,7 @@ const make = Effect.gen(function* () {
             SideChatRejectedError | SideChatNotFoundError
           >(),
           interruptRequested: false,
+          lastActivityAt: yield* Clock.currentTimeMillis,
         };
         byParent.set(parentThreadId, chat);
         byId.set(sideChatId, chat);
@@ -907,10 +916,10 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  // A deleted thread can never be reached again, so neither can its side chat.
+  // A side chat ends with its thread: an archived or deleted thread is done with.
   yield* forkParked(
     Stream.runForEach(threads.streamDomainEvents, (event) =>
-      event.type === "thread.deleted"
+      event.type === "thread.archived" || event.type === "thread.deleted"
         ? closeWhere((chat) => chat.parentThread.id === event.threadId)
         : Effect.void,
     ).pipe(
@@ -920,6 +929,20 @@ const make = Effect.gen(function* () {
           : Effect.logWarning("Side chats stopped following thread deletions.", { cause }),
       ),
     ),
+  );
+
+  // Ends side chats with no turn running and no change for IDLE_CLOSE_AFTER_MS.
+  yield* forkParked(
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      const idle = new Set<SideChat>();
+      for (const chat of Array.from(byId.values())) {
+        const snapshot = yield* chat.lock.withPermit(Ref.get(chat.state));
+        const working = snapshot.status === "running" || snapshot.status === "starting";
+        if (!working && now - chat.lastActivityAt >= IDLE_CLOSE_AFTER_MS) idle.add(chat);
+      }
+      if (idle.size > 0) yield* closeWhere((chat) => idle.has(chat));
+    }).pipe(Effect.repeat(Schedule.spaced("1 minute"))),
   );
 
   return SideChatService.of({ open, send, interrupt, respond, close, subscribe });
