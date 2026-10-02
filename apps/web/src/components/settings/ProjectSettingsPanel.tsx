@@ -28,6 +28,8 @@ import {
   trellisTrashConfirmation,
 } from "../../lib/trellis";
 import { openGraduateIdeaDialog } from "../trellis/GraduateIdeaDialog";
+import { TrellisTrashedUndo } from "../trellis/TrellisTrashedUndo";
+import { trellisTrashedKey, useTrellisTrashedStore } from "../../state/trellisTrashed";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { loadTrellisStatus } from "../../state/trellis";
 import {
@@ -311,6 +313,10 @@ function ProjectDetail({
   const hasMultipleCheckouts = group.memberProjects.length > 1;
 
   const trashTrellisProject = useTrellisTrash();
+  const trashedProjects = useTrellisTrashedStore((state) => state.projects);
+  const trashedHere = group.memberProjects.some(
+    (member) => trellisTrashedKey(member.environmentId, member.id) in trashedProjects,
+  );
   const representativeTrellis = useTrellisStatusFor(representative.environmentId);
   const trellisRemoval =
     group.memberProjects.length === 1
@@ -387,24 +393,29 @@ function ProjectDetail({
                 : "Other entries in this grouped project are unaffected.",
               "This action cannot be undone.",
             ];
-      const confirmed = await settlePromise(() =>
-        api.dialogs.confirm(
-          [
-            ...(trashed.length > 0
-              ? trellisTrashConfirmation({
-                  label: trashed.length === 1 ? firstTrashed!.title : group.displayName,
-                  kind: trellisItemKind(
-                    firstTrashed!.workspaceRoot,
-                    statuses.get(firstTrashed!.environmentId) ?? {},
-                  ),
-                  count: trashed.length,
-                })
-              : []),
-            ...deleteLines,
-          ].join("\n"),
-          { variant: "destructive" },
-        ),
-      );
+      // Only a trash is undoable (the toast and this page offer Undo), so it
+      // alone needs no confirmation.
+      const confirmed =
+        deleted.length === 0
+          ? AsyncResult.success(true)
+          : await settlePromise(() =>
+              api.dialogs.confirm(
+                [
+                  ...(trashed.length > 0
+                    ? trellisTrashConfirmation({
+                        label: trashed.length === 1 ? firstTrashed!.title : group.displayName,
+                        kind: trellisItemKind(
+                          firstTrashed!.workspaceRoot,
+                          statuses.get(firstTrashed!.environmentId) ?? {},
+                        ),
+                        count: trashed.length,
+                      })
+                    : []),
+                  ...deleteLines,
+                ].join("\n"),
+                { variant: "destructive" },
+              ),
+            );
       if (confirmed._tag === "Failure" || !confirmed.value) return;
 
       const draftStore = useComposerDraftStore.getState();
@@ -416,8 +427,14 @@ function ProjectDetail({
         }
         draftStore.clearProjectDraftThreadId(projectRef);
       };
+      let trashedCount = 0;
       for (const member of trashed) {
-        const outcome = await trashTrellisProject(member.environmentId, member.id, member.title);
+        const outcome = await trashTrellisProject(
+          member.environmentId,
+          member.id,
+          member.title,
+          member.workspaceRoot,
+        );
         if (outcome === "failed") return;
         if (outcome === "gone") {
           // Already out of Trellis (e.g. in its trash): only T3's entry is left.
@@ -426,6 +443,7 @@ function ProjectDetail({
           deleted.push(member);
           continue;
         }
+        trashedCount += 1;
         clearProjectDrafts(member);
       }
       for (const member of deleted) {
@@ -455,7 +473,8 @@ function ProjectDetail({
         clearProjectDrafts(member);
       }
 
-      if (isWholeGroup && !hasOtherMembers) {
+      // A trashed project stays on this page, with its Undo.
+      if (isWholeGroup && !hasOtherMembers && deleted.length > 0 && trashedCount === 0) {
         void navigate({ to: "/", replace: true });
       }
     },
@@ -613,45 +632,53 @@ function ProjectDetail({
           </SettingsSection>
         ) : null}
         <SettingsSection title="Danger">
-          <SettingsRow
-            title={
-              trellisManaged
-                ? "Move to the Trellis trash"
-                : hasOtherMembers
-                  ? "Remove checkout"
-                  : group.memberProjects.length > 1
-                    ? "Remove this project everywhere"
-                    : "Remove project"
-            }
-            description={
-              trellisRemoval === "offline"
-                ? "Trellis is off or not running. Turn it on or start it (Settings → Trellis) to move this project to the Trellis trash."
-                : trellisManaged
-                  ? "Moves its files and history to the Trellis trash and archives its conversations. Restore it from Settings → Trellis."
-                  : hasOtherMembers
-                    ? "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched."
-                    : group.memberProjects.length > 1
-                      ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
-                      : "Deletes the project entry and its threads. Files on disk are not touched."
-            }
-            control={
-              <Button
-                size="sm"
-                variant="destructive-outline"
-                disabled={trellisRemoval === "offline"}
-                onClick={() => void removeMembers(group.memberProjects)}
-              >
-                <Trash2Icon />
-                {trellisManaged
-                  ? "Move to trash"
+          {trashedHere ? (
+            <SettingsRow
+              title="In the Trellis trash"
+              description="Its files and history are in the Trellis trash and its conversations are archived. Undo brings both back; later, restore it from Settings → Trellis."
+              control={<TrellisTrashedUndo members={group.memberProjects} label={false} />}
+            />
+          ) : (
+            <SettingsRow
+              title={
+                trellisManaged
+                  ? "Move to the Trellis trash"
                   : hasOtherMembers
                     ? "Remove checkout"
                     : group.memberProjects.length > 1
-                      ? "Remove all entries"
-                      : "Remove project"}
-              </Button>
-            }
-          />
+                      ? "Remove this project everywhere"
+                      : "Remove project"
+              }
+              description={
+                trellisRemoval === "offline"
+                  ? "Trellis is off or not running. Turn it on or start it (Settings → Trellis) to move this project to the Trellis trash."
+                  : trellisManaged
+                    ? "Moves its files and history to the Trellis trash and archives its conversations. Restore it from Settings → Trellis."
+                    : hasOtherMembers
+                      ? "Deletes the selected machine's checkout entries and their threads. Other machines and files on disk are not touched."
+                      : group.memberProjects.length > 1
+                        ? `Deletes all ${group.memberProjects.length} checkout entries and their threads on every machine. Files on disk are not touched.`
+                        : "Deletes the project entry and its threads. Files on disk are not touched."
+              }
+              control={
+                <Button
+                  size="sm"
+                  variant="destructive-outline"
+                  disabled={trellisRemoval === "offline"}
+                  onClick={() => void removeMembers(group.memberProjects)}
+                >
+                  <Trash2Icon />
+                  {trellisManaged
+                    ? "Move to trash"
+                    : hasOtherMembers
+                      ? "Remove checkout"
+                      : group.memberProjects.length > 1
+                        ? "Remove all entries"
+                        : "Remove project"}
+                </Button>
+              }
+            />
+          )}
         </SettingsSection>
       </SettingsPageContainer>
 

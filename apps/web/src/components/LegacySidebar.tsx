@@ -112,7 +112,9 @@ import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useSidebarProjects } from "../hooks/useSidebarProjects";
 import { useTrellisTrash } from "../hooks/useTrellis";
-import { trellisItemKind, trellisRemovalOf, trellisTrashConfirmation } from "../lib/trellis";
+import { TrellisTrashedUndo } from "./trellis/TrellisTrashedUndo";
+import { trellisTrashedKey, useTrellisTrashedStore } from "../state/trellisTrashed";
+import { trellisRemovalOf } from "../lib/trellis";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { loadTrellisStatus } from "../state/trellis";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
@@ -1578,16 +1580,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
       if (trellisRemoval === "trash") {
-        const confirmed = await api.dialogs.confirm(
-          trellisTrashConfirmation({
-            label: member.title,
-            kind: trellisItemKind(member.workspaceRoot, trellisStatus ?? {}),
-            count: 1,
-          }).join("\n"),
-          { variant: "destructive" },
+        // No confirmation: the toast and the row offer Undo.
+        const outcome = await trashTrellisProject(
+          member.environmentId,
+          member.id,
+          member.title,
+          member.workspaceRoot,
         );
-        if (!confirmed) return;
-        const outcome = await trashTrellisProject(member.environmentId, member.id, member.title);
         if (outcome === "trashed") {
           const trashedProjectRef = scopeProjectRef(member.environmentId, member.id);
           const draftStore = useComposerDraftStore.getState();
@@ -2077,6 +2076,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     [handleNewThread, isMobile, setOpenMobile],
   );
 
+  // Every member just moved to the trash: the row takes no new threads.
+  const trashedHere = useTrellisTrashedStore((state) =>
+    project.memberProjects.every(
+      (member) => trellisTrashedKey(member.environmentId, member.id) in state.projects,
+    ),
+  );
   const handleCreateThreadClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
@@ -2494,27 +2499,31 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             </TooltipPopup>
           </Tooltip>
         )}
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <div className="pointer-events-none absolute top-[calc(50%+1px)] right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-focus-within/project-header:pointer-events-auto group-focus-within/project-header:opacity-100">
-                <button
-                  type="button"
-                  aria-label={`Create new thread in ${project.displayName}`}
-                  data-testid="new-thread-button"
-                  className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
-                  onClick={handleCreateThreadClick}
-                >
-                  <SquarePenIcon className="size-3.5" />
-                </button>
-              </div>
-            }
-          />
-          <TooltipPopup side="top">
-            {newThreadShortcutLabel ? `New thread (${newThreadShortcutLabel})` : "New thread"}
-          </TooltipPopup>
-        </Tooltip>
+        {/* A project just moved to the trash takes no new threads, only Undo. */}
+        {trashedHere ? null : (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <div className="pointer-events-none absolute top-[calc(50%+1px)] right-0.5 -translate-y-1/2 opacity-0 transition-opacity duration-150 max-sm:pointer-events-auto max-sm:opacity-100 group-hover/project-header:pointer-events-auto group-hover/project-header:opacity-100 group-focus-within/project-header:pointer-events-auto group-focus-within/project-header:opacity-100">
+                  <button
+                    type="button"
+                    aria-label={`Create new thread in ${project.displayName}`}
+                    data-testid="new-thread-button"
+                    className={SIDEBAR_ICON_ACTION_BUTTON_CLASS}
+                    onClick={handleCreateThreadClick}
+                  >
+                    <SquarePenIcon className="size-3.5" />
+                  </button>
+                </div>
+              }
+            />
+            <TooltipPopup side="top">
+              {newThreadShortcutLabel ? `New thread (${newThreadShortcutLabel})` : "New thread"}
+            </TooltipPopup>
+          </Tooltip>
+        )}
       </div>
+      <TrellisTrashedUndo members={project.memberProjects} className="mb-1 ml-8" />
 
       <SidebarProjectThreadList
         projectKey={project.projectKey}
@@ -3179,7 +3188,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
 });
 
 export default function LegacySidebar() {
-  const projects = useSidebarProjects();
+  const projects = useSidebarProjects({ keepTrashedHere: true });
   const sidebarThreads = useThreadShells();
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const projectOrder = useUiStateStore((store) => store.projectOrder);

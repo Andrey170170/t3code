@@ -81,6 +81,13 @@ export type TrellisTrashProjectInput = typeof TrellisTrashProjectInput.Type;
 export const TrellisTrashProjectResult = Schema.Struct({
   trashed: Schema.NullOr(Schema.Literals(["project", "workspace"])),
   name: Schema.String,
+  /** What to pass to `restore` to undo the trash; absent when nothing was trashed. */
+  restore: Schema.optional(
+    Schema.Struct({
+      kind: Schema.Literals(["idea", "project", "workspace"]),
+      id: TrimmedNonEmptyString,
+    }),
+  ),
 });
 export type TrellisTrashProjectResult = typeof TrellisTrashProjectResult.Type;
 

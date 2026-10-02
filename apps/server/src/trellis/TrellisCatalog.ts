@@ -115,7 +115,11 @@ export type CatalogSyncAction =
       readonly projectId: ProjectId;
       /** Active threads to archive; archiving is reversible and keeps them. */
       readonly archiveThreadIds: ReadonlyArray<ThreadId>;
-      /** Only a project without any threads is deleted. */
+      /**
+       * Only a project without any threads is deleted, and only once its item
+       * cannot come back (graduated or purged): one in the trash keeps its id
+       * for a restore, hidden meanwhile.
+       */
       readonly deleteProject: boolean;
     }
   | {
@@ -299,12 +303,17 @@ export function planCatalogSync(input: {
       graduatedInto.set(normalizeRoot(item.path), normalizeRoot(target.path));
     }
   }
+  // Roots in the Trellis trash, which a restore brings back.
+  const inTrash = new Set<string>();
   for (const item of input.items) {
-    if (!isLive(item)) retiredAt.set(normalizeRoot(item.path), item.deleted_at ?? item.updated_at);
-    else {
+    if (!isLive(item)) {
+      retiredAt.set(normalizeRoot(item.path), item.deleted_at ?? item.updated_at);
+      if (item.deleted_at !== null) inTrash.add(normalizeRoot(item.path));
+    } else {
       for (const workspace of item.workspaces) {
         if (workspace.deleted_at !== null) {
           retiredAt.set(normalizeRoot(workspace.path), workspace.deleted_at);
+          inTrash.add(normalizeRoot(workspace.path));
         }
       }
     }
@@ -312,10 +321,9 @@ export function planCatalogSync(input: {
   for (const [root, project] of projectsByRoot) {
     if (desiredRoots.has(root) || !isTrellisManagedPath(input.root, root)) continue;
     const workspaceId = workspaceIdOfRoot(input.root, root);
-    const at =
-      retiredAt.get(root) ??
-      (workspaceId === null ? undefined : input.deletedWorkspaces.get(workspaceId)) ??
-      input.missingRoots?.get(root);
+    const trashedWorkspaceAt =
+      workspaceId === null ? undefined : input.deletedWorkspaces.get(workspaceId);
+    const at = retiredAt.get(root) ?? trashedWorkspaceAt ?? input.missingRoots?.get(root);
     if (at === undefined) continue;
     const threads = input.threads.filter((thread) => thread.projectId === project.id);
     const toRoot = graduatedInto.get(root);
@@ -336,13 +344,10 @@ export function planCatalogSync(input: {
       // `at` is in whole seconds: a thread updated during that second is older.
       .filter((thread) => !thread.archived && thread.updatedAtMs < (at + 1) * 1000)
       .map((thread) => thread.id);
-    if (archiveThreadIds.length === 0 && threads.length > 0) continue;
-    actions.push({
-      type: "retire",
-      projectId: project.id,
-      archiveThreadIds,
-      deleteProject: threads.length === 0,
-    });
+    const deleteProject =
+      threads.length === 0 && !inTrash.has(root) && trashedWorkspaceAt === undefined;
+    if (archiveThreadIds.length === 0 && !deleteProject) continue;
+    actions.push({ type: "retire", projectId: project.id, archiveThreadIds, deleteProject });
   }
   return actions;
 }
@@ -1450,7 +1455,14 @@ const make = Effect.gen(function* () {
         message: `${target.name} is in the Trellis trash, but ${unreleased.length} agent ${one ? "session" : "sessions"} running in it could not be stopped, so the next turn there may fail until T3 restarts.`,
       });
     }
-    return { trashed: target.kind, name: target.name } satisfies TrellisTrashProjectResult;
+    return {
+      trashed: target.kind,
+      name: target.name,
+      restore: {
+        kind: target.kind === "project" && item?.kind === "idea" ? "idea" : target.kind,
+        id: target.id,
+      },
+    } satisfies TrellisTrashProjectResult;
   });
 
   const restoreConflicts = Effect.fn("TrellisCatalog.restoreConflicts")(function* (

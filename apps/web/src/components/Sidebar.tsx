@@ -178,6 +178,8 @@ import { cn } from "~/lib/utils";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import { TrellisWorkspaceBadge } from "./trellis/TrellisWorkspaceBadge";
+import { TrellisTrashedUndo } from "./trellis/TrellisTrashedUndo";
+import { trellisTrashedKey, useTrellisTrashedStore } from "../state/trellisTrashed";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
 import {
   animateSidebarLayoutChanges,
@@ -2253,7 +2255,9 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 });
 
 export default function Sidebar() {
-  const projects = useSidebarProjects();
+  const projects = useSidebarProjects({ keepTrashedHere: true });
+  // Projects just moved to the trash stay listed for Undo, but take no threads.
+  const trashedHere = useTrellisTrashedStore((state) => state.projects);
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const threads = useThreadShells();
   const router = useRouter();
@@ -4693,6 +4697,9 @@ export default function Sidebar() {
                             ) : null}
                             {project ? <TrellisWorkspaceBadge group={project} /> : null}
                             {project ? (
+                              <TrellisTrashedUndo members={project.memberProjects} />
+                            ) : null}
+                            {project ? (
                               <Button
                                 size="icon-xs"
                                 variant="ghost-muted"
@@ -4726,7 +4733,9 @@ export default function Sidebar() {
               }
               newIdeaEnvironmentLabel={trellis?.label}
               onNewThread={handleNewThreadClick}
-              newThreadDisabled={projects.length === 0}
+              newThreadDisabled={projects.every(
+                (project) => trellisTrashedKey(project.environmentId, project.id) in trashedHere,
+              )}
               newThreadShortcutLabel={newThreadShortcutLabel}
               newThreadInProjectShortcutLabel={newThreadInProjectShortcutLabel}
               showNewThreadInProjectHint={projectGroups.length > 1}

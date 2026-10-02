@@ -4,22 +4,28 @@ import type { EnvironmentId, TrellisStatus } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { isHiddenRetiredProject, isHiddenWorkerProject } from "~/lib/trellis";
 import { useProjects, useThreadShells } from "~/state/entities";
 import { trellisEnvironment } from "~/state/trellis";
+import { reconcileTrellisTrashed, useTrellisTrashedStore } from "~/state/trellisTrashed";
 
 const NO_THREADS = { leads: 0, workers: 0, forkWorkers: 0 } as const;
 
 /**
  * The projects the sidebars list: every project, minus Trellis projects whose
  * item is in the trash and worker forks (forks delegated workers run in),
- * unless a lead thread or a draft is there. Archived conversations stay in
+ * unless a lead thread or a draft is there. With `keepTrashedHere` (the
+ * sidebars), a project this client just moved to the trash stays, listed as
+ * trashed with an Undo; elsewhere (new-thread targets) it is gone. Archived conversations stay in
  * Settings → Archive; worker forks are listed in their project's settings.
  */
-export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
+export function useSidebarProjects(
+  options: { readonly keepTrashedHere?: boolean } = {},
+): ReadonlyArray<EnvironmentProject> {
+  const keepTrashedHere = options.keepTrashedHere === true;
   const projects = useProjects();
   const threads = useThreadShells();
   const environmentKey = [...new Set(projects.map((project) => project.environmentId))]
@@ -42,6 +48,11 @@ export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
     [environmentKey],
   );
   const statuses = useAtomValue(statusAtom);
+  const trashedHere = useTrellisTrashedStore((state) => state.projects);
+  // Every status read settles this client's trashed entries.
+  useEffect(() => {
+    for (const [environmentId, status] of statuses) reconcileTrellisTrashed(environmentId, status);
+  }, [statuses]);
   // Active lead and worker threads per project; a fork worker's lead is in another project.
   const activeThreads = useMemo(() => {
     const projectOf = new Map(
@@ -68,6 +79,9 @@ export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
       statuses.size === 0
         ? []
         : projects.filter((project) => {
+            if (keepTrashedHere && `${project.environmentId}:${project.id}` in trashedHere) {
+              return false;
+            }
             const status = statuses.get(project.environmentId);
             if (status === undefined) return false;
             const counts =
@@ -81,7 +95,7 @@ export function useSidebarProjects(): ReadonlyArray<EnvironmentProject> {
               isHiddenWorkerProject(project, status, counts, false)
             );
           }),
-    [activeThreads, projects, statuses],
+    [activeThreads, keepTrashedHere, projects, statuses, trashedHere],
   );
   const draftKeys = useComposerDraftStore((store) =>
     candidates

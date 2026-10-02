@@ -169,7 +169,25 @@ describe("planCatalogSync", () => {
     ]);
   });
 
-  it("archives the threads of trashed or graduated items and deletes empty projects", () => {
+  it("keeps empty projects of trashed items and forks for a restore, without no-op actions", () => {
+    const actions = TrellisCatalog.planCatalogSync({
+      root: ROOT,
+      items: [
+        idea("idea-trashed", "Trashed", { deleted_at: 100 }),
+        dedicated("prj-live", "Live", [workspace("ws-live"), workspace("ws-fork", "fork")]),
+      ],
+      projects: [
+        project("p-trashed", `${SCRATCH}/idea-trashed`),
+        project("p-live", `${ROOT}/workspaces/ws-live/project`, "Live"),
+        project("p-fork", `${ROOT}/workspaces/ws-fork/project`, "Live · fork"),
+      ],
+      threads: [],
+      deletedWorkspaces: new Map([["ws-fork", 100]]),
+    });
+    expect(actions).toEqual([]);
+  });
+
+  it("archives the threads of trashed or graduated items and deletes empty graduated ones", () => {
     const actions = TrellisCatalog.planCatalogSync({
       root: ROOT,
       items: [
@@ -1066,8 +1084,8 @@ describe("TrellisCatalog service", () => {
         yield* catalog.syncNow;
         assert.equal((yield* projectIdAt(`${ROOT}/workspaces/ws-b/project`))?.title, "Engine v2");
 
-        // An item trashed in Trellis retires: its threads are archived, an
-        // empty project is deleted.
+        // An item trashed in Trellis retires: its threads are archived; an
+        // empty project stays (hidden by clients) so a restore keeps its id.
         const c = (yield* projectIdAt(`${SCRATCH}/idea-c`))!;
         const doomed = yield* createThread("catalog-doomed", c.projectId);
         state.items = state.items.map((item) =>
@@ -1076,12 +1094,22 @@ describe("TrellisCatalog service", () => {
         yield* catalog.syncNow;
         assert.isNotNull(yield* archivedAt(doomed));
         assert.isDefined(yield* projectIdAt(`${SCRATCH}/idea-c`));
+        const d = yield* projectIdAt(`${SCRATCH}/idea-d`);
+        assert.isDefined(d);
+        // Purged from the trash, the empty project goes.
+        state.items = state.items.filter((item) => item.id !== "idea-d");
+        yield* catalog.syncNow;
         assert.isUndefined(yield* projectIdAt(`${SCRATCH}/idea-d`));
 
         // Trash from T3 archives the conversations; restore brings them back.
         const kept = yield* createThread("catalog-kept", a!.projectId);
         const trashed = yield* catalog.trashProject(a!.projectId);
-        assert.deepEqual(trashed, { trashed: "project", name: "Sketch" });
+        // The result says how to undo it: an idea restores as an idea.
+        assert.deepEqual(trashed, {
+          trashed: "project",
+          name: "Sketch",
+          restore: { kind: "idea", id: "idea-a" },
+        });
         assert.deepEqual(state.trashed, ["idea-a"]);
         assert.isNotNull(yield* archivedAt(kept));
         const status = yield* catalog.status;
@@ -1208,6 +1236,7 @@ describe("TrellisCatalog service", () => {
         assert.deepEqual(yield* catalog.trashProject(fork.projectId), {
           trashed: "workspace",
           name: "Engine v2 · fork",
+          restore: { kind: "workspace", id: "ws-f" },
         });
         assert.isNotNull(yield* archivedAt(inFork));
         // Archived by hand after the fork went to the trash.

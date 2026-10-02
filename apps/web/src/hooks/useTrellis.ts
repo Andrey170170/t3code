@@ -25,7 +25,13 @@ import { waitForProject } from "~/state/entities";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useDebouncedValue } from "~/state/queries";
 import { useEnvironmentQuery } from "~/state/query";
-import { loadTrellisStatus, trellisEnvironment } from "~/state/trellis";
+import {
+  loadTrellisStatus,
+  readTrellisStatus,
+  refreshTrellisStatus,
+  trellisEnvironment,
+} from "~/state/trellis";
+import { trellisTrashedKey, useTrellisTrashedStore } from "~/state/trellisTrashed";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { resolveThreadRouteTarget } from "~/threadRoutes";
@@ -274,17 +280,20 @@ export function useTrellisForkWorkspace() {
 
 /**
  * Moves the Trellis item behind a T3 project to the Trellis trash and reports
- * the outcome as a toast. The catalog sync then archives the project's
- * conversations. `gone` means no live Trellis item is behind the project (it
+ * the outcome as a toast with an Undo. The project stays listed as trashed
+ * (see `state/trellisTrashed`) and its conversations are archived; Undo
+ * restores both. `gone` means no live Trellis item is behind the project (it
  * is already in the trash), so only T3's own entry can be removed.
  */
 export function useTrellisTrash() {
   const run = useAtomCommand(trellisEnvironment.trashProject, { reportFailure: false });
+  const undo = useTrellisUndoTrash();
   return useCallback(
     async (
       environmentId: EnvironmentId,
       projectId: ProjectId,
       title: string,
+      workspaceRoot: string,
     ): Promise<"trashed" | "gone" | "failed"> => {
       const result = await run({ environmentId, input: { projectId } });
       if (result._tag === "Failure") {
@@ -303,17 +312,85 @@ export function useTrellisTrash() {
         return "failed";
       }
       if (result.value.trashed === null) return "gone";
-      // Its retired root hides the emptied project. Awaited, so a caller that
-      // navigates next never lands on a new draft in the trashed project.
+      const { name, restore } = result.value;
+      if (restore !== undefined) {
+        useTrellisTrashedStore.getState().add(trellisTrashedKey(environmentId, projectId), {
+          name,
+          environmentId,
+          workspaceRoot,
+          restore,
+          phase: "trashing",
+          staleStatus: readTrellisStatus(appAtomRegistry, environmentId),
+        });
+      }
+      // Its retired root marks the emptied project trashed. Awaited, so a
+      // caller that navigates next never lands on a new draft in it.
       await loadTrellisStatus(appAtomRegistry, environmentId);
-      toastManager.add(
+      const toastId = toastManager.add(
         stackedThreadToast({
           type: "success",
-          title: `Moved "${result.value.name}" to the Trellis trash`,
-          description: "Restore it from Settings → Trellis.",
+          title: `Moved "${name}" to the Trellis trash`,
+          description: "Its conversations are archived. Restore it later from Settings → Trellis.",
+          ...(restore === undefined
+            ? {}
+            : {
+                actionProps: {
+                  children: "Undo",
+                  onClick: () => {
+                    toastManager.close(toastId);
+                    void undo(environmentId, projectId);
+                  },
+                },
+              }),
         }),
       );
       return "trashed";
+    },
+    [run, undo],
+  );
+}
+
+/**
+ * Restores a project this client moved to the Trellis trash, with its
+ * conversations. The entry stays (`restoring`) until a status shows the
+ * project live (see `state/trellisTrashed`), so the sidebar never hides it in
+ * between. A failed restore drops the entry: the trash in Settings → Trellis
+ * is then the way back.
+ */
+export function useTrellisUndoTrash() {
+  const run = useAtomCommand(trellisEnvironment.restore, { reportFailure: false });
+  return useCallback(
+    async (environmentId: EnvironmentId, projectId: ProjectId): Promise<boolean> => {
+      const key = trellisTrashedKey(environmentId, projectId);
+      const trashed = useTrellisTrashedStore.getState().projects[key];
+      if (trashed === undefined || trashed.phase === "restoring") return false;
+      useTrellisTrashedStore.getState().setPhase(key, "restoring");
+      const result = await run({ environmentId, input: trashed.restore });
+      if (result._tag === "Failure") {
+        // Interrupted (a disconnect): it may or may not have happened, so the
+        // Undo comes back; a status showing the restore still settles it.
+        if (isAtomCommandInterrupted(result)) {
+          useTrellisTrashedStore.getState().setPhase(key, "trashed");
+        } else {
+          useTrellisTrashedStore.getState().remove(key);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: `Could not restore "${trashed.name}"`,
+              description: `${failureMessage(
+                squashAtomCommandFailure(result),
+                "Trellis did not respond.",
+              )} Look for it in Settings → Trellis.`,
+            }),
+          );
+        }
+        return false;
+      }
+      refreshTrellisStatus(appAtomRegistry, environmentId);
+      toastManager.add(
+        stackedThreadToast({ type: "success", title: `Restored "${trashed.name}"` }),
+      );
+      return true;
     },
     [run],
   );
