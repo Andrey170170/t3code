@@ -131,6 +131,7 @@ import {
 } from "../AttachmentPrompt.ts";
 import {
   ProviderAdapterEnsureThreadError,
+  ProviderAdapterEventStreamError,
   ProviderAdapterForkThreadError,
   ProviderAdapterInterruptError,
   ProviderAdapterOpenSessionError,
@@ -1177,6 +1178,8 @@ export interface CodexAppServerClientFactoryShape {
     readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
     readonly settings: CodexSettings;
     readonly environment: NodeJS.ProcessEnv;
+    /** Runs once when the app-server connection ends (its process exited or was killed). */
+    readonly onTermination?: (error: CodexErrors.CodexAppServerError) => Effect.Effect<void>;
   }) => Effect.Effect<
     CodexClient.CodexAppServerClient["Service"],
     ProviderAdapterOpenSessionError,
@@ -1417,14 +1420,16 @@ export const codexAppServerClientFactoryFromSettingsLayer: Layer.Layer<
             threadId: input.threadId,
             providerSessionId: input.providerSessionId,
           });
-          const clientOptions: CodexClient.CodexAppServerClientOptions =
-            protocolLogger === undefined
+          const clientOptions: CodexClient.CodexAppServerClientOptions = {
+            ...(protocolLogger === undefined
               ? {}
               : {
                   logIncoming: true,
                   logOutgoing: true,
                   logger: protocolLogger,
-                };
+                }),
+            ...(input.onTermination === undefined ? {} : { onTermination: input.onTermination }),
+          };
           const context = yield* Layer.build(CodexClient.layerChildProcess(handle, clientOptions));
           return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
             Effect.provide(context),
@@ -1570,6 +1575,10 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                     }),
                 ),
               );
+        // A process that exits (crashed or killed) ends
+        // the session's event stream with a failure, so its running turn
+        // settles instead of waiting for notifications that never come.
+        const terminated = yield* Deferred.make<CodexErrors.CodexAppServerError>();
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
@@ -1577,6 +1586,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           runtimePolicy: input.runtimePolicy,
           settings: resolvedRuntime?.config ?? adapterOptions.settings,
           environment: resolvedRuntime?.environment ?? adapterOptions.environment,
+          onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
         });
         const additionalContextByThread = yield* Ref.make(
           new Map<
@@ -5350,7 +5360,21 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           driver: CODEX_PROVIDER,
           providerSessionId: input.providerSessionId,
           providerSession: session,
-          events: Stream.fromEffectRepeat(Queue.take(events)),
+          events: Stream.fromEffectRepeat(Queue.take(events)).pipe(
+            Stream.interruptWhen(
+              Deferred.await(terminated).pipe(
+                Effect.flatMap((cause) =>
+                  Effect.fail(
+                    new ProviderAdapterEventStreamError({
+                      driver: CODEX_PROVIDER,
+                      providerSessionId: input.providerSessionId,
+                      cause,
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          ),
           canReuseContextUsage: canReuseCodexContextUsage,
           // Known gap: a subagent that Codex resumes later reads as completed
           // (not pending) between turns, so idle release can win the race
