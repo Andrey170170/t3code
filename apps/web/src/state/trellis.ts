@@ -104,6 +104,11 @@ export const trellisEnvironment = {
     idleTtlMs: 60_000,
     refreshIntervalMs: 60_000,
   }),
+  /** Rebuilds a base from its built-in definition; takes minutes. */
+  buildBase: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:build-base",
+    tag: WS_METHODS.trellisBuildBase,
+  }),
   graduate: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:graduate",
     tag: WS_METHODS.trellisGraduate,

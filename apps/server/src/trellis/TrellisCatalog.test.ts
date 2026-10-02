@@ -597,6 +597,7 @@ describe("nameDetailsWorkspaces", () => {
         commit: null,
         uptimeSecs: null,
         bases: [],
+        baseStates: null,
         defaultBase: null,
         missingProviders: [],
         agentHomes: null,

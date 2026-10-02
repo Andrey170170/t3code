@@ -28,6 +28,7 @@ import {
   TRELLIS_LANDING_PAD_PROJECT_ID,
   TrellisError,
   type TrellisBasesResult,
+  type TrellisBuildBaseResult,
   type TrellisDetails,
   type TrellisCreateResult,
   type TrellisFindHit,
@@ -747,6 +748,8 @@ export class TrellisCatalog extends Context.Service<
     readonly discardFork: (workspaceId: string) => Effect.Effect<boolean, TrellisError>;
     /** The bases a new project (or a graduating idea) can start from. */
     readonly listBases: Effect.Effect<TrellisBasesResult, TrellisError>;
+    /** Rebuilds a base from its built-in definition; see `Trellis.buildBase`. */
+    readonly buildBase: (name: string) => Effect.Effect<TrellisBuildBaseResult, TrellisError>;
     /** The Trellis service's status in full, workspaces named from the last sync. */
     readonly details: Effect.Effect<TrellisDetails, TrellisError>;
     /** The T3 project for a Trellis item just created (a graduation's), made now rather than at the next poll. */
@@ -1889,6 +1892,7 @@ const make = Effect.gen(function* () {
       restoreConflicts(input).pipe(asTrellisError("Could not check the restore")),
     projectFor,
     listBases: requireReady.pipe(Effect.andThen(trellis.bases)),
+    buildBase: (name) => requireReady.pipe(Effect.andThen(trellis.buildBase(name))),
     details: requireReady.pipe(
       Effect.andThen(Effect.all([trellis.details, Ref.get(lastApplied)])),
       Effect.map(([details, applied]) => nameDetailsWorkspaces(details, applied?.items ?? [])),

@@ -338,6 +338,7 @@ describe("Trellis client", () => {
         started_at: 1_700_000_000,
         uptime_secs: 93_784,
         bases: ["dev", "py"],
+        base_states: { dev: "stale", py: "custom" },
         default_base: "dev",
         node: "local",
         missing_providers: ["codex"],
@@ -370,6 +371,7 @@ describe("Trellis client", () => {
         commit: "abc1234-dirty.5f2e",
         uptimeSecs: 93_784,
         bases: ["dev", "py"],
+        baseStates: { dev: "stale", py: "custom" },
         defaultBase: "dev",
         missingProviders: ["codex"],
         agentHomes: { claude: "/homes/claude", codex: null },
@@ -391,6 +393,7 @@ describe("Trellis client", () => {
         commit: null,
         uptimeSecs: null,
         bases: [],
+        baseStates: null,
         defaultBase: null,
         missingProviders: [],
         agentHomes: null,
@@ -401,6 +404,30 @@ describe("Trellis client", () => {
       };
       expect(result.old).toEqual(unknown);
       expect(result.podmanFailed).toEqual(unknown);
+    }),
+  );
+
+  it.effect("builds a base and reports its state, or Trellis's refusal", () =>
+    Effect.gen(function* () {
+      const harness = setup(({ url, body }) =>
+        url !== "/v1/bases/build"
+          ? { body: { root: "/trellis" } }
+          : body.includes('"dev"')
+            ? { body: { name: "dev", path: "/trellis/bases/dev", state: "current" } }
+            : { status: 400, body: { error: "no built-in definition for base mine" } },
+      );
+      const layer = yield* Effect.promise(() => harness.listen());
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        const built = yield* trellis.buildBase("dev");
+        const refused = yield* trellis.buildBase("mine").pipe(Effect.flip);
+        return { built, refused };
+      }).pipe(Effect.provide(layer));
+      expect(result.built).toEqual({ name: "dev", state: "current" });
+      expect(result.refused.message).toBe("no built-in definition for base mine");
+      expect(harness.requests.find((request) => request.url === "/v1/bases/build")?.body).toBe(
+        '{"name":"dev"}',
+      );
     }),
   );
 });

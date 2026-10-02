@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { formatBytes, staleDetailsNotice, trellisVersionText } from "./TrellisSettings.logic";
+import {
+  baseStateView,
+  formatBytes,
+  staleDetailsNotice,
+  trellisVersionText,
+} from "./TrellisSettings.logic";
 
 describe("formatBytes", () => {
   it("uses the largest decimal unit, with one decimal below ten", () => {
@@ -41,5 +46,16 @@ describe("trellisVersionText", () => {
     );
     expect(trellisVersionText({ version: "0.1.0", commit: null })).toBe("0.1.0");
     expect(trellisVersionText({ version: null, commit: null })).toBeNull();
+  });
+});
+
+describe("baseStateView", () => {
+  it("warns about stale bases and leaves custom ones to the CLI", () => {
+    expect(baseStateView("stale")).toMatchObject({ warn: true, rebuildable: true });
+    expect(baseStateView("current")).toMatchObject({ warn: false, rebuildable: true });
+    expect(baseStateView("custom")).toMatchObject({ rebuildable: false });
+    // Unknown or unreported states stay quiet but rebuildable.
+    expect(baseStateView(null)).toEqual({ description: null, warn: false, rebuildable: true });
+    expect(baseStateView("future-state").description).toBeNull();
   });
 });

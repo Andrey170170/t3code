@@ -31,6 +31,7 @@ import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import {
+  baseStateView,
   formatBytes,
   staleDetailsNotice,
   trellisVersionText,
@@ -305,7 +306,13 @@ function TrellisDetailsSections(props: {
           title="Bases"
           icon={<BoxesIcon className="size-3.5" />}
         >
-          <TrellisBaseRows bases={details.bases} defaultBase={details.defaultBase} />
+          <TrellisBaseRows
+            environmentId={environmentId}
+            bases={details.bases}
+            baseStates={details.baseStates}
+            defaultBase={details.defaultBase}
+            onBuilt={refresh}
+          />
         </SettingsSection>
       )}
     </>
@@ -417,28 +424,89 @@ function WarningTitle({ children }: { readonly children: ReactNode }) {
 }
 
 function TrellisBaseRows(props: {
+  readonly environmentId: EnvironmentId;
   readonly bases: ReadonlyArray<string>;
+  readonly baseStates: TrellisDetails["baseStates"];
   readonly defaultBase: string | null;
+  readonly onBuilt: () => void;
 }) {
-  const { bases, defaultBase } = props;
+  const { environmentId, bases, defaultBase } = props;
   const defaultMissing = defaultBase !== null && !bases.includes(defaultBase);
+  const buildBase = useAtomCommand(trellisEnvironment.buildBase, { reportFailure: false });
+  // One build at a time per root, as Trellis allows.
+  const [building, setBuilding] = useState<string | null>(null);
+  const rebuild = async (base: string) => {
+    setBuilding(base);
+    try {
+      const result = await buildBase({ environmentId, input: { name: base } });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          toastManager.add({
+            type: "error",
+            title: `Could not rebuild ${base}`,
+            description: failureMessage(result, "Trellis did not respond."),
+          });
+        }
+        return;
+      }
+      toastManager.add({
+        type: "success",
+        title: `Rebuilt ${base}`,
+        description: "New workspaces start from it; existing ones keep their environment.",
+      });
+    } finally {
+      setBuilding(null);
+      props.onBuilt();
+    }
+  };
   return (
     <>
       {bases.length === 0 && !defaultMissing ? <SettingsRow title="No bases reported" /> : null}
-      {bases.map((base) => (
-        <SettingsRow
-          key={base}
-          title={<span className="font-mono">{base}</span>}
-          description={base === defaultBase ? "New projects start from this base." : undefined}
-          control={
-            base === defaultBase ? (
-              <Badge variant="secondary" size="sm">
-                Default
-              </Badge>
-            ) : null
-          }
-        />
-      ))}
+      {bases.map((base) => {
+        const state = baseStateView(props.baseStates?.[base] ?? null);
+        const description = [
+          base === defaultBase ? "New projects start from this base." : null,
+          state.description,
+        ]
+          .filter((line) => line !== null)
+          .join(" ");
+        return (
+          <SettingsRow
+            key={base}
+            title={
+              state.warn ? (
+                <WarningTitle>
+                  <span className="font-mono">{base}</span>
+                </WarningTitle>
+              ) : (
+                <span className="font-mono">{base}</span>
+              )
+            }
+            description={description.length > 0 ? description : undefined}
+            control={
+              <span className="inline-flex items-center gap-2">
+                {base === defaultBase ? (
+                  <Badge variant="secondary" size="sm">
+                    Default
+                  </Badge>
+                ) : null}
+                {state.rebuildable ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={building !== null}
+                    title="Builds it again from its definition; takes a few minutes."
+                    onClick={() => void rebuild(base)}
+                  >
+                    {building === base ? <Spinner size="sm" tone="muted" /> : null}
+                    {building === base ? "Rebuilding…" : "Rebuild"}
+                  </Button>
+                ) : null}
+              </span>
+            }
+          />
+        );
+      })}
       {defaultMissing ? (
         <SettingsRow
           title={
