@@ -6,6 +6,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 import { describe, expect } from "vite-plus/test";
 
 import { issueAssetUrl } from "../assets/AssetAccess.ts";
@@ -15,7 +16,7 @@ import { OrchestratorProjectionError, OrchestratorV2 } from "../orchestration-v2
 import { ProjectFaviconResolver } from "../project/ProjectFaviconResolver.ts";
 import { ProjectService } from "../project/ProjectService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
-import { makeTestTrellis, Trellis } from "./Trellis.ts";
+import { makeTestTrellis, Trellis, type TrellisPort } from "./Trellis.ts";
 import * as TrellisPreview from "./TrellisPreview.ts";
 
 const ROOT = "/trellis";
@@ -70,6 +71,32 @@ const AssetLayer = Layer.mergeAll(
   ServerSecretStore.layer.pipe(Layer.provide(configLayer)),
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
+const port = (value: number, address: string, reachable = true): TrellisPort => ({
+  port: value,
+  address,
+  reachable,
+  preview: null,
+});
+
+describe("workspaceServers", () => {
+  it("offers each reachable port once as a localhost server, configured URLs first", () => {
+    const servers = TrellisPreview.workspaceServers(
+      [
+        port(8123, "0.0.0.0"),
+        port(5173, "127.0.0.1"),
+        port(5173, "::1"),
+        port(9000, "10.0.2.100", false),
+      ],
+      ["http://localhost:8123/docs/"],
+    );
+    expect(servers.map((server) => [server.port, server.url])).toEqual([
+      [5173, "http://localhost:5173"],
+      [8123, "http://localhost:8123/docs/"],
+    ]);
+    expect(servers[0]).toMatchObject({ host: "localhost", pid: null, terminal: null });
+  });
+});
+
 describe("TrellisPreview service", () => {
   const makeLayer = (input: {
     readonly workspaceRoot: string;
@@ -80,6 +107,8 @@ describe("TrellisPreview service", () => {
     readonly published: Array<{ target: string; port: number }>;
     /** Addresses Trellis has already published, by target. */
     readonly previews?: Readonly<Record<string, ReadonlyArray<string>>>;
+    /** Ports listening per workspace id; a workspace absent here is not running. */
+    readonly ports?: Readonly<Record<string, ReadonlyArray<TrellisPort>>>;
   }) =>
     TrellisPreview.layer.pipe(
       Layer.provide(
@@ -95,6 +124,14 @@ describe("TrellisPreview service", () => {
                   }),
             listPreviews: (target) =>
               Effect.succeed((input.previews?.[target] ?? []).map((url) => ({ url }))),
+            ports: (workspace) => {
+              const ports = input.ports?.[workspace];
+              return ports === undefined
+                ? Effect.fail(
+                    new TrellisError({ message: `workspace ${workspace} is not running` }),
+                  )
+                : Effect.succeed(ports);
+            },
           }),
         ),
       ),
@@ -285,6 +322,49 @@ describe("TrellisPreview service", () => {
         return yield* preview.resolvePort(threadId, { port: 5173, path: "settings?x=1" });
       }).pipe(Effect.provide(makeLayer({ workspaceRoot: IDEA, published: [] })));
       expect(url).toBe("http://node.tailnet.ts.net:21001/settings?x=1");
+    }),
+  );
+  const firstServers = (layer: ReturnType<typeof makeLayer>) =>
+    Effect.gen(function* () {
+      const preview = yield* TrellisPreview.TrellisPreview;
+      const stream = yield* preview.watchServers(threadId, []);
+      if (stream === null) return null;
+      return yield* stream.pipe(Stream.take(1), Stream.runCollect);
+    }).pipe(Effect.provide(layer));
+
+  it.effect(
+    "discovers a Trellis thread's servers in its workspace, a host thread's on the host",
+    () =>
+      Effect.gen(function* () {
+        const ports = { "ws-1": [port(8123, "0.0.0.0")], "ws-2": [port(3000, "127.0.0.1")] };
+        const trellisServers = yield* firstServers(
+          makeLayer({ workspaceRoot: IDEA, published: [], ports }),
+        );
+        expect(trellisServers?.map((servers) => servers.map((server) => server.url))).toEqual([
+          ["http://localhost:8123"],
+        ]);
+        // null: the caller keeps the host scanner's results.
+        expect(
+          yield* firstServers(makeLayer({ workspaceRoot: "/home/me/code", published: [], ports })),
+        ).toBeNull();
+      }),
+  );
+
+  it.effect("shows no servers, never the host's, when the workspace cannot be asked", () =>
+    Effect.gen(function* () {
+      // Not running.
+      expect(yield* firstServers(makeLayer({ workspaceRoot: IDEA, published: [] }))).toEqual([[]]);
+      // Its localhost is neither the workspace's nor safely the host's.
+      expect(
+        yield* firstServers(
+          makeLayer({
+            workspaceRoot: IDEA,
+            worktreePath: "/home/me/wt",
+            published: [],
+            ports: { "ws-1": [port(8123, "0.0.0.0")] },
+          }),
+        ),
+      ).toEqual([[]]);
     }),
   );
 });
