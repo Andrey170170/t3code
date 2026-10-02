@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
+# Installed as <prefix>-pair (t3code-pair, t3code-NAME-pair), whose name
+# selects the instance's ~/.config/<prefix>/service.env.
 set -euo pipefail
+name=$(basename -- "$0")
 if [[ ${1:-} == --help ]]; then
-  echo 'Usage: t3code-pair [DEVICE_LABEL] (prints a sensitive one-hour pairing URL and QR code)'
+  echo "Usage: $name [DEVICE_LABEL] (prints a sensitive one-hour pairing URL and QR code)"
   exit 0
 fi
 (($# <= 1)) || { echo 'Expected at most one device label.' >&2; exit 2; }
-source "${HOME}/.config/t3code/service.env"
+source "${HOME}/.config/${name%-pair}/service.env"
 export PATH="$(dirname "$T3CODE_NODE"):${HOME}/.local/bin:${HOME}/.volta/bin:/usr/bin:/bin"
 pairing_output=$("$T3CODE_NODE" "$T3CODE_ENTRY" auth pairing create \
   --base-dir "$T3CODE_BASE" --base-url "$T3CODE_ORIGIN" --ttl 1h --label "${1:-Browser}")
