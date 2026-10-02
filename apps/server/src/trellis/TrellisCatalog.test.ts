@@ -976,8 +976,8 @@ describe("TrellisCatalog service", () => {
         yield* catalog.syncNow;
         assert.equal((yield* projectIdAt(`${ROOT}/workspaces/ws-b/project`))?.title, "Engine v2");
 
-        // An item trashed in Trellis retires: its threads are archived, an
-        // empty project is deleted.
+        // An item trashed in Trellis retires: its threads are archived; an
+        // empty project stays (hidden by clients) so a restore keeps its id.
         const c = (yield* projectIdAt(`${SCRATCH}/idea-c`))!;
         const doomed = yield* createThread("catalog-doomed", c.projectId);
         state.items = state.items.map((item) =>
@@ -986,12 +986,22 @@ describe("TrellisCatalog service", () => {
         yield* catalog.syncNow;
         assert.isNotNull(yield* archivedAt(doomed));
         assert.isDefined(yield* projectIdAt(`${SCRATCH}/idea-c`));
+        const d = yield* projectIdAt(`${SCRATCH}/idea-d`);
+        assert.isDefined(d);
+        // Purged from the trash, the empty project goes.
+        state.items = state.items.filter((item) => item.id !== "idea-d");
+        yield* catalog.syncNow;
         assert.isUndefined(yield* projectIdAt(`${SCRATCH}/idea-d`));
 
         // Trash from T3 archives the conversations; restore brings them back.
         const kept = yield* createThread("catalog-kept", a!.projectId);
         const trashed = yield* catalog.trashProject(a!.projectId);
-        assert.deepEqual(trashed, { trashed: "project", name: "Sketch" });
+        // The result says how to undo it: an idea restores as an idea.
+        assert.deepEqual(trashed, {
+          trashed: "project",
+          name: "Sketch",
+          restore: { kind: "idea", id: "idea-a" },
+        });
         assert.deepEqual(state.trashed, ["idea-a"]);
         assert.isNotNull(yield* archivedAt(kept));
         const status = yield* catalog.status;
@@ -1104,6 +1114,7 @@ describe("TrellisCatalog service", () => {
         assert.deepEqual(yield* catalog.trashProject(fork.projectId), {
           trashed: "workspace",
           name: "Engine v2 · fork",
+          restore: { kind: "workspace", id: "ws-f" },
         });
         assert.isNotNull(yield* archivedAt(inFork));
         // Archived by hand after the fork went to the trash.

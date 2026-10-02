@@ -178,6 +178,7 @@ import { cn } from "~/lib/utils";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import { TrellisWorkspaceBadge } from "./trellis/TrellisWorkspaceBadge";
+import { TrellisTrashedUndo } from "./trellis/TrellisTrashedUndo";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
 import {
   animateSidebarLayoutChanges,
@@ -4692,6 +4693,9 @@ export default function Sidebar() {
                               />
                             ) : null}
                             {project ? <TrellisWorkspaceBadge group={project} /> : null}
+                            {project ? (
+                              <TrellisTrashedUndo members={project.memberProjects} />
+                            ) : null}
                             {project ? (
                               <Button
                                 size="icon-xs"

@@ -86,9 +86,11 @@ archives its workers; their forks stay until someone discards them.
 
 ## Deleting and restoring
 
-Deleting a Trellis project or idea in T3 Code moves it to the Trellis trash, archives its
-conversations and removes it from the sidebar. Restore it from **Settings** > **Trellis**; restoring
-also unarchives its conversations. The trash list shows when each item is removed for good.
+Deleting a Trellis project or idea in T3 Code (**Move to trash** in its settings, or **Remove** in
+the sidebar's project menu) moves it to the Trellis trash and archives its conversations, without
+asking first: the project stays listed as **In trash** with an **Undo** (also in the toast) until you
+reload the page, after which it leaves the sidebar. Later, restore it from **Settings** > **Trellis**.
+Undo and restoring also unarchive its conversations. The trash list shows when each item is removed for good.
 Deleting is refused while an agent is still working in the project, and while Trellis is off or not
 running. Deleting a conversation only deletes the conversation.
 

@@ -112,7 +112,8 @@ import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useSidebarProjects } from "../hooks/useSidebarProjects";
 import { useTrellisTrash } from "../hooks/useTrellis";
-import { trellisItemKind, trellisRemovalOf, trellisTrashConfirmation } from "../lib/trellis";
+import { TrellisTrashedUndo } from "./trellis/TrellisTrashedUndo";
+import { trellisRemovalOf } from "../lib/trellis";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { loadTrellisStatus } from "../state/trellis";
 import { useDesktopUpdateState } from "../state/desktopUpdate";
@@ -1578,15 +1579,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
       if (trellisRemoval === "trash") {
-        const confirmed = await api.dialogs.confirm(
-          trellisTrashConfirmation({
-            label: member.title,
-            kind: trellisItemKind(member.workspaceRoot, trellisStatus ?? {}),
-            count: 1,
-          }).join("\n"),
-          { variant: "destructive" },
-        );
-        if (!confirmed) return;
+        // No confirmation: the toast and the row offer Undo.
         const outcome = await trashTrellisProject(member.environmentId, member.id, member.title);
         if (outcome === "trashed") {
           const trashedProjectRef = scopeProjectRef(member.environmentId, member.id);
@@ -2515,6 +2508,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           </TooltipPopup>
         </Tooltip>
       </div>
+      <TrellisTrashedUndo members={project.memberProjects} className="mb-1 ml-8" />
 
       <SidebarProjectThreadList
         projectKey={project.projectKey}
