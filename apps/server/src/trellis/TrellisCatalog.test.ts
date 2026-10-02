@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import type { PlatformError } from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
@@ -445,6 +446,56 @@ describe("planCatalogSync", () => {
     });
     expect(actions).toEqual([]);
   });
+});
+
+describe("openMissingRootsRecord", () => {
+  const withDir = <A, E>(
+    use: (dir: string) => Effect.Effect<A, E, FileSystem.FileSystem>,
+  ): Effect.Effect<A, E | PlatformError, FileSystem.FileSystem> =>
+    Effect.scoped(
+      Effect.flatMap(
+        FileSystem.FileSystem.use((fileSystem) =>
+          fileSystem.makeTempDirectoryScoped({ prefix: "t3-missing-roots-" }),
+        ),
+        use,
+      ),
+    );
+
+  effectIt.effect("keeps the times across a restart, the server's next start reads them", () =>
+    withDir((dir) =>
+      Effect.gen(function* () {
+        const path = `${dir}/record.json`;
+        const first = yield* TrellisCatalog.openMissingRootsRecord(path);
+        assert.equal(first.initial.size, 0);
+        yield* first.write(new Map([["/trellis/workspaces/ws-a/project", 1_700_000_000]]));
+        const restarted = yield* TrellisCatalog.openMissingRootsRecord(path);
+        assert.deepEqual(
+          [...restarted.initial],
+          [["/trellis/workspaces/ws-a/project", 1_700_000_000]],
+        );
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  effectIt.effect("sets an unreadable record aside instead of overwriting it", () =>
+    withDir((dir) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = `${dir}/record.json`;
+        yield* fileSystem.writeFileString(path, "{not json");
+        const record = yield* TrellisCatalog.openMissingRootsRecord(path);
+        assert.equal(record.initial.size, 0);
+        assert.equal(yield* fileSystem.readFileString(`${path}.unreadable`), "{not json");
+        // It cannot be set aside (a directory is in the way): never overwritten.
+        yield* fileSystem.writeFileString(path, "{still not json");
+        yield* fileSystem.remove(`${path}.unreadable`);
+        yield* fileSystem.makeDirectory(`${path}.unreadable/blocker`, { recursive: true });
+        const stuck = yield* TrellisCatalog.openMissingRootsRecord(path);
+        yield* stuck.write(new Map([["/r", 1]]));
+        assert.equal(yield* fileSystem.readFileString(path), "{still not json");
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
 });
 
 describe("trashTargetOf", () => {

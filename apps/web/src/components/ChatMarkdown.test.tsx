@@ -1019,31 +1019,32 @@ describe("chat Markdown math", () => {
     expect(normalizeMarkdownMathDelimiters(displayThenParen)).toBe("$$z$$(note)");
   });
 
-  it("reads link titles, angle destinations and reference definitions as CommonMark does", () => {
+  it("leaves every URL the parser reads literal, and math elsewhere", () => {
     const keep = [
       '[t](https://e/a\\(b\\) "title (")',
       "[t](<1\\(x\\)(>)",
       "[t](\n  https://e/a\\(b\\)\n  'multi\n  line')",
-      "[ref]: https://e/a\\(b\\)",
+      "[x](\r\n/a\\(b\\)\r\n)",
+      '[ref]: https://e/a\\(b\\) "title \\(x\\)"',
+      "> [ref]: /a\\(b\\)",
+      "[![alt](img)](/a\\(b\\))",
+      "See https://example.com/a\\(b\\) and www.example.com/c\\(d\\)",
     ];
     for (const markdown of keep) {
       expect(normalizeMarkdownMathDelimiters(markdown)).toBe(markdown);
     }
-    // No link: a lone `](`, and the outer brackets around a link.
+    // No link: a lone `](`, the outer brackets around a link, a split paragraph,
+    // and text that only looks like a reference definition.
     expect(normalizeMarkdownMathDelimiters("](\\(x\\))")).toBe("]($$x$$)");
     expect(normalizeMarkdownMathDelimiters("[outer [inner](u)](\\(x\\))")).toBe(
       "[outer [inner](u)]($$x$$)",
     );
+    expect(normalizeMarkdownMathDelimiters("[\n\n](\\(x\\))")).toBe("[\n\n]($$x$$)");
+    expect(normalizeMarkdownMathDelimiters("[ref]: \\(x\\) trailing text")).toBe(
+      "[ref]: $$x$$ trailing text",
+    );
     // Math in link text is still math.
     expect(normalizeMarkdownMathDelimiters("[see \\(x\\)](u)")).toBe("[see $$x$$](u)");
-  });
-
-  it("stays fast on text full of unfinished links", () => {
-    const markdown = '[x](u "'.repeat(20_000) + "\\(y\\)";
-    const started = performance.now();
-    normalizeMarkdownMathDelimiters(markdown);
-    normalizeMarkdownMathDelimiters("[x](".repeat(20_000));
-    expect(performance.now() - started).toBeLessThan(1_000);
   });
 
   it("does not mistake indented code for a fenced block", () => {

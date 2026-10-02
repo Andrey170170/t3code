@@ -313,6 +313,55 @@ export function planCatalogSync(input: {
   return actions;
 }
 
+const MissingRootsJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Finite));
+
+/**
+ * The file recording when purged roots were first found missing (Unix
+ * seconds per root). An unreadable file is set aside as `<path>.unreadable`
+ * and logged, and the record starts empty; if it cannot be set aside, it is
+ * never overwritten (`write` then does nothing).
+ */
+export const openMissingRootsRecord = Effect.fn("TrellisCatalog.openMissingRootsRecord")(function* (
+  path: string,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  let writable = true;
+  const initial: ReadonlyMap<string, number> = new Map(
+    Object.entries(
+      (yield* fileSystem.exists(path).pipe(Effect.orElseSucceed(() => false)))
+        ? yield* fileSystem.readFileString(path).pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(MissingRootsJson)),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("unreadable record of missing Trellis roots; set aside", {
+                path,
+                cause,
+              }).pipe(
+                Effect.andThen(fileSystem.rename(path, `${path}.unreadable`)),
+                Effect.catchCause((renameCause) =>
+                  Effect.logWarning("could not set the unreadable record aside; not persisting", {
+                    cause: renameCause,
+                  }).pipe(Effect.andThen(Effect.sync(() => void (writable = false)))),
+                ),
+                Effect.as({}),
+              ),
+            ),
+          )
+        : {},
+    ),
+  );
+  const write = (record: ReadonlyMap<string, number>) =>
+    Effect.gen(function* () {
+      if (!writable) return;
+      const partial = `${path}.partial`;
+      yield* fileSystem.writeFileString(
+        partial,
+        yield* Schema.encodeEffect(MissingRootsJson)(Object.fromEntries(record)),
+      );
+      yield* fileSystem.rename(partial, path);
+    });
+  return { initial, write };
+});
+
 /** `<ws>` when `path` is `<trellis root>/workspaces/<ws>/project` or below it. */
 function workspaceIdOfPath(trellisRoot: string, path: string): string | null {
   const relative = NodePath.posix
@@ -725,41 +774,16 @@ const make = Effect.gen(function* () {
   const dirty = yield* Ref.make(true);
   // When each purged root was first found missing (see `syncOnce`), so a
   // conversation unarchived afterwards is not archived again, also after a
-  // server restart: kept in a file.
-  const missingSincePath = NodePath.join(serverConfig.stateDir, "trellis-missing-roots.json");
-  const missingSinceJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Finite));
-  // An unreadable file is set aside rather than overwritten, and logged:
-  // its roots then count as missing from the next sync on.
-  const persistedMissing = (yield* fileSystem
-    .exists(missingSincePath)
-    .pipe(Effect.orElseSucceed(() => false)))
-    ? yield* fileSystem.readFileString(missingSincePath).pipe(
-        Effect.flatMap(Schema.decodeUnknownEffect(missingSinceJson)),
-        Effect.catchCause((cause) =>
-          Effect.logWarning("unreadable record of missing Trellis roots; set aside", {
-            path: missingSincePath,
-            cause,
-          }).pipe(
-            Effect.andThen(fileSystem.rename(missingSincePath, `${missingSincePath}.unreadable`)),
-            Effect.ignore,
-            Effect.as({}),
-          ),
-        ),
-      )
-    : {};
-  const missingSince = new Map<string, number>(Object.entries(persistedMissing));
+  // server restart.
+  const missingRecord = yield* openMissingRootsRecord(
+    NodePath.join(serverConfig.stateDir, "trellis-missing-roots.json"),
+  );
+  const missingSince = new Map(missingRecord.initial);
   // Set when the map changed and the file does not have it yet; a failed
   // write is retried on the next sync.
   let missingSinceDirty = false;
-  const persistMissingSince = Effect.gen(function* () {
-    const partial = `${missingSincePath}.partial`;
-    yield* fileSystem.writeFileString(
-      partial,
-      yield* Schema.encodeEffect(missingSinceJson)(Object.fromEntries(missingSince)),
-    );
-    yield* fileSystem.rename(partial, missingSincePath);
-    missingSinceDirty = false;
-  }).pipe(
+  const persistMissingSince = missingRecord.write(missingSince).pipe(
+    Effect.andThen(Effect.sync(() => void (missingSinceDirty = false))),
     Effect.catchCause((cause) =>
       Effect.logWarning("could not persist when Trellis roots went missing", { cause }),
     ),
@@ -896,6 +920,8 @@ const make = Effect.gen(function* () {
     const fingerprint = encodeListing(items);
     const previous = yield* Ref.get(lastApplied);
     if (previous?.fingerprint === fingerprint && !(yield* Ref.get(dirty))) {
+      // A record write that failed is retried even when nothing changed.
+      if (missingSinceDirty) yield* persistMissingSince;
       return previous.ids;
     }
     yield* Ref.set(dirty, false);
