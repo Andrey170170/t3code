@@ -5,6 +5,35 @@ SCRIPT_DIR="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 VERSION_FILE="${REPO_ROOT}/config/t3code/VERSION"
 VERSION_PATH="config/t3code/VERSION"
+# The instance comes from this link's name (t3code-update, t3code-NAME-update)
+# or --instance NAME; see t3code-install --help.
+instance=""
+name=$(basename -- "${BASH_SOURCE[0]}")
+if [[ $name == t3code-*-update ]]; then
+  instance=${name#t3code-}
+  instance=${instance%-update}
+fi
+args_without_instance=()
+while (($#)); do
+  if [[ $1 == --instance ]]; then
+    (($# >= 2)) || { echo 'Missing value for --instance' >&2; exit 2; }
+    instance=$2
+    shift 2
+  else
+    args_without_instance+=("$1")
+    shift
+  fi
+done
+set -- ${args_without_instance[@]+"${args_without_instance[@]}"}
+if [[ -n $instance ]]; then
+  [[ $instance =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || { echo "Invalid instance name: $instance" >&2; exit 2; }
+  PREFIX="t3code-$instance"
+  instance_args=(--instance "$instance")
+else
+  PREFIX="t3code"
+  instance_args=()
+fi
+CONFIG_DIR="$HOME/.config/$PREFIX"
 # Forgejo is the default; source builds and upstream npm remain explicit options.
 mode=forgejo
 for arg in "$@"; do
@@ -20,8 +49,16 @@ Usage: t3code-update [--check | --yes] [VERSION] [--token-file PATH]
 Defaults to the Forgejo custom tag. Install prompts before restarting the user
 service; --yes skips the prompt. --check only reports the published version.
 Authentication: PACKAGE_FOGEJO_TOKEN_FILE or --token-file PATH.
+
+A named instance (t3code-NAME-update, or --instance NAME) never follows a
+tag: it installs the exact Forgejo VERSION given, or a source build, and
+never upstream npm releases. --check takes a version or a tag to look up.
 HELP
   exit 0
+fi
+if [[ -n $instance && " $* " == *" --npm "* ]]; then
+  echo "Instance $instance does not install upstream npm releases." >&2
+  exit 2
 fi
 if [[ $mode == forgejo ]]; then
   command=install
@@ -37,14 +74,21 @@ if [[ $mode == forgejo ]]; then
       *) args+=(--version "$1"); shift ;;
     esac
   done
+  if [[ -n $instance ]]; then
+    [[ " ${args[*]-} " == *" --version "* ]] || {
+      echo "Instance $instance is pinned: give the exact VERSION to install (or a tag to --check, such as dev-v2)." >&2
+      exit 2
+    }
+    [[ $command == check ]] || args+=("${instance_args[@]}")
+  fi
   if [[ $command == install ]]; then
     if [[ $confirmed != 1 ]]; then
-      read -r -p "Install from Forgejo and restart T3? [y/N] " reply || exit 1
+      read -r -p "Install from Forgejo and restart $PREFIX.service? [y/N] " reply || exit 1
       [[ $reply =~ ^[Yy]$ ]] || { echo 'Update cancelled.'; exit 0; }
     fi
     args+=(--yes)
   fi
-  exec node "$SCRIPT_DIR/t3code-forgejo.mjs" "$command" "${args[@]}"
+  exec node "$SCRIPT_DIR/t3code-forgejo.mjs" "$command" ${args[@]+"${args[@]}"}
 fi
 legacy_args=()
 for arg in "$@"; do [[ $arg == --npm ]] || legacy_args+=("$arg"); done
@@ -93,14 +137,14 @@ validate_version() {
 
 config_uses_version() (
   local version=$1
-  [[ -r $HOME/.config/t3code/service.env ]] || return 1
-  source "$HOME/.config/t3code/service.env"
+  [[ -r $CONFIG_DIR/service.env ]] || return 1
+  source "$CONFIG_DIR/service.env"
   [[ ${T3CODE_ENTRY:-} == "${T3CODE_BASE}/runtime/versions/${version}/node_modules/t3/dist/bin.mjs" ]]
 )
 
 config_uses_previous_entry() (
-  [[ -n ${PREVIOUS_ENTRY:-} && -r $HOME/.config/t3code/service.env ]] || return 1
-  source "$HOME/.config/t3code/service.env"
+  [[ -n ${PREVIOUS_ENTRY:-} && -r $CONFIG_DIR/service.env ]] || return 1
+  source "$CONFIG_DIR/service.env"
   [[ ${T3CODE_ENTRY:-} == "$PREVIOUS_ENTRY" ]]
 )
 
@@ -112,7 +156,7 @@ reconcile_version_after_failure() {
     write_version "${CURRENT_VERSION}"
   else
     echo "Could not identify the configured T3 Code runtime version; leaving VERSION at ${TARGET_VERSION}." >&2
-    echo "Inspect ~/.config/t3code/service.env before restarting T3 Code." >&2
+    echo "Inspect $CONFIG_DIR/service.env before restarting T3 Code." >&2
   fi
   VERSION_CHANGE_PENDING=0
 }
@@ -200,8 +244,8 @@ CURRENT_VERSION="$(<"${VERSION_FILE}")"
 validate_version "${CURRENT_VERSION}" ||
   die "Invalid current version in ${VERSION_FILE}: expected stable semver (X.Y.Z)."
 
-if [[ -r $HOME/.config/t3code/service.env ]]; then
-  source "$HOME/.config/t3code/service.env"
+if [[ -r $CONFIG_DIR/service.env ]]; then
+  source "$CONFIG_DIR/service.env"
   export PATH="$(dirname "$T3CODE_NODE"):$PATH"
 fi
 PREVIOUS_ENTRY=${T3CODE_ENTRY:-}
@@ -220,8 +264,8 @@ if [[ -n $SOURCE || -n $GIT_REPO ]]; then
   fi
   # Build-only runs do not touch the installed service or its configuration.
   if [[ $BUILD_ONLY -ne 1 ]]; then
-    mkdir -p "$HOME/.config/t3code"
-    exec 8>"$HOME/.config/t3code/update.lock"
+    mkdir -p "$CONFIG_DIR"
+    exec 8>"$CONFIG_DIR/update.lock"
     flock -n 8 || die "Another T3 update is in progress."
   fi
   if [[ -z $BUILD_OUTPUT ]]; then
@@ -242,7 +286,7 @@ if [[ -n $SOURCE || -n $GIT_REPO ]]; then
     read -r -p "Install this build and restart T3? [y/N] " REPLY || die "No confirmation received; update cancelled."
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then echo "Update cancelled."; exit 0; fi
   fi
-  "${SCRIPT_DIR}/t3code-install" --package "$BUILD_OUTPUT/package.tgz" --build-id "$build_id"
+  "${SCRIPT_DIR}/t3code-install" ${instance_args[@]+"${instance_args[@]}"} --package "$BUILD_OUTPUT/package.tgz" --build-id "$build_id"
   echo "Custom build deployed. The npm VERSION pin is unchanged."
   exit 0
 fi
@@ -281,8 +325,8 @@ if [[ ${CHECK_ONLY} -eq 1 ]]; then
   exit 0
 fi
 
-mkdir -p "$HOME/.config/t3code"
-exec 8>"$HOME/.config/t3code/update.lock"
+mkdir -p "$CONFIG_DIR"
+exec 8>"$CONFIG_DIR/update.lock"
 flock -n 8 || die "Another T3 update is in progress."
 
 if ! git -C "${REPO_ROOT}" diff --quiet -- "${VERSION_PATH}" ||

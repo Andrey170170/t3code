@@ -20,7 +20,9 @@ const { values, positionals } = NodeUtil.parseArgs({
     ref: { type: "string" },
     output: { type: "string" },
     artifact: { type: "string" },
-    version: { type: "string", default: "custom" },
+    version: { type: "string" },
+    tag: { type: "string", default: "custom" },
+    instance: { type: "string" },
     "dry-run": { type: "boolean", default: false },
     yes: { type: "boolean", default: false },
     help: { type: "boolean", default: false },
@@ -29,16 +31,19 @@ const { values, positionals } = NodeUtil.parseArgs({
 });
 if (values.help) {
   console.log(`Usage:
-  node scripts/t3code-forgejo.mjs publish [--output DIR] [--source PATH] [--ref COMMIT] [--dry-run]
-  node scripts/t3code-forgejo.mjs publish --artifact DIR [--dry-run]
+  node scripts/t3code-forgejo.mjs publish [--tag TAG] [--output DIR] [--source PATH] [--ref COMMIT] [--dry-run]
+  node scripts/t3code-forgejo.mjs publish [--tag TAG] --artifact DIR [--dry-run]
   node scripts/t3code-forgejo.mjs check [--version VERSION_OR_TAG]
   node scripts/t3code-forgejo.mjs download --output DIR [--version VERSION_OR_TAG]
   node scripts/t3code-forgejo.mjs install --yes [--version VERSION_OR_TAG]
+  node scripts/t3code-forgejo.mjs install --yes --instance NAME --version VERSION
 
 Options: --registry URL, --token-file PATH (or PACKAGE_FOGEJO_TOKEN_FILE).
-Defaults to your git-god Forgejo registry and the custom tag. Publishing builds
-committed source in isolation. Install restarts the Linux user service; download
-does not. Tokens may also be supplied through an existing user npmrc.
+Defaults to your git-god Forgejo registry and the custom tag, which the default
+instance follows; publish other lines under their own --tag (dev_v2: dev-v2). Publishing
+builds committed source in isolation. Install restarts the Linux user service;
+download does not. A named instance (see t3code-install --help) installs only an
+exact version. Tokens may also be supplied through an existing user npmrc.
 `);
   process.exit(0);
 }
@@ -69,13 +74,25 @@ if (
 }
 if (positionals.length !== 1 || !["publish", "check", "download", "install"].includes(command))
   fail("Choose publish, check, download, or install; see --help.");
-if (command === "install" && !values.yes)
-  fail("Install restarts t3code.service. Pass --yes when ready.");
+const instance = values.instance ?? "";
+if (instance && !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(instance)) fail("Invalid instance name.");
+if (instance && command !== "install") fail("--instance applies only to install.");
+const unit = instance ? `t3code-${instance}.service` : "t3code.service";
+if (command === "install" && !values.yes) fail(`Install restarts ${unit}. Pass --yes when ready.`);
 if (values["dry-run"] && command !== "publish") fail("--dry-run applies only to publish.");
 if (command === "download" && !values.output) fail("download requires --output DIR.");
 const customVersion = /^[0-9]+\.[0-9]+\.[0-9]+-forgejo\.[0-9]+(?:\.g[0-9a-f]{12})?$/;
-if (values.version !== "custom" && !customVersion.test(values.version))
-  fail("Expected custom or an exact Forgejo build version.");
+const distTag = /^[a-z][a-z0-9-]*$/;
+// npm refuses tags that read as version ranges (v2, 1.x).
+if (!distTag.test(values.tag) || /^v?[0-9]/.test(values.tag) || values.tag === "latest")
+  fail("Expected a dist-tag other than latest that is no version range, such as custom or dev-v2.");
+if (values.tag !== "custom" && command !== "publish") fail("--tag applies only to publish.");
+// A named instance is pinned: it never follows a tag.
+if (command === "install" && instance && !customVersion.test(values.version ?? ""))
+  fail(`Instance ${instance} installs an exact version: pass --version X.Y.Z-forgejo.N.`);
+const requested = values.version ?? "custom";
+if (!customVersion.test(requested) && !distTag.test(requested))
+  fail("Expected a dist-tag or an exact Forgejo build version.");
 const temporary = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-forgejo-"));
 try {
   const env = { ...process.env };
@@ -184,20 +201,20 @@ try {
       fail("Expected a custom t3 source build.");
     if (publishedVersions().includes(pkg.version))
       fail(`t3@${pkg.version} already exists; refusing to overwrite a published release.`);
-    console.log(`Publishing t3@${pkg.version} to ${registry.href}`);
+    console.log(`Publishing t3@${pkg.version} to ${registry.href} under the ${values.tag} tag`);
     npm([
       "publish",
       tarball,
       "--registry",
       registry.href,
       "--tag",
-      "custom",
+      values.tag,
       "--ignore-scripts",
       ...(values["dry-run"] ? ["--dry-run"] : []),
     ]);
   } else {
     const version = JSON.parse(
-      npm(["view", `t3@${values.version}`, "version", "--registry", registry.href, "--json"], true),
+      npm(["view", `t3@${requested}`, "version", "--registry", registry.href, "--json"], true),
     );
     if (typeof version !== "string" || !customVersion.test(version))
       fail("Registry did not return an exact custom build version.");
@@ -226,6 +243,7 @@ try {
       console.log(tarball);
       if (command === "install")
         run(NodePath.join(root, "scripts/t3code-install"), [
+          ...(instance ? ["--instance", instance] : []),
           "--package",
           tarball,
           "--build-id",

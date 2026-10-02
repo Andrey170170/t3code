@@ -3,42 +3,125 @@
 set -euo pipefail
 if [[ ${1:-} == --help ]]; then
   cat <<'HELP'
-Usage: scripts/t3code-install [--package TARBALL --build-id ID]
+Usage: scripts/t3code-install [--instance NAME] [--package TARBALL --build-id ID]
+       scripts/t3code-install --instance NAME --uninstall
 Install pinned T3 or a built npm tarball and restart its user service. Run without sudo.
 Custom packages use a separate runtime directory and leave VERSION unchanged.
+
+An instance is one T3 server with its own names. Without --instance:
+~/.config/t3code/service.env, t3code.service, ~/.local/share/t3code, port 3773
+and the helpers t3code-run, t3code-pair and t3code-update. --instance NAME:
+~/.config/t3code-NAME/, t3code-NAME.service, ~/.local/share/t3code-NAME and
+t3code-NAME-run, -pair and -update. A named instance installs only packages
+(--package), and its first install needs T3CODE_PORT, a port no other
+instance uses.
+
 First install overrides: T3CODE_HOST, T3CODE_PORT, T3CODE_ORIGIN,
 T3CODE_BASE, T3CODE_WORKDIR, T3CODE_NODE (absolute node executable).
-Subsequent installs read ~/.config/t3code/service.env; edit it to reconfigure.
+Subsequent installs read the instance's service.env; edit it to reconfigure.
+If the restarted service does not answer, the previous service.env is
+restored and the service restarted with it.
+--uninstall stops and removes a named instance's service, helpers and
+configuration; its state folder is kept.
 HELP
   exit 0
 fi
 package=""
 build_id=""
+instance=""
+uninstall=0
 while (($#)); do
   case $1 in
-    --package|--build-id)
+    --package|--build-id|--instance)
       (($# >= 2)) || { echo "Missing value for $1" >&2; exit 2; }
-      case $1 in --package) package=$2 ;; --build-id) build_id=$2 ;; esac
+      case $1 in
+        --package) package=$2 ;;
+        --build-id) build_id=$2 ;;
+        --instance) instance=$2 ;;
+      esac
       shift 2 ;;
+    --uninstall) uninstall=1; shift ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
+if [[ -n $instance ]]; then
+  [[ $instance =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || {
+    echo "Invalid instance name: $instance" >&2; exit 2;
+  }
+  prefix="t3code-$instance"
+else
+  prefix="t3code"
+fi
+[[ $EUID != 0 ]] || { echo 'Run as your normal user, without sudo.' >&2; exit 1; }
+config_dir="$HOME/.config/$prefix"
+unit="$prefix.service"
+bin_dir="$HOME/.local/bin"
+unit_dir="$HOME/.config/systemd/user"
+# Installs and uninstalls are serialized across instances, so two installs
+# cannot claim the same port or state folder.
+install -d "$HOME/.config"
+exec 9>"$HOME/.config/t3code-install.lock"
+flock 9
+
+if ((uninstall)); then
+  [[ -n $instance ]] || { echo 'Only a named instance (--instance) can be uninstalled.' >&2; exit 2; }
+  [[ -z $package && -z $build_id ]] || { echo '--uninstall takes no package.' >&2; exit 2; }
+  base=""
+  if [[ -f $config_dir/service.env ]]; then base=$(source "$config_dir/service.env"; echo "${T3CODE_BASE:-}"); fi
+  if systemctl --user cat "$unit" >/dev/null 2>&1; then
+    systemctl --user disable --now "$unit" || { echo "Could not stop $unit; nothing was removed." >&2; exit 1; }
+  fi
+  rm -f -- "$unit_dir/$unit" "$bin_dir/$prefix-run" "$bin_dir/$prefix-pair" "$bin_dir/$prefix-update"
+  systemctl --user daemon-reload
+  systemctl --user reset-failed "$unit" 2>/dev/null || true
+  # Only the files the helpers write; anything else stays, and so does the folder then.
+  rm -f -- "$config_dir"/{service.env,service.env.previous,install.lock,update.lock}
+  if [[ -d $config_dir ]]; then
+    rmdir -- "$config_dir" 2>/dev/null || echo "Kept $config_dir: it holds other files." >&2
+  fi
+  echo "Removed $unit and its helpers.${base:+ State kept in $base.}"
+  exit 0
+fi
+
 if [[ -n $package || -n $build_id ]]; then
   [[ -f $package && $build_id =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || {
     echo 'Custom installation requires a tarball and a valid build ID.' >&2; exit 2;
   }
   package=$(realpath -- "$package")
 fi
-[[ $EUID != 0 ]] || { echo 'Run as your normal user, without sudo.' >&2; exit 1; }
+# The npm VERSION pin is upstream's release line, which only the default instance follows.
+[[ -z $instance || -n $package ]] || {
+  echo "Instance $instance installs only built packages (--package); see $prefix-update." >&2; exit 2;
+}
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 version=$(<"$repo/config/t3code/VERSION")
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
-config_dir="$HOME/.config/t3code"
-if [[ -f $config_dir/service.env ]]; then source "$config_dir/service.env"; fi
-: "${T3CODE_HOST:=127.0.0.1}" "${T3CODE_PORT:=3773}"
+first_install=1
+if [[ -f $config_dir/service.env ]]; then source "$config_dir/service.env"; first_install=0; fi
+if [[ -z $instance ]]; then : "${T3CODE_PORT:=3773}"; fi
+[[ ${T3CODE_PORT:-} =~ ^[0-9]+$ ]] || {
+  echo "Set T3CODE_PORT for the first install of instance $instance." >&2; exit 2;
+}
+: "${T3CODE_HOST:=127.0.0.1}"
 : "${T3CODE_ORIGIN:=http://localhost:$T3CODE_PORT}"
-: "${T3CODE_BASE:=$HOME/.local/share/t3code}" "${T3CODE_WORKDIR:=$HOME}"
+: "${T3CODE_BASE:=$HOME/.local/share/$prefix}" "${T3CODE_WORKDIR:=$HOME}"
 : "${T3CODE_NODE:=$(command -v node)}"
+[[ $(realpath -m -- "$T3CODE_BASE")/ != "$(realpath -m -- "$config_dir")"/* ]] || {
+  echo "The state folder must not be inside $config_dir." >&2; exit 1;
+}
+# Instances must not share a port or a state folder, also after an edit of service.env.
+for other in "$HOME"/.config/t3code*/service.env; do
+  [[ -f $other && $other != "$config_dir/service.env" ]] || continue
+  read -r other_port other_base < <(source "$other"; echo "${T3CODE_PORT:-} ${T3CODE_BASE:-}")
+  [[ $other_port != "$T3CODE_PORT" ]] || { echo "Port $T3CODE_PORT is used by $other." >&2; exit 1; }
+  [[ $(realpath -m -- "$other_base") != $(realpath -m -- "$T3CODE_BASE") ]] || {
+    echo "State folder $T3CODE_BASE is used by $other." >&2; exit 1;
+  }
+done
+# An installed instance listens on its own port.
+if ((first_install)) && ss -Hltn "sport = :$T3CODE_PORT" 2>/dev/null | grep -q .; then
+  echo "Port $T3CODE_PORT is already in use." >&2; exit 1
+fi
 # Volta shims resolve to volta-shim, so resolve Node through its own runtime.
 T3CODE_NODE=$("$T3CODE_NODE" -p 'process.execPath')
 [[ -d $T3CODE_WORKDIR ]] || { echo "Missing working directory: $T3CODE_WORKDIR" >&2; exit 1; }
@@ -49,8 +132,6 @@ else
   runtime="$T3CODE_BASE/runtime/versions/$version"
 fi
 install -d -m 700 "$config_dir" "$T3CODE_BASE" "$runtime"
-exec 9>"$config_dir/install.lock"
-flock 9
 if [[ -n $package ]]; then
   package_hash=$(sha256sum -- "$package")
   package_hash=${package_hash%% *}
@@ -74,27 +155,65 @@ if [[ -z $package ]]; then [[ $installed_version == "$version" ]]; fi
 T3CODE_BUILD_ID=${build_id:-npm-$version}
 umask 077
 env_tmp=$(mktemp "$config_dir/service.env.XXXXXX")
-trap 'rm -f -- "$env_tmp"' EXIT
+unit_tmp=""
+trap 'rm -f -- "$env_tmp" ${unit_tmp:+"$unit_tmp"}' EXIT
 for name in T3CODE_BUILD_ID T3CODE_NODE T3CODE_ENTRY T3CODE_HOST T3CODE_PORT T3CODE_ORIGIN T3CODE_BASE T3CODE_WORKDIR; do
   printf '%s=%q\n' "$name" "${!name}"
 done > "$env_tmp"
-mv -f -- "$env_tmp" "$config_dir/service.env"
-install -d "$HOME/.local/bin" "$HOME/.config/systemd/user"
-install -m 755 "$repo/scripts/t3code-run" "$repo/scripts/t3code-pair" "$HOME/.local/bin/"
-ln -sfn "$repo/scripts/t3code-update" "$HOME/.local/bin/t3code-update"
-install -m 644 "$repo/config/t3code/t3code.service" "$HOME/.config/systemd/user/t3code.service"
+install -d "$bin_dir" "$unit_dir"
+# The helpers find their instance from their own names.
+install -m 755 "$repo/scripts/t3code-run" "$bin_dir/$prefix-run"
+install -m 755 "$repo/scripts/t3code-pair" "$bin_dir/$prefix-pair"
+ln -sfn "$repo/scripts/t3code-update" "$bin_dir/$prefix-update"
+unit_tmp=$(mktemp "$unit_dir/.$unit.XXXXXX")
+sed -e "s|/t3code-run\$|/$prefix-run|" \
+  -e "s|^Description=.*|&${instance:+ ($instance)}|" \
+  "$repo/config/t3code/t3code.service" > "$unit_tmp"
+chmod 644 "$unit_tmp"
+mv -f -- "$unit_tmp" "$unit_dir/$unit"
 systemctl --user daemon-reload
-systemctl --user enable t3code.service
-systemctl --user restart t3code.service
+systemctl --user enable "$unit"
+# The configuration being replaced, so a build that does not come up is switched back.
+rm -f -- "$config_dir/service.env.previous"
+if [[ -f $config_dir/service.env ]]; then cp -p -- "$config_dir/service.env" "$config_dir/service.env.previous"; fi
+mv -f -- "$env_tmp" "$config_dir/service.env"
+# Failures from here on go through the rollback below.
+restarted=0
+systemctl --user restart "$unit" && restarted=1
 # An IPv6 literal needs brackets in a URL.
 ready_host=$T3CODE_HOST
 [[ $ready_host == *:* && $ready_host != \[* ]] && ready_host="[$ready_host]"
-for ((attempt=0; attempt<30; attempt++)); do
-  if curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 "http://$ready_host:$T3CODE_PORT/" >/dev/null 2>&1; then
-    echo "T3 $installed_version ($T3CODE_BUILD_ID) is serving. Pair a browser with: t3code-pair DEVICE"
-    exit 0
+serving() {
+  local port=$1 attempt
+  for ((attempt=0; attempt<30; attempt++)); do
+    if curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 "http://$ready_host:$port/" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+if ((restarted)) && serving "$T3CODE_PORT"; then
+  echo "T3 $installed_version ($T3CODE_BUILD_ID) is serving as $unit. Pair a browser with: $prefix-pair DEVICE"
+  exit 0
+fi
+echo "T3 $T3CODE_BUILD_ID did not become ready; inspect systemctl --user status $unit." >&2
+if [[ -f $config_dir/service.env.previous ]]; then
+  read -r previous_build previous_host previous_port < <(
+    source "$config_dir/service.env.previous"; echo "${T3CODE_BUILD_ID:-} ${T3CODE_HOST:-} ${T3CODE_PORT:-}"
+  )
+  mv -f -- "$config_dir/service.env.previous" "$config_dir/service.env"
+  systemctl --user restart "$unit" || true
+  ready_host=$previous_host
+  [[ $ready_host == *:* && $ready_host != \[* ]] && ready_host="[$ready_host]"
+  if serving "$previous_port"; then
+    echo "Restored the previous build ($previous_build), which is serving." >&2
+  else
+    echo "Restored the previous service.env ($previous_build), but it does not answer either." >&2
   fi
-  sleep 1
-done
-echo 'T3 did not become ready; inspect systemctl --user status t3code.service.' >&2
+else
+  # Nothing to go back to: stop rather than leave the service restarting.
+  systemctl --user stop "$unit" || true
+  echo "Stopped $unit; this was its first install." >&2
+fi
 exit 1

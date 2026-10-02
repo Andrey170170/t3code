@@ -106,6 +106,37 @@ For subsequent updates, use `t3code-update --check`, then `t3code-update`
 restarts the service, retains older runtimes, and does not automatically undo
 database migrations or create a backup.
 
+## A second instance
+
+`--instance NAME` installs a separate T3 server beside the default one, with
+its own `~/.config/t3code-NAME/service.env`, `t3code-NAME.service`,
+`~/.local/share/t3code-NAME` state and `t3code-NAME-run`, `-pair` and
+`-update` helpers; the default instance keeps the unsuffixed names. Its first
+install needs a port no other instance uses, and refuses one another
+instance's `service.env` names or something already listens on; every install
+checks the port and state folder against the other instances again. A named
+instance is pinned: it installs only an exact Forgejo version or a source
+build, never a tag and never upstream npm.
+
+Builds of another line, such as `dev_v2` for the Trellis instance, are
+published under their own tag so the default instance's `custom` never moves
+to them:
+
+```bash
+npm run publish:forgejo -- --source ../t3code-dev_v2 --tag dev-v2
+node scripts/t3code-forgejo.mjs check --version dev-v2   # the newest dev_v2 build
+T3CODE_PORT=3774 T3CODE_HOST=100.67.121.9 T3CODE_ORIGIN=https://dev-v2.andrei-homelab.com \
+  node scripts/t3code-forgejo.mjs install --yes --instance v2 --version 0.0.44-forgejo.3
+t3code-v2-update 0.0.44-forgejo.4    # later updates name the exact version
+t3code-v2-pair DEVICE
+```
+
+Every install keeps the replaced configuration as `service.env.previous`; when
+the restarted service does not answer, it is put back and the service
+restarted with it (a first install is stopped instead).
+`scripts/t3code-install --instance NAME --uninstall` removes a named
+instance's service, helpers and configuration and keeps its state folder.
+
 These helpers were ported from `~/dotfiles`. Existing dotfiles entry points are
 unchanged until installation from this repository replaces the updater link.
 
