@@ -311,6 +311,7 @@ function TrellisDetailsSections(props: {
             bases={details.bases}
             baseStates={details.baseStates}
             buildingBases={details.buildingBases}
+            baseBuildFailures={details.baseBuildFailures}
             defaultBase={details.defaultBase}
             onBuilt={refresh}
           />
@@ -430,6 +431,7 @@ function TrellisBaseRows(props: {
   readonly baseStates: TrellisDetails["baseStates"];
   /** Builds the server runs, also ones started before this page opened. */
   readonly buildingBases: ReadonlyArray<string>;
+  readonly baseBuildFailures: TrellisDetails["baseBuildFailures"];
   readonly defaultBase: string | null;
   readonly onBuilt: () => void;
 }) {
@@ -469,9 +471,10 @@ function TrellisBaseRows(props: {
       {bases.length === 0 && !defaultMissing ? <SettingsRow title="No bases reported" /> : null}
       {bases.map((base) => {
         const state = baseStateView(props.baseStates?.[base] ?? null);
+        const failure = props.baseBuildFailures[base];
         const description = [
           base === defaultBase ? "New projects start from this base." : null,
-          state.description,
+          failure === undefined ? state.description : `The last rebuild failed: ${failure}`,
         ]
           .filter((line) => line !== null)
           .join(" ");
@@ -479,7 +482,7 @@ function TrellisBaseRows(props: {
           <SettingsRow
             key={base}
             title={
-              state.warn ? (
+              state.warn || failure !== undefined ? (
                 <WarningTitle>
                   <span className="font-mono">{base}</span>
                 </WarningTitle>

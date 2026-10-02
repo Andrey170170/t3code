@@ -1830,19 +1830,40 @@ const make = Effect.gen(function* () {
 
   // Base builds in progress, by base name; see `buildBase` in the shape.
   const baseBuilds = new Map<string, Deferred.Deferred<TrellisBuildBaseResult, TrellisError>>();
+  // A failed build's error, kept for the settings page until the next build:
+  // its caller may be gone.
+  const baseBuildFailures = new Map<string, string>();
   const buildBase = Effect.fn("TrellisCatalog.buildBase")(function* (name: string) {
     yield* requireReady;
-    const running = baseBuilds.get(name);
-    if (running !== undefined) return yield* Deferred.await(running);
-    const done = yield* Deferred.make<TrellisBuildBaseResult, TrellisError>();
-    baseBuilds.set(name, done);
-    yield* trellis.buildBase(name).pipe(
-      Effect.exit,
-      Effect.flatMap((exit) => Deferred.done(done, exit)),
-      Effect.ensuring(Effect.sync(() => void baseBuilds.delete(name))),
-      Effect.forkDetach,
+    const fresh = yield* Deferred.make<TrellisBuildBaseResult, TrellisError>();
+    // Looked up and registered without yielding in between, and forked
+    // uninterruptibly, so concurrent requests start one build.
+    const running = yield* Effect.uninterruptible(
+      Effect.gen(function* () {
+        const existing = baseBuilds.get(name);
+        if (existing !== undefined) return existing;
+        baseBuilds.set(name, fresh);
+        baseBuildFailures.delete(name);
+        yield* trellis.buildBase(name).pipe(
+          Effect.tapError((error) =>
+            Effect.sync(() => void baseBuildFailures.set(name, error.message)).pipe(
+              Effect.andThen(
+                Effect.logWarning("Trellis base build failed", {
+                  base: name,
+                  detail: error.message,
+                }),
+              ),
+            ),
+          ),
+          Effect.exit,
+          Effect.flatMap((exit) => Deferred.done(fresh, exit)),
+          Effect.ensuring(Effect.sync(() => void baseBuilds.delete(name))),
+          Effect.forkDetach,
+        );
+        return fresh;
+      }),
     );
-    return yield* Deferred.await(done);
+    return yield* Deferred.await(running);
   });
 
   return TrellisCatalog.of({
@@ -1921,6 +1942,7 @@ const make = Effect.gen(function* () {
       Effect.map(([details, applied]) => ({
         ...nameDetailsWorkspaces(details, applied?.items ?? []),
         buildingBases: [...baseBuilds.keys()],
+        baseBuildFailures: Object.fromEntries(baseBuildFailures),
       })),
     ),
   });

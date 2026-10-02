@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
   CheckpointId,
@@ -511,9 +512,16 @@ export const TrellisDetails = Schema.Struct({
    * Per base, whether it was built from its current definition: `current`,
    * `stale`, `unrecorded` or `custom` (others may come); null when not reported.
    */
-  baseStates: Schema.NullOr(Schema.Record(Schema.String, Schema.String)),
-  /** Bases this T3 server is rebuilding now (`trellis.buildBase`). */
-  buildingBases: Schema.Array(Schema.String),
+  baseStates: Schema.NullOr(Schema.Record(Schema.String, Schema.String)).pipe(
+    // Absent from servers before base rebuilds.
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /** Bases this T3 server is rebuilding now (`trellis.buildBase`); absent from older servers. */
+  buildingBases: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /** The error of each base's last build that failed, until it is built again. */
+  baseBuildFailures: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   /** May name a base that is not built (absent from `bases`). */
   defaultBase: Schema.NullOr(Schema.String),
   /** Configured provider CLIs not found on the service's PATH. */

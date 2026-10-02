@@ -602,6 +602,7 @@ describe("nameDetailsWorkspaces", () => {
         bases: [],
         baseStates: null,
         buildingBases: [],
+        baseBuildFailures: {},
         defaultBase: null,
         missingProviders: [],
         agentHomes: null,
@@ -852,6 +853,7 @@ describe("TrellisCatalog service", () => {
         bases: ["dev"],
         baseStates: null,
         buildingBases: [],
+        baseBuildFailures: {},
         defaultBase: "dev",
         missingProviders: [],
         agentHomes: null,
@@ -1300,6 +1302,13 @@ describe("TrellisCatalog service", () => {
         assert.deepEqual(yield* Fiber.join(second), { name: "dev", state: "current" });
         assert.equal(buildState.builds, 1);
         assert.deepEqual((yield* catalog.details).buildingBases, []);
+        // Two first requests at once still start one build.
+        const before = buildState.builds ?? 0;
+        const [a, b] = yield* Effect.all([catalog.buildBase("py"), catalog.buildBase("py")], {
+          concurrency: "unbounded",
+        });
+        assert.deepEqual(a, b);
+        assert.equal(buildState.builds, before + 1);
       }),
     );
   });
