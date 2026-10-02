@@ -29,6 +29,7 @@ const RIGHT_PANEL_KINDS = [
   "terminal",
   "pull-request",
   "pull-requests",
+  "side-chat",
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
@@ -84,7 +85,12 @@ export type RightPanelSurface =
       url?: string;
     }
   /** The thread's linked pull requests, one singleton tab beside any number of `pull-request` tabs. */
-  | { id: "pull-requests"; kind: "pull-requests" };
+  | { id: "pull-requests"; kind: "pull-requests" }
+  /**
+   * A Codex side chat. `sideChatId` is null until the server has forked it; a stored id
+   * whose side chat ended (server restart) shows as ended rather than silently reopening.
+   */
+  | { id: "side-chat"; kind: "side-chat"; sideChatId: string | null };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
 // v9 removed the "plan" surface kind (plans render inline in the transcript).
@@ -139,6 +145,8 @@ interface RightPanelStoreState {
   ) => void;
   openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
   renameDevice: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
+  /** Points the side-chat tab at a side chat. Returns false when the tab is no longer open. */
+  setSideChatId: (ref: ScopedThreadRef, sideChatId: string | null) => boolean;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
   openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
   openAttachment: (ref: ScopedThreadRef, attachment: ChatFileAttachment) => void;
@@ -208,6 +216,8 @@ const singletonSurface = (
       return { id: "pull-requests", kind };
     case "device":
       return { id: "device", kind };
+    case "side-chat":
+      return { id: "side-chat", kind, sideChatId: null };
   }
 };
 
@@ -629,6 +639,22 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             );
           }),
         ),
+      setSideChatId: (ref, sideChatId) => {
+        let found = false;
+        set((state) =>
+          automaticUpdate(state, scopedThreadKey(ref), (current) => {
+            found = current.surfaces.some((surface) => surface.kind === "side-chat");
+            if (!found) return current;
+            return {
+              ...current,
+              surfaces: current.surfaces.map((surface) =>
+                surface.kind === "side-chat" ? { ...surface, sideChatId } : surface,
+              ),
+            };
+          }),
+        );
+        return found;
+      },
       renameDevice: (ref, surfaceId, title) =>
         set((state) =>
           userAction(state, scopedThreadKey(ref), (current) => ({

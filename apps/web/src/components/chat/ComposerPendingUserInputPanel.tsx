@@ -1,5 +1,5 @@
 import { type RuntimeRequestId } from "@t3tools/contracts";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, use, useCallback, useEffect, useRef, useState } from "react";
 import { type PendingUserInput } from "../../session-logic";
 import {
   derivePendingUserInputProgress,
@@ -9,6 +9,7 @@ import { CheckIcon } from "lucide-react";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { cn } from "~/lib/utils";
 import { ComposerBanner } from "./ComposerBanner";
+import { isSideChatTarget, SideChatFocusContext } from "./sideChatFocus";
 
 interface PendingUserInputPanelProps {
   pendingUserInputs: PendingUserInput[];
@@ -70,6 +71,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   const progress = derivePendingUserInputProgress(prompt.questions, answers, questionIndex);
   const activeQuestion = progress.activeQuestion;
   const autoAdvanceTimerRef = useRef<number | null>(null);
+  const inSideChat = use(SideChatFocusContext);
   const onAdvanceRef = useRef(onAdvance);
   const [optimisticSingleSelect, setOptimisticSingleSelect] = useState<{
     questionId: string;
@@ -145,6 +147,8 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     if (!activeQuestion || responseDisabled || isCollapsed) return;
     const handler = (event: globalThis.KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
+      // The main chat and a side chat can both show a prompt; each answers keys from its own scope.
+      if (event.defaultPrevented || isSideChatTarget(event.target) !== inSideChat) return;
       const target = event.target;
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
         return;
@@ -166,7 +170,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [activeQuestion, handleOptionSelection, isCollapsed, responseDisabled]);
+  }, [activeQuestion, handleOptionSelection, inSideChat, isCollapsed, responseDisabled]);
 
   if (!activeQuestion) {
     return null;

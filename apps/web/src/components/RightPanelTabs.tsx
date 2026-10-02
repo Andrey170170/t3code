@@ -21,6 +21,7 @@ import {
   FileDiff,
   Files,
   Globe2,
+  MessagesSquare,
   Plus,
   TerminalSquare,
   Volume2,
@@ -130,6 +131,10 @@ interface RightPanelTabsProps {
   pullRequestAvailable: boolean;
   pullRequestsAvailable: boolean;
   deviceAvailable: boolean;
+  /** Present only when side chats apply to this thread (Codex); omitted hides the entry. */
+  onAddSideChat?: (() => void) | undefined;
+  sideChatAvailable?: boolean;
+  sideChatDisabledReason?: string | undefined;
   pullRequestStatusSeeds?: Readonly<Record<string, PullRequestTabStatusSeed>>;
   children: ReactNode;
 }
@@ -158,7 +163,33 @@ const SURFACE_DISABLED_REASONS = {
   pullRequest: "This thread's branch has no pull request yet.",
   pullRequests: "No linked pull requests are available for this thread.",
   device: "Devices are only available from a thread.",
+  sideChat: "Send a message in this chat first.",
 } as const;
+
+/** The side-chat launcher entry, omitted entirely for threads where side chats do not apply. */
+function sideChatSurfaceAction<const Extra extends { description?: string }>(
+  props: {
+    onAddSideChat?: (() => void) | undefined;
+    sideChatAvailable?: boolean;
+    sideChatDisabledReason?: string | undefined;
+  },
+  fallbackReason: string,
+  extra: Extra,
+) {
+  const onAddSideChat = props.onAddSideChat;
+  if (!onAddSideChat) return [];
+  return [
+    {
+      label: "Side chat",
+      icon: MessagesSquare,
+      shortcut: "S",
+      available: props.sideChatAvailable === true,
+      disabledReason: props.sideChatDisabledReason ?? fallbackReason,
+      onClick: () => onAddSideChat(),
+      ...extra,
+    },
+  ] as const;
+}
 
 /** Overlays that must win over the launcher's letter shortcuts. */
 const LAUNCHER_SHORTCUT_BLOCKING_LAYERS = [
@@ -181,6 +212,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
   pullRequest: "No pull request on this branch yet.",
   pullRequests: "No linked pull requests available.",
   device: "Available from a thread.",
+  sideChat: "Send a message in this chat first.",
 } as const;
 
 type TabContextMenuAction =
@@ -327,6 +359,9 @@ function RightPanelEmptyState(props: {
   pullRequestAvailable: boolean;
   pullRequestsAvailable: boolean;
   deviceAvailable: boolean;
+  onAddSideChat?: (() => void) | undefined;
+  sideChatAvailable?: boolean;
+  sideChatDisabledReason?: string | undefined;
 }) {
   // -1 means no highlight: it only appears on hover or arrow use.
   const [highlight, setHighlight] = useState(-1);
@@ -389,6 +424,9 @@ function RightPanelEmptyState(props: {
       disabledReason: SURFACE_UNAVAILABLE_HINTS.device,
       onClick: props.onAddDevice,
     },
+    ...sideChatSurfaceAction(props, SURFACE_UNAVAILABLE_HINTS.sideChat, {
+      description: "Ask a question with this chat’s context.",
+    }),
   ] as const;
 
   type SurfaceAction = (typeof actions)[number];
@@ -598,6 +636,8 @@ function surfaceTitle(
       return "Pull requests";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
+    case "side-chat":
+      return "Side chat";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
@@ -687,6 +727,8 @@ function SurfaceIcon({
       ) : (
         <Smartphone className="size-3 shrink-0" />
       );
+    case "side-chat":
+      return <MessagesSquare className="size-3 shrink-0" />;
   }
 }
 
@@ -889,6 +931,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       disabledReason: SURFACE_DISABLED_REASONS.device,
       onClick: props.onAddDevice,
     },
+    ...sideChatSurfaceAction(props, SURFACE_DISABLED_REASONS.sideChat, {}),
   ] as const;
 
   const handleAddSurfaceMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -1379,6 +1422,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             pullRequestAvailable={props.pullRequestAvailable}
             pullRequestsAvailable={props.pullRequestsAvailable}
             deviceAvailable={props.deviceAvailable}
+            onAddSideChat={props.onAddSideChat}
+            sideChatAvailable={props.sideChatAvailable ?? false}
+            sideChatDisabledReason={props.sideChatDisabledReason}
           />
         ) : (
           props.children

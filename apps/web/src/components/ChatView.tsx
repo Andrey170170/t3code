@@ -1,4 +1,5 @@
 import { ChatCanvas } from "./chat/ChatCanvas";
+import { isSideChatTarget } from "./chat/sideChatFocus";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
   resolveBackgroundDraftWorkspaceOptions,
@@ -63,7 +64,7 @@ import {
   type ServerProvider,
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
-  type ThreadId,
+  ThreadId,
   type ThreadLinkedPullRequest,
   type RunId,
   type RuntimeRequestId,
@@ -382,6 +383,7 @@ import {
   primaryServerKeybindingsAtom,
   serverEnvironment,
 } from "../state/server";
+import { sideChatEnvironment } from "../state/sideChat";
 import { terminalEnvironment } from "../state/terminal";
 import { threadEnvironment } from "../state/threads";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
@@ -667,6 +669,7 @@ const PreviewPanel = lazy(() =>
   import("./preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
 );
 const DiffPanel = lazy(() => import("./DiffPanel"));
+const SideChatPanel = lazy(() => import("./chat/SideChatPanel"));
 const selectAutoShowFloatingPreview = (settings: { browserAutoShowFloatingPreview: boolean }) =>
   settings.browserAutoShowFloatingPreview;
 const DevicePanel = lazy(() =>
@@ -674,6 +677,14 @@ const DevicePanel = lazy(() =>
 );
 const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
+/** Global commands that still apply while focus is inside a side chat. */
+const SIDE_CHAT_PASSTHROUGH_COMMANDS: ReadonlySet<string> = new Set([
+  "rightPanel.toggle",
+  "rightPanel.toggleMaximized",
+  "rightPanel.close",
+  "threadPanel.toggle",
+  "sideChat.open",
+]);
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
   "input",
   "textarea",
@@ -1533,6 +1544,7 @@ export default function ChatView(props: ChatViewProps) {
   const writeTerminal = useAtomCommand(terminalEnvironment.write, "terminal write");
   const closeTerminalMutation = useAtomCommand(terminalEnvironment.close, "terminal close");
   const createThread = useAtomCommand(threadEnvironment.create, { reportFailure: false });
+  const closeSideChat = useAtomCommand(sideChatEnvironment.close, { reportFailure: false });
   const deleteThread = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
@@ -5016,6 +5028,22 @@ export default function ChatView(props: ChatViewProps) {
   const visiblePullRequestCount = visiblePullRequests.length;
   const pullRequestsSurfaceAvailable =
     isServerThread && supportsThreadPullRequests && visiblePullRequestCount > 0;
+  // Side chats fork the parent's native Codex conversation, so they need one to exist.
+  const sideChatSupported =
+    serverThread !== null &&
+    providerStatuses.find((status) => status.instanceId === serverThread.providerInstanceId)
+      ?.driver === "codex";
+  const sideChatAvailable =
+    sideChatSupported &&
+    serverThread.activeProviderThreadId !== null &&
+    !activeEnvironmentUnavailable;
+  const sideChatDisabledReason = activeEnvironmentUnavailable
+    ? "Reconnect to this environment to start a side chat."
+    : "Send a message in this chat first.";
+  const addSideChatSurface = useCallback(() => {
+    if (!activeThreadRef || !sideChatAvailable) return;
+    useRightPanelStore.getState().open(activeThreadRef, "side-chat");
+  }, [activeThreadRef, sideChatAvailable]);
   const addPullRequestsSurface = useCallback(() => {
     if (!activeThreadRef || !pullRequestsSurfaceAvailable) return;
     useRightPanelStore.getState().open(activeThreadRef, "pull-requests");
@@ -5574,6 +5602,16 @@ export default function ChatView(props: ChatViewProps) {
             threadRef: activeThreadRef,
           });
         }
+        // Closing the tab ends the side chat; hiding the panel keeps it.
+        if (surface.kind === "side-chat" && surface.sideChatId) {
+          void closeSideChat({
+            environmentId: activeThreadRef.environmentId,
+            input: {
+              parentThreadId: activeThreadRef.threadId,
+              sideChatId: ThreadId.make(surface.sideChatId),
+            },
+          });
+        }
         if (surface.kind === "terminal") {
           for (const terminalId of surface.terminalIds) {
             storeCloseTerminal(activeThreadRef, terminalId);
@@ -5589,6 +5627,7 @@ export default function ChatView(props: ChatViewProps) {
       activeThreadRef,
       activePreviewState.sessions,
       closePreview,
+      closeSideChat,
       closeTerminalMutation,
       storeCloseTerminal,
     ],
@@ -7326,8 +7365,10 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
       const shortcutContext = getShortcutContext(event.target);
+      const sideChatFocused = isSideChatTarget(event.target);
 
       if (
+        !sideChatFocused &&
         !shortcutContext.terminalFocus &&
         !shortcutContext.modelPickerOpen &&
         shouldTypeToFocusComposer(event)
@@ -7343,6 +7384,16 @@ export default function ChatView(props: ChatViewProps) {
         context: shortcutContext,
       });
       if (!command) return;
+      // A side chat owns its composer shortcuts; only panel-level commands pass through.
+      if (sideChatFocused && !SIDE_CHAT_PASSTHROUGH_COMMANDS.has(command)) return;
+
+      if (command === "sideChat.open") {
+        if (!sideChatAvailable) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) addSideChatSurface();
+        return;
+      }
 
       if (command === "thread.copyReference") {
         event.preventDefault();
@@ -7590,6 +7641,8 @@ export default function ChatView(props: ChatViewProps) {
     supportsSettlement,
     confirmAndUnpinThread,
     copyActiveThreadReference,
+    sideChatAvailable,
+    addSideChatSurface,
     getShortcutContext,
     toggleRightPanel,
     toggleThreadPanel,
@@ -7610,6 +7663,7 @@ export default function ChatView(props: ChatViewProps) {
       }
     };
     const handler = (event: ClipboardEvent) => {
+      if (isSideChatTarget(event.target)) return;
       if (!activeThreadId || isCommandPaletteOpen()) return;
       if (getTerminalFocusOwner() !== null) return;
       if (composerRef.current?.isModelPickerOpen()) return;
@@ -10317,6 +10371,21 @@ export default function ChatView(props: ChatViewProps) {
           }}
         />
       </Suspense>
+    ) : renderedRightPanelSurface?.kind === "side-chat" ? (
+      <Suspense fallback={null}>
+        <SideChatPanel
+          key={activeThreadKey}
+          threadRef={activeThreadRef}
+          sideChatId={renderedRightPanelSurface.sideChatId ?? null}
+          parentTitle={activeThread.title}
+          providerStatuses={providerStatuses}
+          settings={settings}
+          keybindings={keybindings}
+          resolvedTheme={resolvedTheme}
+          onImageExpand={onExpandTimelineImage}
+          onFileOpen={openFileAttachment}
+        />
+      </Suspense>
     ) : (renderedRightPanelSurface?.kind === "files" ||
         renderedRightPanelSurface?.kind === "file") &&
       ((activeProject && activeWorkspaceRoot) ||
@@ -11173,6 +11242,9 @@ export default function ChatView(props: ChatViewProps) {
           pullRequestAvailable={pullRequestSurfaceAvailable}
           pullRequestsAvailable={pullRequestsSurfaceAvailable}
           deviceAvailable={activeThreadRef !== null}
+          {...(sideChatSupported
+            ? { onAddSideChat: addSideChatSurface, sideChatAvailable, sideChatDisabledReason }
+            : {})}
         >
           {rightPanelContent}
         </RightPanelTabs>
@@ -11227,6 +11299,9 @@ export default function ChatView(props: ChatViewProps) {
             pullRequestAvailable={pullRequestSurfaceAvailable}
             pullRequestsAvailable={pullRequestsSurfaceAvailable}
             deviceAvailable={activeThreadRef !== null}
+            {...(sideChatSupported
+              ? { onAddSideChat: addSideChatSurface, sideChatAvailable, sideChatDisabledReason }
+              : {})}
           >
             {rightPanelContent}
           </RightPanelTabs>

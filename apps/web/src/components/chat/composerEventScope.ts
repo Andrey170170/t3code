@@ -1,4 +1,7 @@
+import { useContext } from "react";
+
 import { useComposerHandleContext } from "../../composerHandleContext";
+import { SideChatFocusContext } from "./sideChatFocus";
 
 const COMPOSER_FLOATING_LAYER_SELECTOR = [
   '[data-composer-drawer-layer="true"]',
@@ -9,8 +12,18 @@ export const composerFloatingLayerProps = {
   "data-chat-composer-floating-layer": "true",
 } as const;
 
+const sideChatFloatingLayerProps = {
+  ...composerFloatingLayerProps,
+  // Portaled menus leave the side chat's DOM subtree; this keeps them inside its scope.
+  "data-side-chat": "true",
+} as const;
+
 export function useComposerMenuProps() {
   const composerRef = useComposerHandleContext();
+  // A side chat owns a separate editor, so closing its menus must not focus the main composer.
+  if (useContext(SideChatFocusContext)) {
+    return { ...sideChatFloatingLayerProps, finalFocus: undefined };
+  }
 
   return {
     ...composerFloatingLayerProps,

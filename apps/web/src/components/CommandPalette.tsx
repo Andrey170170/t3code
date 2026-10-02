@@ -56,6 +56,7 @@ import {
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
+  MessagesSquareIcon,
   MonitorIcon,
   MoonIcon,
   PaletteIcon,
@@ -2000,6 +2001,41 @@ function OpenCommandPaletteDialog(props: {
         if (refreshed._tag === "Failure") throw squashAtomCommandFailure(refreshed);
       },
     });
+  }
+
+  if (activeThread !== null) {
+    const thread = activeThread;
+    const providerEntry = providerEntryByEnvironmentAndInstanceId.get(
+      `${thread.environmentId}:${thread.providerInstanceId}`,
+    );
+    // Side chats fork Codex's native conversation; other providers never show the entry.
+    if (providerEntry?.driverKind === "codex") {
+      const connected = environments.some(
+        (environment) =>
+          environment.environmentId === thread.environmentId &&
+          environment.connection.phase === "connected",
+      );
+      const available = connected && thread.activeProviderThreadId !== null;
+      actionItems.push({
+        kind: "action",
+        value: "action:open-side-chat",
+        searchTerms: ["side chat", "side question", "side conversation", "codex", "temporary"],
+        title: "Ask a side question",
+        description: available
+          ? "Open a temporary side chat with this chat’s context."
+          : connected
+            ? "Send a message in this chat first."
+            : "Reconnect to this environment to start a side chat.",
+        icon: <MessagesSquareIcon className={ITEM_ICON_CLASS} />,
+        shortcutCommand: "sideChat.open",
+        disabled: !available,
+        run: async () => {
+          useRightPanelStore
+            .getState()
+            .open(scopeThreadRef(thread.environmentId, thread.id), "side-chat");
+        },
+      });
+    }
   }
 
   actionItems.push({

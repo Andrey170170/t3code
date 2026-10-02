@@ -85,6 +85,23 @@ If you do not want to answer, dismiss the question from its panel. Dismissing
 closes it without sending anything to Codex. This requires a Codex version that
 supports async questions.
 
+## Ask a side question
+
+In a Codex chat you have already messaged, open **Side chat** from the right
+panel, or run **Ask a side question** from the command palette. The side chat
+starts from the main conversation's context, so you can ask a related question
+while the main chat keeps working. If the main chat is mid-turn, the side chat
+sees everything up to its last finished step. Side-chat messages never become
+part of the main conversation.
+
+A side chat has its own model, reasoning, permission mode, and Build/Plan mode,
+and answers its own approvals and questions. It shares the main chat's workspace.
+
+Side chats are temporary: they do not appear in your threads, and each chat has at
+most one. Closing the tab ends it, as does restarting the server; start a new one to
+take a fresh copy of the main conversation. Side chats are available on web and
+desktop, not on mobile.
+
 ## Approve app access
 
 Codex tools can request access to another app. Respond to the named app's request
