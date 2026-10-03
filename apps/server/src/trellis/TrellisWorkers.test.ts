@@ -1181,7 +1181,11 @@ it("lists a project's workspaces with workers, discarded forks and their trash s
 it.effect("hands a worker no more knowledge than its lead has", () => {
   const fake = makeForkTrellis({
     checkpoints: ["snap-new"],
-    knowledge: { project: "ro", groups: { design: "ro" }, existing: ["design", "secret"] },
+    knowledge: {
+      project: "ro",
+      groups: { design: "ro" },
+      existing: ["design", "secret", "constructor"],
+    },
   });
   return Effect.gen(function* () {
     const lead = yield* startLead;
@@ -1191,6 +1195,8 @@ it.effect("hands a worker no more knowledge than its lead has", () => {
         Effect.map((error) => String((error as { readonly message?: string }).message ?? error)),
       );
     assert.include(yield* refused({ project: "rw" }), "project knowledge tier");
+    // Hidden groups named like object properties are still hidden.
+    assert.include(yield* refused({ groups: ["constructor"] }), '"constructor"');
     assert.include(yield* refused({ groups: ["secret"] }), '"secret"');
     assert.include(yield* refused({ groupsRw: ["design"] }), "write access");
     assert.deepEqual(fake.state.forks, []);
@@ -1199,5 +1205,22 @@ it.effect("hands a worker no more knowledge than its lead has", () => {
       fork: { from: "latest", knowledge: { groups: ["design"], groupsRw: ["new-direction"] } },
     });
     assert.equal(fake.state.forks.length, 1);
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
+it.effect("a lead that sees no project knowledge hands its worker none", () => {
+  const fake = makeForkTrellis({
+    checkpoints: ["snap-new"],
+    knowledge: { project: "none", groups: {}, existing: [] },
+  });
+  return Effect.gen(function* () {
+    const lead = yield* startLead;
+    const error = yield* delegate(lead.threadId, {
+      fork: { from: "latest", knowledge: { project: "ro" } },
+    }).pipe(Effect.flip);
+    assert.include(String((error as { readonly message?: string }).message), "project knowledge");
+    // Without a request, the worker default (read) is lowered to none.
+    yield* delegate(lead.threadId, { fork: { from: "latest" } });
+    assert.deepEqual(fake.state.forks.at(-1)?.knowledge, { project: "none" });
   }).pipe(Effect.provide(testLayer(fake)));
 });
