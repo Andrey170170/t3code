@@ -53,7 +53,12 @@ import { ServerConfig } from "../config.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import { OrchestrationEventStore } from "../persistence/Services/OrchestrationEventStore.ts";
 import { forkParked } from "../serverActivation.ts";
-import { Trellis, type TrellisWorkspaceView, trellisRootOf } from "./Trellis.ts";
+import {
+  Trellis,
+  type TrellisForkKnowledge,
+  type TrellisWorkspaceView,
+  trellisRootOf,
+} from "./Trellis.ts";
 import { TrellisCatalog } from "./TrellisCatalog.ts";
 
 /**
@@ -92,6 +97,8 @@ export class TrellisWorkers extends Context.Service<
       readonly from: string;
       readonly name?: string | undefined;
       readonly services?: "none" | "all" | ReadonlyArray<string> | undefined;
+      /** What knowledge the fork sees; Trellis's worker defaults when absent. */
+      readonly knowledge?: TrellisForkKnowledge | undefined;
       /**
        * The caller's retry key (its clientRequestId). With one, the fork is
        * named from it and its checkpoint kept, so a retry after a lost
@@ -188,6 +195,7 @@ function workerGuide(input: {
     `[Trellis worker] You work in your own Trellis fork "${input.name}" (${input.workspaceId}), made from checkpoint ${input.snapshot} of your lead's workspace. Your files are yours alone until the lead merges them.`,
     "Commit your work and put a jj bookmark on it (`jj commit -m MSG && jj bookmark set NAME -r @-`).",
     "Your final message is recorded as the fork's summary, which the lead reads with `trellis merge-brief`: say what you did, the bookmark to fetch, and which environment changes (installed packages, configuration) the lead should carry over.",
+    "Knowledge: the project's shared notes are at /trellis/knowledge/project (read-only unless your lead granted more), any groups you were given at /trellis/knowledge/groups/<name>, and your private notes at /trellis/notes (never committed). `trellis knowledge` shows what you see.",
   ].join("\n");
 }
 
@@ -397,6 +405,9 @@ const make = Effect.gen(function* () {
           name,
           thread: input.parentThreadId,
           services: input.services,
+          // A worker spawn: by default it reads the project tier, not writes it.
+          spawn: true,
+          knowledge: input.knowledge,
         })
         .pipe(
           Effect.mapError((error) =>

@@ -438,6 +438,44 @@ describe("Trellis client", () => {
       expect(result.podmanFailed).toEqual(unknown);
     }),
   );
+
+  it.effect("sends a worker spawn's knowledge in Trellis's names", () =>
+    Effect.gen(function* () {
+      const harness = setup(({ url }) =>
+        url === "/v1/fork"
+          ? {
+              body: {
+                id: "ws-f",
+                kind: "dedicated",
+                name: "w",
+                project_id: "prj",
+                base: "dev",
+                parent_snapshot: "snap-1",
+                gateway_port: 1,
+                created_at: 0,
+                deleted_at: null,
+                head: null,
+                path: "/trellis/workspaces/ws-f/project",
+                running: false,
+                warnings: [],
+              },
+            }
+          : { body: { root: "/trellis" } },
+      );
+      const layer = yield* Effect.promise(() => harness.listen());
+      yield* Effect.flatMap(Trellis.Trellis, (trellis) =>
+        trellis.fork({
+          target: "ws-a",
+          snapshot: "snap-1",
+          spawn: true,
+          knowledge: { project: "ro", notes: "empty", groupsRw: ["design"] },
+        }),
+      ).pipe(Effect.provide(layer), Effect.ignore);
+      const body = harness.requests.find((request) => request.url === "/v1/fork")?.body ?? "";
+      expect(body).toContain('"spawn":true');
+      expect(body).toContain('"knowledge":{"project":"ro","notes":"empty","groups_rw":["design"]}');
+    }),
+  );
 });
 
 describe("parseKnownRoots", () => {

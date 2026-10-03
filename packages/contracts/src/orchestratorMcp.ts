@@ -166,6 +166,37 @@ export const OrchestratorMcpTerminalDelegatedTaskStatus = Schema.Literals([
 export type OrchestratorMcpTerminalDelegatedTaskStatus =
   typeof OrchestratorMcpTerminalDelegatedTaskStatus.Type;
 
+/** What knowledge a worker's fork sees; Trellis's defaults when absent. */
+export const OrchestratorMcpForkKnowledge = Schema.Struct({
+  project: Schema.optional(
+    Schema.Literals(["rw", "ro", "none"]).annotate({
+      description:
+        "The project knowledge tier (/trellis/knowledge/project): 'ro' by default for a worker, 'rw' to let it write there, 'none' to hide it.",
+    }),
+  ),
+  notes: Schema.optional(
+    Schema.Literals(["inherit", "empty"]).annotate({
+      description:
+        "Private notes (/trellis/notes): 'inherit' (default) starts from a copy of this workspace's, 'empty' starts with none.",
+    }),
+  ),
+  groups: Schema.optional(
+    Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(64))).annotate({
+      description:
+        "Knowledge groups (/trellis/knowledge/groups/<name>) the worker reads; a group that does not exist yet is created, with this workspace in it.",
+    }),
+  ),
+  groupsRw: Schema.optional(
+    Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(64))).annotate({
+      description: "Knowledge groups the worker may also write.",
+    }),
+  ),
+}).annotate({
+  description:
+    "Knowledge the fork sees. Default for a worker: the project tier read-only, a copy of your notes, no groups.",
+});
+export type OrchestratorMcpForkKnowledge = typeof OrchestratorMcpForkKnowledge.Type;
+
 /**
  * Where a delegated child works. `parent` (the default) shares the caller's
  * folder. `fork` gives it its own Trellis fork of the caller's workspace, made
@@ -194,6 +225,7 @@ export const OrchestratorMcpTaskWorkspace = Schema.Union([
             "Workspace services (.trellis/services.toml) to start in the fork: 'none' (default), 'all' or a list of names.",
         }),
       ),
+      knowledge: Schema.optional(OrchestratorMcpForkKnowledge),
     }),
   }),
 ]).annotate({

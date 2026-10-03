@@ -77,6 +77,8 @@ function makeForkTrellis(input: { readonly checkpoints: Array<string> }) {
       thread: string | undefined;
       name: string | undefined;
       services: unknown;
+      spawn?: boolean | undefined;
+      knowledge?: unknown;
     }>,
     activities: [] as Array<{ target: string; kind: string; data: unknown }>,
     purgeRequests: [] as Array<{ ids: ReadonlyArray<string>; reason?: string; thread?: string }>,
@@ -88,8 +90,16 @@ function makeForkTrellis(input: { readonly checkpoints: Array<string> }) {
     thread: string | undefined,
     name: string | undefined,
     services: unknown,
+    extra: { readonly spawn?: boolean | undefined; readonly knowledge?: unknown } = {},
   ) => {
-    state.forks.push({ snapshot, thread, name, services });
+    state.forks.push({
+      snapshot,
+      thread,
+      name,
+      services,
+      ...(extra.spawn === undefined ? {} : { spawn: extra.spawn }),
+      ...(extra.knowledge === undefined ? {} : { knowledge: extra.knowledge }),
+    });
     const id = `ws-fork${state.forks.length}`;
     const view: TrellisWorkspaceView = {
       id,
@@ -131,14 +141,16 @@ function makeForkTrellis(input: { readonly checkpoints: Array<string> }) {
         ...input.checkpoints.map((id) => ({ id, kind: "checkpoint" })),
         { id: "snap-turn", kind: "turn" },
       ] as never),
-    fork: ({ snapshot, thread, name, services }) =>
+    fork: ({ snapshot, thread, name, services, spawn, knowledge }) =>
       Effect.suspend(() => {
         const failing = state.failNextFork;
         state.failNextFork = null;
         if (failing === "before") {
           return Effect.fail(new TrellisError({ message: "Trellis is unavailable: restarting" }));
         }
-        return Effect.sync(() => created(snapshot, thread, name, services)).pipe(
+        return Effect.sync(() =>
+          created(snapshot, thread, name, services, { spawn, knowledge }),
+        ).pipe(
           Effect.flatMap((view) =>
             failing === "lost"
               ? Effect.fail(new TrellisError({ message: "Trellis is unavailable: timed out" }))
@@ -322,12 +334,25 @@ it.effect("spawns a worker in a fork of the latest checkpoint, in the fork's own
   return Effect.gen(function* () {
     const lead = yield* startLead;
     const result = yield* delegate(lead.threadId, {
-      fork: { from: "latest", name: "parser", services: ["web"] },
+      fork: {
+        from: "latest",
+        name: "parser",
+        services: ["web"],
+        knowledge: { project: "rw", groups: ["parsing"] },
+      },
     });
 
-    // Forked from the newest checkpoint, spawned by the lead, services passed through.
+    // Forked from the newest checkpoint, spawned by the lead as a worker spawn,
+    // services and knowledge passed through.
     assert.deepEqual(fake.state.forks, [
-      { snapshot: "snap-new", thread: lead.threadId, name: "parser", services: ["web"] },
+      {
+        snapshot: "snap-new",
+        thread: lead.threadId,
+        name: "parser",
+        services: ["web"],
+        spawn: true,
+        knowledge: { project: "rw", groups: ["parsing"] },
+      },
     ]);
     assert.equal(result.fork?.workspaceId, "ws-fork1");
     assert.equal(result.fork?.snapshot, "snap-new");

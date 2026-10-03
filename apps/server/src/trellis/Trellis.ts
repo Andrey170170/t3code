@@ -376,6 +376,14 @@ export interface TrellisAgentHomes {
   readonly codex: string | null;
 }
 
+/** What a fork's knowledge mounts are (`POST /v1/fork` `knowledge`). */
+export interface TrellisForkKnowledge {
+  readonly project?: "rw" | "ro" | "none" | undefined;
+  readonly notes?: "inherit" | "empty" | undefined;
+  readonly groups?: ReadonlyArray<string> | undefined;
+  readonly groupsRw?: ReadonlyArray<string> | undefined;
+}
+
 /** Enabled Trellis state. `shimDir` is null when provider shims could not be created. */
 export interface TrellisEnv {
   readonly root: string;
@@ -474,6 +482,9 @@ export class Trellis extends Context.Service<
       readonly name?: string | undefined;
       readonly thread?: string | undefined;
       readonly services?: "none" | "all" | ReadonlyArray<string> | undefined;
+      /** A worker spawn (`delegate_task`): its default project tier is read-only. */
+      readonly spawn?: boolean | undefined;
+      readonly knowledge?: TrellisForkKnowledge | undefined;
     }) => Effect.Effect<TrellisForkView, TrellisError>;
     /** Records activity in the target's workspace (for example a `summary`). */
     readonly recordActivity: (input: {
@@ -1036,7 +1047,7 @@ const make = Effect.gen(function* () {
           ...(spawnedBy === undefined ? {} : { spawned_by: spawnedBy }),
         })}`,
       ),
-    fork: ({ target, snapshot, name, thread, services }) =>
+    fork: ({ target, snapshot, name, thread, services, spawn, knowledge }) =>
       call(TrellisForkView, "POST", "/v1/fork", {
         body: {
           target,
@@ -1044,6 +1055,17 @@ const make = Effect.gen(function* () {
           ...(name === undefined ? {} : { name }),
           ...(thread === undefined ? {} : { thread }),
           ...(services === undefined ? {} : { services }),
+          ...(spawn === undefined ? {} : { spawn }),
+          ...(knowledge === undefined
+            ? {}
+            : {
+                knowledge: {
+                  ...(knowledge.project === undefined ? {} : { project: knowledge.project }),
+                  ...(knowledge.notes === undefined ? {} : { notes: knowledge.notes }),
+                  ...(knowledge.groups === undefined ? {} : { groups: knowledge.groups }),
+                  ...(knowledge.groupsRw === undefined ? {} : { groups_rw: knowledge.groupsRw }),
+                },
+              }),
         },
         // A reflink copy of the snapshot, and with services a container start.
         timeoutMs: 5 * 60_000,
