@@ -734,12 +734,14 @@ check 10a "Move to project -> click moves the thread, and its first turn runs in
 goto "/$ENV_ID/$IDEA_THREAD"
 thread_menu "$(sql "select title from orchestration_v2_projection_threads where thread_id='$IDEA_THREAD'")"
 shot 10c-history-limit
-LIMIT=$(pwc <<'JS'
-async page => await page.getByRole('button', { name: 'This thread has history; graduation will move such threads.' }).isDisabled()
+# Since graduation (M6) a thread with history moves too: its conversation
+# follows, its earlier turns' files stay in the old folder.
+TARGETS=$(pwc <<'JS'
+async page => await page.getByText(/^Project · ws-/).count()
 JS
 )
-c10b() { [[ $LIMIT == true ]]; }
-check 10b "The same menu on the step 3 thread shows the M1 limit, disabled" "$OUT/10c-history-limit.png" c10b
+c10b() { [[ ${TARGETS:-0} -gt 0 ]]; }
+check 10b "The same menu on the step 3 thread (which has history) offers Trellis projects to move to" "$OUT/10c-history-limit.png" c10b
 note 10 "Adaptation: the UI keeps a new thread as a client draft until its first message, and drafts have no thread menu, so the message-less thread is created over the RPC (orchestration.dispatchCommand thread.create, as API clients do); the move and the first turn go through the UI."
 
 # ---- 11. Context across a move (transcripts) ----------------------------
