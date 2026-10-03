@@ -7416,99 +7416,108 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
-  it.effect("opens an ephemeral side fork at head with side instructions and a boundary", () =>
-    Effect.gen(function* () {
-      const nativeThreadId = "side-source-thread";
-      const forkThreadId = "side-fork-thread";
-      const preamble = codexReplayPreamble({
-        nativeThreadId,
-        nativeTurnId: "side-source-turn",
-        prompt: "unused",
-      });
-      const transcript = makeCodexReplayTranscript({
-        scenario: "codex-ephemeral-side-fork",
-        entries: [
-          ...preamble.slice(0, 5),
-          {
-            type: "expect_outbound",
-            label: "config/read",
-            frame: {
-              id: 3,
-              method: "config/read",
-              params: { cwd: "/workspace", includeLayers: false },
-            },
-          },
-          {
-            type: "emit_inbound",
-            label: "config/read",
-            frame: {
-              id: 3,
-              result: { config: { developer_instructions: " Project rules. " }, origins: {} },
-            },
-          },
-          {
-            type: "expect_outbound",
-            label: "thread/fork",
-            frame: {
-              id: 4,
-              method: "thread/fork",
-              params: {
-                threadId: nativeThreadId,
-                ephemeral: true,
-                excludeTurns: true,
-                developerInstructions: "Project rules.\n\nSide rules.",
-                config: CodexAdapterV2.CODEX_THREAD_CONFIG,
+  it.effect(
+    "opens an ephemeral side fork at head with launch and side instructions and a boundary",
+    () =>
+      Effect.gen(function* () {
+        const nativeThreadId = "side-source-thread";
+        const forkThreadId = "side-fork-thread";
+        const preamble = codexReplayPreamble({
+          nativeThreadId,
+          nativeTurnId: "side-source-turn",
+          prompt: "unused",
+        });
+        const transcript = makeCodexReplayTranscript({
+          scenario: "codex-ephemeral-side-fork",
+          entries: [
+            ...preamble.slice(0, 5),
+            {
+              type: "expect_outbound",
+              label: "config/read",
+              frame: {
+                id: 3,
+                method: "config/read",
+                params: { cwd: "/workspace", includeLayers: false },
               },
             },
-          },
-          {
-            type: "emit_inbound",
-            label: "thread/fork",
-            frame: {
-              id: 4,
-              result: codexReplayThreadResult({
-                nativeThreadId: forkThreadId,
-                forkedFromId: nativeThreadId,
-              }),
+            {
+              type: "emit_inbound",
+              label: "config/read",
+              frame: {
+                id: 3,
+                result: { config: { developer_instructions: " Project rules. " }, origins: {} },
+              },
             },
-          },
-          {
-            type: "expect_outbound",
-            label: "thread/inject_items",
-            frame: {
-              id: 5,
-              method: "thread/inject_items",
-              params: {
-                threadId: forkThreadId,
-                items: [
-                  {
-                    type: "message",
-                    role: "user",
-                    content: [{ type: "input_text", text: "Boundary." }],
+            {
+              type: "expect_outbound",
+              label: "thread/fork",
+              frame: {
+                id: 4,
+                method: "thread/fork",
+                params: {
+                  threadId: nativeThreadId,
+                  ephemeral: true,
+                  excludeTurns: true,
+                  developerInstructions: "Project rules.\n\nPrimer.\n\nSide rules.",
+                  config: {
+                    ...CodexAdapterV2.CODEX_THREAD_CONFIG,
+                    developer_instructions: "Primer.",
                   },
-                ],
+                },
               },
             },
+            {
+              type: "emit_inbound",
+              label: "thread/fork",
+              frame: {
+                id: 4,
+                result: codexReplayThreadResult({
+                  nativeThreadId: forkThreadId,
+                  forkedFromId: nativeThreadId,
+                }),
+              },
+            },
+            {
+              type: "expect_outbound",
+              label: "thread/inject_items",
+              frame: {
+                id: 5,
+                method: "thread/inject_items",
+                params: {
+                  threadId: forkThreadId,
+                  items: [
+                    {
+                      type: "message",
+                      role: "user",
+                      content: [{ type: "input_text", text: "Boundary." }],
+                    },
+                  ],
+                },
+              },
+            },
+            { type: "emit_inbound", label: "thread/inject_items", frame: { id: 5, result: {} } },
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        const openEphemeralFork = harness.runtime.openEphemeralFork;
+        assert.isDefined(openEphemeralFork);
+        const sideThreadId = ThreadId.make("side-chat:test");
+
+        const forked = yield* openEphemeralFork!({
+          sourceNativeThreadId: nativeThreadId,
+          appThreadId: sideThreadId,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          // A launch's instructions (Trellis's primer) survive the fork's own.
+          runtimePolicy: {
+            ...CODEX_TEST_RUNTIME_POLICY,
+            launch: { executable: "/t3/trellis-shims/codex", instructions: "Primer." },
           },
-          { type: "emit_inbound", label: "thread/inject_items", frame: { id: 5, result: {} } },
-        ],
-      });
-      const harness = yield* makeCodexReplayHarness(transcript);
-      const openEphemeralFork = harness.runtime.openEphemeralFork;
-      assert.isDefined(openEphemeralFork);
-      const sideThreadId = ThreadId.make("side-chat:test");
+          developerInstructions: "Side rules.",
+          boundaryPrompt: "Boundary.",
+        });
 
-      const forked = yield* openEphemeralFork!({
-        sourceNativeThreadId: nativeThreadId,
-        appThreadId: sideThreadId,
-        modelSelection: CODEX_TEST_MODEL_SELECTION,
-        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
-        developerInstructions: "Side rules.",
-        boundaryPrompt: "Boundary.",
-      });
-
-      assert.equal(forked.nativeThreadRef?.nativeId, forkThreadId);
-      assert.equal(forked.appThreadId, sideThreadId);
-    }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+        assert.equal(forked.nativeThreadRef?.nativeId, forkThreadId);
+        assert.equal(forked.appThreadId, sideThreadId);
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 });

@@ -6308,9 +6308,11 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                 cwd: forkInput.runtimePolicy.cwd,
                 includeLayers: false,
               });
-              // Fork instructions replace the configured ones, so keep those first.
+              // Fork instructions replace the configured ones and a launch's
+              // (which travel in `config`), so keep both first.
               const developerInstructions = [
                 config.config.developer_instructions?.trim(),
+                forkInput.runtimePolicy.launch?.instructions,
                 forkInput.developerInstructions,
               ]
                 .filter((part): part is string => part !== undefined && part.length > 0)
