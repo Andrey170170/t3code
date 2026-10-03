@@ -33,6 +33,7 @@ import {
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import { previewEnvironment } from "~/state/preview";
+import { mapThreadPreviewUrl } from "~/state/trellisPreview";
 import { useAtomCommand } from "~/state/use-atom-command";
 import {
   browserMiniPlayerSource,
@@ -185,15 +186,48 @@ export function PreviewView({
     // threadKey stands in for threadRef, whose identity churns on every thread update.
   }, [environmentHostname, latestHistoryUrl, navTitle, navUrl, threadKey]);
 
+  /**
+   * `url` as the browser should load it in this thread (`localhost` in a
+   * Trellis thread is its workspace), or null when it must not load at all.
+   */
+  const mapTrellisUrl = useCallback(
+    async (url: string): Promise<string | null> => {
+      const mapped = await mapThreadPreviewUrl(threadRef, url);
+      if ("url" in mapped) return mapped.url;
+      if (mapped.error !== null) {
+        toastManager.add({
+          type: "error",
+          title: "Unable to open workspace port",
+          description: mapped.error.message,
+        });
+      }
+      return null;
+    },
+    [threadRef],
+  );
+
   const navigateToResolvedUrl = useCallback(
-    async (resolvedUrl: string) => {
+    async (requestedUrl: string, options: { readonly alreadyResolved?: boolean } = {}) => {
+      // Opens are mapped by the server; an in-place navigation must ask it
+      // first. A URL mapped by an earlier hop is never mapped again.
+      let resolvedUrl = requestedUrl;
+      if (runtimeTabId && previewBridge && options.alreadyResolved !== true) {
+        const mapped = await mapTrellisUrl(requestedUrl);
+        if (mapped === null) return false;
+        resolvedUrl = mapped;
+      }
       if (runtimeTabId && previewBridge) {
         // The bridge mirrors the resolved URL back to the server.
         await previewBridge.navigate(runtimeTabId, resolvedUrl);
         rememberPreviewUrl(threadRef, resolvedUrl);
         return true;
       }
-      const result = await openPreviewSession({ openPreview: open, threadRef, url: resolvedUrl });
+      const result = await openPreviewSession({
+        openPreview: open,
+        threadRef,
+        url: resolvedUrl,
+        ...(options.alreadyResolved === true ? { alreadyResolved: true } : {}),
+      });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
         if (error instanceof BrowserSettingsReadError) {
@@ -206,7 +240,7 @@ export function PreviewView({
       }
       return result._tag === "Success";
     },
-    [open, runtimeTabId, threadRef],
+    [mapTrellisUrl, open, runtimeTabId, threadRef],
   );
 
   const handleSubmitUrl = useCallback(
@@ -226,15 +260,24 @@ export function PreviewView({
   const handleOpenServerUrl = useCallback(
     async (next: string) => {
       try {
-        const resolved = resolveDiscoveredServerUrl(threadRef.environmentId, next);
-        if (await navigateToResolvedUrl(resolved)) {
+        // A workspace port is mapped before the remote-environment host
+        // rewrite, which would hide that the URL meant `localhost`.
+        const normalized = normalizePreviewUrl(next);
+        const mapped = await mapTrellisUrl(normalized);
+        if (mapped === null) return;
+        const resolved =
+          mapped === normalized
+            ? resolveDiscoveredServerUrl(threadRef.environmentId, next)
+            : mapped;
+        // Mapped here already: the next hops must not map it again.
+        if (await navigateToResolvedUrl(resolved, { alreadyResolved: true })) {
           recordVisitForThread(threadRef, next);
         }
       } catch {
         // Server-side `failed` event renders the unreachable view.
       }
     },
-    [navigateToResolvedUrl, threadRef],
+    [mapTrellisUrl, navigateToResolvedUrl, threadRef],
   );
 
   const handleRefresh = useCallback(() => {

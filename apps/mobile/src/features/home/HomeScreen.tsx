@@ -320,10 +320,11 @@ export function HomeScreen(props: HomeScreenProps) {
     () =>
       buildHomeProjectScopes({
         projects: props.projects,
+        threads: props.threads,
         environmentId: props.selectedEnvironmentId,
         projectGroupingMode: props.projectGroupingMode,
       }),
-    [props.projectGroupingMode, props.projects, props.selectedEnvironmentId],
+    [props.projectGroupingMode, props.projects, props.selectedEnvironmentId, props.threads],
   );
   const hasSearchQuery = props.searchQuery.trim().length > 0;
   const projectByKey = useMemo(() => {

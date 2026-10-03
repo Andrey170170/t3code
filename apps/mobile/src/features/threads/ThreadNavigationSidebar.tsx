@@ -208,10 +208,11 @@ function ThreadNavigationSidebarPane(
     () =>
       buildHomeProjectScopes({
         projects,
+        threads,
         environmentId: options.selectedEnvironmentId,
         projectGroupingMode: options.projectGroupingMode,
       }),
-    [options.projectGroupingMode, options.selectedEnvironmentId, projects],
+    [options.projectGroupingMode, options.selectedEnvironmentId, projects, threads],
   );
   const projectFilterOptions = useMemo(
     () =>

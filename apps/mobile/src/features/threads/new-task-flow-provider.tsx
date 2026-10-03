@@ -254,6 +254,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       sortHomeProjectScopes({
         scopes: buildHomeProjectScopes({
           projects,
+          threads,
           environmentId: null,
           projectGroupingMode: groupingSettings.sidebarProjectGroupingMode,
         }),

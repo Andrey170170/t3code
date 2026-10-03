@@ -17,7 +17,9 @@ import {
 } from "~/browserFaviconStore";
 import { useBrowserPointerStore } from "~/browser/browserPointerStore";
 import { applyPreviewDesktopState, type DesktopPreviewOverlay } from "~/previewStateStore";
+import { toastManager } from "~/components/ui/toast";
 import { previewEnvironment } from "~/state/preview";
+import { mapThreadPreviewUrl } from "~/state/trellisPreview";
 import { usePreparedConnection } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 
@@ -95,6 +97,27 @@ export function usePreviewBridge(input: {
     lastDesktopNavStatus.current = null;
     return bridge.onStateChange(handleStateChange);
   }, [bridge, runtimeTabId, stableThreadRef, tabId]);
+  // A loopback link the page followed on its own is held by the desktop host
+  // until it is mapped for this thread; a failed mapping cancels it.
+  const handleNavigationRequest = useEffectEvent((requestTabId: string, url: string): void => {
+    if (requestTabId !== runtimeTabId || !bridge) return;
+    void mapThreadPreviewUrl(stableThreadRef, url).then((mapped) => {
+      if ("url" in mapped) return bridge.navigate(runtimeTabId, mapped.url);
+      if (mapped.error !== null) {
+        toastManager.add({
+          type: "error",
+          title: "Unable to open workspace port",
+          description: mapped.error.message,
+        });
+      }
+    });
+  });
+  useEffect(() => {
+    if (!bridge || typeof window === "undefined") return;
+    return bridge.onNavigationRequest((request) =>
+      handleNavigationRequest(request.tabId, request.url),
+    );
+  }, [bridge]);
   useEffect(() => {
     if (!projectRef) return;
     flushPendingFaviconsForThread(stableThreadRef, projectRef, environmentHostname);

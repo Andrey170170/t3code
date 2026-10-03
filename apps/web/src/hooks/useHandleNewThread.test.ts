@@ -153,8 +153,8 @@ vi.mock("../lib/utils", () => ({
 vi.mock("../logicalProject", () => ({
   deriveLogicalProjectKeyFromSettings: () => "remote-project",
   getProjectOrderKey: () => "remote-project",
-  selectProjectGroupingSettings: () => ({}),
 }));
+vi.mock("./useProjectGroupingSettings", () => ({ useProjectGroupingSettings: () => ({}) }));
 vi.mock("../state/entities", () => ({
   readProjects: () => [
     {
@@ -174,6 +174,7 @@ vi.mock("../state/server", () => ({
   primaryServerSettingsAtom: "primary-settings",
 }));
 vi.mock("../threadRoutes", () => ({ resolveThreadRouteTarget: () => null }));
+vi.mock("./useSidebarProjects", () => ({ useSidebarProjects: () => [] }));
 vi.mock("../uiStateStore", () => ({
   legacyProjectCwdPreferenceKey: () => "remote-project",
   useUiStateStore: () => [],

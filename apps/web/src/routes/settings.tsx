@@ -5,6 +5,7 @@ import { Button } from "../components/ui/button";
 import { useSettingsRestore } from "../components/settings/SettingsPanels";
 
 import { SettingsBreadcrumb } from "../components/settings/SettingsBreadcrumb";
+import { GraduateIdeaDialogHost } from "../components/trellis/GraduateIdeaDialog";
 import { SidebarInset } from "../components/ui/sidebar";
 import { useNavigateToMainApp } from "../components/sidebar/mainAppLocation";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
@@ -141,6 +142,8 @@ function SettingsContentLayout() {
             <Outlet />
           </SettingsScopeBoundary>
         </div>
+        {/* Project settings graduate ideas from here, outside the chat layout. */}
+        <GraduateIdeaDialogHost />
       </div>
     </SidebarInset>
   );

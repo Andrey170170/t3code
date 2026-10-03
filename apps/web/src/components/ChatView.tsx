@@ -28,7 +28,7 @@ import {
   latestExecutedRun,
   latestRootProviderFailure,
 } from "@t3tools/shared/orchestrationV2ThreadError";
-import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import { isTrellisLandingPad, type UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import {
   collectProviderUsageLimits,
   hasProviderUsageLimits,
@@ -49,6 +49,7 @@ import { useAttachmentUploadStore } from "../lib/attachmentUploadQueue";
 import {
   type AssistantCitation,
   type ChatFileAttachment,
+  CheckpointId,
   CommandId,
   DEFAULT_MODEL,
   isProviderNativeSubagentThread,
@@ -64,6 +65,7 @@ import {
   type ServerProvider,
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
+  type OrchestrationV2AcknowledgedWork,
   ThreadId,
   type ThreadLinkedPullRequest,
   type RunId,
@@ -333,10 +335,7 @@ import {
   preventTerminalCloseShortcut,
 } from "../lib/terminalCloseShortcut";
 import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
-import {
-  deriveLogicalProjectKeyFromSettings,
-  selectProjectGroupingSettings,
-} from "../logicalProject";
+import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import { buildDraftThreadRouteParams, buildThreadRouteParams } from "../threadRoutes";
 import {
   isSameSidebarThreadRef,
@@ -527,6 +526,8 @@ import {
   shouldRefocusComposerOnWindowFocus,
 } from "./ChatView.logic";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
+import { useTrellisKnownRoots, useTrellisRestoreCheck, useTrellisRoot } from "~/hooks/useTrellis";
+import { isTrellisWorkspaceRoot, isUnderTrellisRoots } from "~/lib/trellis";
 import { useComposerHandleContext } from "../composerHandleContext";
 import {
   awaitAttachmentUploads,
@@ -583,6 +584,7 @@ const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_MODELS: ServerProvider["models"] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 import type { CodexArtifactTemplate } from "@t3tools/client-runtime/codex-artifact-templates";
+import { useProjectGroupingSettings } from "../hooks/useProjectGroupingSettings";
 
 const TIMELINE_SCROLL_CANCEL_SENTINEL = Object.freeze({});
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
@@ -1587,6 +1589,7 @@ export default function ChatView(props: ChatViewProps) {
   const dismissThreadUserInput = useAtomCommand(threadEnvironment.dismissUserInput, {
     reportFailure: false,
   });
+  const checkTrellisRestore = useTrellisRestoreCheck();
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
     reportFailure: false,
   });
@@ -2232,13 +2235,25 @@ export default function ChatView(props: ChatViewProps) {
   );
   const diffOpen = activeRightPanelKind === "diff";
   const explicitDiffOpenRef = useRef<ScopedThreadRef | null>(null);
+  // Where a generic opening lands when the checkout has no working-tree diff
+  // (a Trellis project without git): its latest turn. Set below.
+  const genericDiffTurnRef = useRef<RunId | null>(null);
   useLayoutEffect(() => {
     const explicitThreadRef = explicitDiffOpenRef.current;
     explicitDiffOpenRef.current = null;
     // Generic openings always show Changes, including tab fallbacks and thread changes.
     // A timeline click instead opens the specific turn/file the user requested.
-    if (diffOpen && activeThreadRef && explicitThreadRef !== activeThreadRef) {
-      useDiffPanelStore.getState().selectGitScope(activeThreadRef, "branch");
+    // Compared by key: the ref object is rebuilt whenever the thread updates,
+    // which can happen between the click and this effect.
+    if (
+      diffOpen &&
+      activeThreadRef &&
+      (explicitThreadRef === null ||
+        scopedThreadKey(explicitThreadRef) !== scopedThreadKey(activeThreadRef))
+    ) {
+      const latestTurn = genericDiffTurnRef.current;
+      if (latestTurn !== null) useDiffPanelStore.getState().selectTurn(activeThreadRef, latestTurn);
+      else useDiffPanelStore.getState().selectGitScope(activeThreadRef, "branch");
     }
   }, [activeThreadRef, diffOpen]);
   const rightPanelState = useRightPanelStore((state) =>
@@ -2512,7 +2527,7 @@ export default function ChatView(props: ChatViewProps) {
   const handleNewThreadInActiveProject = useCallback(() => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
   }, [activeProjectRef, handleNewThread]);
-  const projectGroupingSettings = selectProjectGroupingSettings(settings);
+  const projectGroupingSettings = useProjectGroupingSettings();
   const activeDraftLogicalProjectKey =
     !isServerThread && activeProject
       ? deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings)
@@ -3940,12 +3955,15 @@ export default function ChatView(props: ChatViewProps) {
       : JSON.stringify([itemId, latestCheckpointCompletedAt]);
   }, [serverVisibleTurnItems, turnDiffSummaries]);
 
-  const gitCwd = activeProject
-    ? projectScriptCwd({
-        project: { cwd: activeProject.workspaceRoot },
-        worktreePath: activeThread?.worktreePath ?? null,
-      })
-    : null;
+  // A new-idea draft has no repository until its idea exists: no git chrome.
+  const isIdeaDraft = activeProject !== null && isTrellisLandingPad(activeProject.id);
+  const gitCwd =
+    activeProject && !isIdeaDraft
+      ? projectScriptCwd({
+          project: { cwd: activeProject.workspaceRoot },
+          worktreePath: activeThread?.worktreePath ?? null,
+        })
+      : null;
   const gitStatusCwd = activeThread?.worktreePath ?? gitCwd;
   const gitStatusQuery = useEnvironmentQuery(
     gitStatusCwd === null
@@ -4073,6 +4091,14 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [environmentId, gitStatusCwd, liveIsGitRepo]);
   const isGitRepo = liveIsGitRepo ?? recallCheckoutIsRepo(environmentId, gitStatusCwd) ?? true;
+  // Trellis checkpoints are snapshots, so turn diffs need no git there.
+  const checkoutTrellisRoots = useTrellisKnownRoots(activeThread?.environmentId ?? null);
+  const hasTurnDiffs =
+    isGitRepo || (gitStatusCwd !== null && isUnderTrellisRoots(gitStatusCwd, checkoutTrellisRoots));
+  const genericDiffTurn = isGitRepo ? null : (turnDiffSummaries.at(-1)?.runId ?? null);
+  useLayoutEffect(() => {
+    genericDiffTurnRef.current = genericDiffTurn;
+  }, [genericDiffTurn]);
   // When context is enabled, keep a hidden, off-flow strip mounted so the composer
   // can measure whether its relocated controls fit. The visible chrome remains
   // content-driven: Git/environment context or controls that actually fit.
@@ -5035,11 +5061,13 @@ export default function ChatView(props: ChatViewProps) {
     [activeThreadRef, openPreview],
   );
   const addDiffSurface = useCallback(() => {
-    if (!activeThreadRef || !isServerThread || !isGitRepo) return;
-    useDiffPanelStore.getState().selectGitScope(activeThreadRef, "branch");
+    if (!activeThreadRef || !isServerThread || !hasTurnDiffs) return;
+    const latestTurn = genericDiffTurnRef.current;
+    if (latestTurn !== null) useDiffPanelStore.getState().selectTurn(activeThreadRef, latestTurn);
+    else useDiffPanelStore.getState().selectGitScope(activeThreadRef, "branch");
     useRightPanelStore.getState().open(activeThreadRef, "diff");
     onDiffPanelOpen?.();
-  }, [activeThreadRef, isGitRepo, isServerThread, onDiffPanelOpen]);
+  }, [activeThreadRef, hasTurnDiffs, isServerThread, onDiffPanelOpen]);
   const openChangesFromThreadPanel = useCallback(() => {
     addDiffSurface();
   }, [addDiffSurface]);
@@ -6468,6 +6496,13 @@ export default function ChatView(props: ChatViewProps) {
   }, []);
 
   const activeWorktreePath = activeThread?.worktreePath ?? null;
+  const trellisRoot = useTrellisRoot(activeThread?.environmentId ?? null);
+  // Trellis projects never get git worktrees (those would run on the host); a
+  // new-idea draft (the landing pad) becomes a Trellis idea on its first send.
+  const activeIsTrellisProject =
+    activeProject !== null &&
+    (isTrellisLandingPad(activeProject.id) ||
+      isTrellisWorkspaceRoot(activeProject.workspaceRoot, trellisRoot));
   const derivedEnvMode: DraftThreadEnvMode = resolveEffectiveEnvMode({
     activeWorktreePath,
     hasServerThread: isServerThread,
@@ -6481,9 +6516,11 @@ export default function ChatView(props: ChatViewProps) {
     activeThread.worktreePath === null &&
     !envLocked,
   );
-  const envMode: DraftThreadEnvMode = canOverrideServerThreadEnvMode
-    ? (pendingServerThreadEnvMode ?? draftThread?.envMode ?? derivedEnvMode)
-    : derivedEnvMode;
+  const envMode: DraftThreadEnvMode = activeIsTrellisProject
+    ? "local"
+    : canOverrideServerThreadEnvMode
+      ? (pendingServerThreadEnvMode ?? draftThread?.envMode ?? derivedEnvMode)
+      : derivedEnvMode;
   const activeThreadBranch =
     canOverrideServerThreadEnvMode && pendingServerThreadBranch !== undefined
       ? pendingServerThreadBranch
@@ -7778,6 +7815,24 @@ export default function ChatView(props: ChatViewProps) {
         setPendingRevert({ turnCount, messageId, routeThreadKey });
         return;
       }
+      let acknowledgeWork: ReadonlyArray<OrchestrationV2AcknowledgedWork> = [];
+      if (restoreFiles) {
+        try {
+          const acknowledged = await checkTrellisRestore(
+            environmentId,
+            { threadId: activeThread.id, turnCount },
+            (message) => localApi.dialogs.confirm(message),
+          );
+          if (acknowledged === null) return;
+          acknowledgeWork = acknowledged;
+        } catch (error) {
+          setThreadError(
+            activeThread.id,
+            error instanceof Error ? error.message : "Failed to revert thread state.",
+          );
+          return;
+        }
+      }
 
       useComposerDraftStore.setState((store) => ({
         rewindingThreadKeys: new Set(store.rewindingThreadKeys).add(routeThreadKey),
@@ -7809,7 +7864,13 @@ export default function ChatView(props: ChatViewProps) {
         await waitForRevertedMessage(routeThreadRef, messageId, turnCount, commandId, async () => {
           const result = await revertThreadCheckpoint({
             environmentId,
-            input: { commandId, threadId: activeThread.id, turnCount, restoreFiles },
+            input: {
+              commandId,
+              threadId: activeThread.id,
+              turnCount,
+              restoreFiles,
+              ...(acknowledgeWork.length === 0 ? {} : { acknowledgeWork }),
+            },
           });
           if (result._tag === "Failure") throw squashAtomCommandFailure(result);
         });
@@ -7904,6 +7965,23 @@ export default function ChatView(props: ChatViewProps) {
               "Roll back this thread to the selected checkpoint?\nThis action cannot be undone.",
             );
       if (!confirmed) return;
+      let acknowledgeWork: ReadonlyArray<OrchestrationV2AcknowledgedWork> = [];
+      try {
+        const acknowledged = await checkTrellisRestore(
+          environmentId,
+          { threadId: activeThread.id, checkpointId: CheckpointId.make(input.checkpointId) },
+          async (message) =>
+            localApi == null ? window.confirm(message) : localApi.dialogs.confirm(message),
+        );
+        if (acknowledged === null) return;
+        acknowledgeWork = acknowledged;
+      } catch (error) {
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to revert thread state.",
+        );
+        return;
+      }
 
       useComposerDraftStore.setState((store) => ({
         rewindingThreadKeys: new Set(store.rewindingThreadKeys).add(routeThreadKey),
@@ -7915,6 +7993,7 @@ export default function ChatView(props: ChatViewProps) {
           threadId: activeThread.id,
           checkpointId: input.checkpointId,
           scopeId: input.scopeId,
+          ...(acknowledgeWork.length === 0 ? {} : { acknowledgeWork }),
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -8228,6 +8307,13 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const multipleModelSelections = sendCtx.multipleModelSelections;
+    if (multipleModelSelections !== null && activeIsTrellisProject) {
+      setThreadError(
+        activeThread.id,
+        "Sending to several models needs git worktrees, which Trellis projects don't use. Pick one model.",
+      );
+      return;
+    }
     if (
       multipleModelSelections !== null &&
       serverConfig?.environment.capabilities.requiredWorktreeBootstrap !== true
@@ -10487,7 +10573,8 @@ export default function ChatView(props: ChatViewProps) {
     anchor: threadPanelPopoverAnchorRef,
     handle: threadPanelPopoverHandle,
     onPresentationChange: setThreadPanelPresentation,
-    forceNewWorktree: multipleModelSelections !== null,
+    forceNewWorktree: multipleModelSelections !== null && !activeIsTrellisProject,
+    worktreesUnavailable: activeIsTrellisProject,
     environmentId: activeThread.environmentId,
     threadId: activeThread.id,
     ...(draftId ? { draftId } : {}),
@@ -10523,7 +10610,7 @@ export default function ChatView(props: ChatViewProps) {
       ? { onCheckoutPullRequestRequest: openPullRequestDialog }
       : {}),
     onComposerFocusRequest: scheduleComposerFocus,
-    ...(isServerThread && isGitRepo ? { onOpenChanges: openChangesFromThreadPanel } : {}),
+    ...(isServerThread && hasTurnDiffs ? { onOpenChanges: openChangesFromThreadPanel } : {}),
     versionMismatch:
       showVersionMismatchBanner && versionMismatch
         ? {
@@ -10929,7 +11016,7 @@ export default function ChatView(props: ChatViewProps) {
                               multipleModelSelections={multipleModelSelections}
                               supportsMultipleModels={
                                 serverConfig?.environment.capabilities.requiredWorktreeBootstrap ===
-                                true
+                                  true && !activeIsTrellisProject
                               }
                               onMultipleModelSelectionsChange={setMultipleModelSelections}
                               composerRef={composerRef}
@@ -11124,7 +11211,10 @@ export default function ChatView(props: ChatViewProps) {
                           {mountComposerContextStrip && (
                             <div className="pointer-events-auto">
                               <BranchToolbar
-                                forceNewWorktree={multipleModelSelections !== null}
+                                forceNewWorktree={
+                                  multipleModelSelections !== null && !activeIsTrellisProject
+                                }
+                                worktreesUnavailable={activeIsTrellisProject}
                                 ref={branchToolbarRef}
                                 environmentId={activeThread.environmentId}
                                 threadId={activeThread.id}
@@ -11289,7 +11379,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddDevice={addDeviceSurface}
           browserAvailable={isPreviewSupportedInRuntime()}
           terminalAvailable={activeProject !== null}
-          diffAvailable={isServerThread && isGitRepo}
+          diffAvailable={isServerThread && hasTurnDiffs}
           filesAvailable={activeProject !== null}
           pullRequestAvailable={pullRequestSurfaceAvailable}
           pullRequestsAvailable={pullRequestsSurfaceAvailable}
@@ -11347,7 +11437,7 @@ export default function ChatView(props: ChatViewProps) {
             onAddDevice={addDeviceSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             terminalAvailable={activeProject !== null}
-            diffAvailable={isServerThread && isGitRepo}
+            diffAvailable={isServerThread && hasTurnDiffs}
             filesAvailable={activeProject !== null}
             pullRequestAvailable={pullRequestSurfaceAvailable}
             pullRequestsAvailable={pullRequestsSurfaceAvailable}

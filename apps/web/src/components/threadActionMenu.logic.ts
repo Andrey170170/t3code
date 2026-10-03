@@ -10,6 +10,8 @@ export type ThreadActionMenuId =
   | "new-thread-on-branch"
   | "filter-by-project"
   | "project-settings"
+  | "move-to-project"
+  | `move-to-project:${string}`
   | "pin"
   | "unpin"
   | "settle"
@@ -59,6 +61,18 @@ export interface ThreadActionMenuState {
     readonly titleRegeneration: boolean;
   };
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
+  /**
+   * Trellis projects the thread can move to; absent where Trellis is not
+   * ready or there is nowhere to move. A blocked move lists only its reason.
+   */
+  readonly moveToProject?: {
+    readonly blockedReason: string | null;
+    readonly targets: ReadonlyArray<{
+      readonly projectId: string;
+      readonly label: string;
+      readonly detail?: string | null;
+    }>;
+  } | null;
 }
 
 /**
@@ -176,6 +190,29 @@ export function buildThreadActionMenuItems(
         { id: "copy-thread-id", label: "Thread ID", icon: "hash" },
       ],
     },
+    ...(state.moveToProject
+      ? [
+          {
+            id: "move-to-project" as const,
+            label: "Move to project",
+            icon: "folder",
+            children:
+              state.moveToProject.blockedReason === null
+                ? state.moveToProject.targets.map((target) => ({
+                    id: `move-to-project:${target.projectId}` as const,
+                    label: target.label,
+                    ...(target.detail ? { detail: target.detail } : {}),
+                  }))
+                : [
+                    {
+                      id: "move-to-project" as const,
+                      label: state.moveToProject.blockedReason,
+                      disabled: true,
+                    },
+                  ],
+          },
+        ]
+      : []),
     { id: "project-settings", label: "Project settings", icon: "settings" },
     // Archive removes the thread from the sidebar while keeping its
     // conversation under Settings > Archived threads — distinct from Settle

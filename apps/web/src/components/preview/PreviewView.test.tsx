@@ -145,6 +145,10 @@ vi.mock("~/state/preview", () => ({
   previewEnvironment: { open: {}, resize: {} },
 }));
 
+// These environments do not run Trellis: previews load as requested.
+vi.mock("~/state/trellisPreview", () => ({
+  mapThreadPreviewUrl: async (_threadRef: unknown, url: string) => ({ url }),
+}));
 vi.mock("~/state/use-atom-command", () => ({
   useAtomCommand: () => vi.fn(),
 }));

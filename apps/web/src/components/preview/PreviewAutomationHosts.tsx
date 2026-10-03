@@ -458,6 +458,10 @@ function PreviewAutomationHost(props: { readonly environmentId: EnvironmentId })
                 input: {
                   threadId: request.threadId,
                   ...(resolvedInputUrl ? { url: resolvedInputUrl } : {}),
+                  // The server mapped this URL to a Trellis workspace already.
+                  ...((input as { alreadyResolved?: boolean }).alreadyResolved === true
+                    ? { alreadyResolved: true }
+                    : {}),
                   // An agent that didn't state a size gets the user's
                   // configured default, same as a hand-opened tab.
                   viewport: browserDefaultOpenViewport(defaults),
