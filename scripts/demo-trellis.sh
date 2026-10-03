@@ -769,7 +769,7 @@ SLUG_DIR=$CLAUDE_HOME/projects/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$SPIKE_B")
 c11() { [[ $SPIKE_RC == 0 ]] && grep -qE 'Tests +1 passed' "$OUT/11-recall-spike.log" && ! grep -q failed "$OUT/11-recall-spike.log"; }
 check 11 "Thinking-only recall survives prepare from this run's idea to its project; forkSession with dir B succeeds (spike test)" \
   "$OUT/11-recall-spike.log" c11
-note 11 "Transcript-level by design: the UI cannot move a thread with history in M1."
+note 11 "Transcript-level: the recall is checked on transcripts directly, beside the UI moves above."
 
 # ---- checklist ----------------------------------------------------------
 print_checklist
