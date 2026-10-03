@@ -1830,9 +1830,15 @@ const make = Effect.gen(function* () {
 
   // Base builds in progress, by base name; see `buildBase` in the shape.
   const baseBuilds = new Map<string, Deferred.Deferred<TrellisBuildBaseResult, TrellisError>>();
-  // A failed build's error, kept for the settings page until the next build:
-  // its caller may be gone.
-  const baseBuildFailures = new Map<string, string>();
+  // A failed build's error, kept for the settings page (its caller may be
+  // gone) until a later build succeeds or Trellis reports the base in another
+  // state than when it failed (rebuilt from the CLI). `state` is the base's
+  // state as last read, undefined until a details read sees it.
+  const baseBuildFailures = new Map<
+    string,
+    { readonly message: string; state: string | null | undefined }
+  >();
+  const lastBaseStates = new Map<string, string | null>();
   const buildBase = Effect.fn("TrellisCatalog.buildBase")(function* (name: string) {
     yield* requireReady;
     const fresh = yield* Deferred.make<TrellisBuildBaseResult, TrellisError>();
@@ -1846,7 +1852,13 @@ const make = Effect.gen(function* () {
         baseBuildFailures.delete(name);
         yield* trellis.buildBase(name).pipe(
           Effect.tapError((error) =>
-            Effect.sync(() => void baseBuildFailures.set(name, error.message)).pipe(
+            Effect.sync(
+              () =>
+                void baseBuildFailures.set(name, {
+                  message: error.message,
+                  state: lastBaseStates.has(name) ? lastBaseStates.get(name) : undefined,
+                }),
+            ).pipe(
               Effect.andThen(
                 Effect.logWarning("Trellis base build failed", {
                   base: name,
@@ -1939,18 +1951,24 @@ const make = Effect.gen(function* () {
     buildBase,
     details: requireReady.pipe(
       Effect.andThen(Effect.all([trellis.details, Ref.get(lastApplied)])),
-      Effect.map(([details, applied]) => ({
-        ...nameDetailsWorkspaces(details, applied?.items ?? []),
-        buildingBases: [...baseBuilds.keys()],
-        baseBuildFailures: Object.fromEntries(
-          [...baseBuildFailures].filter(([base]) => {
-            // Rebuilt since (from the CLI, or an answer that was lost): no longer failed.
-            if (details.baseStates?.[base] !== "current") return true;
-            baseBuildFailures.delete(base);
-            return false;
-          }),
-        ),
-      })),
+      Effect.map(([details, applied]) => {
+        for (const base of details.bases) {
+          const state = details.baseStates?.[base] ?? null;
+          lastBaseStates.set(base, state);
+          const failure = baseBuildFailures.get(base);
+          if (failure === undefined) continue;
+          if (failure.state === undefined) failure.state = state;
+          // Built since by other means: no longer failed.
+          else if (failure.state !== state) baseBuildFailures.delete(base);
+        }
+        return {
+          ...nameDetailsWorkspaces(details, applied?.items ?? []),
+          buildingBases: [...baseBuilds.keys()],
+          baseBuildFailures: Object.fromEntries(
+            [...baseBuildFailures].map(([base, failure]) => [base, failure.message]),
+          ),
+        };
+      }),
     ),
   });
 });

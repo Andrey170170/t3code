@@ -1313,12 +1313,15 @@ describe("TrellisCatalog service", () => {
         });
         assert.deepEqual(a, b);
         assert.equal(buildState.builds, before + 1);
-        // A failure stays reported until the base is current again (rebuilt from the CLI).
-        yield* catalog.buildBase("broken").pipe(Effect.flip);
-        assert.deepEqual((yield* catalog.details).baseBuildFailures, {
-          broken: "definition for broken failed",
-        });
+        // A failed rebuild of a current base stays reported while it is unchanged...
         buildState.baseStates = { broken: "current" };
+        yield* catalog.details;
+        yield* catalog.buildBase("broken").pipe(Effect.flip);
+        const failed = { broken: "definition for broken failed" };
+        assert.deepEqual((yield* catalog.details).baseBuildFailures, failed);
+        assert.deepEqual((yield* catalog.details).baseBuildFailures, failed);
+        // ...and goes once Trellis reports it in another state (rebuilt from the CLI).
+        buildState.baseStates = { broken: "stale" };
         assert.deepEqual((yield* catalog.details).baseBuildFailures, {});
       }),
     );
