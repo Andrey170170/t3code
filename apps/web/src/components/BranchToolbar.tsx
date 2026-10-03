@@ -40,6 +40,8 @@ import {
 } from "./BranchToolbarBranchSelector";
 import { BranchToolbarEnvironmentSelector } from "./BranchToolbarEnvironmentSelector";
 import { BranchToolbarEnvModeSelector } from "./BranchToolbarEnvModeSelector";
+import { useTrellisKnownRoots } from "../hooks/useTrellis";
+import { trellisFolderDisplayName } from "../lib/trellis";
 import { PreviousWorktreeItemContent } from "./PreviousWorktreeItemContent";
 import { ComposerControl } from "./chat/ComposerControl";
 import {
@@ -543,6 +545,20 @@ export const BranchToolbar = memo(function BranchToolbar({
       : null;
   const activeProject = useProject(activeProjectRef);
   const hasActiveThread = serverThread !== null || draftThread !== null;
+  // Trellis project folders and the new-idea landing pad have internal names.
+  const trellisRoots = useTrellisKnownRoots(activeProjectRef?.environmentId ?? null);
+  const projectFolderLabel = useMemo(() => {
+    const label =
+      activeProject === null ? null : trellisFolderDisplayName(activeProject, trellisRoots);
+    if (label === null) return null;
+    return label.placeholder
+      ? {
+          name: label.name,
+          kind: "Trellis idea",
+          tooltip: "The idea's folder is created when you send the first message.",
+        }
+      : { name: label.name };
+  }, [activeProject, trellisRoots]);
   const activeWorktreePath = forceNewWorktree
     ? null
     : (serverThread?.worktreePath ?? draftThread?.worktreePath ?? null);
@@ -628,6 +644,7 @@ export const BranchToolbar = memo(function BranchToolbar({
             effectiveEnvMode={effectiveEnvMode}
             activeWorktreePath={activeWorktreePath}
             workspaceRoot={activeProject.workspaceRoot}
+            projectFolderLabel={projectFolderLabel}
             onEnvModeChange={onEnvModeChange}
           />
         ) : null}

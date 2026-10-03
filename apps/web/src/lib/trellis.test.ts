@@ -17,10 +17,12 @@ import {
   isTrellisIdeaPath,
   isTrellisWorkspaceRoot,
   isUnderTrellisRoots,
+  noProjectKind,
   pickTrellisEnvironment,
   threadMoveBlocker,
   canGraduateIdea,
   trellisFindHitSummary,
+  trellisFolderDisplayName,
   trellisItemDetail,
   trellisItemKind,
   trellisKeepSeparate,
@@ -440,5 +442,62 @@ describe("canGraduateIdea", () => {
     expect(canGraduateIdea("/home/me/repo", ready)).toBe(false);
     expect(canGraduateIdea(idea, { ...ready, retiredRoots: [idea] })).toBe(false);
     expect(canGraduateIdea(idea, { ...ready, state: "unavailable" })).toBe(false);
+  });
+});
+
+describe("noProjectKind", () => {
+  it("means a Trellis idea only while Trellis is ready, else the host scratch project", () => {
+    expect(noProjectKind({ trellisState: "ready", scratchOffered: true })).toBe("idea");
+    expect(noProjectKind({ trellisState: "ready", scratchOffered: false })).toBe("idea");
+    for (const trellisState of ["disabled", "unavailable", null] as const) {
+      expect(noProjectKind({ trellisState, scratchOffered: true })).toBe("scratch");
+      expect(noProjectKind({ trellisState, scratchOffered: false })).toBeNull();
+    }
+  });
+});
+
+describe("trellisFolderDisplayName", () => {
+  const roots = ["/trellis"];
+
+  it("names the landing pad and Trellis folders by their project title", () => {
+    expect(
+      trellisFolderDisplayName(
+        {
+          id: TRELLIS_LANDING_PAD_PROJECT_ID,
+          title: "New idea",
+          workspaceRoot: "/home/me/.t3/userdata/trellis-landing-pad",
+        },
+        [],
+      ),
+    ).toEqual({ name: "New idea", placeholder: true });
+    expect(
+      trellisFolderDisplayName(
+        {
+          id: "p1",
+          title: "Date Printer",
+          workspaceRoot: "/trellis/workspaces/ws-s/project/idea-tsagf8qi",
+        },
+        roots,
+      ),
+    ).toEqual({ name: "Date Printer", placeholder: false });
+    // A Trellis project's folder is always named "project".
+    expect(
+      trellisFolderDisplayName(
+        { id: "p3", title: "click", workspaceRoot: "/trellis/workspaces/ws-1/project" },
+        roots,
+      ),
+    ).toEqual({ name: "click", placeholder: false });
+  });
+
+  it("leaves the user's own folder names alone", () => {
+    const project = { id: "p2", title: "Click (fork)", workspaceRoot: "/home/me/click" };
+    expect(trellisFolderDisplayName(project, roots)).toBeNull();
+    // An idea under a root this environment does not know is not recognized.
+    expect(
+      trellisFolderDisplayName(
+        { ...project, workspaceRoot: "/other/workspaces/ws-s/project/idea-1" },
+        roots,
+      ),
+    ).toBeNull();
   });
 });

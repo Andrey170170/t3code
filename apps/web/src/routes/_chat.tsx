@@ -12,7 +12,7 @@ import { usePrimaryEnvironmentId } from "../state/environments";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
-import { useScratchProject } from "../hooks/useScratchProject";
+import { useNoProjectStart } from "../hooks/useNoProjectStart";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
@@ -40,7 +40,11 @@ function ChatRouteGlobalShortcuts() {
   const projectGroupingSettings = useProjectGroupingSettings();
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const { scratchEnvironmentId, startScratchThread } = useScratchProject();
+  // "Without a project" is a Trellis idea where Trellis is on, else the host
+  // scratch project.
+  const { kind: noProjectKind, start: startWithoutProject } = useNoProjectStart(
+    activeThread?.environmentId ?? activeDraftThread?.environmentId ?? primaryEnvironmentId,
+  );
   const projectGroupCount = useMemo(
     () =>
       buildSidebarProjectSnapshots({
@@ -110,13 +114,10 @@ function ChatRouteGlobalShortcuts() {
       }
 
       if (command === "chat.newWithoutProject") {
-        const environmentId = scratchEnvironmentId(
-          activeThread?.environmentId ?? activeDraftThread?.environmentId ?? primaryEnvironmentId,
-        );
-        if (environmentId === null) return;
+        if (noProjectKind === null) return;
         event.preventDefault();
         event.stopPropagation();
-        void startScratchThread(environmentId);
+        void startWithoutProject();
         return;
       }
 
@@ -198,9 +199,9 @@ function ChatRouteGlobalShortcuts() {
     primaryEnvironmentId,
     projectGroupCount,
     routeThreadRef,
-    scratchEnvironmentId,
+    noProjectKind,
     selectedThreadKeysSize,
-    startScratchThread,
+    startWithoutProject,
     legacySidebarEnabled,
     terminalOpen,
   ]);

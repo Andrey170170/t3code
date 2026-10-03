@@ -38,6 +38,16 @@ interface BranchToolbarEnvModeSelectorProps {
   effectiveEnvMode: EnvMode;
   activeWorktreePath: string | null;
   workspaceRoot?: string | null;
+  /**
+   * Replaces the project folder's own name where that is an internal one (a
+   * Trellis idea's folder, the new-idea landing pad). `kind` and `tooltip`
+   * replace "Project folder" and the path where those would mislead.
+   */
+  projectFolderLabel?: {
+    readonly name: string;
+    readonly kind?: string;
+    readonly tooltip?: string;
+  } | null;
   onEnvModeChange: (mode: EnvMode) => void;
   displayMode?: "toolbar" | "panel";
   previousWorktreeLabel?: string | null;
@@ -51,6 +61,7 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   effectiveEnvMode,
   activeWorktreePath,
   workspaceRoot = null,
+  projectFolderLabel = null,
   onEnvModeChange,
   displayMode = "toolbar",
   previousWorktreeLabel,
@@ -58,8 +69,13 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   onUsePreviousWorktree,
 }: BranchToolbarEnvModeSelectorProps) {
   const workspacePath = displayMode === "panel" ? (activeWorktreePath ?? workspaceRoot) : null;
-  const workspaceDisplayName = resolveWorkspaceDisplayName(workspacePath);
-  const workspaceKind = activeWorktreePath ? "Worktree" : "Project folder";
+  const folderLabel = activeWorktreePath === null ? projectFolderLabel : null;
+  const workspaceDisplayName =
+    workspacePath === null
+      ? null
+      : (folderLabel?.name ?? resolveWorkspaceDisplayName(workspacePath));
+  const workspaceTooltip = folderLabel?.tooltip ?? workspacePath;
+  const workspaceKind = activeWorktreePath ? "Worktree" : (folderLabel?.kind ?? "Project folder");
   const composerFloatingLayerProps = useComposerMenuProps();
   const showPreviousWorktree = Boolean(previousWorktreeLabel && onUsePreviousWorktree);
   const envModeItems = useMemo(
@@ -161,7 +177,8 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
         <TooltipPopup side={displayMode === "panel" ? "left" : undefined}>
           {forceNewWorktree
             ? "Each model starts in its own worktree."
-            : (workspacePath ?? resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode))}
+            : (workspaceTooltip ??
+              resolveLockedWorkspaceLabel(activeWorktreePath, effectiveEnvMode))}
         </TooltipPopup>
       </Tooltip>
     );
@@ -217,7 +234,7 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
           ) : null}
         </TooltipTrigger>
         <TooltipPopup side={displayMode === "panel" ? "left" : undefined}>
-          {workspacePath ??
+          {workspaceTooltip ??
             (effectiveEnvMode === "worktree"
               ? resolveEnvModeLabel("worktree")
               : resolveCurrentWorkspaceLabel(activeWorktreePath))}

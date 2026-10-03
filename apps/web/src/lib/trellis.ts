@@ -49,6 +49,24 @@ export function trellisRemovalOf(
   return roots.some((root) => isTrellisWorkspaceRoot(workspaceRoot, root)) ? "offline" : "none";
 }
 
+export type NoProjectKind = "idea" | "scratch";
+
+/** The host scratch project's name where "without a project" means a Trellis idea. */
+export const HOST_NO_PROJECT_LABEL = "No project (host folder)";
+
+/**
+ * What starting "without a project" means in an environment: a Trellis idea
+ * while Trellis is ready there, otherwise a thread in the host scratch
+ * project when the server offers one, otherwise nothing.
+ */
+export function noProjectKind(input: {
+  readonly trellisState: TrellisState | null | undefined;
+  readonly scratchOffered: boolean;
+}): NoProjectKind | null {
+  if (input.trellisState === "ready") return "idea";
+  return input.scratchOffered ? "scratch" : null;
+}
+
 /** Whether a Trellis project path is an idea folder in scratch rather than a workspace root. */
 export function isTrellisIdeaPath(workspaceRoot: string, trellisRoot: string): boolean {
   const relative = workspaceRoot
@@ -57,6 +75,28 @@ export function isTrellisIdeaPath(workspaceRoot: string, trellisRoot: string): b
     .filter((segment) => segment.length > 0);
   // workspaces/<ws>/project/<idea>
   return relative.length > 3;
+}
+
+/**
+ * The name to show for a project's folder when the folder's own name is an
+ * internal one: the landing pad of new-idea drafts and Trellis project paths
+ * (`workspaces/<ws>/project`, `.../project/idea-<id>`) show the project's
+ * title ("New idea", then the item's name). Null when the folder name is the
+ * user's own and is shown as it is. `placeholder` marks the landing pad,
+ * where no thread ever runs: its path means nothing to the user either.
+ */
+export function trellisFolderDisplayName(
+  project: {
+    readonly id: string;
+    readonly title: string;
+    readonly workspaceRoot: string;
+  },
+  trellisRoots: ReadonlyArray<string>,
+): { readonly name: string; readonly placeholder: boolean } | null {
+  if (isTrellisLandingPad(project.id)) return { name: project.title, placeholder: true };
+  return isUnderTrellisRoots(project.workspaceRoot, trellisRoots)
+    ? { name: project.title, placeholder: false }
+    : null;
 }
 
 const trimTrailingSlashes = (path: string) => path.replace(/(.)\/+$/, "$1");

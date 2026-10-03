@@ -334,7 +334,7 @@ palette "New idea"
 pwc <<'JS' >/dev/null
 async page => {
   await page.waitForURL((url) => url.pathname.startsWith('/draft/'), { timeout: 30000 });
-  await page.getByRole('heading', { name: 'What should we build in New idea?' }).waitFor({ timeout: 30000 });
+  await page.getByRole('heading', { name: 'What should we work on?' }).waitFor({ timeout: 30000 });
 }
 JS
 select_model Claude "$CLAUDE_MODEL_LABEL" >"$OUT/02-model.log"

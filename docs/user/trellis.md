@@ -32,6 +32,11 @@ nothing behind.
 repository. **Find in Trellis** searches ideas and projects and opens the workspace that matched,
 including forks.
 
+While Trellis is on, starting [without a project](./thread-sidebar.md#start-without-a-project)
+means a new idea: **or start without a project**, its shortcut and the empty-state button all open
+one. A plain thread on the host is still there as **No project (host folder)** in the project picker
+and the command palette.
+
 New ideas and projects are named from their first thread: a name appears when its first turn
 finishes and is refined once after the third turn. A name you or an agent gave, or a repository's
 name, is never replaced.

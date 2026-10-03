@@ -96,7 +96,13 @@ import {
   useTrellisFind,
   useTrellisStatusFor,
 } from "../hooks/useTrellis";
-import { canGraduateIdea, trellisFindHitSummary, trellisMoveMenu } from "../lib/trellis";
+import {
+  canGraduateIdea,
+  HOST_NO_PROJECT_LABEL,
+  noProjectKind,
+  trellisFindHitSummary,
+  trellisMoveMenu,
+} from "../lib/trellis";
 import { openGraduateIdeaDialog } from "./trellis/GraduateIdeaDialog";
 import { openNewTrellisProjectDialog } from "./trellis/NewTrellisProjectDialog";
 import { useTheme } from "../hooks/useTheme";
@@ -1160,6 +1166,16 @@ function OpenCommandPaletteDialog(props: {
   const scratchTargetEnvironmentId = scratchEnvironmentId(
     currentProjectEnvironmentId ?? primaryEnvironmentId,
   );
+  // With Trellis on there, "without a project" is a new idea; the host scratch
+  // project stays as its own, plainly labelled entry.
+  const noProjectIsIdea =
+    noProjectKind({
+      trellisState:
+        trellis?.environmentId === (currentProjectEnvironmentId ?? primaryEnvironmentId)
+          ? "ready"
+          : null,
+      scratchOffered: scratchTargetEnvironmentId !== null,
+    }) === "idea";
   const currentProjectCwd = currentProjectId
     ? (projectCwdById.get(currentProjectId) ?? null)
     : null;
@@ -1403,16 +1419,29 @@ function OpenCommandPaletteDialog(props: {
             );
           },
         }),
+        ...(noProjectIsIdea && trellis !== null
+          ? [
+              {
+                kind: "action" as const,
+                value: "new-thread-in:new-idea",
+                searchTerms: ["new idea", "no project", "without project", "none", "trellis"],
+                title: "New idea",
+                icon: <LightbulbIcon className={ITEM_ICON_CLASS} />,
+                shortcutCommand: "chat.newWithoutProject" as const,
+                run: () => newTrellisIdea(trellis.environmentId),
+              },
+            ]
+          : []),
         ...(scratchTargetEnvironmentId === null
           ? []
           : [
               {
                 kind: "action" as const,
                 value: "new-thread-in:no-project",
-                searchTerms: ["no project", "without project", "none"],
-                title: "No project",
+                searchTerms: ["no project", "without project", "none", "host"],
+                title: noProjectIsIdea ? HOST_NO_PROJECT_LABEL : "No project",
                 icon: <MessageSquareDashedIcon className={ITEM_ICON_CLASS} />,
-                shortcutCommand: "chat.newWithoutProject" as const,
+                ...(noProjectIsIdea ? {} : { shortcutCommand: "chat.newWithoutProject" as const }),
                 run: () => startScratchThread(scratchTargetEnvironmentId),
               },
             ]),
@@ -1423,9 +1452,12 @@ function OpenCommandPaletteDialog(props: {
       pickerProjects,
       projectEnvironmentLocationById,
       projectGroupByTargetKey,
+      newTrellisIdea,
+      noProjectIsIdea,
       scratchTargetEnvironmentId,
       scratchWorkspaceRootFor,
       startScratchThread,
+      trellis,
     ],
   );
 
@@ -1974,9 +2006,11 @@ function OpenCommandPaletteDialog(props: {
       kind: "action",
       value: "action:new-thread-without-project",
       searchTerms: ["new thread", "no project", "without project", "none", "chat"],
-      title: "New thread without a project",
+      title: noProjectIsIdea
+        ? "New thread without a project (host folder)"
+        : "New thread without a project",
       icon: <MessageSquareDashedIcon className={ITEM_ICON_CLASS} />,
-      shortcutCommand: "chat.newWithoutProject",
+      ...(noProjectIsIdea ? {} : { shortcutCommand: "chat.newWithoutProject" as const }),
       run: () => startScratchThread(scratchTargetEnvironmentId),
     });
   }
@@ -2189,6 +2223,7 @@ function OpenCommandPaletteDialog(props: {
         title: "New idea",
         description: `Draft a thread; its Trellis idea is created when you send${onEnvironment}`,
         icon: <LightbulbIcon className={ITEM_ICON_CLASS} />,
+        ...(noProjectIsIdea ? { shortcutCommand: "chat.newWithoutProject" as const } : {}),
         run: async () => {
           await newTrellisIdea(trellisEnvironmentId);
         },

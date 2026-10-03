@@ -1,4 +1,5 @@
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -209,6 +210,32 @@ export function useTrellisCreate() {
     [openDraftIn, runPrepareIdeaDraft],
   );
 
+  /**
+   * The landing pad project once it is in this client's store, for
+   * retargeting an open draft to a new idea in place. Null after a failure,
+   * which it reports as a toast.
+   */
+  const openIdeaProject = useCallback(
+    async (environmentId: EnvironmentId): Promise<EnvironmentProject | null> => {
+      const report = (error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not start a new idea",
+            description: failureMessage(error, "Trellis did not respond."),
+          }),
+        );
+        return null;
+      };
+      const result = await runPrepareIdeaDraft({ environmentId, input: {} });
+      if (result._tag === "Failure") {
+        return isAtomCommandInterrupted(result) ? null : report(squashAtomCommandFailure(result));
+      }
+      return waitForProject(scopeProjectRef(environmentId, result.value.projectId)).catch(report);
+    },
+    [runPrepareIdeaDraft],
+  );
+
   const newProject = useCallback(
     async (
       environmentId: EnvironmentId,
@@ -236,7 +263,7 @@ export function useTrellisCreate() {
     [openDraftIn, runNewProject],
   );
 
-  return { newIdea, newProject };
+  return { newIdea, openIdeaProject, newProject };
 }
 
 /**

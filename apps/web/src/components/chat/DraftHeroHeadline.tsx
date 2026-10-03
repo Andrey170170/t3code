@@ -1,9 +1,13 @@
 import type { DraftId } from "~/composerDraftStore";
 import { useComposerDraftStore } from "~/composerDraftStore";
-import { resolveEnvironmentMachineKind, type ScopedProjectRef } from "@t3tools/contracts";
+import {
+  isTrellisLandingPad,
+  resolveEnvironmentMachineKind,
+  type ScopedProjectRef,
+} from "@t3tools/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
-import { FolderPlusIcon, MessageSquareDashedIcon } from "lucide-react";
+import { FolderPlusIcon, LightbulbIcon, MessageSquareDashedIcon } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
@@ -12,6 +16,8 @@ import { shortcutLabelForCommand } from "~/keybindings";
 import { projectIconColorClassName } from "~/projectIconColors";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { useScratchProject } from "~/hooks/useScratchProject";
+import { useTrellisCreate, useTrellisStatusFor } from "~/hooks/useTrellis";
+import { HOST_NO_PROJECT_LABEL, noProjectKind, type NoProjectKind } from "~/lib/trellis";
 import { useClientSettings } from "~/hooks/useSettings";
 import { hasExplicitComposerModelSelection } from "~/lib/chatThreadActions";
 import { deriveLogicalProjectKeyFromSettings } from "~/logicalProject";
@@ -39,8 +45,10 @@ import { InlineButton } from "../ui/button";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { useProjectGroupingSettings } from "~/hooks/useProjectGroupingSettings";
 
-// Menu value for "No project"; real entries are keyed by logical project key.
+// Menu values for "No project" and a Trellis "New idea"; real entries are
+// keyed by logical project key.
 const NO_PROJECT_VALUE = "no-project";
+const NEW_IDEA_VALUE = "new-idea";
 
 interface DraftHeroHeadlineProps {
   readonly draftId: DraftId | null;
@@ -67,6 +75,10 @@ export function DraftHeroHeadline({
   const setModelSelection = useComposerDraftStore((store) => store.setModelSelection);
   const openAddProject = useCallback(() => openCommandPalette({ open: "add-project" }), []);
   const { scratchEnvironmentId, scratchWorkspaceRootFor, openScratchProject } = useScratchProject();
+  const { openIdeaProject } = useTrellisCreate();
+  // Where a thread without a project would start: the draft's environment.
+  const noProjectEnvironmentId = activeProjectRef?.environmentId ?? primaryEnvironmentId;
+  const trellisState = useTrellisStatusFor(noProjectEnvironmentId)?.state ?? null;
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
 
   const environmentLabelById = useMemo(
@@ -142,7 +154,6 @@ export function DraftHeroHeadline({
   const activeProjectDisplayName = activeProjectGroup?.displayName ?? activeProjectTitle;
   const hasResolvedProject = activeProjectTitle !== null;
   const canChooseProject = projectPickerEntries.length > 0;
-  const shouldShowProjectMenu = canChooseProject;
   // The project that hosts threads without a project appears once, as the
   // "No project" item, not as a project row.
   const menuEntries = projectPickerEntries.filter(
@@ -163,6 +174,18 @@ export function DraftHeroHeadline({
   const scratchWorkspaceRoot = scratchWorkspaceRootFor(scratchTargetEnvironmentId);
   const isScratchDraft =
     activeProject !== null && isScratchProject(activeProject, scratchWorkspaceRoot);
+  // A new-idea draft belongs to the Trellis landing pad, which is not a listed
+  // project. With Trellis on, "without a project" means such an idea, and the
+  // host scratch project is its own, plainly named choice.
+  const isIdeaDraft = activeProjectRef !== null && isTrellisLandingPad(activeProjectRef.projectId);
+  const withoutProject = noProjectKind({
+    trellisState,
+    scratchOffered: scratchWorkspaceRoot !== null,
+  });
+  const ideasOffered = withoutProject === "idea";
+  const isNoProjectDraft = isScratchDraft || isIdeaDraft;
+  const scratchLabel = ideasOffered ? HOST_NO_PROJECT_LABEL : "No project";
+  const shouldShowProjectMenu = canChooseProject || ideasOffered || isIdeaDraft;
 
   // The picker can change the draft's target while the no-project home is
   // still being opened; a stale continuation must not retarget it again.
@@ -204,12 +227,16 @@ export function DraftHeroHeadline({
       }
     }
   };
-  const startScratch = async (): Promise<boolean> => {
-    if (scratchTargetEnvironmentId === null || isScratchDraft) {
+  /** Retargets the open draft to a new idea or to the host scratch project. */
+  const startWithoutProject = async (kind: NoProjectKind): Promise<boolean> => {
+    const environmentId = kind === "idea" ? noProjectEnvironmentId : scratchTargetEnvironmentId;
+    if (environmentId === null || (kind === "idea" ? isIdeaDraft : isScratchDraft)) {
       return false;
     }
     const requested = { draftId, activeProjectKey, scratchTargetEnvironmentId };
-    const project = await openScratchProject(scratchTargetEnvironmentId);
+    const project = await (kind === "idea"
+      ? openIdeaProject(environmentId)
+      : openScratchProject(environmentId));
     const latest = latestTargetRef.current;
     if (
       !project ||
@@ -240,19 +267,25 @@ export function DraftHeroHeadline({
           }
         >
           <span className="min-w-0 truncate">
-            {isScratchDraft ? "No project" : (activeProjectDisplayName ?? "Choose a project")}
+            {isIdeaDraft
+              ? "New idea"
+              : isScratchDraft
+                ? scratchLabel
+                : (activeProjectDisplayName ?? "Choose a project")}
           </span>
         </TooltipTrigger>
-        {activeProjectDisplayName && !isScratchDraft ? (
+        {activeProjectDisplayName && !isNoProjectDraft ? (
           <TooltipPopup side="top">{activeProjectDisplayName}</TooltipPopup>
         ) : null}
       </Tooltip>
       <MenuPopup align="center" className="max-h-80 overflow-y-auto">
         <MenuRadioGroup
-          value={isScratchDraft ? NO_PROJECT_VALUE : activeProjectKey}
+          value={
+            isIdeaDraft ? NEW_IDEA_VALUE : isScratchDraft ? NO_PROJECT_VALUE : activeProjectKey
+          }
           onValueChange={(value) => {
-            if (value === NO_PROJECT_VALUE) {
-              void startScratch();
+            if (value === NEW_IDEA_VALUE || value === NO_PROJECT_VALUE) {
+              void startWithoutProject(value === NEW_IDEA_VALUE ? "idea" : "scratch");
               return;
             }
             const entry = projectEntryByKey.get(value as string);
@@ -262,6 +295,19 @@ export function DraftHeroHeadline({
             selectProject(entry.targetProject, entry.group.projectKey);
           }}
         >
+          {ideasOffered || isIdeaDraft ? (
+            <MenuRadioItem value={NEW_IDEA_VALUE} closeOnClick>
+              <span className="flex min-w-0 items-center gap-2">
+                <span
+                  aria-hidden="true"
+                  className={`inline-flex size-4 shrink-0 ${projectIconColorClassName("gray")}`}
+                >
+                  <LightbulbIcon className="size-full" />
+                </span>
+                New idea
+              </span>
+            </MenuRadioItem>
+          ) : null}
           {scratchWorkspaceRoot === null ? null : (
             <MenuRadioItem value={NO_PROJECT_VALUE} closeOnClick>
               <span className="flex min-w-0 items-center gap-2">
@@ -272,7 +318,7 @@ export function DraftHeroHeadline({
                 >
                   <MessageSquareDashedIcon className="size-full" />
                 </span>
-                No project
+                {scratchLabel}
               </span>
             </MenuRadioItem>
           )}
@@ -320,7 +366,7 @@ export function DraftHeroHeadline({
   // a complete sentence too. The project picker is a control rendered inline
   // in the h1; without an explicit label its widget state bleeds into the
   // announced phrase.
-  const headingLabel = isScratchDraft
+  const headingLabel = isNoProjectDraft
     ? "What should we work on?"
     : hasResolvedProject
       ? `What should we build in ${activeProjectDisplayName}?`
@@ -332,7 +378,7 @@ export function DraftHeroHeadline({
   // above it. Focus moves to the project picker once this line has gone.
   const noProjectShortcut = shortcutLabelForCommand(keybindings, "chat.newWithoutProject");
   const orStartWithoutProject =
-    scratchWorkspaceRoot !== null && !isScratchDraft && (hasResolvedProject || canChooseProject) ? (
+    withoutProject !== null && !isNoProjectDraft && (hasResolvedProject || canChooseProject) ? (
       <Tooltip>
         <TooltipTrigger
           render={
@@ -340,7 +386,7 @@ export function DraftHeroHeadline({
               tone="muted"
               className="pointer-events-auto"
               onClick={() =>
-                void startScratch().then((started) => {
+                void startWithoutProject(withoutProject).then((started) => {
                   if (started) {
                     document.querySelector<HTMLElement>("[data-draft-project-trigger]")?.focus();
                   }
@@ -361,7 +407,7 @@ export function DraftHeroHeadline({
         aria-label={headingLabel}
         className="w-full text-center font-normal text-2xl text-foreground tracking-tight sm:text-3xl"
       >
-        {isScratchDraft ? (
+        {isNoProjectDraft ? (
           <>What should we work on?</>
         ) : hasResolvedProject ? (
           <>What should we build in {projectSelector}?</>
@@ -373,9 +419,9 @@ export function DraftHeroHeadline({
       </h1>
       {/* Reserved whenever threads can skip a project, so the heading does not
           move. Without a project, the picker moves here to choose one. */}
-      {scratchWorkspaceRoot === null ? null : (
+      {withoutProject === null && !isNoProjectDraft ? null : (
         <p className="mt-2 flex h-6 items-center text-sm">
-          {isScratchDraft ? projectSelector : orStartWithoutProject}
+          {isNoProjectDraft ? projectSelector : orStartWithoutProject}
         </p>
       )}
     </div>
