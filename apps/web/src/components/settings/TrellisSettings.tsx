@@ -691,9 +691,13 @@ function TrellisHistorySection(props: {
     reportFailure: false,
   });
   const [maintaining, setMaintaining] = useState(false);
+  // Saves still on their way; maintenance runs only after them, so it applies
+  // the settings just entered (clicking Run now commits a focused field).
+  const writes = useRef<Promise<unknown>>(Promise.resolve());
   const thinNow = async () => {
     setMaintaining(true);
     try {
+      await writes.current.catch(() => undefined);
       const result = await runMaintenance({ environmentId, input: {} });
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
@@ -745,8 +749,14 @@ function TrellisHistorySection(props: {
     }
     const revision = ++nextRevision.current;
     apply((current) => startHistoryWrite(current, key, edit.value, revision));
-    // Serial per environment, so writes reach Trellis in the order they were made.
-    const result = await update({ environmentId, input: edit.patch });
+    // Serial per environment, so writes reach Trellis in the order they were made;
+    // maintenance waits for them (see `thinNow`).
+    const write = update({ environmentId, input: edit.patch });
+    writes.current = writes.current.then(
+      () => write,
+      () => write,
+    );
+    const result = await write;
     if (result._tag === "Failure") {
       const message = isAtomCommandInterrupted(result)
         ? null

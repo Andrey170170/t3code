@@ -110,6 +110,8 @@ export const trellisEnvironment = {
     tag: WS_METHODS.trellisGetHistorySettings,
     staleTimeMs: 30_000,
     idleTtlMs: 60_000,
+    // Maintenance runs hourly and other clients may change the settings.
+    refreshIntervalMs: 60_000,
   }),
   /** One write at a time per environment, so they reach Trellis in order. */
   updateHistorySettings: createEnvironmentRpcCommand(connectionAtomRuntime, {
