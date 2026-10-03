@@ -103,6 +103,11 @@ A discarded fork that holds work its parent workspace lacks (uncommitted changes
 merged back) is kept until you purge it; the trash says why. Agents never purge: they can ask you to,
 and the trash shows the request with a **Purge** button.
 
+How long snapshots are kept, how often running workspaces are snapshotted, and when trashed ideas,
+discarded forks and incoming fork copies expire are set under **History** in **Settings** > **Trellis**;
+each row says what 0 means for it. Changes apply at the next maintenance, about once an hour;
+**Run now** applies them at once.
+
 ## Restoring files from a turn
 
 Reverting a turn in a Trellis project can restore its files from Trellis' snapshot of that turn. An

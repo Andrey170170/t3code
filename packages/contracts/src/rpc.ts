@@ -21,6 +21,9 @@ import {
   TrellisGraduateResult,
   TrellisBasesResult,
   TrellisDetails,
+  TrellisHistorySettings,
+  TrellisHistorySettingsUpdateResult,
+  TrellisHistoryValues,
   TrellisRestoreConflicts,
   TrellisRestoreConflictsInput,
   TrellisRestoreInput,
@@ -406,6 +409,9 @@ export const WS_METHODS = {
   trellisListBases: "trellis.listBases",
   trellisGetDetails: "trellis.getDetails",
   trellisBuildBase: "trellis.buildBase",
+  trellisGetHistorySettings: "trellis.getHistorySettings",
+  trellisUpdateHistorySettings: "trellis.updateHistorySettings",
+  trellisRunMaintenance: "trellis.runMaintenance",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1319,6 +1325,26 @@ const WsTrellisBuildBaseRpc = Rpc.make(WS_METHODS.trellisBuildBase, {
   error: TrellisRpcError,
 });
 
+const WsTrellisGetHistorySettingsRpc = Rpc.make(WS_METHODS.trellisGetHistorySettings, {
+  payload: Schema.Struct({}),
+  success: TrellisHistorySettings,
+  error: TrellisRpcError,
+});
+
+/** Changes the given history settings; Trellis validates the merged result. */
+const WsTrellisUpdateHistorySettingsRpc = Rpc.make(WS_METHODS.trellisUpdateHistorySettings, {
+  payload: TrellisHistoryValues,
+  success: TrellisHistorySettingsUpdateResult,
+  error: TrellisRpcError,
+});
+
+/** Runs Trellis maintenance now: expiries and thinning by the history settings. */
+const WsTrellisRunMaintenanceRpc = Rpc.make(WS_METHODS.trellisRunMaintenance, {
+  payload: Schema.Struct({}),
+  success: Schema.Struct({}),
+  error: TrellisRpcError,
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1952,6 +1978,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsTrellisListBasesRpc,
   WsTrellisGetDetailsRpc,
   WsTrellisBuildBaseRpc,
+  WsTrellisGetHistorySettingsRpc,
+  WsTrellisUpdateHistorySettingsRpc,
+  WsTrellisRunMaintenanceRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,

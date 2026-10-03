@@ -8,11 +8,12 @@ import {
   ActivityIcon,
   AlertTriangleIcon,
   BoxesIcon,
+  HistoryIcon,
   LightbulbIcon,
   SproutIcon,
   TrashIcon,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 
 import { useTrellisStatusFor } from "../../hooks/useTrellis";
 import { cn } from "../../lib/utils";
@@ -24,17 +25,43 @@ import { refreshTrellisStatus, trellisEnvironment } from "../../state/trellis";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import {
+  NumberField,
+  NumberFieldDecrement,
+  NumberFieldGroup,
+  NumberFieldIncrement,
+  NumberFieldInput,
+} from "../ui/number-field";
 import { RefreshIcon } from "../ui/refresh-icon";
 import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SettingResetButton,
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+} from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import {
   baseStateView,
   formatBytes,
+  finishHistoryWrite,
+  HISTORY_SETTINGS,
+  type HistoryEdits,
+  type HistoryKey,
+  historyDefaultNote,
+  historyEdit,
+  historyFieldValue,
+  historyValuesInForce,
+  NO_HISTORY_EDITS,
+  rejectHistoryEdit,
+  startHistoryWrite,
+  lastThinningText,
+  snapshotCountsText,
   staleDetailsNotice,
   trellisVersionText,
+  wouldRemoveText,
   workspaceLabel,
 } from "./TrellisSettings.logic";
 import { SettingsScopeNotice } from "./SettingsScopeNotice";
@@ -47,6 +74,8 @@ function failureMessage(result: Parameters<typeof squashAtomCommandFailure>[0], 
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 const formatDay = (unixSeconds: number) => dateFormat.format(new Date(unixSeconds * 1000));
+const timeFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" });
+const formatTime = (unixSeconds: number) => timeFormat.format(new Date(unixSeconds * 1000));
 
 /** When a trashed item goes away for good, in words. */
 function trashExpiryText(item: Pick<TrellisTrashItem, "expiresAt" | "unmerged">): string {
@@ -87,8 +116,8 @@ const KIND_LABELS: Readonly<Record<TrellisTrashItem["kind"], string>> = {
 
 /**
  * Trellis settings of each selected environment: the integration switch, the
- * service's status, its bases, and the Trellis trash with restore. Each topic
- * is its own section, so more (previews, history) slot in beside them.
+ * service's status, its bases, its history settings, and the Trellis trash
+ * with restore. Each topic is its own section, so more slot in beside them.
  */
 export function TrellisSettingsPanel() {
   const { connectedEnvironments, scope } = useSettingsScope();
@@ -205,6 +234,7 @@ function TrellisEnvironmentSettings(props: {
             statusId={anchor("trellis-status")}
             basesId={anchor("trellis-bases")}
           />
+          <TrellisHistorySection environmentId={environmentId} id={anchor("trellis-history")} />
           <TrellisTrashSection
             environmentId={environmentId}
             title="Trash"
@@ -712,6 +742,253 @@ function TrellisTrashSection(props: {
             }
           />
         ))
+      )}
+    </SettingsSection>
+  );
+}
+
+/**
+ * Trellis's snapshot timer, retention and expiry settings, one number per
+ * row. A value is sent when its field commits (blur, Enter, the step
+ * buttons), only that key, one write at a time; Trellis's refusal shows
+ * under the row and the field goes back to the value in force.
+ */
+function TrellisHistorySection(props: {
+  readonly environmentId: EnvironmentId;
+  readonly id: string | undefined;
+}) {
+  const { environmentId } = props;
+  const historyQuery = useEnvironmentQuery(
+    trellisEnvironment.historySettings({ environmentId, input: {} }),
+  );
+  const update = useAtomCommand(trellisEnvironment.updateHistorySettings, {
+    reportFailure: false,
+  });
+  const runMaintenance = useAtomCommand(trellisEnvironment.runMaintenance, {
+    reportFailure: false,
+  });
+  const [maintaining, setMaintaining] = useState(false);
+  // Saves still on their way; maintenance runs only after them, so it applies
+  // the settings just entered (clicking Run now commits a focused field).
+  // Resolves to whether every save since the last Run now succeeded.
+  const writes = useRef<Promise<boolean>>(Promise.resolve(true));
+  const maintainingRef = useRef(false);
+  const thinNow = async () => {
+    maintainingRef.current = true;
+    setMaintaining(true);
+    try {
+      const saved = await writes.current;
+      writes.current = Promise.resolve(true);
+      // A setting the user just entered was refused or lost: running now
+      // would apply the previous one.
+      if (!saved) {
+        toastManager.add({
+          type: "error",
+          title: "Maintenance did not run",
+          description: "A history setting was not saved. Fix it, then run maintenance again.",
+        });
+        return;
+      }
+      const result = await runMaintenance({ environmentId, input: {} });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          toastManager.add({
+            type: "error",
+            title: "Could not run maintenance",
+            description: failureMessage(result, "Trellis did not respond."),
+          });
+        }
+        return;
+      }
+      toastManager.add({ type: "success", title: "Maintenance done" });
+    } finally {
+      maintainingRef.current = false;
+      setMaintaining(false);
+      historyQuery.refresh();
+    }
+  };
+  const settings = historyQuery.data;
+  // Kept in a ref as well, so commits made before a re-render see each other.
+  const editsRef = useRef(NO_HISTORY_EDITS);
+  const [edits, setEdits] = useState(NO_HISTORY_EDITS);
+  const nextRevision = useRef(0);
+  const apply = (change: (current: HistoryEdits) => HistoryEdits) => {
+    editsRef.current = change(editsRef.current);
+    setEdits(editsRef.current);
+  };
+  const inForce =
+    settings === null
+      ? {}
+      : historyValuesInForce(settings.values, historyQuery.dataUpdatedAt, edits);
+  const staleNotice = staleDetailsNotice({
+    hasData: settings !== null,
+    error: historyQuery.error,
+    updatedAt: historyQuery.dataUpdatedAt,
+  });
+
+  const commit = async (key: HistoryKey, input: number | null) => {
+    // Fields and resets wait while Run now runs (see `thinNow`).
+    if (settings === null || maintainingRef.current) return;
+    const current = historyFieldValue(
+      key,
+      historyValuesInForce(settings.values, historyQuery.dataUpdatedAt, editsRef.current),
+      editsRef.current,
+    );
+    const edit = historyEdit(key, input, current);
+    if (edit.kind === "unchanged") return;
+    if (edit.kind === "invalid") {
+      apply((current) => rejectHistoryEdit(current, key, edit.message));
+      return;
+    }
+    const revision = ++nextRevision.current;
+    apply((current) => startHistoryWrite(current, key, edit.value, revision));
+    // Serial per environment, so writes reach Trellis in the order they were made;
+    // maintenance waits for them (see `thinNow`).
+    const write = update({ environmentId, input: edit.patch });
+    writes.current = writes.current.then((earlier) =>
+      write.then(
+        (result) => earlier && result._tag !== "Failure",
+        () => false,
+      ),
+    );
+    const result = await write;
+    if (result._tag === "Failure") {
+      const message = isAtomCommandInterrupted(result)
+        ? null
+        : failureMessage(result, "Trellis did not respond.");
+      apply((current) => finishHistoryWrite(current, key, revision, { ok: false, message }));
+      return;
+    }
+    apply((current) =>
+      finishHistoryWrite(current, key, revision, {
+        ok: true,
+        values: result.value.values,
+        at: Date.now(),
+      }),
+    );
+    const notice = wouldRemoveText(result.value.wouldRemove);
+    if (notice !== null) {
+      toastManager.add({ type: "info", title: "History settings saved", description: notice });
+    }
+    // For the snapshot counts; the values are already the write's answer.
+    historyQuery.refresh();
+  };
+
+  const counts = settings === null ? null : snapshotCountsText(settings.snapshots);
+
+  return (
+    <SettingsSection
+      {...idProp(props.id)}
+      title="History"
+      icon={<HistoryIcon className="size-3.5" />}
+    >
+      {settings === null ? (
+        <SettingsRow
+          title={
+            <span className="inline-flex items-center gap-2">
+              {historyQuery.isPending ? <Spinner size="sm" tone="muted" /> : null}
+              {historyQuery.isPending
+                ? "Loading history settings"
+                : "Could not read the history settings"}
+            </span>
+          }
+          description={historyQuery.error ?? undefined}
+        />
+      ) : (
+        <>
+          {staleNotice === null ? null : (
+            <SettingsRow
+              title={<WarningTitle>History settings may be out of date</WarningTitle>}
+              description={staleNotice}
+            />
+          )}
+          {HISTORY_SETTINGS.map((setting) => {
+            const value = historyFieldValue(setting.key, inForce, edits);
+            if (value === undefined) return null;
+            const defaultValue = settings.defaults[setting.key];
+            const defaultNote = historyDefaultNote(value, defaultValue, setting.unit);
+            const message = edits.error?.key === setting.key ? edits.error.message : undefined;
+            return (
+              <SettingsRow
+                key={setting.key}
+                title={setting.title}
+                description={setting.description}
+                status={
+                  message === undefined && defaultNote === null ? undefined : (
+                    <>
+                      {defaultNote === null ? null : <span className="block">{defaultNote}</span>}
+                      {message === undefined ? null : (
+                        <span role="alert" className="block text-destructive">
+                          {message}
+                        </span>
+                      )}
+                    </>
+                  )
+                }
+                resetAction={
+                  defaultNote === null || defaultValue === undefined ? undefined : (
+                    <SettingResetButton
+                      label={setting.title}
+                      onClick={() => void commit(setting.key, defaultValue)}
+                    />
+                  )
+                }
+                control={
+                  <div className="flex shrink-0 items-center gap-2">
+                    <NumberField
+                      // Controlled, so a commit (each arrow step) keeps the input
+                      // mounted and focused; a refusal remounts it to drop the draft.
+                      key={edits.resets[setting.key] ?? 0}
+                      value={value ?? null}
+                      min={0}
+                      step={1}
+                      size="sm"
+                      className="w-32"
+                      // No new saves while Run now waits for the earlier ones and runs.
+                      disabled={maintaining}
+                      onValueCommitted={(next) => void commit(setting.key, next)}
+                    >
+                      <NumberFieldGroup>
+                        <NumberFieldDecrement aria-label={`Decrease ${setting.title}`} />
+                        <NumberFieldInput
+                          aria-label={`${setting.title} in ${setting.unit}s`}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") event.currentTarget.blur();
+                          }}
+                        />
+                        <NumberFieldIncrement aria-label={`Increase ${setting.title}`} />
+                      </NumberFieldGroup>
+                    </NumberField>
+                    <span className="w-14 text-xs text-muted-foreground">{`${setting.unit}s`}</span>
+                  </div>
+                }
+              />
+            );
+          })}
+          <SettingsRow
+            title="Snapshots"
+            description={counts?.byKind ?? "Live snapshots across all workspaces, by kind."}
+            control={<Value>{counts?.total ?? 0}</Value>}
+          />
+          <SettingsRow
+            title="Last thinning"
+            description="Thinning runs with maintenance, about once an hour; Run now applies changed settings at once. It never purges projects."
+            control={
+              <span className="inline-flex items-center gap-2">
+                <Value>{lastThinningText(settings.lastThinning, formatTime)}</Value>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={maintaining}
+                  onClick={() => void thinNow()}
+                >
+                  {maintaining ? <Spinner size="sm" tone="muted" /> : null}
+                  {maintaining ? "Running…" : "Run now"}
+                </Button>
+              </span>
+            }
+          />
+        </>
       )}
     </SettingsSection>
   );

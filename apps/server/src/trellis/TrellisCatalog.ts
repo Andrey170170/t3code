@@ -30,6 +30,9 @@ import {
   type TrellisBasesResult,
   type TrellisBuildBaseResult,
   type TrellisDetails,
+  type TrellisHistorySettings,
+  type TrellisHistorySettingsUpdateResult,
+  type TrellisHistoryValues,
   type TrellisCreateResult,
   type TrellisFindHit,
   type TrellisFindResult,
@@ -758,6 +761,14 @@ export class TrellisCatalog extends Context.Service<
     readonly buildBase: (name: string) => Effect.Effect<TrellisBuildBaseResult, TrellisError>;
     /** The Trellis service's status in full, workspaces named from the last sync. */
     readonly details: Effect.Effect<TrellisDetails, TrellisError>;
+    /** Trellis's snapshot timer, retention and expiry settings, for Settings. */
+    readonly historySettings: Effect.Effect<TrellisHistorySettings, TrellisError>;
+    /** Changes the given history settings; Trellis validates them. */
+    readonly updateHistorySettings: (
+      values: TrellisHistoryValues,
+    ) => Effect.Effect<TrellisHistorySettingsUpdateResult, TrellisError>;
+    /** Runs Trellis maintenance now; see `Trellis.runMaintenance`. */
+    readonly runMaintenance: Effect.Effect<void, TrellisError>;
     /** The T3 project for a Trellis item just created (a graduation's), made now rather than at the next poll. */
     readonly projectFor: (
       item: TrellisProjectView,
@@ -1970,6 +1981,10 @@ const make = Effect.gen(function* () {
         };
       }),
     ),
+    historySettings: requireReady.pipe(Effect.andThen(trellis.historySettings)),
+    updateHistorySettings: (values) =>
+      requireReady.pipe(Effect.andThen(trellis.updateHistorySettings(values))),
+    runMaintenance: requireReady.pipe(Effect.andThen(trellis.runMaintenance)),
   });
 });
 

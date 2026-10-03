@@ -109,6 +109,26 @@ export const trellisEnvironment = {
     label: "environment-data:trellis:build-base",
     tag: WS_METHODS.trellisBuildBase,
   }),
+  /** Trellis's snapshot timer, retention and expiry settings, with snapshot counts. */
+  historySettings: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:history-settings",
+    tag: WS_METHODS.trellisGetHistorySettings,
+    staleTimeMs: 30_000,
+    idleTtlMs: 60_000,
+    // Maintenance runs hourly and other clients may change the settings.
+    refreshIntervalMs: 60_000,
+  }),
+  /** One write at a time per environment, so they reach Trellis in order. */
+  updateHistorySettings: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:update-history-settings",
+    tag: WS_METHODS.trellisUpdateHistorySettings,
+    concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
+  }),
+  runMaintenance: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:run-maintenance",
+    tag: WS_METHODS.trellisRunMaintenance,
+    concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
+  }),
   graduate: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:graduate",
     tag: WS_METHODS.trellisGraduate,
