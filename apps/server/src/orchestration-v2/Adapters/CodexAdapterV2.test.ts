@@ -642,12 +642,11 @@ describe("CodexAdapterV2 process spawning", () => {
           model: "gpt-5.4",
           config: {
             "tools.update_plan.enabled": true,
-            mcp_servers: {
-              "t3-code": {
-                url: "http://127.0.0.1:43123/mcp",
-                http_headers: {
-                  Authorization: "Bearer secret-codex-token",
-                },
+            // Dotted, so servers from the command line (agent profiles) stay.
+            "mcp_servers.t3-code": {
+              url: "http://127.0.0.1:43123/mcp",
+              http_headers: {
+                Authorization: "Bearer secret-codex-token",
               },
             },
           },
@@ -657,6 +656,105 @@ describe("CodexAdapterV2 process spawning", () => {
       McpProviderSession.clearMcpProviderSession(threadId);
     }
   });
+
+  it("adds the launch's instructions and reaches T3 MCP through the launch's loopback host", () => {
+    const threadId = ThreadId.make("thread-codex-launch");
+    McpProviderSession.setMcpProviderSession({
+      environmentId: EnvironmentId.make("environment-codex-launch"),
+      threadId,
+      providerSessionId: "mcp-session-codex-launch",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      endpoint: "http://127.0.0.1:43123/mcp",
+      authorizationHeader: "Bearer secret-codex-token",
+      browserToolsAvailable: true,
+    });
+    try {
+      const params = CodexAdapterV2.codexThreadRuntimeParams({
+        threadId,
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: "/trellis/workspaces/ws-1/project",
+          launch: {
+            executable: "/t3/trellis-shims/codex",
+            instructions: "You are in a Trellis workspace.",
+            sessionKey: "ws-1",
+            loopbackHost: "host.containers.internal",
+          },
+        },
+      });
+      assert.equal(params.config.developer_instructions, "You are in a Trellis workspace.");
+      assert.equal(
+        CodexAdapterV2.codexThreadRuntimeParams({
+          threadId,
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/trellis/workspaces/ws-1/project",
+            launch: { executable: "/t3/trellis-shims/codex", instructions: "Primer." },
+          },
+          configuredDeveloperInstructions: "The user's own instructions.",
+        }).config.developer_instructions,
+        "The user's own instructions.\n\nPrimer.",
+      );
+      assert.deepEqual(params.config["mcp_servers.t3-code"], {
+        url: "http://host.containers.internal:43123/mcp",
+        http_headers: { Authorization: "Bearer secret-codex-token" },
+      });
+      assert.notProperty(params.config, "mcp_servers");
+    } finally {
+      McpProviderSession.clearMcpProviderSession(threadId);
+    }
+  });
+
+  it.effect("spawns a launched app-server through the launch executable in the thread's cwd", () =>
+    Effect.gen(function* () {
+      const spawned: Array<{ readonly command: string; readonly cwd: string | undefined }> = [];
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (ChildProcess.isStandardCommand(command)) {
+          spawned.push({ command: command.command, cwd: command.options.cwd });
+        }
+        return Effect.fail(
+          PlatformError.systemError({ _tag: "NotFound", module: "ChildProcess", method: "spawn" }),
+        );
+      });
+      const factory = yield* CodexAdapterV2.CodexAppServerClientFactory.pipe(
+        Effect.provide(CodexAdapterV2.codexAppServerClientFactoryFromSettingsLayer),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      );
+      const open = (launch: ProviderAdapterV2RuntimePolicy["launch"]) =>
+        factory
+          .open({
+            instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+            threadId: ThreadId.make("thread-launch"),
+            providerSessionId: ProviderSessionId.make("provider-session-launch"),
+            runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/trellis/workspaces/ws-1/project",
+              ...(launch === undefined ? {} : { launch }),
+            }),
+            settings: { ...DEFAULT_CODEX_SETTINGS, binaryPath: "/usr/local/bin/codex" },
+            environment: {},
+          })
+          .pipe(Effect.scoped, Effect.exit);
+
+      yield* open(undefined);
+      yield* open({ executable: "/t3/trellis-shims/codex", sessionKey: "ws-1" });
+
+      assert.deepEqual(spawned, [
+        { command: "/usr/local/bin/codex", cwd: undefined },
+        { command: "/t3/trellis-shims/codex", cwd: "/trellis/workspaces/ws-1/project" },
+      ]);
+    }).pipe(
+      Effect.provideService(HostProcessPlatform, "linux"),
+      Effect.provideService(SpawnExecutableResolution, (command) => command),
+    ),
+  );
 
   it.effect("reports the app-server process exiting to the factory's caller", () =>
     Effect.gen(function* () {
@@ -1900,96 +1998,87 @@ describe("CodexAdapterV2 post-settle continuation", () => {
   // An app-server that exits mid-turn must settle the turn; one that exits
   // idle (for example, stopped with the T3 server) must not mark the session
   // failed.
-  for (const working of [true, false]) {
-    it.effect(
-      working
-        ? "fails the session's event stream when the app-server exits mid-turn"
-        : "stops the session quietly when the app-server exits while idle",
-      () =>
-        Effect.gen(function* () {
-          const scenario = working ? "terminated-mid-turn" : "terminated-idle";
-          const preamble = codexReplayPreamble({
-            nativeThreadId: scenario,
-            nativeTurnId: "native-turn-terminated",
-            prompt: "Keep working",
-          });
-          const transcript = makeCodexReplayTranscript({
-            scenario,
-            entries: working ? preamble : preamble.slice(0, 3),
-          });
-          let terminate:
-            | ((error: CodexErrors.CodexAppServerError) => Effect.Effect<void>)
-            | undefined;
-          const adapter = CodexAdapterV2.makeCodexAdapterV2({
-            instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
-            settings: DEFAULT_CODEX_SETTINGS,
-            environment: {},
-            clientFactory: {
-              open: (openInput) => {
-                terminate = openInput.onTermination;
-                return Layer.build(CodexReplay.layerReplay(transcript)).pipe(
-                  Effect.flatMap((context) =>
-                    Effect.service(CodexClient.CodexAppServerClient).pipe(Effect.provide(context)),
-                  ),
-                  Effect.orDie,
-                );
-              },
-            },
-            fileSystem: yield* FileSystem.FileSystem,
-            idAllocator: yield* IdAllocator.IdAllocatorV2,
-            serverConfig: yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie),
-            continuationRequests: { offer: () => Effect.void },
-          });
-          const threadId = ThreadId.make(`thread-${scenario}`);
-          const runtime = yield* adapter.openSession({
+  it.effect.each([
+    { working: true, name: "fails the session's event stream when the app-server exits mid-turn" },
+    { working: false, name: "stops the session quietly when the app-server exits while idle" },
+  ])("$name", ({ working }) =>
+    Effect.gen(function* () {
+      const scenario = working ? "terminated-mid-turn" : "terminated-idle";
+      const preamble = codexReplayPreamble({
+        nativeThreadId: scenario,
+        nativeTurnId: "native-turn-terminated",
+        prompt: "Keep working",
+      });
+      const transcript = makeCodexReplayTranscript({
+        scenario,
+        entries: working ? preamble : preamble.slice(0, 3),
+      });
+      let terminate: ((error: CodexErrors.CodexAppServerError) => Effect.Effect<void>) | undefined;
+      const adapter = CodexAdapterV2.makeCodexAdapterV2({
+        instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+        settings: DEFAULT_CODEX_SETTINGS,
+        environment: {},
+        clientFactory: {
+          open: (openInput) => {
+            terminate = openInput.onTermination;
+            return Layer.build(CodexReplay.layerReplay(transcript)).pipe(
+              Effect.flatMap((context) =>
+                Effect.service(CodexClient.CodexAppServerClient).pipe(Effect.provide(context)),
+              ),
+              Effect.orDie,
+            );
+          },
+        },
+        fileSystem: yield* FileSystem.FileSystem,
+        idAllocator: yield* IdAllocator.IdAllocatorV2,
+        serverConfig: yield* makeReplayServerConfig(transcript.scenario).pipe(Effect.orDie),
+        continuationRequests: { offer: () => Effect.void },
+      });
+      const threadId = ThreadId.make(`thread-${scenario}`);
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make(`provider-session-${scenario}`),
+        modelSelection: CODEX_TEST_MODEL_SELECTION,
+        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+      });
+      if (working) {
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+        });
+        yield* runtime.startTurn(
+          makeCodexTestTurnInput({
             threadId,
-            providerSessionId: ProviderSessionId.make(`provider-session-${scenario}`),
-            modelSelection: CODEX_TEST_MODEL_SELECTION,
-            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
-          });
-          if (working) {
-            const providerThread = yield* runtime.ensureThread({
-              threadId,
-              modelSelection: CODEX_TEST_MODEL_SELECTION,
-              runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
-            });
-            yield* runtime.startTurn(
-              makeCodexTestTurnInput({
-                threadId,
-                providerThread,
-                now: yield* DateTime.now,
-                attemptId: RunAttemptId.make("terminated-attempt"),
-                text: "Keep working",
-              }),
-            );
-          }
-          const drained = yield* runtime.events.pipe(
-            Stream.runCollect,
-            Effect.exit,
-            Effect.forkScoped,
-          );
-          assert.isDefined(terminate);
-          yield* terminate!(new CodexErrors.CodexAppServerProcessExitedError({ code: 143 }));
-          const exit = yield* Fiber.join(drained);
-          if (working) {
-            assert.isTrue(exit._tag === "Failure");
-            const error = exit._tag === "Failure" ? Cause.squash(exit.cause) : undefined;
-            assert.equal(
-              (error as { _tag?: string } | undefined)?._tag,
-              "ProviderAdapterEventStreamError",
-            );
-            return;
-          }
-          assert.isTrue(exit._tag === "Success");
-          const last = exit._tag === "Success" ? exit.value.at(-1) : undefined;
-          assert.equal(last?.type, "provider_session.updated");
-          assert.equal(
-            last?.type === "provider_session.updated" ? last.providerSession.status : undefined,
-            "stopped",
-          );
-        }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
-    );
-  }
+            providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("terminated-attempt"),
+            text: "Keep working",
+          }),
+        );
+      }
+      const drained = yield* runtime.events.pipe(Stream.runCollect, Effect.exit, Effect.forkScoped);
+      assert.isDefined(terminate);
+      yield* terminate!(new CodexErrors.CodexAppServerProcessExitedError({ code: 143 }));
+      const exit = yield* Fiber.join(drained);
+      if (working) {
+        assert.isTrue(exit._tag === "Failure");
+        const error = exit._tag === "Failure" ? Cause.squash(exit.cause) : undefined;
+        assert.equal(
+          (error as { _tag?: string } | undefined)?._tag,
+          "ProviderAdapterEventStreamError",
+        );
+        return;
+      }
+      assert.isTrue(exit._tag === "Success");
+      const last = exit._tag === "Success" ? exit.value.at(-1) : undefined;
+      assert.equal(last?.type, "provider_session.updated");
+      assert.equal(
+        last?.type === "provider_session.updated" ? last.providerSession.status : undefined,
+        "stopped",
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
 
   it.effect("unsubscribes from the native thread when it is unloaded", () =>
     Effect.gen(function* () {
@@ -2718,6 +2807,90 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(resumed.nativeThreadRef?.nativeId, nativeThreadId);
         assert.equal(resumed.status, "idle");
         assert.equal(DateTime.toEpochMillis(resumed.updatedAt), 1782622450000);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
+  it.effect("appends a launch primer to each cwd's own configured developer instructions", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const scenario = "codex-launch-instructions-per-cwd";
+        const nativeThreadId = `native-${scenario}-thread`;
+        const preamble = codexReplayPreamble({
+          nativeThreadId,
+          nativeTurnId: "unused-turn",
+          prompt: "unused-prompt",
+        }).slice(0, 5);
+        // Two projects of one workspace share the app-server, each with its config.
+        const projects = [
+          { cwd: "/trellis/workspaces/ws-1/project/a", instructions: "Project A rules." },
+          { cwd: "/trellis/workspaces/ws-1/project/b", instructions: "Project B rules." },
+        ];
+        const transcript = makeCodexReplayTranscript({
+          scenario,
+          entries: [
+            ...preamble,
+            ...projects.flatMap(({ cwd, instructions }, index) => {
+              const readId = 3 + index * 2;
+              return [
+                {
+                  type: "expect_outbound" as const,
+                  label: "config/read",
+                  frame: {
+                    id: readId,
+                    method: "config/read",
+                    params: { cwd, includeLayers: false },
+                  },
+                },
+                {
+                  type: "emit_inbound" as const,
+                  label: "config/read",
+                  frame: {
+                    id: readId,
+                    result: { config: { developer_instructions: instructions }, origins: {} },
+                  },
+                },
+                {
+                  type: "expect_outbound" as const,
+                  label: "thread/resume",
+                  frame: {
+                    id: readId + 1,
+                    method: "thread/resume",
+                    params: {
+                      threadId: nativeThreadId,
+                      excludeTurns: true,
+                      cwd,
+                      config: {
+                        ...CodexAdapterV2.CODEX_THREAD_CONFIG,
+                        developer_instructions: `${instructions}\n\nPrimer.`,
+                      },
+                    },
+                  },
+                },
+                {
+                  type: "emit_inbound" as const,
+                  label: "thread/resume",
+                  frame: {
+                    id: readId + 1,
+                    result: { thread: { id: nativeThreadId, updatedAt: 1782622450 } },
+                  },
+                },
+              ];
+            }),
+          ],
+        });
+        const harness = yield* makeCodexReplayHarness(transcript);
+        for (const { cwd } of projects) {
+          yield* harness.runtime.resumeThread({
+            providerThread: harness.providerThread,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+              ...CODEX_TEST_RUNTIME_POLICY,
+              cwd,
+              launch: { executable: "/t3/trellis-shims/codex", instructions: "Primer." },
+            }),
+          });
+        }
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),
   );

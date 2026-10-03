@@ -7,6 +7,7 @@ import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
 import { newCommandId, readCaller, readMutationCaller, unavailable } from "../../threadAccess.ts";
+import { refuseTrellisProjectDelete } from "../../../trellis/TrellisCatalog.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 function projectFailure(error: Project.ProjectServiceError) {
@@ -188,6 +189,12 @@ export const ProjectHandlersLive = ProjectToolkit.toLayer({
   t3_project_delete: (input) =>
     Effect.gen(function* () {
       const projects = yield* mutation;
+      yield* refuseTrellisProjectDelete(input.projectId).pipe(
+        Effect.mapError(
+          (error) =>
+            new OrchestratorMcpFailure({ code: "invalid_request", message: error.message }),
+        ),
+      );
       return yield* projects
         .delete({ ...input, commandId: yield* newCommandId() })
         .pipe(Effect.mapError(projectFailure));

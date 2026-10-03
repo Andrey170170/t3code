@@ -47,6 +47,10 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "./ProviderFailure.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import { TurnAdmission } from "./TurnAdmission.ts";
+
+/** The message of an interrupt request that named no reason (Orchestrator `run.interrupt`). */
+const DEFAULT_INTERRUPT_REQUEST_MESSAGE = "Interrupt requested";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -109,6 +113,7 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    const turnAdmission = yield* TurnAdmission;
 
     // These callbacks outlive startup while a run drains background work. Build
     // them outside start's scope so they cannot retain its full thread history.
@@ -173,6 +178,32 @@ export const layer: Layer.Layer<
               }),
             )
             .pipe(Effect.catchCause(() => Effect.succeed(false))),
+        // The request's message when the interrupt named a reason (a Trellis
+        // checkpoint, an agent's t3_thread_interrupt); a plain Stop has none.
+        interruptReason: () =>
+          projectionStore
+            .getThreadRecords(input.threadId, ["turnItems"], {
+              turnItemRunId: input.runId,
+              turnItemTypes: ["run_interrupt_request"],
+            })
+            .pipe(
+              Effect.map((records) => {
+                const request = records.turnItems.find(
+                  (item) =>
+                    item.type === "run_interrupt_request" &&
+                    item.id ===
+                      idAllocator.derive.runSignalTurnItem({
+                        runId: input.runId,
+                        signal: "interrupt-request",
+                      }),
+                );
+                return request?.type === "run_interrupt_request" &&
+                  request.message !== DEFAULT_INTERRUPT_REQUEST_MESSAGE
+                  ? request.message
+                  : undefined;
+              }),
+              Effect.catchCause(() => Effect.succeed(undefined)),
+            ),
       };
     };
 
@@ -219,7 +250,26 @@ export const layer: Layer.Layer<
       readonly willRetry?: boolean;
     }) {
       const { runId } = input;
-      const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
+      const admissionRead = yield* projectionStore.getTurnStartContext(input.threadId, runId);
+      // Admitted before the policy resolves or a session opens; a turn held
+      // back (by a checkpoint restore) rereads what the wait may have changed.
+      const admissionRun = admissionRead.runs.find((candidate) => candidate.id === runId);
+      const admissionCwd = admissionRead.checkpointScopes.find(
+        (scope) =>
+          scope.id ===
+          admissionRead.nodes.find((node) => node.id === admissionRun?.rootNodeId)
+            ?.checkpointScopeId,
+      )?.cwd;
+      const admission =
+        admissionRun?.status === "starting" && admissionCwd !== undefined
+          ? yield* Effect.result(
+              turnAdmission.start({ threadId: input.threadId, runId, cwd: admissionCwd }),
+            )
+          : undefined;
+      const held = admission?._tag === "Success" && admission.success;
+      const projection = held
+        ? yield* projectionStore.getTurnStartContext(input.threadId, runId)
+        : admissionRead;
       const run = projection.runs.find((candidate) => candidate.id === runId);
       if (run === undefined) {
         return yield* new ProviderTurnStartError({ runId, cause: `Run ${runId} was not found.` });
@@ -368,6 +418,26 @@ export const layer: Layer.Layer<
           });
         },
       );
+      if (admission?._tag === "Failure") {
+        const now = yield* DateTime.now;
+        yield* settleRunBeforeStart({
+          signal: "turn-admission-refused",
+          status: "failed",
+          now,
+          startedAt: now,
+          providerInstanceId: run.providerInstanceId,
+          itemProviderThreadId: providerThread.id,
+          item: {
+            type: "error",
+            title: "Turn not started",
+            failure: makeProviderFailure({
+              class: "validation_error",
+              message: admission.failure.message,
+            }),
+          },
+        });
+        return;
+      }
       if (message.attachments.length === 0 && message.text.trimStart().startsWith("/")) {
         const isEmptyCompaction =
           message.text.trim().toLowerCase() === "/compact" && !projection.hasConversation;
@@ -515,32 +585,38 @@ export const layer: Layer.Layer<
       });
       const { isCurrentAttemptInStatus } = runControls;
 
-      const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
-        thread: projection.thread,
-        modelSelection: run.modelSelection,
-      });
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
       );
+      // A policy that cannot resolve (for example a refused Trellis launch)
+      // fails the run with its reason like a session that cannot open.
       const sessionResult = yield* Effect.result(
-        providerSessions.open({
-          threadId: projection.thread.id,
-          providerSessionId,
-          modelSelection: run.modelSelection,
-          runtimePolicy: resolvedRuntimePolicy,
-          ...(existingSessionProjection === undefined
-            ? {}
-            : { resumeFromSession: existingSessionProjection }),
-          ...(providerThread.nativeThreadRef?.nativeId == null
-            ? {}
-            : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
-          ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
-            ? {}
-            : {
-                initialProviderItemIdentityVersion:
-                  providerThread.nativeMetadata.itemIdentityVersion,
-              }),
-        }),
+        runtimePolicy
+          .resolve({ thread: projection.thread, modelSelection: run.modelSelection })
+          .pipe(
+            Effect.flatMap((resolvedRuntimePolicy) =>
+              providerSessions
+                .open({
+                  threadId: projection.thread.id,
+                  providerSessionId,
+                  modelSelection: run.modelSelection,
+                  runtimePolicy: resolvedRuntimePolicy,
+                  ...(existingSessionProjection === undefined
+                    ? {}
+                    : { resumeFromSession: existingSessionProjection }),
+                  ...(providerThread.nativeThreadRef?.nativeId == null
+                    ? {}
+                    : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
+                  ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
+                    ? {}
+                    : {
+                        initialProviderItemIdentityVersion:
+                          providerThread.nativeMetadata.itemIdentityVersion,
+                      }),
+                })
+                .pipe(Effect.map((session) => ({ session, resolvedRuntimePolicy }))),
+            ),
+          ),
       );
       // The last start attempt fails the run with the provider's own reason
       // instead of leaving it `starting` after the effect gives up. A run that
@@ -584,7 +660,7 @@ export const layer: Layer.Layer<
         });
         return;
       }
-      const session = sessionResult.success;
+      const { session, resolvedRuntimePolicy } = sessionResult.success;
       // Only the provider's own thread load fails the run on the last attempt;
       // store, id and handoff failures around it keep their typed errors.
       const loadFromProvider = (
@@ -1235,6 +1311,7 @@ export const layer: Layer.Layer<
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
+        interruptReason: runControls.interruptReason,
         message: {
           messageId: message.id,
           text: userText,

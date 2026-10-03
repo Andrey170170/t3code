@@ -156,10 +156,12 @@ it.effect.each([
               }),
           }),
           Layer.mock(CheckpointServiceV2)({
+            reserve: () => Effect.succeed({ endsSessionsIn: null }),
             restore: () =>
               Effect.gen(function* () {
                 calls.push("files");
                 yield* fs.remove(otherFile).pipe(Effect.orDie);
+                return { notice: null };
               }),
           }),
           Layer.mock(EventSinkV2)({ write: () => Effect.succeed([]) }),

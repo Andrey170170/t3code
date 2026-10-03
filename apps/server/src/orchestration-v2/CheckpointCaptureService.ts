@@ -107,8 +107,12 @@ export const layer: Layer.Layer<
       const baselineOrdinalWithinScope = Math.max(0, run.ordinal - 1);
       const hasReadyCheckpoint = (ordinalWithinScope: number) =>
         readyCheckpointOrdinals.includes(ordinalWithinScope);
+      // A later workspace assignment's scope starts at its own baseline; the
+      // thread's start is in its first scope.
       const threadStartCheckpoint =
-        baselineOrdinalWithinScope === 0 || hasReadyCheckpoint(0)
+        baselineOrdinalWithinScope === 0 ||
+        hasReadyCheckpoint(0) ||
+        (scope.workspaceAssignment ?? 0) > 0
           ? null
           : yield* checkpoints.materializeBaselineCheckpoint({
               scope,

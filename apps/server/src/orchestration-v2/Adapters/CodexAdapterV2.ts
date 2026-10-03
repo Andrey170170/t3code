@@ -152,6 +152,7 @@ import {
   type ProviderAdapterV2SessionRuntime,
   type ProviderAdapterV2SteerInput,
   type ProviderAdapterV2TurnInput,
+  withLaunchLoopbackHost,
 } from "../ProviderAdapter.ts";
 import {
   makeSubagentChildThread,
@@ -1204,6 +1205,11 @@ export function codexThreadRuntimeParams(input: {
   readonly threadId: ThreadId | null;
   readonly modelSelection?: { readonly model: string };
   readonly runtimePolicy?: ProviderAdapterV2RuntimePolicy;
+  /**
+   * The user's configured `developer_instructions`. The override replaces
+   * them, so a launch's instructions are appended to them.
+   */
+  readonly configuredDeveloperInstructions?: string | undefined;
 }): {
   readonly cwd?: string;
   readonly model?: string;
@@ -1211,20 +1217,30 @@ export function codexThreadRuntimeParams(input: {
 } {
   const mcpSession =
     input.threadId === null ? undefined : McpProviderSession.readMcpProviderSession(input.threadId);
+  const launch = input.runtimePolicy?.launch;
   return {
     ...(input.runtimePolicy?.cwd == null ? {} : { cwd: input.runtimePolicy.cwd }),
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      ...(launch?.instructions === undefined
+        ? {}
+        : {
+            developer_instructions: [input.configuredDeveloperInstructions, launch.instructions]
+              .filter((part) => part !== undefined && part.length > 0)
+              .join("\n\n"),
+          }),
+      // A dotted key, not a nested `mcp_servers` table: Codex (0.160) lets a
+      // nested table replace every MCP server configured on its command line
+      // (`-c mcp_servers.*`, as Trellis agent profiles add them), while a
+      // dotted key merges this one server in beside them.
       ...(mcpSession === undefined
         ? {}
         : {
-            mcp_servers: {
-              "t3-code": {
-                url: mcpSession.endpoint,
-                http_headers: {
-                  Authorization: mcpSession.authorizationHeader,
-                },
+            "mcp_servers.t3-code": {
+              url: withLaunchLoopbackHost(mcpSession.endpoint, launch),
+              http_headers: {
+                Authorization: mcpSession.authorizationHeader,
               },
             },
           }),
@@ -1394,16 +1410,23 @@ export const codexAppServerClientFactoryFromSettingsLayer: Layer.Layer<
       open: (input) =>
         Effect.gen(function* () {
           const scope = yield* Scope.Scope;
+          // A launch (a Trellis shim) runs the app-server elsewhere, chosen by
+          // the process's cwd, so it also starts in the policy's directory.
+          const launch = input.runtimePolicy.launch;
           const environment = {
             ...input.environment,
             ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
+            ...launch?.env,
           };
           const command = yield* makeCodexAppServerSpawnCommand({
-            command: input.settings.binaryPath || "codex",
+            command: launch?.executable ?? (input.settings.binaryPath || "codex"),
             args: codexAppServerArgs(
               resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
             ),
             env: environment,
+            ...(launch === undefined || input.runtimePolicy.cwd === null
+              ? {}
+              : { cwd: input.runtimePolicy.cwd }),
           });
           const handle = yield* spawner.spawn(command).pipe(
             Effect.provideService(Scope.Scope, scope),
@@ -1633,6 +1656,28 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
           yield* client.notify("initialized", undefined);
           yield* Ref.set(initialized, true);
         });
+        /**
+         * The configured `developer_instructions` for a request's cwd, when a
+         * launch adds instructions that would otherwise replace them. Read per
+         * request: threads of one workspace share this process, yet each cwd
+         * may carry its own project config.
+         */
+        const configuredDeveloperInstructionsFor = (
+          runtimePolicy: ProviderAdapterV2RuntimePolicy | undefined,
+        ) =>
+          runtimePolicy?.launch?.instructions === undefined
+            ? Effect.succeed(undefined)
+            : client
+                .request("config/read", {
+                  ...(runtimePolicy.cwd === null ? {} : { cwd: runtimePolicy.cwd }),
+                  includeLayers: false,
+                })
+                .pipe(
+                  Effect.map(
+                    (response) => response.config.developer_instructions?.trim() || undefined,
+                  ),
+                  Effect.orElseSucceed(() => undefined),
+                );
         const now = yield* DateTime.now;
         const session = providerSession({
           providerSessionId: input.providerSessionId,
@@ -5441,13 +5486,15 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
             }),
           ensureThread: (threadInput) =>
             ensureInitialized.pipe(
-              Effect.andThen(
+              Effect.andThen(configuredDeveloperInstructionsFor(threadInput.runtimePolicy)),
+              Effect.flatMap((configuredDeveloperInstructions) =>
                 client.request(
                   "thread/start",
                   codexThreadRuntimeParams({
                     threadId: threadInput.threadId,
                     modelSelection: threadInput.modelSelection,
                     runtimePolicy: threadInput.runtimePolicy,
+                    configuredDeveloperInstructions,
                   }),
                 ),
               ),
@@ -5475,12 +5522,14 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
 
               const response = yield* ensureInitialized.pipe(
-                Effect.andThen(
+                Effect.andThen(configuredDeveloperInstructionsFor(threadInput.runtimePolicy)),
+                Effect.flatMap((configuredDeveloperInstructions) =>
                   // excludeTurns is not in the generated request schema yet.
                   client.raw.request("thread/resume", {
                     threadId: nativeThreadId,
                     excludeTurns: true,
                     ...codexThreadRuntimeParams({
+                      configuredDeveloperInstructions,
                       threadId: threadInput.threadId ?? threadInput.providerThread.appThreadId,
                       ...(threadInput.modelSelection === undefined
                         ? {}
@@ -6204,6 +6253,9 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               // process. After a restart or idle release, load it the same way
               // the next turn would before reverting.
               if (!loaded) {
+                const configuredDeveloperInstructions = yield* configuredDeveloperInstructionsFor(
+                  input.runtimePolicy,
+                );
                 yield* client.raw.request("thread/resume", {
                   threadId,
                   excludeTurns: true,
@@ -6211,6 +6263,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                     threadId: threadInput.providerThread.appThreadId,
                     modelSelection: input.modelSelection,
                     runtimePolicy: input.runtimePolicy,
+                    configuredDeveloperInstructions,
                   }),
                 });
               }
@@ -6312,13 +6365,15 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               const threadId = yield* getNativeThreadId(threadInput.sourceProviderThread);
               const boundary = yield* resolveCodexForkBoundary(threadInput);
               const response = yield* ensureInitialized.pipe(
-                Effect.andThen(
+                Effect.andThen(configuredDeveloperInstructionsFor(threadInput.runtimePolicy)),
+                Effect.flatMap((configuredDeveloperInstructions) =>
                   client.request("thread/fork", {
                     threadId,
                     ...(boundary.lastTurnId === undefined
                       ? {}
                       : { lastTurnId: boundary.lastTurnId }),
                     ...codexThreadRuntimeParams({
+                      configuredDeveloperInstructions,
                       threadId: threadInput.targetThreadId,
                       ...(threadInput.modelSelection === undefined
                         ? {}

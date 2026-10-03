@@ -39,6 +39,17 @@ import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
+import * as Trellis from "./trellis/Trellis.ts";
+import * as TrellisCatalog from "./trellis/TrellisCatalog.ts";
+import * as TrellisCheckpointStore from "./trellis/TrellisCheckpointStore.ts";
+import * as TrellisIdeaPromotion from "./trellis/TrellisIdeaPromotion.ts";
+import * as TrellisNaming from "./trellis/TrellisNaming.ts";
+import * as TrellisPreview from "./trellis/TrellisPreview.ts";
+import * as TrellisWorkers from "./trellis/TrellisWorkers.ts";
+import * as TrellisPtyAdapter from "./trellis/TrellisPtyAdapter.ts";
+import * as TrellisRestore from "./trellis/TrellisRestore.ts";
+import * as TrellisTurns from "./trellis/TrellisTurns.ts";
+import * as TrellisGraduation from "./trellis/TrellisGraduation.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -192,7 +203,8 @@ const ApplicationObservabilityLive = EventLoopMonitor.layer.pipe(
   Layer.provideMerge(ResourceAttributionLayerLive),
 );
 
-const PtyAdapterLive = NodePtyAdapter.layer;
+// Terminals in Trellis project paths run inside the workspace container.
+const PtyAdapterLive = TrellisPtyAdapter.layer.pipe(Layer.provide(NodePtyAdapter.layer));
 
 const ServerSettingsLayerLive = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
@@ -384,8 +396,9 @@ const VcsLayerLive = Layer.empty.pipe(
   ),
 );
 
-const CheckpointStoreLayerLive = CheckpointStore.layer.pipe(
-  Layer.provide(VcsDriverRegistryLayerLive),
+// Trellis project paths are checkpointed by Trellis snapshots, the rest by Git.
+const CheckpointStoreLayerLive = TrellisCheckpointStore.layer.pipe(
+  Layer.provide(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistryLayerLive))),
 );
 
 const PortScannerLayerLive = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
@@ -473,6 +486,29 @@ const ThreadPullRequestWorkerLive = Layer.effectDiscard(
   ThreadPullRequestService.make.pipe(Effect.flatMap((service) => service.start())),
 ).pipe(Layer.provide(PullRequestServiceLive));
 
+// Trellis catalog sync (one T3 project per Trellis workspace path), its
+// client operations, the lazy creation of new ideas, graduation, naming items
+// from their threads and the mapping of workspace previews. Idle while
+// Trellis is off.
+const TrellisCatalogLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const catalog = yield* TrellisCatalog.TrellisCatalog;
+    yield* catalog.start();
+    const naming = yield* TrellisNaming.TrellisNaming;
+    yield* naming.start();
+    const workers = yield* TrellisWorkers.TrellisWorkers;
+    yield* workers.start();
+  }),
+).pipe(
+  Layer.provideMerge(TrellisNaming.layer),
+  // Workers in forks: fork spawns, discards, summaries, the archive cascade.
+  Layer.provideMerge(TrellisWorkers.layer),
+  Layer.provideMerge(TrellisIdeaPromotion.layer),
+  Layer.provideMerge(TrellisGraduation.layer),
+  Layer.provideMerge(TrellisCatalog.layer),
+  Layer.provideMerge(TrellisPreview.layer),
+);
+
 const ProviderInstallationRefreshLive = Layer.effectDiscard(
   Effect.gen(function* () {
     const antigravity = yield* AntigravityInstallation.AntigravityInstallation;
@@ -512,6 +548,7 @@ const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
     Layer.provide(ProjectionStoreV2.layer),
   ),
   ThreadPullRequestWorkerLive,
+  TrellisCatalogLive,
   Layer.effectDiscard(
     Effect.gen(function* () {
       const service = yield* PullRequestSyncReactor.PullRequestSyncReactor;
@@ -571,6 +608,13 @@ const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
 
 const RuntimeCoreDependenciesLive = RuntimeCoreDependenciesBaseLive.pipe(
   Layer.provideMerge(PtyAdapterLive),
+  // Reports turns in Trellis paths to Trellis (idle while it is off).
+  Layer.provideMerge(TrellisTurns.layer),
+  // The optional Trellis workspace service, off until enabled in settings.
+  // Runtime policy, terminals and worktree creation consult it when present.
+  Layer.provideMerge(Trellis.layer.pipe(Layer.provide(ServerSettingsLayerLive))),
+  // Orders Trellis restores and trash against each other and new turns.
+  Layer.provideMerge(TrellisRestore.gateLayer),
   // Search, prepare, status inspection, and turn launch share one registry
   // cache so every client and provider instance sees the same prepared agents.
   Layer.provideMerge(AcpRegistryCatalogLive),

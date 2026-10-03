@@ -53,6 +53,7 @@ it.effect.each([false, true, "interrupt"] as const)(
           IdAllocator.layer,
           Layer.mock(CheckpointStore.CheckpointStore)({
             isGitRepository: () => Effect.succeed(true),
+            isCheckpointable: () => Effect.succeed(true),
             hasCheckpointRef,
             captureCheckpoint: () => Effect.void,
           }),
@@ -101,3 +102,48 @@ it.effect.each([false, true, "interrupt"] as const)(
     }).pipe(Effect.provide(testLayer));
   },
 );
+
+it("restores files of a turn before a move only from the project the thread is in now", () => {
+  const scope = (id: string, assignment?: number) => ({
+    id: CheckpointScopeId.make(id),
+    kind: "root_run" as const,
+    parentScopeId: null,
+    ...(assignment === undefined ? {} : { workspaceAssignment: assignment }),
+  });
+  const checkpoint = (scopeId: string, ordinal: number, appRunOrdinal: number | null) => ({
+    scopeId: CheckpointScopeId.make(scopeId),
+    status: "ready" as const,
+    ordinalWithinScope: ordinal,
+    appRunOrdinal,
+  });
+  // Runs 1 and 2 in the idea; the thread moved and ran turn 3 in the project.
+  const idea = scope("idea");
+  const project = scope("project", 1);
+  const scopes = [idea, project];
+  const checkpoints = [
+    checkpoint("idea", 0, null),
+    checkpoint("idea", 1, 1),
+    checkpoint("idea", 2, 2),
+    checkpoint("project", 2, null),
+    checkpoint("project", 3, 3),
+  ];
+  const targetOf = (index: number, thread = { workspaceAssignment: 1 }) =>
+    CheckpointService.fileRestoreTargetOf({
+      thread,
+      checkpoint: checkpoints[index]!,
+      scope: checkpoints[index]!.scopeId === idea.id ? idea : project,
+      checkpoints,
+      scopes,
+    });
+  // Undoing turn 3 restores the state the thread arrived with, from the project.
+  assert.deepEqual(targetOf(2), { checkpoint: checkpoints[3], scope: project });
+  // Earlier states are in the idea's folder: across the boundary.
+  assert.isNull(targetOf(1));
+  assert.isNull(targetOf(0));
+  assert.deepEqual(targetOf(4), { checkpoint: checkpoints[4], scope: project });
+  // Before the move, the idea's own checkpoints restore as always.
+  assert.deepEqual(targetOf(1, { workspaceAssignment: 0 }), {
+    checkpoint: checkpoints[1],
+    scope: idea,
+  });
+});

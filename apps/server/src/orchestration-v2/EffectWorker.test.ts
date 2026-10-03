@@ -99,6 +99,7 @@ function makeExecutorLayer(input: {
       ProviderSessionManager.ProviderSessionManagerV2,
       ProviderSessionManager.ProviderSessionManagerV2.of({
         shutdown: Effect.void,
+        listLive: Effect.succeed([]),
         open: () => Effect.die("unused open"),
         get: () => Effect.succeed(Option.none()),
         close: () => Effect.void,

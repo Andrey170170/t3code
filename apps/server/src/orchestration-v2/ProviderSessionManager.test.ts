@@ -892,6 +892,59 @@ it.effect("ProviderSessionManagerV2 opens a duplicate session only once", () =>
   }),
 );
 
+it.effect("ProviderSessionManagerV2 serves a launched session only to its own session key", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const first = ThreadId.make("thread-provider-session-manager-key-a");
+      const second = ThreadId.make("thread-provider-session-manager-key-b");
+      const providerSessionId = idAllocator.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        sessionKey: "ws-a",
+      });
+      const launched = (sessionKey: string) => ({
+        ...runtimePolicy,
+        launch: { executable: "/shims/codex", sessionKey },
+      });
+      yield* eventSink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: first, now }),
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: second, now }),
+        ],
+      });
+
+      const runtime = yield* manager.open({
+        threadId: first,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy: launched("ws-a"),
+      });
+      assert.equal(runtime.providerSession.sessionKey, "ws-a");
+      const projection = yield* projectionStore.getThreadProjection(first);
+      assert.equal(projection.providerSessions.at(-1)?.sessionKey, "ws-a");
+
+      // A thread resolved to another workspace never reattaches to the live process.
+      const refused = yield* manager
+        .open({
+          threadId: second,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy: launched("ws-b"),
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused._tag, "ProviderSessionOpenError");
+      assert.equal((yield* Ref.get(state)).openCount, 1);
+    });
+
+    yield* effect.pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 60_000 })));
+  }),
+);
+
 it.effect("ProviderSessionManagerV2 releases live sessions when its layer shuts down", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
@@ -3188,6 +3241,85 @@ it.effect(
         yield* TestClock.adjust("1 second");
         yield* Effect.yieldNow;
         assert.equal((yield* Ref.get(state)).closeCount, 1);
+      });
+
+      yield* effect.pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 1000 })));
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 unloads a thread that moved to another session from the shared runtime it left",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const projectId = yield* idAllocator.allocate.project({
+          fixtureName: "provider-session-manager-moved-thread",
+        });
+        const movedThreadId = yield* idAllocator.allocate.thread({
+          fixtureName: "provider-session-manager-moved-thread-a",
+          projectId,
+        });
+        const stayingThreadId = yield* idAllocator.allocate.thread({
+          fixtureName: "provider-session-manager-moved-thread-b",
+          projectId,
+        });
+        const oldSessionId = idAllocator.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          sessionKey: "ws-1",
+        });
+        const newSessionId = idAllocator.derive.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          sessionKey: "ws-2",
+        });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId: movedThreadId, now }),
+            yield* makeThreadCreatedEvent({ idAllocator, threadId: stayingThreadId, now }),
+          ],
+        });
+        for (const threadId of [movedThreadId, stayingThreadId]) {
+          yield* manager.open({
+            threadId,
+            providerSessionId: oldSessionId,
+            modelSelection,
+            runtimePolicy,
+          });
+        }
+        // The dispatch already moved the provider thread's row to the new session.
+        const moved = makeProviderThread({
+          idAllocator,
+          threadId: movedThreadId,
+          providerSessionId: newSessionId,
+          now,
+        });
+        yield* eventSink.write({
+          events: [
+            {
+              id: yield* idAllocator.allocate.event({ threadId: movedThreadId }),
+              type: "provider-thread.updated",
+              threadId: movedThreadId,
+              driver: CODEX_DRIVER,
+              occurredAt: now,
+              payload: moved,
+            },
+          ],
+        });
+
+        yield* manager.detach({
+          providerSessionId: oldSessionId,
+          threadId: movedThreadId,
+          unloadProviderThreads: [
+            { providerThreadId: moved.id, nativeThreadRef: moved.nativeThreadRef! },
+          ],
+        });
+        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
+        assert.isTrue(Option.isSome(yield* manager.get(oldSessionId)));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
       });
 
       yield* effect.pipe(Effect.provide(makeTestLayer({ state, idleTimeoutMs: 1000 })));

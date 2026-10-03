@@ -292,7 +292,10 @@ it.effect("reports a missing provider turn as a structured rollback failure", ()
   const testLayer = checkpointRollbackServiceLayer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        Layer.mock(CheckpointService.CheckpointServiceV2)({ restore }),
+        Layer.mock(CheckpointService.CheckpointServiceV2)({
+          restore,
+          reserve: () => Effect.succeed({ endsSessionsIn: null }),
+        }),
         Layer.mock(EventSink.EventSinkV2)({}),
         IdAllocator.layer,
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
@@ -391,9 +394,11 @@ it.effect.each([
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(CheckpointService.CheckpointServiceV2)({
+          reserve: () => Effect.succeed({ endsSessionsIn: null }),
           restore: () =>
             Effect.sync(() => {
               calls.push("files");
+              return { notice: null };
             }),
         }),
         Layer.mock(EventSink.EventSinkV2)({
@@ -464,7 +469,9 @@ it.effect.each([
     yield* service.execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles });
     assert.deepEqual(
       calls,
-      restoreFiles ? ["provider", "files", "projection"] : ["provider", "projection"],
+      // The rewind is recorded before the files are restored, and the runs
+      // are marked as having their files restored after.
+      restoreFiles ? ["provider", "projection", "files", "projection"] : ["provider", "projection"],
     );
   }).pipe(Effect.provide(testLayer));
 });
@@ -507,3 +514,201 @@ it.effect.skipIf(!symlinksSupported)(
       assert.isFalse(isolated);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+// A thread that ran turns 1-2 in project A (assignment 0), moved to B
+// (assignment 1, baseline at ordinal 2) and ran turn 3 there.
+function movedThreadHarness(options: {
+  readonly assignmentAfterLease?: number;
+  readonly policySessionKey?: string;
+}) {
+  const threadId = ThreadId.make("moved-thread");
+  const providerThreadId = ProviderThreadId.make("moved-provider-thread");
+  const oldSessionId = ProviderSessionId.make("moved-session-a");
+  const instanceId = ProviderInstanceId.make("codex");
+  const scopeA = CheckpointScopeId.make("moved-scope-a");
+  const scopeB = CheckpointScopeId.make("moved-scope-b");
+  const checkpoint = (
+    id: string,
+    scopeId: CheckpointScopeId,
+    ordinal: number,
+    appRunOrdinal: number | null,
+  ) => ({
+    id: CheckpointId.make(id),
+    scopeId,
+    status: "ready",
+    ordinalWithinScope: ordinal,
+    appRunOrdinal,
+    runId: appRunOrdinal === null ? null : `run-${appRunOrdinal}`,
+    nodeId: "node",
+    ref: `ref-${id}`,
+  });
+  const providerThread = {
+    id: providerThreadId,
+    providerSessionId: oldSessionId,
+    providerInstanceId: instanceId,
+  };
+  const thread = (assignment: number) => ({
+    id: threadId,
+    worktreePath: null,
+    activeProviderThreadId: providerThreadId,
+    modelSelection: { instanceId, model: "test" },
+    workspaceAssignment: assignment,
+  });
+  let reads = 0;
+  const projection = () =>
+    ({
+      thread: thread(reads++ === 0 ? 1 : (options.assignmentAfterLease ?? 1)),
+      providerThreads: [providerThread],
+      providerSessions: [
+        {
+          id: oldSessionId,
+          status: "ready",
+          cwd: "/a",
+          sessionKey: "ws-a",
+          capabilities: { sessions: { supportsMultipleProviderThreadsPerSession: true } },
+        },
+      ],
+      providerTurns: [1, 2, 3].map((ordinal) => ({
+        id: `turn-${ordinal}`,
+        providerThreadId,
+        runAttemptId: `attempt-${ordinal}`,
+        ordinal,
+        status: "completed",
+      })),
+      nodes: [],
+      attempts: [1, 2, 3].map((ordinal) => ({ id: `attempt-${ordinal}`, runId: `run-${ordinal}` })),
+      checkpoints: [
+        checkpoint("a-1", scopeA, 1, 1),
+        checkpoint("a-2", scopeA, 2, 2),
+        checkpoint("b-2", scopeB, 2, null),
+        checkpoint("b-3", scopeB, 3, 3),
+      ],
+      checkpointScopes: [
+        { id: scopeA, kind: "root_run", parentScopeId: null, cwd: "/a" },
+        { id: scopeB, kind: "root_run", parentScopeId: null, cwd: "/b", workspaceAssignment: 1 },
+      ],
+      runs: [1, 2, 3].map((ordinal) => ({
+        id: `run-${ordinal}`,
+        ordinal,
+        status: "completed",
+        rootNodeId: null,
+        activeAttemptId: `attempt-${ordinal}`,
+      })),
+    }) as unknown as OrchestrationV2ThreadProjection;
+  const events: Array<{ readonly type: string; readonly payload: unknown }> = [];
+  const opened: Array<{ readonly providerSessionId: string; readonly resumed: boolean }> = [];
+  const restored: Array<string> = [];
+  const layer = checkpointRollbackServiceLayer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(CheckpointService.CheckpointServiceV2)({
+          reserve: () => Effect.succeed({ endsSessionsIn: null }),
+          restore: (input) =>
+            Effect.sync(() => {
+              restored.push(input.checkpoint.id);
+              return { notice: null };
+            }),
+          deleteStaleRefs: () => Effect.void,
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          write: (input) =>
+            Effect.sync(() => {
+              events.push(...(input.events as unknown as typeof events));
+              return [];
+            }),
+        }),
+        IdAllocator.layer,
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThreadRecords: () => Effect.sync(projection),
+          getShellSnapshot: () =>
+            Effect.succeed({
+              schemaVersion: 1,
+              snapshotSequence: 0,
+              threads: [],
+              archivedThreads: [],
+            }),
+          getNextTurnItemOrdinal: () => Effect.succeed(1),
+        }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          open: (input) =>
+            Effect.sync(() => {
+              opened.push({
+                providerSessionId: input.providerSessionId,
+                resumed: input.resumeFromSession !== undefined,
+              });
+              return {
+                rollbackThread: () => Effect.succeed({ providerThread }),
+              } as never;
+            }),
+        }),
+        Layer.mock(RuntimePolicy.RuntimePolicyV2)({
+          resolve: () =>
+            Effect.succeed({
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/b",
+              ...(options.policySessionKey === undefined
+                ? {}
+                : { launch: { executable: "/shims/codex", sessionKey: options.policySessionKey } }),
+            } as never),
+        }),
+      ),
+    ),
+  );
+  const execute = (input: { readonly checkpointId: string; readonly restoreFiles: boolean }) =>
+    Effect.flatMap(CheckpointRollbackService.CheckpointRollbackServiceV2, (service) =>
+      service.execute({
+        threadId,
+        providerThreadId,
+        checkpointId: CheckpointId.make(input.checkpointId),
+        scopeId: input.checkpointId.startsWith("a-") ? scopeA : scopeB,
+        restoreFiles: input.restoreFiles,
+      }),
+    );
+  return { layer, execute, events, opened, restored, instanceId };
+}
+
+it.effect("a file restore is refused when the thread moved while the revert waited", () => {
+  const harness = movedThreadHarness({ assignmentAfterLease: 2 });
+  return Effect.gen(function* () {
+    const error = yield* harness
+      .execute({ checkpointId: "b-2", restoreFiles: true })
+      .pipe(Effect.flip);
+    assert.include(error.message + (error.detail ?? ""), "before the thread moved");
+    assert.deepEqual(harness.restored, []);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("a conversation rewind past a move keeps the new project's baseline", () => {
+  const harness = movedThreadHarness({});
+  return Effect.gen(function* () {
+    yield* harness.execute({ checkpointId: "a-1", restoreFiles: false });
+    const stale = harness.events
+      .filter(
+        (event) =>
+          event.type === "checkpoint.captured" &&
+          (event.payload as { status: string }).status === "stale",
+      )
+      .map((event) => (event.payload as { id: string }).id)
+      .toSorted();
+    assert.deepEqual(stale, ["a-2", "b-3"]);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("a rewind after a move opens the new workspace's session, not the old one", () => {
+  const harness = movedThreadHarness({ policySessionKey: "ws-b" });
+  return Effect.gen(function* () {
+    const ids = yield* IdAllocator.IdAllocatorV2;
+    yield* harness.execute({ checkpointId: "b-2", restoreFiles: false });
+    const destination = ids.derive.providerSession({
+      providerInstanceId: harness.instanceId,
+      sessionKey: "ws-b",
+    });
+    assert.deepEqual(harness.opened, [{ providerSessionId: destination, resumed: false }]);
+    const updated = harness.events.find((event) => event.type === "provider-thread.updated");
+    assert.equal(
+      (updated?.payload as { providerSessionId: string }).providerSessionId,
+      destination,
+    );
+  }).pipe(Effect.provide(Layer.merge(harness.layer, IdAllocator.layer)));
+});

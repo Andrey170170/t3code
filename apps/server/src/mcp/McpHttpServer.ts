@@ -47,6 +47,9 @@ import {
 import { WorktreeToolkitHandlersLive } from "./toolkits/worktree/handlers.ts";
 import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 import * as WorktreeMcpService from "./WorktreeMcpService.ts";
+import { TrellisToolkitHandlersLive } from "./toolkits/trellis/handlers.ts";
+import { TrellisToolkit } from "./toolkits/trellis/tools.ts";
+import * as TrellisCheckpointTool from "../trellis/TrellisCheckpointTool.ts";
 import { PullRequestsToolkitHandlersLive } from "./toolkits/pullRequests/handlers.ts";
 import { PullRequestsToolkit } from "./toolkits/pullRequests/tools.ts";
 import {
@@ -675,6 +678,11 @@ const WorktreeToolkitRegistrationLive = McpServer.toolkit(WorktreeToolkit).pipe(
   Layer.provide(WorktreeMcpService.layer),
 );
 
+const TrellisToolkitRegistrationLive = McpServer.toolkit(TrellisToolkit).pipe(
+  Layer.provide(TrellisToolkitHandlersLive),
+  Layer.provide(TrellisCheckpointTool.layer),
+);
+
 const PreviewControlsRegistrationLive = McpServer.toolkit(PreviewControlsToolkit).pipe(
   Layer.provide(PreviewControlsHandlersLive),
 );
@@ -724,6 +732,7 @@ export const layer = Layer.mergeAll(
   EnvironmentRegistrationLive,
   PreviewControlsRegistrationLive,
   WorktreeToolkitRegistrationLive,
+  TrellisToolkitRegistrationLive,
   PullRequestsToolkitRegistrationLive,
   DeviceToolkitRegistrationLive,
 ).pipe(Layer.provideMerge(McpTransportLive));

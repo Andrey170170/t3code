@@ -3,10 +3,12 @@ import {
   ModelSelection,
   OrchestrationV2DomainEvent,
   OrchestrationV2ProviderSession,
+  type OrchestrationV2ProviderRef,
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
   ProviderInstanceId,
   ProviderSessionId,
+  type ProviderThreadId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -159,6 +161,14 @@ export interface ProviderSessionManagerV2Shape {
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
+  /**
+   * The sessions with a live runtime and the directory each runs in, whether
+   * or not a thread is still attached (an idle runtime outlives its threads
+   * until the idle release).
+   */
+  readonly listLive: Effect.Effect<
+    ReadonlyArray<{ readonly providerSessionId: ProviderSessionId; readonly cwd: string }>
+  >;
   /** Closes every live runtime owned by one provider instance. */
   readonly closeInstance: (
     instanceId: ProviderInstanceId,
@@ -178,6 +188,15 @@ export interface ProviderSessionManagerV2Shape {
      * potential re-attach.
      */
     readonly revokeMcpCredential?: boolean;
+    /**
+     * Provider threads that left this session for another one, with the
+     * native refs they had here; unloaded along with the threads whose rows
+     * still name this session.
+     */
+    readonly unloadProviderThreads?: ReadonlyArray<{
+      readonly providerThreadId: ProviderThreadId;
+      readonly nativeThreadRef: OrchestrationV2ProviderRef;
+    }>;
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
 }
 
@@ -288,6 +307,31 @@ function providerThreadLoadKey(input: {
     modelSelection: input.modelSelection ?? null,
     runtimePolicy: input.runtimePolicy ?? null,
   });
+}
+
+/**
+ * Stamps the launch's session key on everything the runtime reports about its
+ * session, so the projection records which workspace the process serves.
+ */
+function withSessionKey(
+  runtime: ProviderAdapterV2SessionRuntime,
+  key: string | undefined,
+): ProviderAdapterV2SessionRuntime {
+  if (key === undefined) return runtime;
+  const stamp = (session: OrchestrationV2ProviderSession) => ({ ...session, sessionKey: key });
+  return {
+    ...runtime,
+    get providerSession() {
+      return stamp(runtime.providerSession);
+    },
+    events: runtime.events.pipe(
+      Stream.map((event) =>
+        event.type === "provider_session.updated"
+          ? { ...event, providerSession: stamp(event.providerSession) }
+          : event,
+      ),
+    ),
+  };
 }
 
 export const layerWithOptions = (
@@ -1682,6 +1726,20 @@ export const layerWithOptions = (
               const key = sessionKey(input.providerSessionId);
               const existing = (yield* Ref.get(sessions)).get(key);
               if (existing !== undefined) {
+                // A live process serves only threads launched the same way
+                // (one Trellis workspace); ids normally differ per key, so this
+                // guards a thread that kept an id from before its key changed.
+                if (
+                  existing.runtime.providerSession.sessionKey !==
+                  input.runtimePolicy.launch?.sessionKey
+                ) {
+                  return yield* new ProviderSessionOpenError({
+                    instanceId: input.modelSelection.instanceId,
+                    providerSessionId: input.providerSessionId,
+                    cause:
+                      "This provider session runs in another workspace; send the message again to start one in this thread's workspace.",
+                  });
+                }
                 if (
                   !existing.attachedThreadIds.has(input.threadId) &&
                   !existing.supportsMultipleProviderThreads
@@ -1728,7 +1786,7 @@ export const layerWithOptions = (
                 }
               });
               const sessionScope = yield* Scope.make();
-              const runtime = yield* adapter
+              const opened = yield* adapter
                 .openSession({
                   threadId: input.threadId,
                   providerSessionId: input.providerSessionId,
@@ -1773,6 +1831,7 @@ export const layerWithOptions = (
                       }),
                   ),
                 );
+              const runtime = withSessionKey(opened, input.runtimePolicy.launch?.sessionKey);
               const eventSubscribers = yield* Ref.make<
                 ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
               >(new Map());
@@ -1829,6 +1888,14 @@ export const layerWithOptions = (
               return exposedRuntime;
             }),
           ),
+        listLive: Ref.get(sessions).pipe(
+          Effect.map((entries) =>
+            [...entries.values()].map((entry) => ({
+              providerSessionId: entry.runtime.providerSession.id,
+              cwd: entry.runtime.providerSession.cwd,
+            })),
+          ),
+        ),
         get: (providerSessionId) =>
           Effect.gen(function* () {
             const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
@@ -1905,7 +1972,22 @@ export const layerWithOptions = (
                     .filter((thread) => thread.providerSessionId === input.providerSessionId)
                     .map((thread) => [thread.id, thread] as const),
                 );
-                detachedProviderThreads = [...providerThreads.values()];
+                // Threads that already moved on are unloaded as they were here.
+                const left = (input.unloadProviderThreads ?? []).flatMap((moved) => {
+                  const row = projection.value.providerThreads.find(
+                    (thread) => thread.id === moved.providerThreadId,
+                  );
+                  return row === undefined || providerThreads.has(row.id)
+                    ? []
+                    : [
+                        {
+                          ...row,
+                          providerSessionId: input.providerSessionId,
+                          nativeThreadRef: moved.nativeThreadRef,
+                        },
+                      ];
+                });
+                detachedProviderThreads = [...providerThreads.values(), ...left];
                 const activeTurns = projection.value.providerTurns.filter(
                   (turn) => turn.status === "running" && providerThreads.has(turn.providerThreadId),
                 );

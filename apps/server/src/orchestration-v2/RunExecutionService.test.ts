@@ -1428,6 +1428,23 @@ it.effect("does not pin ingestion on background items when the root turn is inte
   }),
 );
 
+it.effect("an interrupted run's result names the interrupt's reason, else the user", () =>
+  Effect.gen(function* () {
+    const byUser = yield* runBackgroundItemScenario(
+      "interrupt-by-user",
+      (ids) => [rootTerminalEvent(ids, "interrupted")],
+      { observeInterruptResult: true },
+    );
+    assert.include(byUser, "interrupt-result:Run interrupted by user");
+    const byCheckpoint = yield* runBackgroundItemScenario(
+      "interrupt-by-checkpoint",
+      (ids) => [rootTerminalEvent(ids, "interrupted")],
+      { interruptReason: "Interrupted for a Trellis checkpoint", observeInterruptResult: true },
+    );
+    assert.include(byCheckpoint, "interrupt-result:Interrupted for a Trellis checkpoint");
+  }),
+);
+
 it.effect("seeds inherited background items before their next update", () =>
   Effect.gen(function* () {
     const key = "inherited-background-seeded";
@@ -3869,6 +3886,9 @@ function runBackgroundItemScenario(
       ReadonlyArray<{ readonly id: TurnItemId; readonly runId: RunId }>
     >;
     readonly onSubscribe?: Effect.Effect<void>;
+    readonly interruptReason?: string;
+    /** Also records the run_interrupt_result message. */
+    readonly observeInterruptResult?: boolean;
   },
 ) {
   return Effect.gen(function* () {
@@ -3890,6 +3910,19 @@ function runBackgroundItemScenario(
                   )
                 ) {
                   yield* Ref.update(observed, (current) => [...current, "root-finalized"]);
+                }
+                for (const event of input.events) {
+                  if (
+                    options?.observeInterruptResult === true &&
+                    event.type === "turn-item.updated" &&
+                    event.payload.type === "run_interrupt_result"
+                  ) {
+                    const message = event.payload.message;
+                    yield* Ref.update(observed, (current) => [
+                      ...current,
+                      `interrupt-result:${message}`,
+                    ]);
+                  }
                 }
                 return [];
               }),
@@ -3965,6 +3998,9 @@ function runBackgroundItemScenario(
           : {
               loadInheritedBackgroundTurnItems: options.loadInheritedBackgroundTurnItems,
             }),
+        ...(options?.interruptReason === undefined
+          ? {}
+          : { interruptReason: () => Effect.succeed(options.interruptReason) }),
         providerTurnOrdinal: 1,
         message: {
           messageId: MessageId.make(`message:${key}:user`),

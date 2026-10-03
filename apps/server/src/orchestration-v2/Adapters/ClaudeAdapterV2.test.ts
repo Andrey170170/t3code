@@ -165,6 +165,47 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
     assert.include(options.settings, { showThinkingSummaries: true });
   });
 
+  it("takes the executable, environment and primer from the runtime policy's launch", () => {
+    const base = {
+      modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+      nativeThreadId: "launched-thread",
+      resume: true,
+      cwd: "/trellis/workspaces/ws-1/project",
+      settings: { ...DEFAULT_CLAUDE_SETTINGS, binaryPath: "/usr/local/bin/claude" },
+      environment: { HOME: "/home/me", KEEP: "1" },
+      mcpServers: {
+        "t3-code": { type: "http" as const, url: "http://127.0.0.1:43123/mcp", headers: {} },
+      },
+    };
+    const host = ClaudeAdapterV2.makeClaudeQueryOptions(base);
+    const launched = ClaudeAdapterV2.makeClaudeQueryOptions({
+      ...base,
+      launch: {
+        executable: "/t3/trellis-shims/claude",
+        env: { KEEP: "2", TRELLIS_SOCKET: "/trellis/state/api.sock" },
+        instructions: "You are in a Trellis workspace.",
+        sessionKey: "ws-1",
+        loopbackHost: "host.containers.internal",
+      },
+    });
+    assert.equal(host.pathToClaudeCodeExecutable, "/usr/local/bin/claude");
+    assert.equal(launched.pathToClaudeCodeExecutable, "/t3/trellis-shims/claude");
+    assert.deepEqual(launched.env, {
+      HOME: "/home/me",
+      KEEP: "2",
+      TRELLIS_SOCKET: "/trellis/state/api.sock",
+    });
+    const hostPrompt = host.systemPrompt as { readonly append: string };
+    const launchedPrompt = launched.systemPrompt as { readonly append: string };
+    assert.equal(launchedPrompt.append, `${hostPrompt.append}\n\nYou are in a Trellis workspace.`);
+    assert.deepEqual(launched.mcpServers?.["t3-code"], {
+      type: "http",
+      url: "http://host.containers.internal:43123/mcp",
+      headers: {},
+    });
+    assert.deepEqual(host.mcpServers, base.mcpServers);
+  });
+
   it("preserves an explicit omitted thinking display", () => {
     const options = ClaudeAdapterV2.makeClaudeQueryOptions({
       modelSelection: CLAUDE_TEST_MODEL_SELECTION,
@@ -1605,6 +1646,87 @@ describe("ClaudeAdapterV2 attachments", () => {
 });
 
 describe("ClaudeAdapterV2 native fork", () => {
+  it.effect("forks a source that moved to this workspace from its relocated transcript", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const configDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-cfg-" });
+        const workspaceA = yield* fileSystem.realPath(
+          yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-ws-a-" }),
+        );
+        const workspaceB = yield* fileSystem.realPath(
+          yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-ws-b-" }),
+        );
+        const slug = (cwd: string) => cwd.replace(/[^a-zA-Z0-9]/g, "-");
+        // The source ran in A, then its thread moved to B without running there.
+        yield* fileSystem.makeDirectory(path.join(configDir, "projects", slug(workspaceA)), {
+          recursive: true,
+        });
+        yield* fileSystem.writeFileString(
+          path.join(configDir, "projects", slug(workspaceA), "source-native-session.jsonl"),
+          "{}\n",
+        );
+        const transcriptInB: Array<boolean> = [];
+        const adapter = ClaudeAdapterV2.makeClaudeAdapterV2({
+          instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+          settings: DEFAULT_CLAUDE_SETTINGS,
+          environment: { CLAUDE_CONFIG_DIR: configDir },
+          attachmentsDir: configDir,
+          fileSystem,
+          path,
+          idAllocator,
+          queryRunner: {
+            allocateSessionId: Effect.succeed("source-native-session"),
+            open: () => Effect.die("no query opens"),
+            forkSession: () =>
+              fileSystem
+                .exists(
+                  path.join(configDir, "projects", slug(workspaceB), "source-native-session.jsonl"),
+                )
+                .pipe(
+                  Effect.orDie,
+                  Effect.map((present) => {
+                    transcriptInB.push(present);
+                    return { sessionId: "forked-native-session" };
+                  }),
+                ),
+            subagentLaunchToolUseId: () => Effect.succeed(null),
+            assertComplete: Effect.void,
+          },
+        });
+        const modelSelection = {
+          instanceId: ProviderInstanceId.make(ClaudeAdapterV2.CLAUDE_PROVIDER),
+          model: "claude-sonnet-4-6",
+        };
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: workspaceB,
+          launch: { executable: "/shims/claude", sessionKey: "ws-b" },
+        });
+        const runtime = yield* adapter.openSession({
+          threadId: ThreadId.make("thread-moved-fork-source"),
+          providerSessionId: ProviderSessionId.make("provider-session-moved-fork"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const sourceProviderThread = yield* runtime.ensureThread({
+          threadId: ThreadId.make("thread-moved-fork-source"),
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* runtime.forkThread({
+          sourceProviderThread,
+          sourceProviderTurns: [],
+          targetThreadId: ThreadId.make("thread-moved-fork-target"),
+        });
+        assert.deepEqual(transcriptInB, [true]);
+      }),
+    ).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
   it.effect("forks at the source assistant cursor and resumes the forked session", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1900,10 +2022,10 @@ describe("ClaudeAdapterV2 native session identity", () => {
 });
 
 describe("ClaudeAdapterV2 resume fallback", () => {
-  // After a failed resume, V2 binds a new native session to the same
-  // provider-thread row (`ensureThread` with the existing row) and starts the
-  // turn with that row's next ordinal. The new session must be created, not
-  // resumed.
+  // The sequence V2 runs when a resume fails: `resumeThread` fails (here a
+  // launched session whose transcript is gone), `ensureThread` binds a new
+  // native session to the same provider-thread row, and the turn starts with
+  // that row's next ordinal. The new session must be created, not resumed.
   it.effect("opens the replacement session fresh after a failed resume", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1920,6 +2042,7 @@ describe("ClaudeAdapterV2 resume fallback", () => {
           runtimeMode: "full-access",
           interactionMode: "default",
           cwd,
+          launch: { executable: "/t3/trellis-shims/claude", sessionKey: "ws-1" },
         });
         const sessionIds = ["native-original", "native-replacement"];
         const openedQueries: Array<ClaudeAdapterV2.ClaudeAgentSdkQueryOpenInput> = [];
@@ -1958,7 +2081,7 @@ describe("ClaudeAdapterV2 resume fallback", () => {
             modelSelection: CLAUDE_TEST_MODEL_SELECTION,
             runtimePolicy,
           });
-        // An earlier session created the native thread.
+        // An earlier session created the native thread; its transcript is gone.
         const original = yield* (yield* openSession("provider-session-before")).ensureThread({
           threadId,
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
@@ -1966,6 +2089,10 @@ describe("ClaudeAdapterV2 resume fallback", () => {
         });
 
         const runtime = yield* openSession("provider-session-after");
+        const resumed = yield* Effect.result(
+          runtime.resumeThread({ threadId, providerThread: original, runtimePolicy }),
+        );
+        assert.equal(resumed._tag, "Failure");
         const replacement = yield* runtime.ensureThread({
           threadId,
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
@@ -6427,6 +6554,96 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           makeResultFrame({
             uuid: "00000000-0000-4000-8000-000000000208",
             result: "Delegation completed.",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
+  );
+
+  // Ported from the fork's client fold (5e8edd787a): Claude resumes a failed
+  // subagent (e.g. after a usage limit) under the same task id through a new
+  // tool call; it must show as running again, without the old failure.
+  it.effect("re-opens a failed subagent that a new tool call resumes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const SUBAGENT_TASK_ID = "task-resume-after-failure";
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const subagentEvents = () =>
+          harness.events.filter(
+            (event): event is Extract<ProviderAdapterV2Event, { type: "subagent.updated" }> =>
+              event.type === "subagent.updated",
+          );
+        const taskStarted = (toolUseId: string, prompt: string, uuid: string) =>
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_started",
+            task_id: SUBAGENT_TASK_ID,
+            tool_use_id: toolUseId,
+            description: "Delegated task",
+            subagent_type: "general-purpose",
+            task_type: "local_agent",
+            prompt,
+            uuid,
+            session_id: WAKE_NATIVE_SESSION,
+          });
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-resume-after-failure"),
+            text: "Delegate this task.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          taskStarted("toolu-old-launch", "Do the task.", "00000000-0000-4000-8000-000000000901"),
+        );
+        yield* awaitUntil(() => subagentEvents().length === 1, "subagent node created");
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: SUBAGENT_TASK_ID,
+            tool_use_id: "toolu-old-launch",
+            status: "failed",
+            output_file: "/tmp/task-resume-after-failure.output",
+            summary: "Usage limit",
+            uuid: "00000000-0000-4000-8000-000000000902",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* awaitUntil(
+          () => subagentEvents().at(-1)?.subagent.status === "failed",
+          "subagent failed",
+        );
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          taskStarted(
+            "toolu-new-launch",
+            "Continue the task.",
+            "00000000-0000-4000-8000-000000000903",
+          ),
+        );
+        yield* awaitUntil(
+          () => subagentEvents().at(-1)?.subagent.status === "running",
+          "subagent re-opened",
+        );
+        const reopened = subagentEvents().at(-1)?.subagent;
+        assert.equal(reopened?.result ?? null, null);
+        assert.equal(new Set(subagentEvents().map((event) => event.subagent.id)).size, 1);
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000904",
+            result: "Resumed the subagent.",
           }),
         );
         yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");

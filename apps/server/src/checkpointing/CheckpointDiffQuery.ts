@@ -155,23 +155,52 @@ export const make = Effect.gen(function* () {
         });
       }
 
+      // A thread that moved after it ran has one root scope per project it
+      // worked in; a diff stays within the scope of its end. A range reaching
+      // back before that scope's first checkpoint starts at it (the baseline
+      // taken when the thread first ran there): earlier states are in another
+      // directory.
+      const toAssignment = toScope.workspaceAssignment ?? 0;
+      const scopeCheckpoints = projection.checkpoints.filter(
+        (checkpoint) => checkpoint.scopeId === toScope.id,
+      );
+      // The scope starts at its earliest checkpoint, whatever its status: a
+      // baseline that could not be captured makes the range unavailable rather
+      // than starting at a later capture.
+      const scopeStart =
+        scopeCheckpoints.length === 0
+          ? undefined
+          : Math.min(...scopeCheckpoints.map((checkpoint) => checkpoint.ordinalWithinScope));
+      const fromOrdinal =
+        scopeStart === undefined ? undefined : Math.max(input.fromTurnCount, scopeStart);
+      const fromReady =
+        fromOrdinal !== undefined &&
+        scopeCheckpoints.some(
+          (checkpoint) =>
+            checkpoint.ordinalWithinScope === fromOrdinal && checkpoint.status === "ready",
+        );
       const fromCheckpointRef =
-        input.fromTurnCount === 0
-          ? (() => {
-              // The root scope is shared by every run in this thread. Its
-              // runId tracks the latest owner, while ordinal zero stays the baseline.
-              const firstScope = projection.checkpointScopes.find(
-                (scope) => scope.kind === "root_run",
-              );
-              return firstScope === undefined
-                ? undefined
-                : checkpointRefForScopeOrdinal({
-                    scopeId: firstScope.id,
-                    ordinalWithinScope: 0,
-                  });
-            })()
-          : readyCheckpoints.find((checkpoint) => checkpoint.appRunOrdinal === input.fromTurnCount)
-              ?.ref;
+        toAssignment > 0
+          ? fromOrdinal === undefined || !fromReady
+            ? undefined
+            : checkpointRefForScopeOrdinal({ scopeId: toScope.id, ordinalWithinScope: fromOrdinal })
+          : input.fromTurnCount === 0
+            ? (() => {
+                // The root scope is shared by every run in this thread. Its
+                // runId tracks the latest owner, while ordinal zero stays the baseline.
+                const firstScope = projection.checkpointScopes.find(
+                  (scope) => scope.kind === "root_run" && (scope.workspaceAssignment ?? 0) === 0,
+                );
+                return firstScope === undefined
+                  ? undefined
+                  : checkpointRefForScopeOrdinal({
+                      scopeId: firstScope.id,
+                      ordinalWithinScope: 0,
+                    });
+              })()
+            : readyCheckpoints.find(
+                (checkpoint) => checkpoint.appRunOrdinal === input.fromTurnCount,
+              )?.ref;
       if (fromCheckpointRef === undefined) {
         return yield* new CheckpointRefUnavailableError({
           operation,
@@ -189,7 +218,24 @@ export const make = Effect.gen(function* () {
           fallbackFromToHead: false,
           ignoreWhitespace,
         })
-        .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"));
+        .pipe(
+          // A checkpoint whose stored state is gone (a removed workspace
+          // snapshot) is unavailable like a missing ref.
+          Effect.catchTag("CheckpointSnapshotUnavailableError", (error) =>
+            Effect.fail(
+              new CheckpointRefUnavailableError({
+                operation,
+                threadId: input.threadId,
+                turnCount:
+                  error.checkpointRef === fromCheckpointRef
+                    ? input.fromTurnCount
+                    : input.toTurnCount,
+                checkpoint: error.checkpointRef === fromCheckpointRef ? "from" : "to",
+              }),
+            ),
+          ),
+          Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"),
+        );
 
       const turnDiff = buildTurnDiffResult(input, diff);
       if (!isTurnDiffResult(turnDiff)) {

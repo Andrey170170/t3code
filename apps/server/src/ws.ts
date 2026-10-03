@@ -41,7 +41,7 @@ import {
   type OrchestrationV2Command,
   type GitActionProgressEvent,
   type GitManagerServiceError,
-  type MessageId,
+  MessageId,
   type AcpRegistryImportSessionInput,
   type AcpRegistryDeleteSessionInput,
   type AcpRegistryDisableProviderInput,
@@ -194,6 +194,10 @@ import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
+import * as TrellisCatalog from "./trellis/TrellisCatalog.ts";
+import * as TrellisGraduation from "./trellis/TrellisGraduation.ts";
+import * as TrellisIdeaPromotion from "./trellis/TrellisIdeaPromotion.ts";
+import * as TrellisPreview from "./trellis/TrellisPreview.ts";
 import { refreshPushedPullRequests } from "./git/refreshPushedPullRequests.ts";
 import { linkCreatedPullRequest } from "./git/linkCreatedPullRequest.ts";
 import * as ReviewService from "./review/ReviewService.ts";
@@ -1256,8 +1260,38 @@ const makeWsRpcLayer = (
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const terminalManager = yield* TerminalManager.TerminalManager;
+      const trellisCatalog = yield* TrellisCatalog.TrellisCatalog;
+      const trellisGraduation = yield* TrellisGraduation.TrellisGraduation;
+      const trellisIdeas = yield* TrellisIdeaPromotion.TrellisIdeaPromotion;
+      const trellisPreview = yield* TrellisPreview.TrellisPreview;
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
+      // The host's listening servers, rescanned while the stream runs.
+      const hostDiscoveredServers = (configuredUrls: ReadonlyArray<string>) =>
+        Stream.callback<DiscoveredLocalServerList>((queue) =>
+          Effect.gen(function* () {
+            yield* portDiscovery.retain;
+            const initial = yield* portDiscovery.scan(configuredUrls);
+            const initialScannedAt = DateTime.formatIso(yield* DateTime.now);
+            yield* Queue.offer(queue, {
+              servers: initial,
+              scannedAt: initialScannedAt,
+              configuredUrlProbing: true,
+            });
+            yield* portDiscovery.subscribe(
+              { configuredUrls, initialSnapshot: initial },
+              (servers) =>
+                Effect.gen(function* () {
+                  const scannedAt = DateTime.formatIso(yield* DateTime.now);
+                  yield* Queue.offer(queue, {
+                    servers,
+                    scannedAt,
+                    configuredUrlProbing: true,
+                  });
+                }),
+            );
+          }),
+        );
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const modelManifest = yield* ModelManifest.ModelManifest;
       const providerVersionCache = yield* ProviderMaintenance.ProviderVersionCache;
@@ -1841,12 +1875,22 @@ const makeWsRpcLayer = (
             ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
             startup
               .enqueueCommand(
-                ThreadMessageIntake.dispatchCommand(
-                  ThreadManagementService.withCreationProvenance(command, {
-                    createdBy: "user",
-                    creationSource: "creationSource" in command ? command.creationSource : "web",
-                  }),
-                ).pipe(Effect.provide(intakeContext)),
+                Effect.suspend(() => {
+                  const dispatch = ThreadMessageIntake.dispatchCommand(
+                    ThreadManagementService.withCreationProvenance(command, {
+                      createdBy: "user",
+                      creationSource: "creationSource" in command ? command.creationSource : "web",
+                    }),
+                  ).pipe(Effect.provide(intakeContext));
+                  // A new idea's draft moves into its idea on its first message.
+                  return command.type === "message.dispatch"
+                    ? trellisIdeas.dispatchMessage({
+                        threadId: command.threadId,
+                        commandId: command.commandId,
+                        dispatch,
+                      })
+                    : dispatch;
+                }),
               )
               .pipe(
                 Effect.tap(() => recordClientCommandAnalytics(command)),
@@ -1972,38 +2016,44 @@ const makeWsRpcLayer = (
             ORCHESTRATION_V2_WS_METHODS.launchThread,
             startup
               .enqueueCommand(
-                ThreadMessageIntake.launchThread({
-                  commandId: input.commandId,
-                  ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
-                  ...(input.reuseExistingThread === undefined
-                    ? {}
-                    : { reuseExistingThread: input.reuseExistingThread }),
+                // A launch into the new-idea landing pad goes into a new idea.
+                trellisIdeas.launch({
+                  threadId: input.threadId,
                   projectId: input.projectId,
-                  title: input.title,
-                  ...(input.generateTitle === undefined
-                    ? {}
-                    : { generateTitle: input.generateTitle }),
-                  modelSelection: input.modelSelection,
-                  runtimeMode: input.runtimeMode,
-                  interactionMode: input.interactionMode,
-                  workspaceStrategy: input.workspaceStrategy,
-                  ...(input.initialMessage === undefined
-                    ? {}
-                    : {
-                        initialMessage: {
-                          ...(input.initialMessage.messageId === undefined
-                            ? {}
-                            : { messageId: input.initialMessage.messageId }),
-                          text: input.initialMessage.text,
-                          attachments: input.initialMessage.attachments,
-                          ...(input.initialMessage.context === undefined
-                            ? {}
-                            : { context: input.initialMessage.context }),
-                        },
-                      }),
-                  createdBy: "user",
-                  creationSource: input.creationSource ?? "web",
-                }).pipe(Effect.provide(intakeContext)),
+                  launch: (projectId) =>
+                    ThreadMessageIntake.launchThread({
+                      commandId: input.commandId,
+                      ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+                      ...(input.reuseExistingThread === undefined
+                        ? {}
+                        : { reuseExistingThread: input.reuseExistingThread }),
+                      title: input.title,
+                      ...(input.generateTitle === undefined
+                        ? {}
+                        : { generateTitle: input.generateTitle }),
+                      modelSelection: input.modelSelection,
+                      runtimeMode: input.runtimeMode,
+                      interactionMode: input.interactionMode,
+                      workspaceStrategy: input.workspaceStrategy,
+                      ...(input.initialMessage === undefined
+                        ? {}
+                        : {
+                            initialMessage: {
+                              ...(input.initialMessage.messageId === undefined
+                                ? {}
+                                : { messageId: input.initialMessage.messageId }),
+                              text: input.initialMessage.text,
+                              attachments: input.initialMessage.attachments,
+                              ...(input.initialMessage.context === undefined
+                                ? {}
+                                : { context: input.initialMessage.context }),
+                            },
+                          }),
+                      createdBy: "user",
+                      creationSource: input.creationSource ?? "web",
+                      projectId,
+                    }).pipe(Effect.provide(intakeContext)),
+                }),
               )
               .pipe(
                 Effect.tap(() =>
@@ -2023,6 +2073,13 @@ const makeWsRpcLayer = (
                   projection: projectThreadProjectionForWire(result.projection),
                 })),
                 Effect.catchTags({
+                  TrellisError: (cause) =>
+                    new OrchestrationV2ThreadLaunchError({
+                      commandId: input.commandId,
+                      projectId: input.projectId,
+                      message: cause.message,
+                      cause,
+                    }),
                   AttachmentClaimError: (cause) =>
                     new OrchestrationV2ThreadLaunchError({
                       commandId: input.commandId,
@@ -2050,6 +2107,57 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "orchestration",
               "orchestration_v2.command_id": input.commandId,
               "orchestration_v2.project_id": input.projectId,
+            },
+          ),
+        [ORCHESTRATION_V2_WS_METHODS.moveThreadToProject]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_V2_WS_METHODS.moveThreadToProject,
+            startup
+              .enqueueCommand(
+                Effect.gen(function* () {
+                  const moved = yield* threadManagement.dispatch({
+                    type: "thread.project.move",
+                    commandId: input.commandId,
+                    threadId: input.threadId,
+                    projectId: input.projectId,
+                    ...(input.expectedProjectId === undefined
+                      ? {}
+                      : { expectedProjectId: input.expectedProjectId }),
+                  });
+                  // Queued like a worktree handoff's continuation: the next
+                  // turn starts in the new project.
+                  if (input.continuationPrompt !== undefined) {
+                    yield* threadManagement.sendToThread({
+                      projectId: input.projectId,
+                      commandId: CommandId.make(`${input.commandId}:continuation`),
+                      threadId: input.threadId,
+                      messageId: MessageId.make(`${input.commandId}:continuation`),
+                      text: input.continuationPrompt,
+                      attachments: [],
+                      mode: "queue",
+                      createdBy: "user",
+                      creationSource: "web",
+                    });
+                  }
+                  return { sequence: moved.sequence };
+                }),
+              )
+              .pipe(
+                Effect.mapError((cause) => {
+                  const detail = userFacingDispatchErrorMessage(cause);
+                  return new OrchestrationV2DispatchCommandError({
+                    commandId: input.commandId,
+                    commandType: "thread.project.move",
+                    message: detail ?? "Failed to move the thread",
+                    ...(detail === undefined ? {} : { detail }),
+                    cause,
+                  });
+                }),
+              ),
+            {
+              "rpc.aggregate": "orchestrationV2",
+              "orchestration_v2.command_id": input.commandId,
+              "orchestration_v2.thread_id": input.threadId,
             },
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeArchivedShell]: (_input) =>
@@ -3168,17 +3276,32 @@ const makeWsRpcLayer = (
         [WS_METHODS.projectsMutate]: (mutation) =>
           observeRpcEffect(
             WS_METHODS.projectsMutate,
-            startup.enqueueCommand(mutateProject(mutation)).pipe(
+            (mutation.type === "project.delete"
+              ? trellisCatalog.checkProjectDelete(mutation.projectId)
+              : Effect.void
+            ).pipe(
               Effect.mapError(
                 (cause) =>
                   new ProjectMutationError({
                     commandId: mutation.commandId,
-                    message:
-                      cause._tag === "ProjectNotEmptyError"
-                        ? cause.message
-                        : "Failed to mutate project.",
+                    message: cause.message,
                     cause,
                   }),
+              ),
+              Effect.andThen(
+                startup.enqueueCommand(mutateProject(mutation)).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProjectMutationError({
+                        commandId: mutation.commandId,
+                        message:
+                          cause._tag === "ProjectNotEmptyError"
+                            ? cause.message
+                            : "Failed to mutate project.",
+                        cause,
+                      }),
+                  ),
+                ),
               ),
             ),
             { "rpc.aggregate": "orchestration" },
@@ -3187,6 +3310,130 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.shellOpenInEditor, externalLauncher.launchEditor(input), {
             "rpc.aggregate": "workspace",
           }),
+        [WS_METHODS.trellisGetStatus]: () =>
+          observeRpcEffect(WS_METHODS.trellisGetStatus, trellisCatalog.status, {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisNewIdea]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisNewIdea, trellisCatalog.newIdea(input), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisPrepareIdeaDraft]: () =>
+          observeRpcEffect(WS_METHODS.trellisPrepareIdeaDraft, trellisCatalog.prepareIdeaDraft, {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisTrashProject]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisTrashProject,
+            trellisCatalog.trashProject(input.projectId),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisListTrash]: () =>
+          observeRpcEffect(
+            WS_METHODS.trellisListTrash,
+            trellisCatalog.listTrash.pipe(Effect.map((items) => ({ items }))),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisRestore]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisRestore, trellisCatalog.restore(input), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisEmptyTrash]: () =>
+          observeRpcEffect(
+            WS_METHODS.trellisEmptyTrash,
+            trellisCatalog.emptyTrash.pipe(Effect.map((purged) => ({ purged }))),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisNewProject]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisNewProject, trellisCatalog.newProject(input), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisRestoreConflicts]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisRestoreConflicts,
+            trellisCatalog.restoreConflicts(input),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisResolvePreviewUrl]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisResolvePreviewUrl,
+            trellisPreview
+              .resolveUrl(input.threadId, input.url)
+              .pipe(Effect.map((url) => ({ url }))),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisFind]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisFind, trellisCatalog.find(input.query), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisListWorkspaces]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisListWorkspaces,
+            trellisCatalog.listWorkspaces(input.projectId),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisListCheckpoints]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisListCheckpoints,
+            trellisCatalog
+              .listCheckpoints(input.workspaceId)
+              .pipe(Effect.map((items) => ({ items }))),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisForkWorkspace]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisForkWorkspace, trellisCatalog.forkWorkspace(input), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisPurge]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisPurge,
+            trellisCatalog.purge(input.ids).pipe(Effect.map((purged) => ({ purged }))),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisGraduate]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisGraduate, trellisGraduation.graduate(input), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisListBases]: () =>
+          observeRpcEffect(WS_METHODS.trellisListBases, trellisCatalog.listBases, {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisBuildBase]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisBuildBase, trellisCatalog.buildBase(input.name), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisSetPreviewHost]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisSetPreviewHost,
+            trellisCatalog.setPreviewHost(input.previewHost),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisGetDetails]: () =>
+          observeRpcEffect(WS_METHODS.trellisGetDetails, trellisCatalog.details, {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisGetHistorySettings]: () =>
+          observeRpcEffect(WS_METHODS.trellisGetHistorySettings, trellisCatalog.historySettings, {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisRunMaintenance]: () =>
+          observeRpcEffect(
+            WS_METHODS.trellisRunMaintenance,
+            trellisCatalog.runMaintenance.pipe(Effect.as({})),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisUpdateHistorySettings]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisUpdateHistorySettings,
+            trellisCatalog.updateHistorySettings(input),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisGetProfile]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisGetProfile,
+            trellisCatalog.profile(input.target ?? null),
+            { "rpc.aggregate": "trellis" },
+          ),
         [WS_METHODS.filesystemBrowse]: (input) =>
           observeRpcEffect(
             WS_METHODS.filesystemBrowse,
@@ -3521,14 +3768,32 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "terminal" },
           ),
+        // `localhost` in a Trellis thread means its workspace, not this host.
         [WS_METHODS.previewOpen]: (input) =>
-          observeRpcEffect(WS_METHODS.previewOpen, previewManager.open(input), {
-            "rpc.aggregate": "preview",
-          }),
+          observeRpcEffect(
+            WS_METHODS.previewOpen,
+            Effect.gen(function* () {
+              const { alreadyResolved, ...open } = input;
+              if (open.url === undefined) return yield* previewManager.open(open);
+              const url = yield* trellisPreview.resolveUrl(open.threadId, open.url, {
+                alreadyResolved,
+              });
+              return yield* previewManager.open({ ...open, url });
+            }),
+            { "rpc.aggregate": "preview" },
+          ),
         [WS_METHODS.previewNavigate]: (input) =>
-          observeRpcEffect(WS_METHODS.previewNavigate, previewManager.navigate(input), {
-            "rpc.aggregate": "preview",
-          }),
+          observeRpcEffect(
+            WS_METHODS.previewNavigate,
+            Effect.gen(function* () {
+              const { alreadyResolved, ...navigate } = input;
+              const url = yield* trellisPreview.resolveUrl(navigate.threadId, navigate.url, {
+                alreadyResolved,
+              });
+              return yield* previewManager.navigate({ ...navigate, url });
+            }),
+            { "rpc.aggregate": "preview" },
+          ),
         [WS_METHODS.previewResize]: (input) =>
           observeRpcEffect(WS_METHODS.previewResize, previewManager.resize(input), {
             "rpc.aggregate": "preview",
@@ -3625,28 +3890,26 @@ const makeWsRpcLayer = (
         [WS_METHODS.subscribeDiscoveredLocalServers]: (input) =>
           observeRpcStream(
             WS_METHODS.subscribeDiscoveredLocalServers,
-            Stream.callback<DiscoveredLocalServerList>((queue) =>
+            Stream.unwrap(
               Effect.gen(function* () {
                 const configuredUrls = input.configuredUrls ?? [];
-                yield* portDiscovery.retain;
-                const initial = yield* portDiscovery.scan(configuredUrls);
-                const initialScannedAt = DateTime.formatIso(yield* DateTime.now);
-                yield* Queue.offer(queue, {
-                  servers: initial,
-                  scannedAt: initialScannedAt,
-                  configuredUrlProbing: true,
-                });
-                yield* portDiscovery.subscribe(
-                  { configuredUrls, initialSnapshot: initial },
-                  (servers) =>
-                    Effect.gen(function* () {
-                      const scannedAt = DateTime.formatIso(yield* DateTime.now);
-                      yield* Queue.offer(queue, {
-                        servers,
-                        scannedAt,
-                        configuredUrlProbing: true,
-                      });
-                    }),
+                if (input.threadId === undefined) return hostDiscoveredServers(configuredUrls);
+                // A Trellis thread's servers are its workspace's, not the host's;
+                // the source follows the thread when it moves.
+                return trellisPreview.watchServers(input.threadId, configuredUrls).pipe(
+                  Stream.switchMap((servers) =>
+                    servers === null
+                      ? hostDiscoveredServers(configuredUrls)
+                      : Stream.fromEffect(
+                          DateTime.now.pipe(
+                            Effect.map((now): DiscoveredLocalServerList => ({
+                              servers,
+                              scannedAt: DateTime.formatIso(now),
+                              configuredUrlProbing: true,
+                            })),
+                          ),
+                        ),
+                  ),
                 );
               }),
             ),

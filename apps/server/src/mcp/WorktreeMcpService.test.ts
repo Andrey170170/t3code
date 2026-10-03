@@ -21,6 +21,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import * as Trellis from "../trellis/Trellis.ts";
 import {
   OrchestratorDispatchError,
   OrchestratorProjectionError,
@@ -107,6 +108,8 @@ interface HarnessOptions {
   readonly removeWorktreeFails?: boolean;
   readonly deleteLocalBranchFails?: boolean;
   readonly createWorktreeGate?: Effect.Effect<void>;
+  /** Puts the project in a Trellis workspace, with the Trellis service present. */
+  readonly trellisProject?: boolean;
 }
 
 const makeHarness = (options: HarnessOptions = {}) => {
@@ -190,7 +193,11 @@ const makeHarness = (options: HarnessOptions = {}) => {
       ? (Effect.fail("simulated project read failure") as never)
       : Effect.succeed(
           id === projectId && options.projectMissing !== true
-            ? Option.some(project)
+            ? Option.some(
+                options.trellisProject === true
+                  ? { ...project, workspaceRoot: "/trellis/workspaces/ws-1/project" }
+                  : project,
+              )
             : Option.none(),
         ),
   );
@@ -331,6 +338,9 @@ const makeHarness = (options: HarnessOptions = {}) => {
           refreshStatus,
         } satisfies Partial<VcsStatusBroadcaster.VcsStatusBroadcaster["Service"]>),
         NodeServices.layer,
+        options.trellisProject === true
+          ? Layer.succeed(Trellis.Trellis, Trellis.makeTestTrellis())
+          : Layer.empty,
       ),
     ),
   );
@@ -423,6 +433,19 @@ describe("t3_worktree_handoff", () => {
         worktreePath: "/worktrees/project/feature/handoff",
         project: { id: projectId, workspaceRoot, scripts: [] },
       });
+    });
+  });
+
+  it.effect("refuses a worktree of a Trellis project before touching git", () => {
+    const harness = makeHarness({ trellisProject: true });
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature/trellis" }));
+      expectTypedFailure(exit, {
+        code: "invalid_request",
+        message: Trellis.TRELLIS_WORKTREE_REFUSAL,
+      });
+      expect(harness.localStatus).not.toHaveBeenCalled();
+      expect(harness.createWorktree).not.toHaveBeenCalled();
     });
   });
 

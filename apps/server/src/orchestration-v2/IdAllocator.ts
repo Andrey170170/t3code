@@ -127,8 +127,10 @@ export interface IdAllocatorV2AllocateShape {
 }
 
 export interface IdAllocatorV2DeriveShape {
+  /** The shared session of a multi-thread provider instance, one per `sessionKey` (workspace). */
   readonly providerSession: (input: {
     readonly providerInstanceId: ProviderInstanceId;
+    readonly sessionKey?: string;
   }) => ProviderSessionId;
   readonly delegatedTaskNode: (input: { readonly commandId: CommandId }) => NodeId;
   readonly delegatedTaskThread: (input: { readonly commandId: CommandId }) => ThreadId;
@@ -389,7 +391,15 @@ export const layer: Layer.Layer<IdAllocatorV2> = Layer.succeed(
     derive: {
       providerSession: (input) =>
         ProviderSessionId.make(
-          joinId("provider-session", "provider-instance", input.providerInstanceId, "shared"),
+          input.sessionKey === undefined
+            ? joinId("provider-session", "provider-instance", input.providerInstanceId, "shared")
+            : joinId(
+                "provider-session",
+                "provider-instance",
+                input.providerInstanceId,
+                "session-key",
+                input.sessionKey,
+              ),
         ),
       delegatedTaskNode: (input) => NodeId.make(joinId("node", "delegated-task", input.commandId)),
       delegatedTaskThread: (input) =>

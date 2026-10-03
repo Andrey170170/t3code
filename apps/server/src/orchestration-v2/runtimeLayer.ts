@@ -44,6 +44,8 @@ import { layer as providerTurnStartServiceLayer } from "./ProviderTurnStartServi
 import { layer as runExecutionServiceLayer } from "./RunExecutionService.ts";
 import { layer as runFinalizationServiceLayer } from "./RunFinalizationService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as TrellisRuntimePolicy from "../trellis/TrellisRuntimePolicy.ts";
+import * as TrellisRestore from "../trellis/TrellisRestore.ts";
 import { layer as runtimeRequestServiceLayer } from "./RuntimeRequestService.ts";
 import { layerWithLegacyImporter as threadManagementServiceLayer } from "./ThreadManagementService.ts";
 import { layer as threadLaunchServiceLayer } from "./ThreadLaunchService.ts";
@@ -59,7 +61,10 @@ export const OrchestrationEventInfrastructureLayerLive = Layer.mergeAll(
   OrchestrationCommandReceipts.OrchestrationCommandReceiptRepositoryLive,
 );
 
-const runtimePolicyProvided = RuntimePolicy.layerFromProjectStore.pipe(
+// Trellis projects launch their providers inside the workspace; without the
+// Trellis service in context the decorator is the base policy.
+const runtimePolicyProvided = TrellisRuntimePolicy.layer.pipe(
+  Layer.provide(RuntimePolicy.layerFromProjectStore),
   Layer.provide(ProjectStore.layer),
 );
 
@@ -132,6 +137,20 @@ const providerSessionManagerProvided = providerSessionManagerLayer.pipe(
   ),
 );
 
+// Restores, turn admission and the restore rule follow Trellis restore scopes
+// in Trellis projects; without the Trellis service they are V2's defaults.
+// Admission releases the sessions of a workspace a checkpoint restarted.
+const restoreSeamsProvided = TrellisRestore.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProjectStore.layer,
+      effectOutboxLayer,
+      projectionStoreLayer,
+      providerSessionManagerProvided,
+    ),
+  ),
+);
+
 const providerAuthServiceProvided = ProviderAuthServiceLive.pipe(
   Layer.provide(Layer.merge(projectionStoreLayer, providerSessionManagerProvided)),
 );
@@ -158,6 +177,7 @@ const providerTurnStartServiceProvided = providerTurnStartServiceLayer.pipe(
       providerAuthServiceProvided,
       runExecutionServiceProvided,
       runtimePolicyProvided,
+      restoreSeamsProvided,
     ),
   ),
 );
@@ -178,6 +198,7 @@ const checkpointRollbackServiceProvided = checkpointRollbackServiceLayer.pipe(
       projectionStoreLayer,
       providerSessionManagerProvided,
       runtimePolicyProvided,
+      restoreSeamsProvided,
     ),
   ),
 );
@@ -216,6 +237,7 @@ const orchestratorProvided = orchestratorLayer.pipe(
       providerSwitchServiceProvided,
       runExecutionServiceProvided,
       threadForkServiceLayer,
+      restoreSeamsProvided,
     ),
   ),
 );

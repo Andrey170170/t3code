@@ -15,6 +15,7 @@ import {
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ProjectService from "./ProjectService.ts";
 import { projectMutationOperation } from "./ProjectMutation.ts";
+import { refuseTrellisProjectDelete } from "../trellis/TrellisCatalog.ts";
 
 export const failProjectMutation = Effect.fn("environment.projects.failMutation")(function* (
   cause: ProjectService.ProjectServiceError | ServerRuntimeStartup.ServerRuntimeStartupError,
@@ -52,6 +53,11 @@ export const projectHttpApiLayer = HttpApiBuilder.group(
         Effect.fn("environment.projects.mutate")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          if (args.payload.type === "project.delete") {
+            yield* refuseTrellisProjectDelete(args.payload.projectId).pipe(
+              Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
+            );
+          }
           const operation = projectMutationOperation(projects, args.payload);
           return yield* startup.enqueueCommand(operation).pipe(Effect.catch(failProjectMutation));
         }),

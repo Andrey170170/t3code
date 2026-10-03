@@ -319,6 +319,7 @@ function createTextGeneration(
       Effect.succeed({
         title: "Update workflow",
       }),
+    generateProjectName: () => Effect.succeed({ name: "Workflow", description: "" }),
     ...overrides,
   };
 
@@ -367,6 +368,7 @@ function createTextGeneration(
             }),
         ),
       ),
+    generateProjectName: (input) => implementation.generateProjectName(input),
   };
 }
 

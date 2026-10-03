@@ -47,6 +47,7 @@ import {
   RunId,
   ThreadLinkedPullRequest,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import {
@@ -65,11 +66,16 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ProjectStore from "./ProjectStore.ts";
+import { CheckpointRestoreRule } from "./CheckpointRestoreSafety.ts";
+import { TurnAdmission } from "./TurnAdmission.ts";
 import {
-  isCheckpointRestoreIsolated,
-  SHARED_WORKSPACE_RESTORE_MESSAGE,
-} from "./CheckpointRestoreSafety.ts";
-import { CheckpointServiceV2 } from "./CheckpointService.ts";
+  CheckpointServiceV2,
+  checkpointRunOrdinal,
+  fileRestoreTargetOf,
+  MOVE_BOUNDARY_RESTORE_MESSAGE,
+  scopeAssignmentOf,
+  workspaceAssignmentOf,
+} from "./CheckpointService.ts";
 import { CommandPolicyV2, resolveMessageDispatchIntent } from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
@@ -77,7 +83,12 @@ import { notificationTurnItem } from "./Notification.ts";
 import { isRestartNoteSource } from "./RestartBackgroundNote.ts";
 import { isUndeliveredMailboxSteer } from "./NotificationMailbox.ts";
 import { EventSinkV2 } from "./EventSink.ts";
-import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
+import {
+  EffectOutboxV2,
+  type OrchestrationEffectRequestV2,
+  type PendingOrchestrationEffectV2,
+} from "./EffectOutbox.ts";
+import { rollbackInFlight } from "./CheckpointRollbackService.ts";
 import { IdAllocatorV2 } from "./IdAllocator.ts";
 import {
   ThreadCommandExecutor,
@@ -397,7 +408,9 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "checkpoint.rollback":
     case "checkpoint.rollback.fail":
     case "thread.background-work.settle":
+    case "checkpoint.rollback.complete":
     case "provider.switch":
+    case "thread.project.move":
       return command.threadId;
     case "delegated_task.request":
     case "delegated_task.wake-policy":
@@ -718,6 +731,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const idAllocator = yield* IdAllocatorV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projectionStore = yield* ProjectionStoreV2;
+  // Present in the server; tells a rollback whose effect settled apart from one in flight.
+  const effectOutbox = yield* Effect.serviceOption(EffectOutboxV2);
   const nextTurnItemOrdinal = (
     projection: Pick<OrchestrationV2ThreadProjection, "thread"> &
       Partial<Pick<OrchestrationV2ThreadProjection, "turnItems">>,
@@ -736,6 +751,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const restoreRule = yield* CheckpointRestoreRule;
+  const turnAdmission = yield* TurnAdmission;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
   const continuationRequests = yield* ProviderContinuationRequests;
   const providerSessions = yield* ProviderSessionManagerV2;
@@ -774,6 +791,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly adapter: ProviderAdapterV2Shape;
     readonly providerInstanceId: ProviderInstanceId;
     readonly threadId: ThreadId;
+    readonly sessionKey: Option.Option<string | undefined>;
   }) =>
     input.adapter.getCapabilities().pipe(
       Effect.flatMap((capabilities) =>
@@ -781,6 +799,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? Effect.succeed(
               idAllocator.derive.providerSession({
                 providerInstanceId: input.providerInstanceId,
+                ...Option.match(input.sessionKey, {
+                  onNone: () => ({}),
+                  onSome: (sessionKey) => (sessionKey === undefined ? {} : { sessionKey }),
+                }),
               }),
             )
           : idAllocator.allocate.providerSession({
@@ -789,6 +811,116 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
       ),
     );
+
+  /**
+   * The `launch.sessionKey` (a Trellis workspace) the thread's next turn runs
+   * under; none when the policy does not resolve, which keeps V2's choice (the
+   * turn start resolves again and fails with the policy's reason).
+   */
+  const resolveSessionKey = (thread: OrchestrationV2AppThread, modelSelection: ModelSelection) =>
+    runtimePolicy.resolve({ thread, modelSelection }).pipe(
+      Effect.map((policy) => Option.some(policy.launch?.sessionKey)),
+      Effect.orElseSucceed(() => Option.none<string | undefined>()),
+    );
+
+  /**
+   * A thread keeps its provider session only while the session was opened for
+   * the same session key, so a shared process never serves another workspace.
+   */
+  const keepsProviderSession = (
+    projection: Pick<OrchestrationV2ThreadProjection, "providerSessions">,
+    providerSessionId: ProviderSessionId,
+    sessionKey: Option.Option<string | undefined>,
+  ) =>
+    Option.isNone(sessionKey) ||
+    projection.providerSessions.find((session) => session.id === providerSessionId)?.sessionKey ===
+      sessionKey.value;
+
+  /**
+   * The detach field naming `providerThread` with its native ref, when it is
+   * still recorded on `providerSessionId`: the dispatch moves its row to the
+   * new session before the detach runs, which then could not find it.
+   */
+  const unloadProviderThreadsOn = (
+    providerSessionId: ProviderSessionId,
+    providerThread: OrchestrationV2ProviderThread | undefined,
+  ) =>
+    providerThread?.providerSessionId === providerSessionId &&
+    providerThread.nativeThreadRef !== null
+      ? {
+          unloadProviderThreads: [
+            {
+              providerThreadId: providerThread.id,
+              nativeThreadRef: providerThread.nativeThreadRef,
+            },
+          ],
+        }
+      : {};
+
+  /** `unloadProviderThreadsOn` for every provider thread recorded on `providerSessionId`. */
+  const unloadProviderThreadsLeaving = (
+    providerSessionId: ProviderSessionId,
+    providerThreads: ReadonlyArray<OrchestrationV2ProviderThread>,
+  ) => {
+    const unloadProviderThreads = providerThreads.flatMap(
+      (providerThread) =>
+        unloadProviderThreadsOn(providerSessionId, providerThread).unloadProviderThreads ?? [],
+    );
+    return unloadProviderThreads.length === 0 ? {} : { unloadProviderThreads };
+  };
+
+  /**
+   * Detaches the live session a thread leaves because its session key changed
+   * (its project moved to another workspace), so the old workspace's process
+   * stops serving it.
+   */
+  const detachSupersededSession = (input: {
+    readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
+    readonly effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>;
+    readonly command: OrchestrationV2ServerCommand;
+    readonly threadId: ThreadId;
+    readonly projection: Pick<OrchestrationV2ThreadProjection, "providerSessions">;
+    readonly previous: ProviderSessionId | null;
+    readonly next: ProviderSessionId;
+    /** The thread's provider thread as it was on `previous`, to unload there. */
+    readonly providerThread: OrchestrationV2ProviderThread | undefined;
+  }) =>
+    Effect.gen(function* () {
+      const session = input.projection.providerSessions.find(
+        (candidate) =>
+          candidate.id === input.previous &&
+          candidate.id !== input.next &&
+          candidate.status !== "stopped" &&
+          candidate.status !== "error",
+      );
+      if (session === undefined) return;
+      const now = yield* DateTime.now;
+      yield* emit(
+        input.events,
+        input.command,
+      )({
+        type: "provider-session.detached",
+        threadId: input.threadId,
+        driver: session.driver,
+        providerInstanceId: session.providerInstanceId,
+        occurredAt: now,
+        payload: { providerSessionId: session.id, detachedAt: now, reason: "Workspace changed." },
+      });
+      yield* Ref.update(input.effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${input.command.commandId}:provider-session.detach:${session.id}`,
+          commandId: input.command.commandId,
+          threadId: input.threadId,
+          request: {
+            type: "provider-session.detach",
+            providerSessionId: session.id,
+            detail: "Workspace changed.",
+            ...unloadProviderThreadsOn(session.id, input.providerThread),
+          },
+        } satisfies PendingOrchestrationEffectV2,
+      ]);
+    });
 
   const enforceCommandPolicy =
     (command: OrchestrationV2Command) =>
@@ -1177,6 +1309,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
     });
 
+  const isTurnEndStatus = (status: OrchestrationV2Run["status"]) =>
+    status === "completed" ||
+    status === "interrupted" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "rolled_back";
+
   const startNextQueuedRun = (threadId: ThreadId, options?: { readonly failedRunId?: RunId }) =>
     Effect.gen(function* () {
       // Every terminal run checks the queue. Only a deliverable queued run
@@ -1264,15 +1403,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const queuedProviderThread = projection.providerThreads.find(
         (candidate) => candidate.id === providerThreadId,
       );
-      const storedCheckpointScope = projection.checkpointScopes.find(
+      const queuedCheckpointScope = projection.checkpointScopes.find(
         (scope) => scope.id === rootNode?.checkpointScopeId,
       );
+      // A run queued before its thread moved to another project prepares its
+      // scope again, in the new project's directory.
+      const storedCheckpointScope =
+        queuedCheckpointScope !== undefined &&
+        scopeAssignmentOf(queuedCheckpointScope, projection.checkpointScopes) ===
+          workspaceAssignmentOf(projection.thread)
+          ? queuedCheckpointScope
+          : undefined;
       if (
         rootNode === undefined ||
         attempt === undefined ||
         queuedMessage === undefined ||
         queuedProviderThread === undefined ||
-        (rootNode.checkpointScopeId !== null && storedCheckpointScope === undefined)
+        (rootNode.checkpointScopeId !== null && queuedCheckpointScope === undefined)
       ) {
         return yield* new OrchestratorDispatchError({
           commandId: CommandId.make(`command:system:start-queued:${queuedRun.id}`),
@@ -1472,6 +1619,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 providerThreadId: queuedProviderThread.id,
                 cwd: resolvedRuntimePolicy.cwd ?? projection.thread.worktreePath ?? process.cwd(),
                 createdAt: now,
+                workspaceAssignment: workspaceAssignmentOf(projection.thread),
               }),
             ),
             Effect.mapError(
@@ -1483,10 +1631,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 }),
             ),
           ));
+      const sessionKey = yield* resolveSessionKey(projection.thread, queuedRun.modelSelection);
       const providerSessionId =
         (!canResumeAcrossInstances &&
         queuedProviderThread.providerSessionId !== null &&
-        !switchPlan?.releaseProviderSessionIds.includes(queuedProviderThread.providerSessionId)
+        !switchPlan?.releaseProviderSessionIds.includes(queuedProviderThread.providerSessionId) &&
+        keepsProviderSession(projection, queuedProviderThread.providerSessionId, sessionKey)
           ? queuedProviderThread.providerSessionId
           : null) ??
         (yield* providerAdapters.get(queuedRun.providerInstanceId).pipe(
@@ -1495,6 +1645,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               adapter,
               providerInstanceId: queuedRun.providerInstanceId,
               threadId,
+              sessionKey,
             }),
           ),
           Effect.mapError(
@@ -1626,9 +1777,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               },
             ]
           : [];
+      // A session kept from before the thread's session key changed is left too.
+      const supersededSessionId =
+        queuedProviderThread.providerSessionId !== null &&
+        queuedProviderThread.providerSessionId !== providerSessionId &&
+        !keepsProviderSession(projection, queuedProviderThread.providerSessionId, sessionKey)
+          ? queuedProviderThread.providerSessionId
+          : null;
       const sessionsToDetach = projection.providerSessions.filter(
         (session) =>
-          switchPlan?.releaseProviderSessionIds.includes(session.id) &&
+          (switchPlan?.releaseProviderSessionIds.includes(session.id) ||
+            session.id === supersededSessionId) &&
           session.status !== "stopped" &&
           session.status !== "error",
       );
@@ -1771,6 +1930,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               type: "provider-session.detach" as const,
               providerSessionId: session.id,
               detail: "Provider or model selection changed.",
+              ...(session.id === supersededSessionId
+                ? unloadProviderThreadsOn(session.id, queuedProviderThread)
+                : {}),
             },
           })),
           {
@@ -3268,6 +3430,166 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
   });
 
+  /**
+   * Moves a thread to another project. A thread that has run starts a new
+   * workspace assignment: its later runs checkpoint into a new root scope in
+   * the new directory, while earlier checkpoints keep theirs (their files
+   * cannot be restored across the move; the conversation can be rewound). A
+   * running thread is refused (queued runs prepare their scope when they
+   * start), and so is a forked child whose native fork is still pending,
+   * which would fork from the source transcript in the wrong place. The
+   * worktree binding is cleared (the new project has its own root), live
+   * sessions are detached, as a worktree change does, and the thread's
+   * terminals close; the next turn resolves the new project's policy and
+   * resumes the same native session there.
+   */
+  const dispatchThreadProjectMove = Effect.fn("orchestrationV2.dispatch.threadProjectMove")(
+    function* (
+      command: Extract<OrchestrationV2InternalCommand, { readonly type: "thread.project.move" }>,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+      effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    ) {
+      const reject = (cause: string) =>
+        new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause,
+        });
+      const projection = yield* projectionStore
+        .getThreadRecords(command.threadId, [
+          "runs",
+          "checkpointScopes",
+          "contextTransfers",
+          "providerSessions",
+          "providerThreads",
+        ])
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        );
+      const thread = projection.thread;
+      if (thread.deletedAt !== null) {
+        return yield* reject(`Thread ${command.threadId} is deleted.`);
+      }
+      if (
+        command.expectedProjectId !== undefined &&
+        command.expectedProjectId !== thread.projectId
+      ) {
+        return yield* reject(
+          `Thread ${command.threadId} moved to another project before this move could be applied.`,
+        );
+      }
+      const project = yield* projects.get(command.projectId).pipe(mapDispatchError(command));
+      if (Option.isNone(project) || project.value.deletedAt !== null) {
+        return yield* reject(`Project ${command.projectId} does not exist.`);
+      }
+      if (projection.runs.some(isBlockingRun)) {
+        return yield* reject(
+          "This thread has a running turn (thread_busy); wait for it to finish or stop it, then move it.",
+        );
+      }
+      // A revert accepted before the move would restore the old project's
+      // files after it; rollbacks are accepted on this same per-thread queue.
+      if (yield* rollbackInFlight(thread, effectOutbox)) {
+        return yield* reject(
+          "This thread is reverting (thread_busy); wait for the revert to finish, then move it.",
+        );
+      }
+      if (pendingForkTransferForThread(projection) !== undefined) {
+        return yield* reject(
+          "This thread is a fork that has not run yet (thread_pending_fork), so it cannot move to another project yet.",
+        );
+      }
+      if (thread.projectId === command.projectId) return;
+
+      const now = yield* DateTime.now;
+      const emitEvent = emit(events, command);
+      yield* emitEvent({
+        type: "thread.project-moved",
+        threadId: command.threadId,
+        providerInstanceId: thread.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          ...thread,
+          projectId: command.projectId,
+          worktreePath: null,
+          branch: null,
+          updatedAt: now,
+          ...(projection.checkpointScopes.length === 0
+            ? {}
+            : { workspaceAssignment: workspaceAssignmentOf(thread) + 1 }),
+        },
+      });
+      // A thread with history shows where it went, without starting a turn.
+      if (projection.checkpointScopes.length > 0) {
+        yield* emitEvent({
+          type: "turn-item.updated",
+          threadId: command.threadId,
+          providerInstanceId: thread.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`turn-item:project-move:${command.commandId}`),
+            type: "system_notice",
+            message: `Moved to the project "${project.value.title}" (${project.value.workspaceRoot}). Earlier turns' files stay in the previous project: reverting them rewinds only the conversation.`,
+            threadId: command.threadId,
+            runId: null,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: yield* nextTurnItemOrdinal(projection),
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+          },
+        });
+      }
+      // Terminals run in the old project's directory: they close, and the
+      // terminal panel opens new ones in the new project.
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${command.commandId}:terminal.cleanup`,
+          commandId: command.commandId,
+          threadId: command.threadId,
+          request: { type: "terminal.cleanup" },
+        } satisfies PendingOrchestrationEffectV2,
+      ]);
+      const detail = "Project changed.";
+      for (const session of projection.providerSessions) {
+        if (session.status === "stopped" || session.status === "error") continue;
+        yield* emitEvent({
+          type: "provider-session.detached",
+          threadId: command.threadId,
+          driver: session.driver,
+          providerInstanceId: session.providerInstanceId,
+          occurredAt: now,
+          payload: { providerSessionId: session.id, detachedAt: now, reason: detail },
+        });
+        yield* Ref.update(effects, (existing) => [
+          ...existing,
+          {
+            id: `effect:${command.commandId}:provider-session.detach:${session.id}`,
+            commandId: command.commandId,
+            threadId: command.threadId,
+            request: {
+              type: "provider-session.detach",
+              providerSessionId: session.id,
+              detail,
+              // Captured now: the next turn may move the rows to the new
+              // workspace's session before this detach runs.
+              ...unloadProviderThreadsLeaving(session.id, projection.providerThreads),
+            },
+          } satisfies PendingOrchestrationEffectV2,
+        ]);
+      }
+    },
+  );
+
   const dispatchProviderSessionDetach = Effect.fn("orchestrationV2.dispatch.providerSessionDetach")(
     function* (
       command: Extract<OrchestrationV2Command, { readonly type: "provider-session.detach" }>,
@@ -3945,15 +4267,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           input.projection,
           input.modelSelection.instanceId,
         ).find((candidate) => candidate.id !== providerThread.id);
+        const targetSessionKey = yield* resolveSessionKey(
+          input.projection.thread,
+          input.modelSelection,
+        );
+        const existingTargetProviderSessionId =
+          existingTargetProviderThread?.providerSessionId ?? null;
         const targetProviderSessionId =
-          existingTargetProviderThread?.providerSessionId ??
+          (existingTargetProviderSessionId !== null &&
+          keepsProviderSession(input.projection, existingTargetProviderSessionId, targetSessionKey)
+            ? existingTargetProviderSessionId
+            : null) ??
           (yield* mapDispatchError(input.command)(
             providerSessionIdFor({
               adapter: targetAdapter,
               providerInstanceId: input.modelSelection.instanceId,
               threadId: input.command.threadId,
+              sessionKey: targetSessionKey,
             }),
           ));
+        yield* detachSupersededSession({
+          events: input.events,
+          effects: input.effects,
+          command: input.command,
+          threadId: input.command.threadId,
+          projection: input.projection,
+          previous: existingTargetProviderSessionId,
+          next: targetProviderSessionId,
+          providerThread: existingTargetProviderThread,
+        });
         const targetProviderThreadBase: OrchestrationV2ProviderThread =
           existingTargetProviderThread === undefined
             ? {
@@ -4075,6 +4417,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             input.projection.thread.worktreePath ??
             session.providerSession.cwd,
           createdAt: now,
+          workspaceAssignment: workspaceAssignmentOf(input.projection.thread),
         })
         .pipe(
           Effect.mapError(
@@ -4750,6 +5093,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                       projection.thread.worktreePath ??
                       process.cwd(),
                     createdAt: now,
+                    workspaceAssignment: workspaceAssignmentOf(projection.thread),
                   }),
                 ),
                 Effect.mapError(
@@ -5024,15 +5368,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               }),
           ),
         );
+        const sessionKey = yield* resolveSessionKey(projection.thread, modelSelection);
+        const activeProviderSessionId = activeProviderThread?.providerSessionId ?? null;
         const providerSessionId =
-          activeProviderThread?.providerSessionId ??
+          (activeProviderSessionId !== null &&
+          keepsProviderSession(projection, activeProviderSessionId, sessionKey)
+            ? activeProviderSessionId
+            : null) ??
           (yield* mapDispatchError(command)(
             providerSessionIdFor({
               adapter,
               providerInstanceId: modelSelection.instanceId,
               threadId: command.threadId,
+              sessionKey,
             }),
           ));
+        yield* detachSupersededSession({
+          events,
+          effects,
+          command,
+          threadId: command.threadId,
+          projection,
+          previous: activeProviderSessionId,
+          next: providerSessionId,
+          providerThread: activeProviderThread,
+        });
         const providerThreadId =
           activeProviderThread?.id ??
           idAllocator.derive.providerThread({
@@ -5107,6 +5467,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                         projection.thread.worktreePath ??
                         process.cwd(),
                       createdAt: now,
+                      workspaceAssignment: workspaceAssignmentOf(projection.thread),
                     }),
                   ),
                   mapDispatchError(command),
@@ -5409,15 +5770,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         isProviderSwitch && !canResumeAcrossInstances
           ? rootProviderThreadsForProvider(projection, modelSelection.instanceId)[0]
           : activeProviderThread;
+      const sessionKey = yield* resolveSessionKey(projection.thread, modelSelection);
+      const targetProviderSessionId = canResumeAcrossInstances
+        ? null
+        : (targetProviderThread?.providerSessionId ?? null);
       const providerSessionId =
-        (canResumeAcrossInstances ? undefined : targetProviderThread?.providerSessionId) ??
+        (targetProviderSessionId !== null &&
+        keepsProviderSession(projection, targetProviderSessionId, sessionKey)
+          ? targetProviderSessionId
+          : null) ??
         (yield* mapDispatchError(command)(
           providerSessionIdFor({
             adapter,
             providerInstanceId: modelSelection.instanceId,
             threadId: command.threadId,
+            sessionKey,
           }),
         ));
+      yield* detachSupersededSession({
+        events,
+        effects,
+        command,
+        threadId: command.threadId,
+        projection,
+        previous: targetProviderSessionId,
+        next: providerSessionId,
+        providerThread: targetProviderThread,
+      });
       const existingProviderSession = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
       );
@@ -5789,6 +6168,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             projection.thread.worktreePath ??
             process.cwd(),
           createdAt: now,
+          workspaceAssignment: workspaceAssignmentOf(projection.thread),
         })
         .pipe(
           Effect.mapError(
@@ -6339,6 +6719,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
 
+      if (
+        command.projectId !== undefined &&
+        command.projectId !== parentProjection.thread.projectId
+      ) {
+        const project = yield* projects.get(command.projectId).pipe(mapDispatchError(command));
+        if (Option.isNone(project) || project.value.deletedAt !== null) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Project ${command.projectId} does not exist.`,
+          });
+        }
+      }
+
       const now = command.createdAt ?? (yield* DateTime.now);
       const taskNodeId = idAllocator.derive.delegatedTaskNode({
         commandId: command.commandId,
@@ -6373,6 +6767,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
+        // A child in another project works in that project's own folder.
+        ...(command.projectId === undefined ||
+        command.projectId === parentProjection.thread.projectId
+          ? {}
+          : { projectId: command.projectId, worktreePath: null, branch: null }),
       };
       const task: OrchestrationV2Subagent = {
         id: taskNodeId,
@@ -7573,6 +7972,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           providerThreadId: state.providerThread.id,
           cwd: resolvedRuntimePolicy.cwd ?? projection.thread.worktreePath ?? process.cwd(),
           createdAt: now,
+          workspaceAssignment: workspaceAssignmentOf(projection.thread),
         })
         .pipe(mapDispatchError(command));
       const emitEvent = emit(events, command);
@@ -7932,6 +8332,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const completionCohortRunId = completionMessage?.delegatedCompletion?.parentRunId ?? run.id;
       const stopCompletionCohort = () =>
         Effect.gen(function* () {
+          if (command.keepDelegatedCompletions === true) return;
           yield* disposeDelegatedCompletionCohort({
             command,
             events,
@@ -8254,65 +8655,92 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       );
 
-      const targetCheckpoint = projection.checkpoints.find(
+      const requestedCheckpoint = projection.checkpoints.find(
         (candidate) => candidate.id === command.checkpointId,
       );
-      if (targetCheckpoint === undefined) {
+      if (requestedCheckpoint === undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: `Checkpoint ${command.checkpointId} was not found.`,
         });
       }
-      if (targetCheckpoint.status !== "ready") {
+      if (requestedCheckpoint.status !== "ready") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
-          cause: `Checkpoint ${command.checkpointId} is ${targetCheckpoint.status} and cannot be restored.`,
+          cause: `Checkpoint ${command.checkpointId} is ${requestedCheckpoint.status} and cannot be restored.`,
         });
       }
-      const targetScope = projection.checkpointScopes.find(
-        (candidate) => candidate.id === targetCheckpoint.scopeId,
+      const requestedScope = projection.checkpointScopes.find(
+        (candidate) => candidate.id === requestedCheckpoint.scopeId,
       );
-      if (targetScope === undefined) {
+      if (requestedScope === undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
-          cause: `Checkpoint scope ${targetCheckpoint.scopeId} was not found.`,
+          cause: `Checkpoint scope ${requestedCheckpoint.scopeId} was not found.`,
         });
       }
-      if (targetScope.id !== command.scopeId) {
+      if (requestedScope.id !== command.scopeId) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
-          cause: `Checkpoint ${command.checkpointId} belongs to scope ${targetScope.id}, not ${command.scopeId}.`,
+          cause: `Checkpoint ${command.checkpointId} belongs to scope ${requestedScope.id}, not ${command.scopeId}.`,
         });
       }
+      // A file restore to a turn from before the thread moved restores the
+      // same state from the current project's checkpoint, when there is one;
+      // otherwise only the conversation can go back that far.
+      const fileTarget =
+        command.restoreFiles === false
+          ? { checkpoint: requestedCheckpoint, scope: requestedScope }
+          : fileRestoreTargetOf({
+              thread: projection.thread,
+              checkpoint: requestedCheckpoint,
+              scope: requestedScope,
+              checkpoints: projection.checkpoints,
+              scopes: projection.checkpointScopes,
+            });
+      if (fileTarget === null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: MOVE_BOUNDARY_RESTORE_MESSAGE,
+        });
+      }
+      const targetCheckpoint = fileTarget.checkpoint;
+      const targetScope = fileTarget.scope;
       if (command.restoreFiles !== false) {
-        const isolated = yield* isCheckpointRestoreIsolated(projection.thread, targetScope, {
-          projects,
-          path,
-          fileSystem,
-          projections: projectionStore,
-        }).pipe(
-          Effect.mapError(
-            (cause) =>
-              new OrchestratorDispatchError({
-                commandId: command.commandId,
-                commandType: command.type,
-                cause,
-              }),
-          ),
-        );
-        if (!isolated)
+        const refusal = yield* restoreRule
+          .check(
+            {
+              thread: projection.thread,
+              scope: targetScope,
+              checkpoint: targetCheckpoint,
+              acknowledgeWork: command.acknowledgeWork ?? [],
+            },
+            { fileSystem, projections: projectionStore, projects, path },
+          )
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause,
+                }),
+            ),
+          );
+        if (refusal !== null)
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause: SHARED_WORKSPACE_RESTORE_MESSAGE,
+            cause: refusal,
           });
       }
 
-      const targetOrdinal = targetCheckpoint.appRunOrdinal ?? 0;
+      const targetOrdinal = checkpointRunOrdinal(targetCheckpoint, targetScope);
       if (targetOrdinal > 0) {
         const targetRun = projection.runs.find((run) => run.ordinal === targetOrdinal);
         const targetProviderTurn =
@@ -8346,6 +8774,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: {
           ...projection.thread,
           rollbackRequestId: command.commandId,
+          rollbackCompletedRequestId: null,
           rollbackFailure: null,
           updatedAt: now,
         },
@@ -8373,6 +8802,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           request: {
             type: "provider-thread.rollback",
             ...(command.restoreFiles === undefined ? {} : { restoreFiles: command.restoreFiles }),
+            ...(command.acknowledgeWork === undefined
+              ? {}
+              : { acknowledgeWork: command.acknowledgeWork }),
             providerThreadId: providerThread.id,
             checkpointId: targetCheckpoint.id,
             scopeId: targetScope.id,
@@ -8416,6 +8848,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           rollbackFailure: { requestId: command.requestId, message: command.message },
           updatedAt: now,
         },
+      });
+    });
+
+  /**
+   * Records that a rollback finished, files included, so clients waiting on
+   * it stop only then. A completion of a superseded rollback is ignored.
+   */
+  const dispatchCheckpointRollbackComplete = (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "checkpoint.rollback.complete" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) =>
+    Effect.gen(function* () {
+      const thread = yield* projectionStore
+        .getThread(command.threadId)
+        .pipe(mapDispatchError(command));
+      if (thread.deletedAt !== null || thread.rollbackRequestId !== command.requestId) return;
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: command.threadId,
+        providerInstanceId: thread.providerInstanceId,
+        occurredAt: now,
+        payload: { ...thread, rollbackCompletedRequestId: command.requestId, updatedAt: now },
       });
     });
 
@@ -9288,6 +9749,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.pull-request-watch.sync":
         yield* dispatchPullRequestWatchSync(command, events, effects);
         break;
+      case "thread.project.move":
+        yield* dispatchThreadProjectMove(command, events, effects);
+        break;
       case "provider-session.detach":
         yield* dispatchProviderSessionDetach(command, events, effects);
         break;
@@ -9409,6 +9873,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "thread.background-work.settle":
         yield* dispatchBackgroundWorkSettle(command, events);
+        break;
+      case "checkpoint.rollback.complete":
+        yield* dispatchCheckpointRollbackComplete(command, events);
         break;
       case "thread.fork":
         yield* dispatchThreadFork(command, events);
@@ -9687,6 +10154,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             stored.event.payload.status === "rolled_back"),
       ),
       Stream.runForEach(handleTerminalRun),
+      Effect.forkDetach,
+    );
+
+  // Every terminal run ends its admitted turn, whatever ended it, including
+  // the runtime reconciliation at shutdown that queue promotion skips.
+  yield* eventSink
+    .stream({ afterSequence: terminalEventsAfterSequence, eventType: "run.updated" })
+    .pipe(
+      Stream.runForEach((stored) =>
+        stored.event.type === "run.updated" && isTurnEndStatus(stored.event.payload.status)
+          ? turnAdmission.end({
+              threadId: stored.event.threadId,
+              runId: stored.event.payload.id,
+              status: stored.event.payload.status,
+            })
+          : Effect.void,
+      ),
+      Effect.catchCause((cause) => Effect.logWarning("Failed to report V2 turn ends", { cause })),
       Effect.forkDetach,
     );
 
