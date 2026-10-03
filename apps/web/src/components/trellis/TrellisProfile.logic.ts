@@ -111,11 +111,16 @@ export function trellisProfileBadges(
         : { ...known, hint: `${known.hint}${approvedBy}` },
     );
   }
-  // A layer's switch always shows (also on an approved item); an item off
-  // for its status alone (approval, trust, error) has that badge only.
+  // A layer's switch always shows (also on an approved item), and an
+  // approved item that is off says so; an item off for its status alone
+  // (approval, trust, error) has that badge only.
   if (
     !item.enabled &&
-    (item.disabledBy !== null || item.status === null || item.status === "not enforced")
+    (item.disabledBy !== null ||
+      item.status === null ||
+      item.status === "not enforced" ||
+      // Approval and enablement are separate: an approved item can still be off.
+      item.status === "approved")
   ) {
     badges.push({
       label:

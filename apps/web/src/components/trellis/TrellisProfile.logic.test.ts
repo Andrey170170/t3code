@@ -299,3 +299,16 @@ describe("trellisProfileLooseErrors", () => {
     ).toEqual([]);
   });
 });
+
+describe("approved but off", () => {
+  it("shows Off for approved instructions that are not enabled, with no layer to name", () => {
+    expect(
+      trellisProfileBadges({
+        enabled: false,
+        disabledBy: null,
+        status: "approved",
+        approvedBy: null,
+      }).map((badge) => badge.label),
+    ).toEqual(["Approved", "Off"]);
+  });
+});
