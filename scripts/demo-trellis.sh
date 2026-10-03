@@ -637,14 +637,20 @@ async page => {
   await page.waitForTimeout(2000);
   const own = page.getByRole('button', { name: $(js "Remove checkout $C_PATH"), exact: true });
   const used = (await own.count()) > 0 ? 'Remove checkout (grouped entry)' : 'Move to trash';
-  if ((await own.count()) > 0) await own.click();
-  else await page.getByRole('button', { name: 'Move to trash' }).click();
-  const dialog = page.getByRole('alertdialog');
-  await dialog.waitFor();
-  const title = await dialog.getByRole('heading').innerText();
-  await dialog.getByRole('button', { name: 'Confirm' }).click();
-  await page.waitForTimeout(4000);
-  return used + ': ' + title;
+  if ((await own.count()) > 0) {
+    // Removing a grouped entry deletes it for good, so it still confirms.
+    await own.click();
+    const dialog = page.getByRole('alertdialog');
+    await dialog.waitFor();
+    const title = await dialog.getByRole('heading').innerText();
+    await dialog.getByRole('button', { name: 'Confirm' }).click();
+    await page.waitForTimeout(4000);
+    return used + ': ' + title;
+  }
+  // A trash asks nothing: the page stays, offering Undo.
+  await page.getByRole('button', { name: 'Move to trash' }).click();
+  await page.getByRole('heading', { name: 'In the Trellis trash' }).waitFor({ timeout: 60000 });
+  return used + ': in place, with Undo';
 }
 JS
 goto "/$ENV_ID/$B_THREAD"
@@ -658,7 +664,7 @@ c9a() {
   tr_ --json trash | jq -e --arg id "$C_ID" 'any(.projects[]; .id==$id)' && [[ -n $C_ARCHIVED ]] &&
     ! grep -qF -- "$C_TITLE" <<<"$SIDEBAR_AFTER_DELETE"
 }
-check 9a "Deleting click moves it to the Trellis trash, archives its thread and removes it from the sidebar" \
+check 9a "Deleting click moves it to the Trellis trash without a dialog, archives its thread and removes it from the sidebar's threads" \
   "$OUT/09a-sidebar-after-delete.png, $OUT/09b-trash.png" \
   c9a
 pwc <<JS >>"$OUT/09-trash.log"
@@ -728,12 +734,14 @@ check 10a "Move to project -> click moves the thread, and its first turn runs in
 goto "/$ENV_ID/$IDEA_THREAD"
 thread_menu "$(sql "select title from orchestration_v2_projection_threads where thread_id='$IDEA_THREAD'")"
 shot 10c-history-limit
-LIMIT=$(pwc <<'JS'
-async page => await page.getByRole('button', { name: 'This thread has history; graduation will move such threads.' }).isDisabled()
+# Since graduation (M6) a thread with history moves too: its conversation
+# follows, its earlier turns' files stay in the old folder.
+TARGETS=$(pwc <<'JS'
+async page => await page.getByText(/^Project · ws-/).count()
 JS
 )
-c10b() { [[ $LIMIT == true ]]; }
-check 10b "The same menu on the step 3 thread shows the M1 limit, disabled" "$OUT/10c-history-limit.png" c10b
+c10b() { [[ ${TARGETS:-0} -gt 0 ]]; }
+check 10b "The same menu on the step 3 thread (which has history) offers Trellis projects to move to" "$OUT/10c-history-limit.png" c10b
 note 10 "Adaptation: the UI keeps a new thread as a client draft until its first message, and drafts have no thread menu, so the message-less thread is created over the RPC (orchestration.dispatchCommand thread.create, as API clients do); the move and the first turn go through the UI."
 
 # ---- 11. Context across a move (transcripts) ----------------------------
@@ -761,7 +769,7 @@ SLUG_DIR=$CLAUDE_HOME/projects/$(sed 's/[^A-Za-z0-9]/-/g' <<<"$SPIKE_B")
 c11() { [[ $SPIKE_RC == 0 ]] && grep -qE 'Tests +1 passed' "$OUT/11-recall-spike.log" && ! grep -q failed "$OUT/11-recall-spike.log"; }
 check 11 "Thinking-only recall survives prepare from this run's idea to its project; forkSession with dir B succeeds (spike test)" \
   "$OUT/11-recall-spike.log" c11
-note 11 "Transcript-level by design: the UI cannot move a thread with history in M1."
+note 11 "Transcript-level: the recall is checked on transcripts directly, beside the UI moves above."
 
 # ---- checklist ----------------------------------------------------------
 print_checklist
