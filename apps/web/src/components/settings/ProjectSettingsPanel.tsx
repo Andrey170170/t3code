@@ -41,6 +41,7 @@ import { useThreadShells } from "../../state/entities";
 import { projectEnvironment } from "../../state/projects";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { TrellisProjectProfileSection } from "../trellis/TrellisProfileSection";
 import { TrellisWorkspacesSection } from "../trellis/TrellisWorkspacesSection";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
@@ -600,10 +601,16 @@ function ProjectDetail({
         {trellisRemoval === "trash" &&
         representativeTrellis !== null &&
         trellisItemKind(representative.workspaceRoot, representativeTrellis) !== "idea" ? (
-          <TrellisWorkspacesSection
-            environmentId={representative.environmentId}
-            projectId={representative.id}
-          />
+          <>
+            <TrellisWorkspacesSection
+              environmentId={representative.environmentId}
+              projectId={representative.id}
+            />
+            <TrellisProjectProfileSection
+              environmentId={representative.environmentId}
+              projectId={representative.id}
+            />
+          </>
         ) : null}
         {hasMultipleCheckouts ? checkoutChoices : null}
         {group.memberProjects.length === 1 &&

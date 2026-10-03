@@ -26,6 +26,8 @@ import {
   TrellisHistorySettings,
   TrellisHistorySettingsUpdateResult,
   TrellisHistoryValues,
+  TrellisProfile,
+  TrellisProfileInput,
   TrellisRestoreConflicts,
   TrellisRestoreConflictsInput,
   TrellisRestoreInput,
@@ -415,6 +417,7 @@ export const WS_METHODS = {
   trellisUpdateHistorySettings: "trellis.updateHistorySettings",
   trellisRunMaintenance: "trellis.runMaintenance",
   trellisSetPreviewHost: "trellis.setPreviewHost",
+  trellisGetProfile: "trellis.getProfile",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1354,6 +1357,12 @@ const WsTrellisSetPreviewHostRpc = Rpc.make(WS_METHODS.trellisSetPreviewHost, {
   error: TrellisRpcError,
 });
 
+const WsTrellisGetProfileRpc = Rpc.make(WS_METHODS.trellisGetProfile, {
+  payload: TrellisProfileInput,
+  success: TrellisProfile,
+  error: TrellisRpcError,
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1991,6 +2000,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsTrellisUpdateHistorySettingsRpc,
   WsTrellisRunMaintenanceRpc,
   WsTrellisSetPreviewHostRpc,
+  WsTrellisGetProfileRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,

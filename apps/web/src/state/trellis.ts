@@ -134,6 +134,17 @@ export const trellisEnvironment = {
     tag: WS_METHODS.trellisSetPreviewHost,
     concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
   }),
+  /**
+   * The effective agent profile of a workspace (`target`), or of the agent
+   * homes and global layer without one. Layer files change rarely and by
+   * hand, so it is read when shown and on refresh, not on an interval.
+   */
+  profile: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:profile",
+    tag: WS_METHODS.trellisGetProfile,
+    staleTimeMs: 30_000,
+    idleTtlMs: 60_000,
+  }),
   graduate: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:graduate",
     tag: WS_METHODS.trellisGraduate,

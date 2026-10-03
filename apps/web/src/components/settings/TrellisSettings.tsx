@@ -24,6 +24,7 @@ import { serverEnvironment } from "../../state/server";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { refreshTrellisStatus, trellisEnvironment } from "../../state/trellis";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { TrellisProfileSection } from "../trellis/TrellisProfileSection";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
@@ -241,6 +242,12 @@ function TrellisEnvironmentSettings(props: {
             basesId={anchor("trellis-bases")}
           />
           <TrellisHistorySection environmentId={environmentId} id={anchor("trellis-history")} />
+          <TrellisProfileSection
+            environmentId={environmentId}
+            target={null}
+            id={anchor("trellis-profile")}
+            description="What every workspace starts from: the agent homes mounted into workspaces and the global layer. A project's page shows its workspaces' full profile."
+          />
           <TrellisTrashSection
             environmentId={environmentId}
             title="Trash"

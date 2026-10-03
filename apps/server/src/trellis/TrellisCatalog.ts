@@ -34,6 +34,7 @@ import {
   type TrellisHistorySettings,
   type TrellisHistorySettingsUpdateResult,
   type TrellisHistoryValues,
+  type TrellisProfile,
   type TrellisCreateResult,
   type TrellisFindHit,
   type TrellisFindResult,
@@ -774,6 +775,8 @@ export class TrellisCatalog extends Context.Service<
     ) => Effect.Effect<TrellisHistorySettingsUpdateResult, TrellisError>;
     /** Runs Trellis maintenance now; see `Trellis.runMaintenance`. */
     readonly runMaintenance: Effect.Effect<void, TrellisError>;
+    /** A workspace's effective agent profile, or (null) the agent homes' and global layer's. */
+    readonly profile: (target: string | null) => Effect.Effect<TrellisProfile, TrellisError>;
     /** The T3 project for a Trellis item just created (a graduation's), made now rather than at the next poll. */
     readonly projectFor: (
       item: TrellisProjectView,
@@ -1991,6 +1994,7 @@ const make = Effect.gen(function* () {
     updateHistorySettings: (values) =>
       requireReady.pipe(Effect.andThen(trellis.updateHistorySettings(values))),
     runMaintenance: requireReady.pipe(Effect.andThen(trellis.runMaintenance)),
+    profile: (target) => requireReady.pipe(Effect.andThen(trellis.profile(target))),
   });
 });
 

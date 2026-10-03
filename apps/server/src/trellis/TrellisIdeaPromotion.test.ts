@@ -81,6 +81,7 @@ const FakeCatalog = Layer.effect(
       updateHistorySettings: unused,
       runMaintenance: Effect.die("unused"),
       setPreviewHost: () => Effect.die("unused catalog operation"),
+      profile: unused,
     });
   }),
 );

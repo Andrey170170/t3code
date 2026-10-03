@@ -27,6 +27,9 @@ import {
   type TrellisHistorySettingsUpdateResult,
   type TrellisHistoryValues,
   type TrellisSetPreviewHostResult,
+  type TrellisProfile,
+  type TrellisProfileItem,
+  type TrellisProfileProvider,
   type TrellisStatus,
 } from "@t3tools/contracts";
 import {
@@ -364,6 +367,151 @@ const TrellisDetailsView = Schema.Struct({
     Schema.NullOr(Schema.Struct({ free_bytes: Schema.Finite, total_bytes: Schema.Finite })),
   ),
 });
+
+/**
+ * `GET /v1/profile` (Trellis main at or after PR #47). Decoded leniently: every
+ * field Trellis may omit is optional, unknown fields and statuses pass.
+ */
+const OptionalString = Schema.optional(Schema.NullOr(Schema.String));
+const TrellisProfileItemView = Schema.Struct({
+  name: Schema.String,
+  source: Schema.Struct({ layer: Schema.String, path: OptionalString, scope: OptionalString }),
+  enabled: Schema.optional(Schema.Boolean),
+  disabled_by: Schema.optional(Schema.NullOr(Schema.Struct({ layer: Schema.String }))),
+  status: OptionalString,
+  error: OptionalString,
+  approved_by: OptionalString,
+  detail: Schema.optional(Schema.Unknown),
+});
+const TrellisProfileInstructionsView = Schema.Struct({
+  layer: Schema.String,
+  path: OptionalString,
+  text: OptionalString,
+  enabled: Schema.optional(Schema.Boolean),
+  status: OptionalString,
+  error: OptionalString,
+  approved_by: OptionalString,
+});
+const ProfileItems = Schema.optional(Schema.Array(TrellisProfileItemView));
+const TrellisProfileProviderView = Schema.Struct({
+  mcp: ProfileItems,
+  skills: ProfileItems,
+  plugins: ProfileItems,
+  instructions: Schema.optional(Schema.Array(TrellisProfileInstructionsView)),
+  repository: Schema.optional(
+    Schema.Struct({
+      mcp: ProfileItems,
+      skills: ProfileItems,
+      instructions: ProfileItems,
+      settings: ProfileItems,
+    }),
+  ),
+  strict_mcp: Schema.optional(Schema.NullOr(Schema.Boolean)),
+});
+const TrellisProfileView = Schema.Struct({
+  target: OptionalString,
+  generated_at: Schema.optional(Schema.NullOr(Schema.Finite)),
+  stale: Schema.optional(Schema.Boolean),
+  trusted: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  origin: OptionalString,
+  layers: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        path: OptionalString,
+        paths: Schema.optional(Schema.Array(Schema.String)),
+        present: Schema.optional(Schema.NullOr(Schema.Boolean)),
+      }),
+    ),
+  ),
+  providers: Schema.optional(Schema.Record(Schema.String, TrellisProfileProviderView)),
+  errors: Schema.optional(
+    Schema.Array(
+      Schema.Struct({ layer: Schema.String, item: OptionalString, error: Schema.String }),
+    ),
+  ),
+});
+
+const stringField = (value: unknown, key: string): string | null =>
+  Predicate.hasProperty(value, key) && typeof value[key] === "string" ? value[key] : null;
+
+const toProfileItem = (item: typeof TrellisProfileItemView.Type): TrellisProfileItem => {
+  const args = Predicate.hasProperty(item.detail, "args") ? item.detail.args : null;
+  return {
+    name: item.name,
+    source: {
+      layer: item.source.layer,
+      path: item.source.path ?? null,
+      scope: item.source.scope ?? null,
+    },
+    enabled: item.enabled ?? true,
+    disabledBy: item.disabled_by?.layer ?? null,
+    status: item.status ?? null,
+    error: item.error ?? null,
+    approvedBy: item.approved_by ?? null,
+    detail: {
+      type: stringField(item.detail, "type"),
+      url: stringField(item.detail, "url"),
+      command: stringField(item.detail, "command"),
+      args: Array.isArray(args) ? args.filter((arg) => typeof arg === "string") : [],
+      path: stringField(item.detail, "path"),
+      head: stringField(item.detail, "head"),
+    },
+  };
+};
+
+const toProfileProvider = (
+  view: typeof TrellisProfileProviderView.Type,
+): TrellisProfileProvider => {
+  const items = (list: typeof view.mcp) => (list ?? []).map(toProfileItem);
+  return {
+    mcp: items(view.mcp),
+    skills: items(view.skills),
+    plugins: items(view.plugins),
+    instructions: (view.instructions ?? []).map((entry) => ({
+      layer: entry.layer,
+      path: entry.path ?? null,
+      text: entry.text ?? null,
+      enabled: entry.enabled ?? true,
+      status: entry.status ?? null,
+      error: entry.error ?? null,
+      approvedBy: entry.approved_by ?? null,
+    })),
+    repository: {
+      mcp: items(view.repository?.mcp),
+      skills: items(view.repository?.skills),
+      instructions: items(view.repository?.instructions),
+      settings: items(view.repository?.settings),
+    },
+    strictMcp: view.strict_mcp ?? null,
+  };
+};
+
+const toProfile = (view: typeof TrellisProfileView.Type): TrellisProfile => {
+  const provider = (name: string) => {
+    const entry = view.providers?.[name];
+    return entry === undefined ? null : toProfileProvider(entry);
+  };
+  return {
+    target: view.target ?? null,
+    generatedAt: view.generated_at ?? null,
+    stale: view.stale ?? false,
+    trusted: view.trusted ?? null,
+    origin: view.origin ?? null,
+    layers: (view.layers ?? []).map((layer) => ({
+      name: layer.name,
+      path: layer.path ?? null,
+      paths: layer.paths ?? [],
+      present: layer.present ?? null,
+    })),
+    providers: { claude: provider("claude"), codex: provider("codex") },
+    errors: (view.errors ?? []).map((entry) => ({
+      layer: entry.layer,
+      item: entry.item ?? null,
+      error: entry.error,
+    })),
+  };
+};
 
 /** The workspace (`ws`) or project a pending operation's journal data names. */
 function pendingTarget(data: unknown): string | null {
@@ -810,6 +958,15 @@ export class Trellis extends Context.Service<
     readonly setPreviewHost: (
       setting: string,
     ) => Effect.Effect<TrellisSetPreviewHostResult, TrellisError>;
+    /**
+     * The effective agent profile of a workspace (id or path), or with a null
+     * target that of the agent homes and the global layer; `provider` limits
+     * it to one provider.
+     */
+    readonly profile: (
+      target: string | null,
+      provider?: "claude" | "codex",
+    ) => Effect.Effect<TrellisProfile, TrellisError>;
   }
 >()("t3/trellis/Trellis") {}
 
@@ -896,6 +1053,10 @@ const ROUTE_MINIMUM: ReadonlyArray<{ readonly route: string; readonly since: str
     route,
     since: "main at or after PR #40 (records/history-settings, 0bed1e8)",
   })),
+  {
+    route: "GET /v1/profile",
+    since: "main at or after PR #47 (env/profile-view, 8ffb0be)",
+  },
 ];
 
 /** The error for a failed response whose body is not Trellis' `{error}`. */
@@ -1501,6 +1662,17 @@ const make = Effect.gen(function* () {
           errors: view.errors ?? [],
         })),
       ),
+    profile: (target, provider) =>
+      call(
+        TrellisProfileView,
+        "GET",
+        `/v1/profile?${query({
+          ...(target === null ? {} : { target }),
+          ...(provider === undefined ? {} : { provider }),
+        })}`,
+        // Reads layer files and the homes' skills; a settings page waits on it.
+        { timeoutMs: 5_000 },
+      ).pipe(Effect.map(toProfile)),
   });
 });
 
@@ -1624,6 +1796,7 @@ export function makeTestTrellis(
     updateHistorySettings: unused,
     runMaintenance: Effect.die(new Error("unused Trellis operation")),
     setPreviewHost: unused,
+    profile: unused,
     ...rest,
   });
 }
