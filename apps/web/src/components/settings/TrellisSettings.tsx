@@ -13,7 +13,7 @@ import {
   SproutIcon,
   TrashIcon,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { useTrellisStatusFor } from "../../hooks/useTrellis";
 import { cn } from "../../lib/utils";
@@ -453,6 +453,14 @@ function TrellisPreviewHostRow(props: {
   const [choice, setChoice] = useState<PreviewHostChoice>(current);
   const [address, setAddress] = useState(current === "custom" ? previewHost.setting : "");
   const [pending, setPending] = useState(false);
+  const [editing, setEditing] = useState(false);
+  // The setting may change elsewhere (the CLI, another client): follow it,
+  // except while an address is being typed or saved.
+  useEffect(() => {
+    if (editing || pending) return;
+    setChoice(previewHostChoice(previewHost.setting));
+    setAddress(previewHostChoice(previewHost.setting) === "custom" ? previewHost.setting : "");
+  }, [editing, pending, previewHost.setting]);
   const save = async (next: PreviewHostChoice, typed: string) => {
     const setting = previewHostSetting(next, typed);
     if (setting === null || setting === previewHost.setting) return;
@@ -467,13 +475,19 @@ function TrellisPreviewHostRow(props: {
             description: failureMessage(result, "Trellis did not respond."),
           });
         }
+        // Back to what is in force, typed address included.
         setChoice(current);
+        setAddress(current === "custom" ? previewHost.setting : "");
         return;
       }
       const { errors } = result.value;
       toastManager.add(
         errors.length === 0
-          ? { type: "success", title: `Previews now listen on ${result.value.previewHost.bind}` }
+          ? {
+              type: "success",
+              title: `Previews now listen on ${result.value.previewHost.bind}`,
+              description: "Previews already open keep their old address: open them again.",
+            }
           : {
               type: "warning",
               title: `${errors.length} preview${errors.length === 1 ? "" : "s"} could not move`,
@@ -490,7 +504,7 @@ function TrellisPreviewHostRow(props: {
   return (
     <SettingsRow
       title="Preview address"
-      description={`Where previews of workspace ports listen: ${previewHost.bind}, opened as ${previewHost.urlHost}. This machine keeps them private; the local network or the tailnet lets other devices open them.`}
+      description={`Where previews of workspace ports listen: ${previewHost.bind}, opened as ${previewHost.urlHost}. This machine keeps them private. The local network or the tailnet lets other devices open them, with no T3 sign-in in front: anyone who reaches the address reaches the workspace's server.`}
       control={
         <span className="inline-flex items-center gap-2">
           {choice === "custom" ? (
@@ -502,7 +516,11 @@ function TrellisPreviewHostRow(props: {
               value={address}
               disabled={pending}
               onChange={(event) => setAddress(event.target.value)}
-              onBlur={() => void save("custom", address)}
+              onFocus={() => setEditing(true)}
+              onBlur={() => {
+                setEditing(false);
+                void save("custom", address);
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") event.currentTarget.blur();
               }}
