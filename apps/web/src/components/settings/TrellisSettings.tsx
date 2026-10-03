@@ -447,23 +447,32 @@ function TrellisPreviewHostRow(props: {
   readonly previewHost: NonNullable<TrellisDetails["previewHost"]>;
   readonly onChanged: () => void;
 }) {
-  const { environmentId, previewHost } = props;
+  const { environmentId } = props;
   const setHost = useAtomCommand(trellisEnvironment.setPreviewHost, { reportFailure: false });
-  const current = previewHostChoice(previewHost.setting);
-  const [choice, setChoice] = useState<PreviewHostChoice>(current);
-  const [address, setAddress] = useState(current === "custom" ? previewHost.setting : "");
+  // The setting in force: the last read, or a save's answer until the next
+  // read, which also brings changes made elsewhere (the CLI, another client).
+  const [committed, setCommitted] = useState(props.previewHost);
+  // Keyed on the values, so a refresh repeating the last read keeps a newer save's answer.
+  const { setting: readSetting, bind: readBind, urlHost: readUrlHost } = props.previewHost;
+  useEffect(
+    () => setCommitted({ setting: readSetting, bind: readBind, urlHost: readUrlHost }),
+    [readSetting, readBind, readUrlHost],
+  );
+  // Local edits not saved yet; null follows the setting in force.
+  const [draftChoice, setDraftChoice] = useState<PreviewHostChoice | null>(null);
+  const [draftAddress, setDraftAddress] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const [editing, setEditing] = useState(false);
-  // The setting may change elsewhere (the CLI, another client): follow it,
-  // except while an address is being typed or saved.
-  useEffect(() => {
-    if (editing || pending) return;
-    setChoice(previewHostChoice(previewHost.setting));
-    setAddress(previewHostChoice(previewHost.setting) === "custom" ? previewHost.setting : "");
-  }, [editing, pending, previewHost.setting]);
+  const committedChoice = previewHostChoice(committed.setting);
+  const choice = draftChoice ?? committedChoice;
+  const address = draftAddress ?? (committedChoice === "custom" ? committed.setting : "");
   const save = async (next: PreviewHostChoice, typed: string) => {
     const setting = previewHostSetting(next, typed);
-    if (setting === null || setting === previewHost.setting) return;
+    if (setting === null) return;
+    if (setting === committed.setting) {
+      setDraftChoice(null);
+      setDraftAddress(null);
+      return;
+    }
     setPending(true);
     try {
       const result = await setHost({ environmentId, input: { previewHost: setting } });
@@ -475,11 +484,9 @@ function TrellisPreviewHostRow(props: {
             description: failureMessage(result, "Trellis did not respond."),
           });
         }
-        // Back to what is in force, typed address included.
-        setChoice(current);
-        setAddress(current === "custom" ? previewHost.setting : "");
         return;
       }
+      setCommitted(result.value.previewHost);
       const { errors } = result.value;
       toastManager.add(
         errors.length === 0
@@ -497,6 +504,9 @@ function TrellisPreviewHostRow(props: {
             },
       );
     } finally {
+      // Saved or refused, the row shows the setting in force again.
+      setDraftChoice(null);
+      setDraftAddress(null);
       setPending(false);
       props.onChanged();
     }
@@ -504,7 +514,7 @@ function TrellisPreviewHostRow(props: {
   return (
     <SettingsRow
       title="Preview address"
-      description={`Where previews of workspace ports listen: ${previewHost.bind}, opened as ${previewHost.urlHost}. This machine keeps them private. The local network or the tailnet lets other devices open them, with no T3 sign-in in front: anyone who reaches the address reaches the workspace's server.`}
+      description={`Where previews of workspace ports listen: ${committed.bind}, opened as ${committed.urlHost}. This machine keeps them private. The local network or the tailnet lets other devices open them, with no T3 sign-in in front: anyone who reaches the address reaches the workspace's server.`}
       control={
         <span className="inline-flex items-center gap-2">
           {choice === "custom" ? (
@@ -515,11 +525,10 @@ function TrellisPreviewHostRow(props: {
               placeholder="IP address"
               value={address}
               disabled={pending}
-              onChange={(event) => setAddress(event.target.value)}
-              onFocus={() => setEditing(true)}
+              onChange={(event) => setDraftAddress(event.target.value)}
               onBlur={() => {
-                setEditing(false);
-                void save("custom", address);
+                // Only a typed address is saved; an untouched one follows the setting.
+                if (draftAddress !== null) void save("custom", draftAddress);
               }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") event.currentTarget.blur();
@@ -532,8 +541,8 @@ function TrellisPreviewHostRow(props: {
             disabled={pending}
             onValueChange={(value) => {
               if (value === null) return;
-              setChoice(value);
-              if (value !== "custom") void save(value, address);
+              if (value === "custom") setDraftChoice("custom");
+              else void save(value, "");
             }}
           >
             <SelectTrigger size="xs" className="w-36" aria-label="Where previews listen">
