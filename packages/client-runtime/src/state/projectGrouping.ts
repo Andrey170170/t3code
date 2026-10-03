@@ -12,6 +12,14 @@ import { normalizeProjectPathForComparison } from "./projects.ts";
 export interface ProjectGroupingSettings {
   readonly sidebarProjectGroupingMode: SidebarProjectGroupingMode;
   readonly sidebarProjectGroupingOverrides: Record<string, SidebarProjectGroupingMode>;
+  /**
+   * Projects that always stand alone, whatever the mode or overrides: each
+   * is its own environment (for example a Trellis workspace), so sharing a
+   * repository does not make two of them one project.
+   */
+  readonly keepSeparate?: (
+    project: Pick<EnvironmentProject, "environmentId" | "workspaceRoot">,
+  ) => boolean;
 }
 
 export type ProjectGroupingMode = SidebarProjectGroupingMode;
@@ -90,6 +98,7 @@ export function resolveProjectGroupingMode(
   project: Pick<EnvironmentProject, "environmentId" | "workspaceRoot">,
   settings: ProjectGroupingSettings,
 ): SidebarProjectGroupingMode {
+  if (settings.keepSeparate?.(project) === true) return "separate";
   return (
     settings.sidebarProjectGroupingOverrides?.[deriveProjectGroupingOverrideKey(project)] ??
     settings.sidebarProjectGroupingMode

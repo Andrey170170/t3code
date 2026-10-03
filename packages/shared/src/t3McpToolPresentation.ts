@@ -41,6 +41,9 @@ export type T3McpToolSummaryAction =
   | "worktree-handoff"
   | "worktree-list"
   | "worktree-status"
+  | "trellis-checkpoint"
+  | "trellis-discard-fork"
+  | "trellis-graduate"
   | "project-list"
   | "project-read"
   | "project-create"
@@ -143,6 +146,18 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "worktree-handoff",
   ),
   t3_worktree_status: tool(["Get", "Getting", "Got", "thread worktree status"], "worktree-status"),
+  trellis_checkpoint: tool(
+    ["Take", "Taking", "Took", "a Trellis checkpoint"],
+    "trellis-checkpoint",
+  ),
+  trellis_discard_fork: tool(
+    ["Discard", "Discarding", "Discarded", "a Trellis fork"],
+    "trellis-discard-fork",
+  ),
+  trellis_graduate: tool(
+    ["Graduate", "Graduating", "Graduated", "the Trellis idea"],
+    "trellis-graduate",
+  ),
   preview_status: tool(["Get", "Getting", "Got", "preview browser status"], "browser", "browser"),
   preview_open: tool(
     ["Open", "Opening", "Opened", "a page in the preview browser"],

@@ -1,5 +1,45 @@
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
 import {
+  TrellisCheckpointList,
+  TrellisCheckpointsInput,
+  TrellisCreateResult,
+  TrellisBuildBaseInput,
+  TrellisBuildBaseResult,
+  TrellisEmptyTrashResult,
+  TrellisSetPreviewHostInput,
+  TrellisSetPreviewHostResult,
+  TrellisForkWorkspaceInput,
+  TrellisForkWorkspaceResult,
+  TrellisPurgeInput,
+  TrellisWorkspaceList,
+  TrellisWorkspacesInput,
+  TrellisError,
+  TrellisFindInput,
+  TrellisFindResult,
+  TrellisIdeaDraftTarget,
+  TrellisNewIdeaInput,
+  TrellisNewProjectInput,
+  TrellisGraduateInput,
+  TrellisGraduateResult,
+  TrellisBasesResult,
+  TrellisDetails,
+  TrellisHistorySettings,
+  TrellisHistorySettingsUpdateResult,
+  TrellisHistoryValues,
+  TrellisProfile,
+  TrellisProfileInput,
+  TrellisRestoreConflicts,
+  TrellisRestoreConflictsInput,
+  TrellisRestoreInput,
+  TrellisResolvePreviewUrlInput,
+  TrellisResolvePreviewUrlResult,
+  TrellisRestoreResult,
+  TrellisStatus,
+  TrellisTrashList,
+  TrellisTrashProjectInput,
+  TrellisTrashProjectResult,
+} from "./trellis.ts";
+import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
   ChatGptImportProfileInput,
@@ -9,7 +49,7 @@ import {
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   SideChatError,
   SideChatParentInput,
@@ -251,6 +291,7 @@ import {
   PreviewReportStatusInput,
   PreviewResizeInput,
   PreviewSessionSnapshot,
+  PreviewTrellisError,
 } from "./preview.ts";
 import {
   DeviceActionInput,
@@ -365,6 +406,32 @@ export const WS_METHODS = {
   filesystemBrowse: "filesystem.browse",
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
+
+  // Trellis workspace service methods
+  trellisGetStatus: "trellis.getStatus",
+  trellisNewIdea: "trellis.newIdea",
+  trellisPrepareIdeaDraft: "trellis.prepareIdeaDraft",
+  trellisTrashProject: "trellis.trashProject",
+  trellisListTrash: "trellis.listTrash",
+  trellisRestore: "trellis.restore",
+  trellisEmptyTrash: "trellis.emptyTrash",
+  trellisNewProject: "trellis.newProject",
+  trellisFind: "trellis.find",
+  trellisRestoreConflicts: "trellis.restoreConflicts",
+  trellisResolvePreviewUrl: "trellis.resolvePreviewUrl",
+  trellisListWorkspaces: "trellis.listWorkspaces",
+  trellisListCheckpoints: "trellis.listCheckpoints",
+  trellisForkWorkspace: "trellis.forkWorkspace",
+  trellisPurge: "trellis.purge",
+  trellisGraduate: "trellis.graduate",
+  trellisListBases: "trellis.listBases",
+  trellisGetDetails: "trellis.getDetails",
+  trellisBuildBase: "trellis.buildBase",
+  trellisGetHistorySettings: "trellis.getHistorySettings",
+  trellisUpdateHistorySettings: "trellis.updateHistorySettings",
+  trellisRunMaintenance: "trellis.runMaintenance",
+  trellisSetPreviewHost: "trellis.setPreviewHost",
+  trellisGetProfile: "trellis.getProfile",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1199,6 +1266,142 @@ const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
   error: Schema.Union([FilesystemBrowseError, EnvironmentAuthorizationError]),
 });
 
+const WsTrellisGetStatusRpc = Rpc.make(WS_METHODS.trellisGetStatus, {
+  payload: Schema.Struct({}),
+  success: TrellisStatus,
+  error: EnvironmentAuthorizationError,
+});
+
+const TrellisRpcError = Schema.Union([TrellisError, EnvironmentAuthorizationError]);
+
+const WsTrellisNewIdeaRpc = Rpc.make(WS_METHODS.trellisNewIdea, {
+  payload: TrellisNewIdeaInput,
+  success: TrellisCreateResult,
+  error: TrellisRpcError,
+});
+const WsTrellisPrepareIdeaDraftRpc = Rpc.make(WS_METHODS.trellisPrepareIdeaDraft, {
+  payload: Schema.Struct({}),
+  success: TrellisIdeaDraftTarget,
+  error: TrellisRpcError,
+});
+const WsTrellisTrashProjectRpc = Rpc.make(WS_METHODS.trellisTrashProject, {
+  payload: TrellisTrashProjectInput,
+  success: TrellisTrashProjectResult,
+  error: TrellisRpcError,
+});
+const WsTrellisListTrashRpc = Rpc.make(WS_METHODS.trellisListTrash, {
+  payload: Schema.Struct({}),
+  success: TrellisTrashList,
+  error: TrellisRpcError,
+});
+const WsTrellisRestoreRpc = Rpc.make(WS_METHODS.trellisRestore, {
+  payload: TrellisRestoreInput,
+  success: TrellisRestoreResult,
+  error: TrellisRpcError,
+});
+const WsTrellisEmptyTrashRpc = Rpc.make(WS_METHODS.trellisEmptyTrash, {
+  payload: Schema.Struct({}),
+  success: TrellisEmptyTrashResult,
+  error: TrellisRpcError,
+});
+const WsTrellisNewProjectRpc = Rpc.make(WS_METHODS.trellisNewProject, {
+  payload: TrellisNewProjectInput,
+  success: TrellisCreateResult,
+  error: TrellisRpcError,
+});
+const WsTrellisFindRpc = Rpc.make(WS_METHODS.trellisFind, {
+  payload: TrellisFindInput,
+  success: TrellisFindResult,
+  error: TrellisRpcError,
+});
+const WsTrellisResolvePreviewUrlRpc = Rpc.make(WS_METHODS.trellisResolvePreviewUrl, {
+  payload: TrellisResolvePreviewUrlInput,
+  success: TrellisResolvePreviewUrlResult,
+  error: Schema.Union([PreviewTrellisError, EnvironmentAuthorizationError]),
+});
+
+const WsTrellisRestoreConflictsRpc = Rpc.make(WS_METHODS.trellisRestoreConflicts, {
+  payload: TrellisRestoreConflictsInput,
+  success: TrellisRestoreConflicts,
+  error: TrellisRpcError,
+});
+const WsTrellisListWorkspacesRpc = Rpc.make(WS_METHODS.trellisListWorkspaces, {
+  payload: TrellisWorkspacesInput,
+  success: TrellisWorkspaceList,
+  error: TrellisRpcError,
+});
+const WsTrellisListCheckpointsRpc = Rpc.make(WS_METHODS.trellisListCheckpoints, {
+  payload: TrellisCheckpointsInput,
+  success: TrellisCheckpointList,
+  error: TrellisRpcError,
+});
+const WsTrellisForkWorkspaceRpc = Rpc.make(WS_METHODS.trellisForkWorkspace, {
+  payload: TrellisForkWorkspaceInput,
+  success: TrellisForkWorkspaceResult,
+  error: TrellisRpcError,
+});
+const WsTrellisPurgeRpc = Rpc.make(WS_METHODS.trellisPurge, {
+  payload: TrellisPurgeInput,
+  success: TrellisEmptyTrashResult,
+  error: TrellisRpcError,
+});
+
+const WsTrellisGraduateRpc = Rpc.make(WS_METHODS.trellisGraduate, {
+  payload: TrellisGraduateInput,
+  success: TrellisGraduateResult,
+  error: TrellisRpcError,
+});
+
+const WsTrellisListBasesRpc = Rpc.make(WS_METHODS.trellisListBases, {
+  payload: Schema.Struct({}),
+  success: TrellisBasesResult,
+  error: TrellisRpcError,
+});
+
+const WsTrellisGetDetailsRpc = Rpc.make(WS_METHODS.trellisGetDetails, {
+  payload: Schema.Struct({}),
+  success: TrellisDetails,
+  error: TrellisRpcError,
+});
+
+const WsTrellisBuildBaseRpc = Rpc.make(WS_METHODS.trellisBuildBase, {
+  payload: TrellisBuildBaseInput,
+  success: TrellisBuildBaseResult,
+  error: TrellisRpcError,
+});
+
+const WsTrellisGetHistorySettingsRpc = Rpc.make(WS_METHODS.trellisGetHistorySettings, {
+  payload: Schema.Struct({}),
+  success: TrellisHistorySettings,
+  error: TrellisRpcError,
+});
+
+/** Changes the given history settings; Trellis validates the merged result. */
+const WsTrellisUpdateHistorySettingsRpc = Rpc.make(WS_METHODS.trellisUpdateHistorySettings, {
+  payload: TrellisHistoryValues,
+  success: TrellisHistorySettingsUpdateResult,
+  error: TrellisRpcError,
+});
+
+/** Runs Trellis maintenance now: expiries and thinning by the history settings. */
+const WsTrellisRunMaintenanceRpc = Rpc.make(WS_METHODS.trellisRunMaintenance, {
+  payload: Schema.Struct({}),
+  success: Schema.Struct({}),
+  error: TrellisRpcError,
+});
+
+const WsTrellisSetPreviewHostRpc = Rpc.make(WS_METHODS.trellisSetPreviewHost, {
+  payload: TrellisSetPreviewHostInput,
+  success: TrellisSetPreviewHostResult,
+  error: TrellisRpcError,
+});
+
+const WsTrellisGetProfileRpc = Rpc.make(WS_METHODS.trellisGetProfile, {
+  payload: TrellisProfileInput,
+  success: TrellisProfile,
+  error: TrellisRpcError,
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1481,6 +1684,8 @@ const WsSubscribePreviewEventsRpc = Rpc.make(WS_METHODS.subscribePreviewEvents, 
 const WsSubscribeDiscoveredLocalServersRpc = Rpc.make(WS_METHODS.subscribeDiscoveredLocalServers, {
   payload: Schema.Struct({
     configuredUrls: Schema.optional(ConfiguredLocalServerUrls),
+    /** Scopes discovery to this thread's environment: a Trellis thread sees its workspace's servers. */
+    threadId: Schema.optional(ThreadId),
   }),
   success: DiscoveredLocalServerList,
   error: EnvironmentAuthorizationError,
@@ -1599,6 +1804,15 @@ const WsOrchestrationV2LaunchThreadRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.la
   success: OrchestrationV2RpcSchemas.launchThread.output,
   error: Schema.Union([OrchestrationV2ThreadLaunchError, EnvironmentAuthorizationError]),
 });
+
+const WsOrchestrationV2MoveThreadToProjectRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.moveThreadToProject,
+  {
+    payload: OrchestrationV2RpcSchemas.moveThreadToProject.input,
+    success: OrchestrationV2RpcSchemas.moveThreadToProject.output,
+    error: Schema.Union([OrchestrationV2DispatchCommandError, EnvironmentAuthorizationError]),
+  },
+);
 
 const WsOrchestrationV2SubscribeArchivedShellRpc = Rpc.make(
   ORCHESTRATION_V2_WS_METHODS.subscribeArchivedShell,
@@ -1833,6 +2047,30 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsMutateRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
+  WsTrellisGetStatusRpc,
+  WsTrellisNewIdeaRpc,
+  WsTrellisPrepareIdeaDraftRpc,
+  WsTrellisTrashProjectRpc,
+  WsTrellisListTrashRpc,
+  WsTrellisRestoreRpc,
+  WsTrellisEmptyTrashRpc,
+  WsTrellisNewProjectRpc,
+  WsTrellisFindRpc,
+  WsTrellisRestoreConflictsRpc,
+  WsTrellisResolvePreviewUrlRpc,
+  WsTrellisListWorkspacesRpc,
+  WsTrellisListCheckpointsRpc,
+  WsTrellisForkWorkspaceRpc,
+  WsTrellisPurgeRpc,
+  WsTrellisGraduateRpc,
+  WsTrellisListBasesRpc,
+  WsTrellisGetDetailsRpc,
+  WsTrellisBuildBaseRpc,
+  WsTrellisGetHistorySettingsRpc,
+  WsTrellisUpdateHistorySettingsRpc,
+  WsTrellisRunMaintenanceRpc,
+  WsTrellisSetPreviewHostRpc,
+  WsTrellisGetProfileRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,
@@ -1905,6 +2143,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2GetArchivedShellSnapshotRpc,
   WsOrchestrationV2GetThreadProjectionRpc,
   WsOrchestrationV2LaunchThreadRpc,
+  WsOrchestrationV2MoveThreadToProjectRpc,
   WsOrchestrationV2SubscribeArchivedShellRpc,
   WsOrchestrationV2SubscribeShellRpc,
   WsOrchestrationV2SubscribeThreadRpc,

@@ -259,7 +259,10 @@ function recorderThreadConfigKeys(transcript: CodexAppServerReplayTranscript): R
  * and host-supplied MCP servers (machine-local URLs, short-lived authorization
  * headers) vary per machine, and recorder-only keys are not the client's.
  */
-function normalizeThreadRequest(frame: unknown, ignoredConfigKeys: ReadonlySet<string>): unknown {
+export function normalizeThreadRequest(
+  frame: unknown,
+  ignoredConfigKeys: ReadonlySet<string>,
+): unknown {
   if (typeof frame !== "object" || frame === null) return frame;
   const record = frame as Record<string, unknown>;
   if (
@@ -274,6 +277,8 @@ function normalizeThreadRequest(frame: unknown, ignoredConfigKeys: ReadonlySet<s
   const { cwd: _cwd, model: _model, config, ...params } = record.params as Record<string, unknown>;
   if (typeof config !== "object" || config === null) return { ...record, params };
   const { mcp_servers: _mcpServers, ...owned } = config as Record<string, unknown>;
+  // Servers given as dotted keys (`mcp_servers.<name>`) vary the same way.
+  for (const key of Object.keys(owned)) if (key.startsWith("mcp_servers.")) delete owned[key];
   for (const key of ignoredConfigKeys) delete owned[key];
   return { ...record, params: { ...params, config: owned } };
 }

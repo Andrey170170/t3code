@@ -60,4 +60,5 @@ export * from "./worktreeMcp.ts";
 export * from "./resourceTelemetry.ts";
 export * from "./rpc.ts";
 export * from "./sideChat.ts";
+export * from "./trellis.ts";
 export * from "./worktreeSetup.ts";

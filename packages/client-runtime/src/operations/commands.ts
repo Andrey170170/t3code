@@ -22,6 +22,7 @@ import {
   type RunId,
   type RuntimeMode,
   type RuntimeRequestId,
+  type OrchestrationV2AcknowledgedWork,
   type ThreadId,
   type ThreadEnvMode,
   type UploadChatAttachment,
@@ -203,6 +204,8 @@ export interface DismissThreadUserInputInput extends ThreadCommandInput {
 
 export interface RevertThreadCheckpointInput extends ThreadCommandInput {
   readonly restoreFiles?: boolean;
+  /** Other threads whose later work the user agreed the file restore undoes. */
+  readonly acknowledgeWork?: ReadonlyArray<OrchestrationV2AcknowledgedWork>;
   readonly checkpointId?: string;
   readonly scopeId?: string;
   readonly turnCount?: number;
@@ -221,6 +224,13 @@ export interface MergeThreadBackInput extends CommandMetadata {
   readonly sourceThreadId: ThreadId;
   readonly targetThreadId: ThreadId;
   readonly runId: RunId;
+}
+
+export interface MoveThreadToProjectInput extends ThreadCommandInput {
+  readonly projectId: ProjectId;
+  /** The project the caller saw the thread in; the server refuses if it moved since. */
+  readonly expectedProjectId?: ProjectId;
+  readonly continuationPrompt?: string;
 }
 
 export interface ReorderQueuedRunInput extends ThreadCommandInput {
@@ -853,6 +863,7 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
       return yield* dispatch({
         type: "checkpoint.rollback",
         ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
+        ...(input.acknowledgeWork === undefined ? {} : { acknowledgeWork: input.acknowledgeWork }),
         commandId: yield* allocateCommandId(input),
         threadId: input.threadId,
         scopeId: CheckpointScopeId.make(input.scopeId),
@@ -882,6 +893,7 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
     return yield* dispatch({
       type: "checkpoint.rollback",
       ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
+      ...(input.acknowledgeWork === undefined ? {} : { acknowledgeWork: input.acknowledgeWork }),
       commandId: yield* allocateCommandId(input),
       threadId: input.threadId,
       scopeId: checkpoint.scopeId,
@@ -934,6 +946,23 @@ export const mergeThreadBack = Effect.fn("EnvironmentCommands.mergeThreadBack")(
     sourceThreadId: input.sourceThreadId,
     targetThreadId: input.targetThreadId,
     sourcePoint: { type: "run", runId: input.runId },
+  });
+});
+
+/** Moves a thread without history to another project of the same environment. */
+export const moveThreadToProject = Effect.fn("EnvironmentCommands.moveThreadToProject")(function* (
+  input: MoveThreadToProjectInput,
+) {
+  return yield* request(ORCHESTRATION_V2_WS_METHODS.moveThreadToProject, {
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    projectId: input.projectId,
+    ...(input.expectedProjectId === undefined
+      ? {}
+      : { expectedProjectId: input.expectedProjectId }),
+    ...(input.continuationPrompt === undefined
+      ? {}
+      : { continuationPrompt: input.continuationPrompt }),
   });
 });
 

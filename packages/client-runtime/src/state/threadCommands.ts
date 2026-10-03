@@ -28,6 +28,7 @@ import {
   type MarkThreadUnreadInput,
   type ForkThreadFromRunInput,
   type MergeThreadBackInput,
+  type MoveThreadToProjectInput,
   type PromoteQueuedRunInput,
   type ReorderQueuedRunInput,
   type LinkThreadPullRequestInput,
@@ -62,6 +63,7 @@ import {
   forkThreadFromRun,
   markThreadUnread,
   mergeThreadBack,
+  moveThreadToProject,
   promoteQueuedRun,
   reorderQueuedRun,
   resumeThreadQueue,
@@ -107,6 +109,7 @@ export type {
   MarkThreadUnreadInput,
   ForkThreadFromRunInput,
   MergeThreadBackInput,
+  MoveThreadToProjectInput,
   PromoteQueuedRunInput,
   ReorderQueuedRunInput,
   LinkThreadPullRequestInput,
@@ -332,6 +335,12 @@ export function createThreadEnvironmentAtoms<R, E>(
         key: ({ environmentId, input }) =>
           JSON.stringify([environmentId, input.sourceThreadId, input.targetThreadId]),
       },
+    }),
+    moveToProject: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:move-to-project",
+      execute: (input: MoveThreadToProjectInput) => moveThreadToProject(input),
+      scheduler,
+      concurrency,
     }),
     resumeThreadQueue: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:resume-queue",

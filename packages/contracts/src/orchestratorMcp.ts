@@ -166,6 +166,100 @@ export const OrchestratorMcpTerminalDelegatedTaskStatus = Schema.Literals([
 export type OrchestratorMcpTerminalDelegatedTaskStatus =
   typeof OrchestratorMcpTerminalDelegatedTaskStatus.Type;
 
+const KnowledgeGroupName = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^[a-z0-9_-]+$/),
+);
+
+/** What knowledge a worker's fork sees; Trellis's defaults when absent. */
+export const OrchestratorMcpForkKnowledge = Schema.Struct({
+  project: Schema.optional(
+    Schema.Literals(["rw", "ro", "none"]).annotate({
+      description:
+        "The project knowledge tier (/trellis/knowledge/project): 'ro' by default for a worker, 'rw' to let it write there, 'none' to hide it.",
+    }),
+  ),
+  notes: Schema.optional(
+    Schema.Literals(["inherit", "empty"]).annotate({
+      description:
+        "Private notes (/trellis/notes): 'inherit' (default) starts from a copy of this workspace's, 'empty' starts with none.",
+    }),
+  ),
+  groups: Schema.optional(
+    Schema.Array(KnowledgeGroupName).annotate({
+      description:
+        "Knowledge groups (/trellis/knowledge/groups/<name>, names [a-z0-9_-]) the worker reads; a group that does not exist yet is created, with this workspace in it. You can share only groups you see yourself.",
+    }),
+  ),
+  groupsRw: Schema.optional(
+    Schema.Array(KnowledgeGroupName).annotate({
+      description: "Knowledge groups the worker may also write; you need write access yourself.",
+    }),
+  ),
+}).annotate({
+  description:
+    "Knowledge the fork sees. Default for a worker: the project tier read-only, a copy of your notes, no groups.",
+});
+export type OrchestratorMcpForkKnowledge = typeof OrchestratorMcpForkKnowledge.Type;
+
+/**
+ * Where a delegated child works. `parent` (the default) shares the caller's
+ * folder. `fork` gives it its own Trellis fork of the caller's workspace, made
+ * from a checkpoint the caller chooses; spawning never stops the workspace.
+ */
+export const OrchestratorMcpTaskWorkspace = Schema.Union([
+  Schema.Literal("parent"),
+  Schema.Struct({
+    fork: Schema.Struct({
+      from: TrimmedNonEmptyString.check(Schema.isMaxLength(200)).annotate({
+        description:
+          "Required. 'latest' for this workspace's newest checkpoint, or a checkpoint snapshot id (snap-...). To fork from the current state, call trellis_checkpoint first (it ends your turn), then spawn.",
+      }),
+      name: Schema.optional(
+        TrimmedNonEmptyString.check(Schema.isMaxLength(100)).annotate({
+          description:
+            "Name of the fork (default fork-N). With a clientRequestId it gets a short suffix, so a retry finds the same fork.",
+        }),
+      ),
+      services: Schema.optional(
+        Schema.Union([
+          Schema.Literals(["none", "all"]),
+          Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(100))),
+        ]).annotate({
+          description:
+            "Workspace services (.trellis/services.toml) to start in the fork: 'none' (default), 'all' or a list of names.",
+        }),
+      ),
+      knowledge: Schema.optional(OrchestratorMcpForkKnowledge),
+    }),
+  }),
+]).annotate({
+  description:
+    "Where the child works: 'parent' (default, this folder) or {fork: {from, name?, services?}} for its own Trellis fork, made from a checkpoint of this workspace.",
+});
+export type OrchestratorMcpTaskWorkspace = typeof OrchestratorMcpTaskWorkspace.Type;
+
+/** The fork a delegated child was spawned into. */
+export const OrchestratorMcpTaskFork = Schema.Struct({
+  workspaceId: Schema.String,
+  name: Schema.String,
+  path: Schema.String,
+  /** The checkpoint it was made from. */
+  snapshot: Schema.String,
+  /** Resource warnings Trellis reported (many running workspaces, memory nearly full). */
+  warnings: Schema.Array(Schema.String),
+  /** Services started in the fork, with their previews; not yet ready. */
+  services: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      state: Schema.String,
+      error: Schema.optional(Schema.String),
+      previews: Schema.Array(Schema.Struct({ port: Schema.Number, url: Schema.String })),
+    }),
+  ),
+});
+export type OrchestratorMcpTaskFork = typeof OrchestratorMcpTaskFork.Type;
+
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   task: OrchestratorMcpPrompt.annotate({
     description: "Self-contained task for one delegated child agent/subagent.",
@@ -186,6 +280,7 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
   runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),
   interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
+  workspace: Schema.optional(OrchestratorMcpTaskWorkspace),
 });
 export type OrchestratorMcpDelegateTaskInput = typeof OrchestratorMcpDelegateTaskInput.Type;
 
@@ -209,6 +304,8 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
     description:
       "True only on that mode=wait call when timeoutMs elapsed. The timeout does not cancel the child. Later task_status reads return false and use status for liveness.",
   }),
+  /** Present on the delegate_task call that spawned the child into a fork. */
+  fork: Schema.optional(OrchestratorMcpTaskFork),
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
 

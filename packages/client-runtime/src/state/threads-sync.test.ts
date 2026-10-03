@@ -3,6 +3,7 @@ import {
   EventId,
   MessageId,
   ORCHESTRATION_V2_WS_METHODS,
+  ProjectId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2ThreadDetailSnapshot,
@@ -295,6 +296,29 @@ const titleUpdated = (title: string, sequence = 2): OrchestrationV2ThreadStreamI
       threadId: THREAD_ID,
       occurredAt,
       payload: { ...v2Projection.thread, title, updatedAt: occurredAt },
+    },
+  };
+};
+
+const MOVED_PROJECT_ID = ProjectId.make("project-moved-to");
+
+const projectMoved = (sequence: number): OrchestrationV2ThreadStreamItem => {
+  const occurredAt = DateTime.makeUnsafe("2026-06-20T01:30:00.000Z");
+  return {
+    kind: "event",
+    sequence,
+    event: {
+      id: EventId.make(`event-moved-${sequence}`),
+      type: "thread.project-moved",
+      threadId: THREAD_ID,
+      occurredAt,
+      payload: {
+        ...v2Projection.thread,
+        projectId: MOVED_PROJECT_ID,
+        worktreePath: null,
+        branch: null,
+        updatedAt: occurredAt,
+      },
     },
   };
 };
@@ -702,6 +726,35 @@ describe("EnvironmentThreads", () => {
       expect((yield* Ref.get(harness.savedThreads)).map((saved) => saved.snapshotSequence)).toEqual(
         [1, 10, 11],
       );
+    }),
+  );
+
+  it.effect("moves a thread to another project from a live event", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* Queue.offer(harness.inputs, snapshot(BASE_PROJECTION));
+      yield* Queue.offer(harness.inputs, projectMoved(2));
+
+      const state = yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          Option.isSome(value.data) && value.data.value.thread.projectId === MOVED_PROJECT_ID,
+      );
+      expect(Option.getOrThrow(state.data).thread.worktreePath).toBeNull();
+    }),
+  );
+
+  it.effect("moves a thread to another project when a warm cache replays the event", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_PROJECTION });
+      yield* Queue.offer(harness.inputs, projectMoved(CACHED_SNAPSHOT_SEQUENCE + 1));
+
+      yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          Option.isSome(value.data) && value.data.value.thread.projectId === MOVED_PROJECT_ID,
+      );
+      expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(CACHED_SNAPSHOT_SEQUENCE);
     }),
   );
 

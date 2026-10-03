@@ -298,6 +298,15 @@ export function summarizeT3ToolCalls(
     case "worktree-status":
       label = phrase("Checked", "check", `worktree status ${times}`);
       break;
+    case "trellis-checkpoint":
+      label = phrase("Took", "take", `a Trellis checkpoint ${times}`);
+      break;
+    case "trellis-discard-fork":
+      label = phrase("Discarded", "discard", `a Trellis fork ${times}`);
+      break;
+    case "trellis-graduate":
+      label = phrase("Graduated", "graduate", `the Trellis idea ${times}`);
+      break;
     case "project-list":
       label = phrase("Listed", "list", `projects ${times}`);
       break;

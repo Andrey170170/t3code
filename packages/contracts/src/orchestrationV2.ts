@@ -419,6 +419,11 @@ export const OrchestrationV2AppThread = Schema.Struct({
   ),
   /** Latest accepted rollback. Only its failure is recorded in `rollbackFailure`. */
   rollbackRequestId: Schema.optional(CommandId),
+  /**
+   * Latest rollback whose conversation and files are both restored; null
+   * while the latest one runs. Absent from servers that predate it.
+   */
+  rollbackCompletedRequestId: Schema.optional(Schema.NullOr(CommandId)),
   /** Latest rollback that failed after every retry; cleared when the next rollback starts. */
   rollbackFailure: Schema.optional(
     Schema.NullOr(
@@ -429,6 +434,12 @@ export const OrchestrationV2AppThread = Schema.Struct({
     ),
   ),
   deletedAt: Schema.NullOr(Schema.DateTimeUtc),
+  /**
+   * How many times the thread moved to another project after it had run
+   * (absent: never). Each assignment checkpoints into its own root scope, so
+   * earlier checkpoints keep the directory they were taken in.
+   */
+  workspaceAssignment: Schema.optional(NonNegativeInt),
 });
 export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
 
@@ -549,6 +560,12 @@ export const OrchestrationV2Run = Schema.Struct({
     }),
   ),
   delegatedCompletion: Schema.optional(OrchestrationV2DelegatedCompletionCohort),
+  /**
+   * On a `rolled_back` run: true once the rollback that removed it also
+   * restored the files to before it. Absent means its file changes may
+   * remain (a conversation-only rewind, or files not restored yet).
+   */
+  rollbackRestoredFiles: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2Run = typeof OrchestrationV2Run.Type;
 
@@ -687,6 +704,8 @@ export const OrchestrationV2CheckpointScope = Schema.Struct({
   advancesAppRunCount: Schema.Boolean,
   cwd: TrimmedNonEmptyString,
   createdAt: Schema.DateTimeUtc,
+  /** The thread's workspace assignment a root scope belongs to (absent: 0). */
+  workspaceAssignment: Schema.optional(NonNegativeInt),
 });
 export type OrchestrationV2CheckpointScope = typeof OrchestrationV2CheckpointScope.Type;
 
@@ -701,6 +720,12 @@ export const OrchestrationV2ProviderSession = Schema.Struct({
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   lastError: Schema.NullOr(Schema.String),
+  /**
+   * The runtime policy's `launch.sessionKey` this session was opened with (a
+   * Trellis workspace id). A thread reuses a session only while its own key
+   * still matches, so a process never serves another workspace.
+   */
+  sessionKey: Schema.optional(Schema.String),
 });
 export type OrchestrationV2ProviderSession = typeof OrchestrationV2ProviderSession.Type;
 
@@ -1526,6 +1551,7 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.interaction-mode-updated",
       "thread.model-selection-updated",
       "thread.provider-switched",
+      "thread.project-moved",
     ]),
     payload: OrchestrationV2AppThread,
   }),
@@ -2317,6 +2343,7 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.interaction-mode-updated",
       "thread.model-selection-updated",
       "thread.provider-switched",
+      "thread.project-moved",
     ]),
     payload: OrchestrationV2AppThreadJson,
   }),
@@ -2434,6 +2461,17 @@ export const OrchestrationV2StoredEventJson = Schema.Struct({
   event: OrchestrationV2DomainEventJson,
 });
 export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJson.Type;
+
+/**
+ * Another thread's later work a file restore would undo, as the user saw it
+ * when agreeing: the thread and its latest run then. A newer run there is
+ * not covered.
+ */
+export const OrchestrationV2AcknowledgedWork = Schema.Struct({
+  threadId: ThreadId,
+  runId: RunId,
+});
+export type OrchestrationV2AcknowledgedWork = typeof OrchestrationV2AcknowledgedWork.Type;
 
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
@@ -2732,6 +2770,11 @@ export const OrchestrationV2Command = Schema.Union([
     runId: RunId,
     reason: Schema.optional(Schema.String),
     holdQueue: Schema.optional(Schema.Boolean),
+    /**
+     * Keep the run's delegated workers reporting to it: the turn ends only to
+     * continue (a Trellis checkpoint), so the work it started is not stopped.
+     */
+    keepDelegatedCompletions: Schema.optional(Schema.Boolean),
   }),
   Schema.Struct({
     type: Schema.Literal("queued-message.promote-to-steer"),
@@ -2787,6 +2830,11 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),
     restoreFiles: Schema.optional(Schema.Boolean),
+    /**
+     * Other threads' later work in a shared workspace the user agreed to
+     * undo. A restore rule that names such work refuses without it.
+     */
+    acknowledgeWork: Schema.optional(Schema.Array(OrchestrationV2AcknowledgedWork)),
     commandId: CommandId,
     threadId: ThreadId,
     scopeId: CheckpointScopeId,
@@ -2820,6 +2868,9 @@ export const OrchestrationV2Command = Schema.Union([
     parentNodeId: NodeId,
     task: TrimmedNonEmptyString,
     title: Schema.optional(TrimmedNonEmptyString),
+    // The child's project when it is not the parent's (a Trellis fork's
+    // project); it then works in that project's folder, not the parent's.
+    projectId: Schema.optional(ProjectId),
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
@@ -2914,6 +2965,27 @@ const OrchestrationV2InternalCommand = Schema.Union([
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
   }),
+  /** Records that the rollback `requestId` restored the conversation and the files. */
+  Schema.Struct({
+    type: Schema.Literal("checkpoint.rollback.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: CommandId,
+  }),
+  /**
+   * Moves a thread to another project. Only a thread without history (no
+   * checkpoint scope) and without an active or queued run moves; its worktree
+   * binding is cleared and its provider sessions are detached. Clients use the
+   * `moveThreadToProject` RPC, which also queues an optional continuation.
+   */
+  Schema.Struct({
+    type: Schema.Literal("thread.project.move"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    projectId: ProjectId,
+    /** Reject unless the thread is still in this project. */
+    expectedProjectId: Schema.optional(ProjectId),
+  }),
 ]);
 export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalCommand.Type;
 
@@ -2929,6 +3001,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",
   launchThread: "orchestration.launchThread",
+  moveThreadToProject: "orchestration.moveThreadToProject",
   subscribeArchivedShell: "orchestration.subscribeArchivedShell",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
@@ -3010,6 +3083,17 @@ export const OrchestrationV2ThreadLaunchResult = Schema.Struct({
   resumed: Schema.Boolean,
 });
 export type OrchestrationV2ThreadLaunchResult = typeof OrchestrationV2ThreadLaunchResult.Type;
+
+export const OrchestrationV2MoveThreadToProjectInput = Schema.Struct({
+  commandId: CommandId,
+  threadId: ThreadId,
+  projectId: ProjectId,
+  expectedProjectId: Schema.optional(ProjectId),
+  /** Queued to the thread after the move, saying where it now is. */
+  continuationPrompt: Schema.optional(TrimmedNonEmptyString),
+});
+export type OrchestrationV2MoveThreadToProjectInput =
+  typeof OrchestrationV2MoveThreadToProjectInput.Type;
 
 export const OrchestrationV2DispatchCommandResult = Schema.Struct({
   sequence: NonNegativeInt,
@@ -3295,6 +3379,10 @@ export const OrchestrationV2RpcSchemas = {
   launchThread: {
     input: OrchestrationV2ThreadLaunchInput,
     output: OrchestrationV2ThreadLaunchResult,
+  },
+  moveThreadToProject: {
+    input: OrchestrationV2MoveThreadToProjectInput,
+    output: OrchestrationV2DispatchCommandResult,
   },
   subscribeArchivedShell: {
     input: Schema.Struct({}),

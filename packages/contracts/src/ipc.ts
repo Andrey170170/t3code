@@ -32,6 +32,8 @@ import type {
 export interface ContextMenuItem<T extends string = string> {
   id: T;
   label: string;
+  /** A second, quieter line under the label, e.g. to tell same-named items apart. */
+  detail?: string;
   destructive?: boolean;
   disabled?: boolean;
   /** Renders as a non-interactive section header label. Web fallback only — stripped on desktop native menus. */
@@ -52,6 +54,7 @@ export type QuitShortcutHintEvent =
 export interface ContextMenuItemSchemaType {
   readonly id: string;
   readonly label: string;
+  readonly detail?: string;
   readonly destructive?: boolean;
   readonly disabled?: boolean;
   readonly header?: boolean;
@@ -64,6 +67,7 @@ export interface ContextMenuItemSchemaType {
 export const ContextMenuItemSchema: Schema.Codec<ContextMenuItemSchemaType> = Schema.Struct({
   id: Schema.String,
   label: Schema.String,
+  detail: Schema.optionalKey(Schema.String),
   destructive: Schema.optionalKey(Schema.Boolean),
   disabled: Schema.optionalKey(Schema.Boolean),
   header: Schema.optionalKey(Schema.Boolean),
@@ -1261,6 +1265,11 @@ export interface DesktopBridge {
 /** Renderer callback invoked by Electron with a fresh user gesture before display-media capture. */
 export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewRecordingCapture";
 
+export interface DesktopPreviewNavigationRequest {
+  readonly tabId: string;
+  readonly url: string;
+}
+
 export interface DesktopPreviewBridge {
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
@@ -1348,6 +1357,11 @@ export interface DesktopPreviewBridge {
     waitFor: (tabId: string, input: PreviewAutomationWaitForInput) => Promise<void>;
   };
   onStateChange: (listener: (tabId: string, state: DesktopPreviewTabState) => void) => () => void;
+  /**
+   * A navigation the guest page started toward a loopback address, held back
+   * until the renderer maps it for the tab's thread and calls `navigate`.
+   */
+  onNavigationRequest: (listener: (request: DesktopPreviewNavigationRequest) => void) => () => void;
   onPointerEvent: (listener: (event: DesktopPreviewPointerEvent) => void) => () => void;
 }
 
