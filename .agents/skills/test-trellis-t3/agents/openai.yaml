@@ -1,0 +1,4 @@
+interface:
+  display_name: "T3 with a dev Trellis"
+  short_description: "Test T3's Trellis integration against a development Trellis"
+  default_prompt: "Use $test-trellis-t3 to verify this Trellis flow in T3 against a development Trellis."
