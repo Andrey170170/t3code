@@ -498,7 +498,8 @@ function TrellisBaseRows(props: {
                     Default
                   </Badge>
                 ) : null}
-                {state.rebuildable ? (
+                {/* `base_states` came with the build endpoint: a Trellis without them cannot build. */}
+                {state.rebuildable && props.baseStates !== null ? (
                   <Button
                     size="xs"
                     variant="outline"
