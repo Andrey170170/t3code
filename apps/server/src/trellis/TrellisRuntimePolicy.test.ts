@@ -9,6 +9,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  TrellisError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -56,6 +57,7 @@ const resolve = (input: {
   /** Roots known without asking Trellis; Trellis reports `trellisEnv` when asked. */
   readonly knownRoots?: ReadonlyArray<string>;
   readonly notAskedYet?: boolean;
+  readonly primerFails?: boolean;
   /** Symlinks: alias → target. */
   readonly aliases?: Readonly<Record<string, string>>;
   readonly providerInstances?: Parameters<typeof ServerSettingsService.layerTest>[0];
@@ -101,10 +103,12 @@ const resolve = (input: {
           ...(input.notAskedYet === true ? { current: Effect.succeed(null) } : {}),
           canonicalPath: (path) => Effect.succeed(input.aliases?.[path] ?? path),
           primer: (target, provider) =>
-            Effect.sync(() => {
-              primerTargets.push(provider === undefined ? target : `${target} (${provider})`);
-              return "You are in a Trellis workspace.\n";
-            }),
+            input.primerFails === true
+              ? Effect.fail(new TrellisError({ message: "primer timed out" }))
+              : Effect.sync(() => {
+                  primerTargets.push(provider === undefined ? target : `${target} (${provider})`);
+                  return "You are in a Trellis workspace.\n";
+                }),
         }),
       ),
     ),
@@ -157,6 +161,18 @@ describe("TrellisRuntimePolicy", () => {
         // `trellis launch` then leaves out (TRELLIS_INSTRUCTIONS=t3).
         assert.deepEqual(primerTargets, [`${idea} (${shim})`]);
       }
+    }),
+  );
+
+  it.effect("leaves profile instructions to trellis launch when the primer fails", () =>
+    Effect.gen(function* () {
+      const { policy } = yield* resolve({
+        instance: "claudeAgent",
+        projectRoot: idea,
+        primerFails: true,
+      });
+      assert.notProperty(policy.launch?.env ?? {}, "TRELLIS_INSTRUCTIONS");
+      assert.equal(policy.launch?.instructions, TrellisRuntimePolicy.TRELLIS_T3_GUIDE);
     }),
   );
 
