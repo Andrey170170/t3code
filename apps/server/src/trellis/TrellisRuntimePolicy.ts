@@ -334,6 +334,15 @@ export const layer: Layer.Layer<
             Effect.option,
           );
         if (Option.isNone(primer)) {
+          // A Codex thread's instructions replace those of its workspace's
+          // shared app-server, which may have been launched for another thread
+          // that had the primer (so without the profile's own): starting this
+          // one without the primer would lose them, so it waits for Trellis.
+          if (driverKind === "codex") {
+            return yield* refuse(
+              "Trellis could not give this thread its primer (with the agent profile's instructions). Try again in a moment.",
+            );
+          }
           yield* Effect.logWarning(
             "Trellis primer unavailable; starting without it, profile instructions left to trellis launch",
             { threadId: input.thread.id },

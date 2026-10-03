@@ -164,7 +164,7 @@ describe("TrellisRuntimePolicy", () => {
     }),
   );
 
-  it.effect("leaves profile instructions to trellis launch when the primer fails", () =>
+  it.effect("leaves Claude's profile instructions to trellis launch when the primer fails", () =>
     Effect.gen(function* () {
       const { policy } = yield* resolve({
         instance: "claudeAgent",
@@ -173,6 +173,12 @@ describe("TrellisRuntimePolicy", () => {
       });
       assert.notProperty(policy.launch?.env ?? {}, "TRELLIS_INSTRUCTIONS");
       assert.equal(policy.launch?.instructions, TrellisRuntimePolicy.TRELLIS_T3_GUIDE);
+      // Codex threads share their workspace's app-server, launched perhaps
+      // without the profile's instructions: they wait for the primer instead.
+      assert.include(
+        yield* refusal(resolve({ instance: "codex", projectRoot: idea, primerFails: true })),
+        "could not give this thread its primer",
+      );
     }),
   );
 
