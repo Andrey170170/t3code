@@ -693,11 +693,23 @@ function TrellisHistorySection(props: {
   const [maintaining, setMaintaining] = useState(false);
   // Saves still on their way; maintenance runs only after them, so it applies
   // the settings just entered (clicking Run now commits a focused field).
-  const writes = useRef<Promise<unknown>>(Promise.resolve());
+  // Resolves to whether every save since the last Run now succeeded.
+  const writes = useRef<Promise<boolean>>(Promise.resolve(true));
   const thinNow = async () => {
     setMaintaining(true);
     try {
-      await writes.current.catch(() => undefined);
+      const saved = await writes.current;
+      writes.current = Promise.resolve(true);
+      // A setting the user just entered was refused or lost: running now
+      // would apply the previous one.
+      if (!saved) {
+        toastManager.add({
+          type: "error",
+          title: "Maintenance did not run",
+          description: "A history setting was not saved. Fix it, then run maintenance again.",
+        });
+        return;
+      }
       const result = await runMaintenance({ environmentId, input: {} });
       if (result._tag === "Failure") {
         if (!isAtomCommandInterrupted(result)) {
@@ -752,9 +764,11 @@ function TrellisHistorySection(props: {
     // Serial per environment, so writes reach Trellis in the order they were made;
     // maintenance waits for them (see `thinNow`).
     const write = update({ environmentId, input: edit.patch });
-    writes.current = writes.current.then(
-      () => write,
-      () => write,
+    writes.current = writes.current.then((earlier) =>
+      write.then(
+        (result) => earlier && result._tag !== "Failure",
+        () => false,
+      ),
     );
     const result = await write;
     if (result._tag === "Failure") {
