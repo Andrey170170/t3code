@@ -320,6 +320,38 @@ const make = Effect.gen(function* () {
       return trellisRootOf(yield* trellis.expectedRoots, path) === null ? undefined : path;
     });
 
+  /**
+   * Why the lead may not hand out `knowledge`, or null. T3 forks on the user
+   * socket, which Trellis does not limit, so the lead's own access is the
+   * ceiling: existing groups at the access it hands out, and the project
+   * tier likewise. A group that does not exist yet is created by the spawn.
+   */
+  const knowledgeRefusal = Effect.fn("TrellisWorkers.knowledgeRefusal")(function* (
+    workspace: string,
+    knowledge: TrellisForkKnowledge | undefined,
+  ) {
+    if (knowledge === undefined) return null;
+    const wanted = [
+      ...(knowledge.groups ?? []).map((name) => [name, "ro"] as const),
+      ...(knowledge.groupsRw ?? []).map((name) => [name, "rw"] as const),
+    ];
+    if (wanted.length === 0 && knowledge.project !== "rw") return null;
+    const own = yield* trellis.knowledge(workspace);
+    if (knowledge.project === "rw" && own.project !== "rw") {
+      return "You cannot give your worker write access to the project knowledge tier: your own is not read-write.";
+    }
+    if (wanted.length === 0) return null;
+    const existing = new Set(yield* trellis.knowledgeGroups(workspace));
+    for (const [name, access] of wanted) {
+      if (!existing.has(name)) continue;
+      const mine = own.groups[name];
+      if (mine === undefined || mine === "none" || (access === "rw" && mine !== "rw")) {
+        return `You cannot give your worker ${access === "rw" ? "write" : "read"} access to the knowledge group "${name}": you do not have it yourself.`;
+      }
+    }
+    return null;
+  });
+
   const spawnFork: TrellisWorkers["Service"]["spawnFork"] = Effect.fn("TrellisWorkers.spawnFork")(
     function* (input) {
       const invalid = (message: string) => new TrellisForkSpawnError({ message, invalid: true });
@@ -395,6 +427,10 @@ const make = Effect.gen(function* () {
               input.from,
             );
       if ("error" in checkpoint) return yield* invalid(checkpoint.error);
+      const refusal = yield* knowledgeRefusal(resolved.workspace.id, input.knowledge).pipe(
+        Effect.mapError(unavailable),
+      );
+      if (refusal !== null) return yield* invalid(refusal);
       if (spawnKey !== undefined && remembered === undefined) {
         yield* rememberSpawn(spawnKey, checkpoint.id);
       }

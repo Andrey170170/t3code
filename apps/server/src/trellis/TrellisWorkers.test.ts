@@ -56,7 +56,15 @@ const pathOf = (workspace: string) => `/trellis/workspaces/${workspace}/project`
  * A Trellis with one dedicated project (`prj-1`, primary workspace `ws-a`)
  * that records forks, activities, discards and purge requests.
  */
-function makeForkTrellis(input: { readonly checkpoints: Array<string> }) {
+function makeForkTrellis(input: {
+  readonly checkpoints: Array<string>;
+  /** The lead's own knowledge access, and the project's existing groups. */
+  readonly knowledge?: {
+    readonly project: string;
+    readonly groups: Record<string, string>;
+    readonly existing: Array<string>;
+  };
+}) {
   const state = {
     /** The next fork fails: `lost` after creating it (the response is lost), `before` without. */
     failNextFork: null as "lost" | "before" | null,
@@ -141,6 +149,12 @@ function makeForkTrellis(input: { readonly checkpoints: Array<string> }) {
         ...input.checkpoints.map((id) => ({ id, kind: "checkpoint" })),
         { id: "snap-turn", kind: "turn" },
       ] as never),
+    knowledge: () =>
+      Effect.succeed({
+        project: input.knowledge?.project ?? "rw",
+        groups: input.knowledge?.groups ?? {},
+      }),
+    knowledgeGroups: () => Effect.succeed(input.knowledge?.existing ?? []),
     fork: ({ snapshot, thread, name, services, spawn, knowledge }) =>
       Effect.suspend(() => {
         const failing = state.failNextFork;
@@ -1162,4 +1176,28 @@ it("lists a project's workspaces with workers, discarded forks and their trash s
   assert.equal(discarded.unmergedReason, "commits missing from the parent");
   assert.isNull(discarded.expiresAt);
   assert.deepEqual(discarded.purgeRequested, { at: 60, reason: "dead end", by: "Lead thread" });
+});
+
+it.effect("hands a worker no more knowledge than its lead has", () => {
+  const fake = makeForkTrellis({
+    checkpoints: ["snap-new"],
+    knowledge: { project: "ro", groups: { design: "ro" }, existing: ["design", "secret"] },
+  });
+  return Effect.gen(function* () {
+    const lead = yield* startLead;
+    const refused = (knowledge: object) =>
+      delegate(lead.threadId, { fork: { from: "latest", knowledge } }).pipe(
+        Effect.flip,
+        Effect.map((error) => String((error as { readonly message?: string }).message ?? error)),
+      );
+    assert.include(yield* refused({ project: "rw" }), "project knowledge tier");
+    assert.include(yield* refused({ groups: ["secret"] }), '"secret"');
+    assert.include(yield* refused({ groupsRw: ["design"] }), "write access");
+    assert.deepEqual(fake.state.forks, []);
+    // Its own groups at its own access, and new groups, are fine.
+    yield* delegate(lead.threadId, {
+      fork: { from: "latest", knowledge: { groups: ["design"], groupsRw: ["new-direction"] } },
+    });
+    assert.equal(fake.state.forks.length, 1);
+  }).pipe(Effect.provide(testLayer(fake)));
 });

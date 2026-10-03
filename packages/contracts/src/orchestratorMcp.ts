@@ -166,6 +166,11 @@ export const OrchestratorMcpTerminalDelegatedTaskStatus = Schema.Literals([
 export type OrchestratorMcpTerminalDelegatedTaskStatus =
   typeof OrchestratorMcpTerminalDelegatedTaskStatus.Type;
 
+const KnowledgeGroupName = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^[a-z0-9_-]+$/),
+);
+
 /** What knowledge a worker's fork sees; Trellis's defaults when absent. */
 export const OrchestratorMcpForkKnowledge = Schema.Struct({
   project: Schema.optional(
@@ -181,14 +186,14 @@ export const OrchestratorMcpForkKnowledge = Schema.Struct({
     }),
   ),
   groups: Schema.optional(
-    Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(64))).annotate({
+    Schema.Array(KnowledgeGroupName).annotate({
       description:
-        "Knowledge groups (/trellis/knowledge/groups/<name>) the worker reads; a group that does not exist yet is created, with this workspace in it.",
+        "Knowledge groups (/trellis/knowledge/groups/<name>, names [a-z0-9_-]) the worker reads; a group that does not exist yet is created, with this workspace in it. You can share only groups you see yourself.",
     }),
   ),
   groupsRw: Schema.optional(
-    Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(64))).annotate({
-      description: "Knowledge groups the worker may also write.",
+    Schema.Array(KnowledgeGroupName).annotate({
+      description: "Knowledge groups the worker may also write; you need write access yourself.",
     }),
   ),
 }).annotate({
