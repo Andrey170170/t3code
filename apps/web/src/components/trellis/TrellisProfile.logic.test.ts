@@ -67,6 +67,17 @@ describe("trellisProfileBadges", () => {
     });
     expect(badge?.hint).toContain("By agent ws-1.");
   });
+
+  it("shows a layer's switch on an approved item too", () => {
+    expect(
+      trellisProfileBadges({
+        ...item({ name: "x" }),
+        status: "approved",
+        enabled: false,
+        disabledBy: "workspace",
+      }).map((badge) => badge.label),
+    ).toEqual(["Approved", "Off in workspace"]);
+  });
 });
 
 describe("skillDescription", () => {
@@ -217,19 +228,74 @@ describe("trellisProfileFreshness", () => {
 });
 
 describe("trellisProfileLooseErrors", () => {
-  it("keeps only errors no item of either provider shows", () => {
-    const profile = {
-      providers: {
-        claude: provider({
-          skills: [item({ name: "broken", enabled: false, status: "error", error: "no SKILL.md" })],
-        }),
-        codex: null,
-      },
-      errors: [
-        { layer: "home", item: "skills.broken", error: "no SKILL.md" },
-        { layer: "global", item: null, error: 'unknown key "mpc"' },
+  const broken = item({
+    name: "broken",
+    source: { layer: "home", path: "/h/skills/broken", scope: null },
+    enabled: false,
+    status: "error",
+    error: "no SKILL.md",
+  });
+  const errors = [
+    { layer: "home", item: "skills.broken", error: "no SKILL.md" },
+    { layer: "global", item: null, error: 'unknown key "mpc"' },
+  ];
+
+  it("drops errors the shown provider's items carry, keeps the rest", () => {
+    const claude = provider({ skills: [broken] });
+    expect(trellisProfileLooseErrors(errors, claude)).toEqual([errors[1]]);
+    // Without a provider view nothing is shown inline.
+    expect(trellisProfileLooseErrors(errors, null)).toEqual(errors);
+  });
+
+  it("keeps an error only the other provider's items show", () => {
+    expect(trellisProfileLooseErrors(errors, provider())).toEqual(errors);
+  });
+
+  it("keeps the same message from another layer or item", () => {
+    const claude = provider({ skills: [broken] });
+    const sameMessage = [
+      { layer: "global", item: "skills.broken", error: "no SKILL.md" },
+      { layer: "home", item: "skills.other", error: "no SKILL.md" },
+    ];
+    expect(trellisProfileLooseErrors(sameMessage, claude)).toEqual(sameMessage);
+  });
+
+  it("matches repository items and instructions by Trellis's names", () => {
+    const claude = provider({
+      instructions: [
+        {
+          layer: "project",
+          path: null,
+          text: null,
+          enabled: false,
+          status: "error",
+          error: "missing file",
+          approvedBy: null,
+        },
       ],
-    };
-    expect(trellisProfileLooseErrors(profile)).toEqual([profile.errors[1]]);
+      repository: {
+        mcp: [],
+        skills: [
+          item({
+            name: "deploy",
+            source: { layer: "project", path: "/p/.claude/skills/deploy", scope: "repository" },
+            enabled: false,
+            status: "error",
+            error: "points out",
+          }),
+        ],
+        instructions: [],
+        settings: [],
+      },
+    });
+    expect(
+      trellisProfileLooseErrors(
+        [
+          { layer: "project", item: "instructions", error: "missing file" },
+          { layer: "project", item: ".claude/skills/deploy", error: "points out" },
+        ],
+        claude,
+      ),
+    ).toEqual([]);
   });
 });

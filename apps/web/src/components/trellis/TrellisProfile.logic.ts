@@ -111,8 +111,12 @@ export function trellisProfileBadges(
         : { ...known, hint: `${known.hint}${approvedBy}` },
     );
   }
-  // A switched-off item that is still active says so through "not enforced".
-  if (!item.enabled && (item.status === null || item.status === "not enforced")) {
+  // A layer's switch always shows (also on an approved item); an item off
+  // for its status alone (approval, trust, error) has that badge only.
+  if (
+    !item.enabled &&
+    (item.disabledBy !== null || item.status === null || item.status === "not enforced")
+  ) {
     badges.push({
       label:
         item.disabledBy === null ? "Off" : `Off in ${layerLabel(item.disabledBy).toLowerCase()}`,
@@ -225,31 +229,45 @@ export function trellisProfileGroups(
 }
 
 /**
- * The profile's errors not already shown on an item of either provider (a
- * malformed layer file, a server Codex merges), since Trellis names no
- * provider for an error.
+ * The profile's errors not already shown inline on an item of the shown
+ * provider (a malformed layer file, a server Codex merges, or an item of the
+ * other provider). An error is shown inline when an item of the same layer
+ * and name carries the same message; Trellis names items `mcp.NAME`,
+ * `skills.NAME`, `.claude/skills/NAME` or `instructions`.
  */
 export function trellisProfileLooseErrors(
-  profile: Pick<TrellisProfile, "providers" | "errors">,
+  errors: TrellisProfile["errors"],
+  provider: TrellisProfileProvider | null,
 ): TrellisProfile["errors"] {
-  const shown = new Set<string>();
-  for (const provider of [profile.providers.claude, profile.providers.codex]) {
-    if (provider === null) continue;
-    const { repository } = provider;
-    for (const entry of [
+  if (provider === null) return errors;
+  const { repository } = provider;
+  const inline = [
+    ...[
       ...provider.mcp,
       ...provider.skills,
       ...provider.plugins,
-      ...provider.instructions,
       ...repository.mcp,
       ...repository.skills,
       ...repository.instructions,
       ...repository.settings,
-    ]) {
-      if (entry.error !== null) shown.add(entry.error);
-    }
-  }
-  return profile.errors.filter((entry) => !shown.has(entry.error));
+    ].map((item) => ({ layer: item.source.layer, name: item.name, error: item.error })),
+    ...provider.instructions.map((entry) => ({
+      layer: entry.layer,
+      name: "instructions",
+      error: entry.error,
+    })),
+  ].filter((entry) => entry.error !== null);
+  const namesItem = (item: string | null, name: string) =>
+    item === name || item?.endsWith(`.${name}`) === true || item?.endsWith(`/${name}`) === true;
+  return errors.filter(
+    (entry) =>
+      !inline.some(
+        (shown) =>
+          shown.layer === entry.layer &&
+          shown.error === entry.error &&
+          namesItem(entry.item, shown.name),
+      ),
+  );
 }
 
 /** A profile error as one line: `project · mcp.github: GITHUB_TOKEN is not set`. */

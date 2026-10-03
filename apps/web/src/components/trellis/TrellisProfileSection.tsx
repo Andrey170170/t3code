@@ -11,6 +11,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { Spinner } from "../ui/spinner";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { SettingsRow, SettingsSection } from "../settings/settingsLayout";
+import { staleDetailsNotice } from "../settings/TrellisSettings.logic";
 import {
   type TrellisProfileGroup,
   trellisProfileErrorText,
@@ -57,7 +58,13 @@ export function TrellisProfileSection(props: {
   const groups =
     provider === null ? [] : trellisProfileGroups(provider, { withT3Server: target !== null });
   const freshness = profile ? trellisProfileFreshness(profile, formatUnixTime) : null;
-  const errors = profile ? trellisProfileLooseErrors(profile) : [];
+  const errors = profile ? trellisProfileLooseErrors(profile.errors, provider) : [];
+  // A failed refresh keeps the last profile; it must not look current.
+  const staleNotice = staleDetailsNotice({
+    hasData: profile != null,
+    error: query.error,
+    updatedAt: query.dataUpdatedAt,
+  });
 
   return (
     <SettingsSection
@@ -106,6 +113,12 @@ export function TrellisProfileSection(props: {
         />
       ) : (
         <>
+          {staleNotice === null ? null : (
+            <SettingsRow
+              title={<WarningText>Profile may be out of date</WarningText>}
+              description={staleNotice}
+            />
+          )}
           <SettingsRow
             title={target === null ? "Agent homes and global layer" : "Effective profile"}
             description={props.description}

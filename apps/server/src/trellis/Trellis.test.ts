@@ -595,23 +595,42 @@ describe("Trellis client", () => {
           { layer: "home", error: "config.toml: expected a table" },
         ],
       };
-      const harness = setup((request) => ({
-        body: request.url.startsWith("/v1/profile?target=ws-1")
-          ? view
-          : { target: null, effective_hash: "e0", layers: [], providers: {}, errors: [] },
-      }));
+      // Like Trellis, `provider` limits `providers` to that one.
+      const harness = setup((request) => {
+        const params = new URL(request.url, "http://trellis").searchParams;
+        if (params.get("target") !== "ws-1") {
+          return {
+            body: { target: null, effective_hash: "e0", layers: [], providers: {}, errors: [] },
+          };
+        }
+        const provider = params.get("provider");
+        return {
+          body:
+            provider === null
+              ? view
+              : {
+                  ...view,
+                  providers: { [provider]: view.providers[provider as "claude" | "codex"] },
+                },
+        };
+      });
       const layer = yield* Effect.promise(() => harness.listen());
       const result = yield* Effect.gen(function* () {
         const trellis = yield* Trellis.Trellis;
         return {
-          workspace: yield* trellis.profile("ws-1", "claude"),
+          workspace: yield* trellis.profile("ws-1"),
+          claudeOnly: yield* trellis.profile("ws-1", "claude"),
           home: yield* trellis.profile(null),
         };
       }).pipe(Effect.provide(layer));
       expect(harness.requests.map((request) => request.url)).toEqual([
+        "/v1/profile?target=ws-1",
         "/v1/profile?target=ws-1&provider=claude",
         "/v1/profile?",
       ]);
+      // The filtered view reports Claude only; Codex reads as not reported.
+      expect(result.claudeOnly.providers.codex).toBeNull();
+      expect(result.claudeOnly.providers.claude).toEqual(result.workspace.providers.claude);
       const { workspace } = result;
       expect(workspace).toMatchObject({
         target: "ws-1",
