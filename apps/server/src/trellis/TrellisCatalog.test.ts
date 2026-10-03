@@ -606,6 +606,7 @@ describe("nameDetailsWorkspaces", () => {
         baseBuildFailures: {},
         defaultBase: null,
         missingProviders: [],
+        previewHost: null,
         agentHomes: null,
         runningWorkspaces: [
           { id: "ws-scratch", name: null },
@@ -860,6 +861,7 @@ describe("TrellisCatalog service", () => {
         baseBuildFailures: {},
         defaultBase: "dev",
         missingProviders: [],
+        previewHost: null,
         agentHomes: null,
         runningWorkspaces: null,
         restartNeeded: null,

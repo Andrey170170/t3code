@@ -6,6 +6,8 @@ import {
   TrellisBuildBaseInput,
   TrellisBuildBaseResult,
   TrellisEmptyTrashResult,
+  TrellisSetPreviewHostInput,
+  TrellisSetPreviewHostResult,
   TrellisForkWorkspaceInput,
   TrellisForkWorkspaceResult,
   TrellisPurgeInput,
@@ -412,6 +414,7 @@ export const WS_METHODS = {
   trellisGetHistorySettings: "trellis.getHistorySettings",
   trellisUpdateHistorySettings: "trellis.updateHistorySettings",
   trellisRunMaintenance: "trellis.runMaintenance",
+  trellisSetPreviewHost: "trellis.setPreviewHost",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1345,6 +1348,12 @@ const WsTrellisRunMaintenanceRpc = Rpc.make(WS_METHODS.trellisRunMaintenance, {
   error: TrellisRpcError,
 });
 
+const WsTrellisSetPreviewHostRpc = Rpc.make(WS_METHODS.trellisSetPreviewHost, {
+  payload: TrellisSetPreviewHostInput,
+  success: TrellisSetPreviewHostResult,
+  error: TrellisRpcError,
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1981,6 +1990,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsTrellisGetHistorySettingsRpc,
   WsTrellisUpdateHistorySettingsRpc,
   WsTrellisRunMaintenanceRpc,
+  WsTrellisSetPreviewHostRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,

@@ -237,6 +237,7 @@ function fakeCatalog(fake: ReturnType<typeof makeForkTrellis>) {
         historySettings: Effect.die("unused"),
         updateHistorySettings: unused,
         runMaintenance: Effect.die("unused"),
+        setPreviewHost: () => Effect.die("unused"),
         projectFor: unused,
       });
     }),

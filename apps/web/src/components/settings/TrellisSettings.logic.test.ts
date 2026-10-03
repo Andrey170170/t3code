@@ -15,6 +15,8 @@ import {
   lastThinningText,
   snapshotCountsText,
   wouldRemoveText,
+  previewHostChoice,
+  previewHostSetting,
 } from "./TrellisSettings.logic";
 
 describe("formatBytes", () => {
@@ -181,5 +183,18 @@ describe("history writes", () => {
     const interrupted = finishHistoryWrite(sent, "ideaTrashDays", 1, { ok: false, message: null });
     expect(interrupted.error).toBeNull();
     expect(interrupted.resets).toEqual({ ideaTrashDays: 1 });
+  });
+});
+
+describe("preview host", () => {
+  it("shows a setting as its choice and sends a choice as a setting", () => {
+    expect(previewHostChoice("lan")).toBe("lan");
+    expect(previewHostChoice("tailscale")).toBe("tailscale");
+    expect(previewHostChoice("127.0.0.1")).toBe("local");
+    expect(previewHostChoice("10.0.0.7")).toBe("custom");
+    expect(previewHostSetting("local", "")).toBe("127.0.0.1");
+    expect(previewHostSetting("tailscale", "ignored")).toBe("tailscale");
+    expect(previewHostSetting("custom", " 10.0.0.7 ")).toBe("10.0.0.7");
+    expect(previewHostSetting("custom", "  ")).toBeNull();
   });
 });

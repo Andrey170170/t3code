@@ -9,11 +9,12 @@ import {
   AlertTriangleIcon,
   BoxesIcon,
   HistoryIcon,
+  GlobeIcon,
   LightbulbIcon,
   SproutIcon,
   TrashIcon,
 } from "lucide-react";
-import { type ReactNode, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { useTrellisStatusFor } from "../../hooks/useTrellis";
 import { cn } from "../../lib/utils";
@@ -32,6 +33,8 @@ import {
   NumberFieldIncrement,
   NumberFieldInput,
 } from "../ui/number-field";
+import { Input } from "../ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { RefreshIcon } from "../ui/refresh-icon";
 import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
@@ -45,6 +48,9 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import {
   baseStateView,
+  type PreviewHostChoice,
+  previewHostChoice,
+  previewHostSetting,
   formatBytes,
   finishHistoryWrite,
   HISTORY_SETTINGS,
@@ -265,7 +271,7 @@ const UNKNOWN = "Not reported";
 /**
  * The service's status and bases, from one `/v1/status` read. Older Trellis
  * versions report little beyond the root; their rows read "Not reported".
- * Trellis does not report its preview host, so it is not shown.
+ * Where previews listen shows once Trellis reports it.
  */
 function TrellisDetailsSections(props: {
   readonly environmentId: EnvironmentId;
@@ -344,6 +350,15 @@ function TrellisDetailsSections(props: {
             baseBuildFailures={details.baseBuildFailures}
             defaultBase={details.defaultBase}
             onBuilt={refresh}
+          />
+        </SettingsSection>
+      )}
+      {details?.previewHost == null ? null : (
+        <SettingsSection title="Previews" icon={<GlobeIcon className="size-3.5" />}>
+          <TrellisPreviewHostRow
+            environmentId={environmentId}
+            previewHost={details.previewHost}
+            onChanged={refresh}
           />
         </SettingsSection>
       )}
@@ -452,6 +467,137 @@ function WarningTitle({ children }: { readonly children: ReactNode }) {
       <AlertTriangleIcon className="size-3.5 shrink-0 text-warning" />
       {children}
     </span>
+  );
+}
+
+const PREVIEW_HOST_CHOICES: ReadonlyArray<{ value: PreviewHostChoice; label: string }> = [
+  { value: "local", label: "This machine" },
+  { value: "lan", label: "Local network" },
+  { value: "tailscale", label: "Tailnet" },
+  { value: "custom", label: "Address…" },
+];
+
+/**
+ * Where previews of workspace ports listen. Changing it binds every open
+ * preview again at the new address, under the same ports.
+ */
+function TrellisPreviewHostRow(props: {
+  readonly environmentId: EnvironmentId;
+  readonly previewHost: NonNullable<TrellisDetails["previewHost"]>;
+  readonly onChanged: () => void;
+}) {
+  const { environmentId } = props;
+  const setHost = useAtomCommand(trellisEnvironment.setPreviewHost, { reportFailure: false });
+  // The setting in force: the last read, or a save's answer until the next
+  // read, which also brings changes made elsewhere (the CLI, another client).
+  const [committed, setCommitted] = useState(props.previewHost);
+  // Keyed on the values, so a refresh repeating the last read keeps a newer save's answer.
+  const { setting: readSetting, bind: readBind, urlHost: readUrlHost } = props.previewHost;
+  useEffect(
+    () => setCommitted({ setting: readSetting, bind: readBind, urlHost: readUrlHost }),
+    [readSetting, readBind, readUrlHost],
+  );
+  // Local edits not saved yet; null follows the setting in force.
+  const [draftChoice, setDraftChoice] = useState<PreviewHostChoice | null>(null);
+  const [draftAddress, setDraftAddress] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const committedChoice = previewHostChoice(committed.setting);
+  const choice = draftChoice ?? committedChoice;
+  const address = draftAddress ?? (committedChoice === "custom" ? committed.setting : "");
+  const save = async (next: PreviewHostChoice, typed: string) => {
+    const setting = previewHostSetting(next, typed);
+    if (setting === null) return;
+    if (setting === committed.setting) {
+      setDraftChoice(null);
+      setDraftAddress(null);
+      return;
+    }
+    setPending(true);
+    try {
+      const result = await setHost({ environmentId, input: { previewHost: setting } });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          toastManager.add({
+            type: "error",
+            title: "Could not change where previews listen",
+            description: failureMessage(result, "Trellis did not respond."),
+          });
+        }
+        return;
+      }
+      setCommitted(result.value.previewHost);
+      const { errors } = result.value;
+      toastManager.add(
+        errors.length === 0
+          ? {
+              type: "success",
+              title: `Previews now listen on ${result.value.previewHost.bind}`,
+              description: "Previews already open keep their old address: open them again.",
+            }
+          : {
+              type: "warning",
+              title: `${errors.length} preview${errors.length === 1 ? "" : "s"} could not move`,
+              description: errors
+                .map((error) => `${error.workspace} port ${error.port}: ${error.error}`)
+                .join("\n"),
+            },
+      );
+    } finally {
+      // Saved or refused, the row shows the setting in force again.
+      setDraftChoice(null);
+      setDraftAddress(null);
+      setPending(false);
+      props.onChanged();
+    }
+  };
+  return (
+    <SettingsRow
+      title="Preview address"
+      description={`Where previews of workspace ports listen: ${committed.bind}, opened as ${committed.urlHost}. This machine keeps them private. The local network or the tailnet lets other devices open them, with no T3 sign-in in front: anyone who reaches the address reaches the workspace's server.`}
+      control={
+        <span className="inline-flex items-center gap-2">
+          {choice === "custom" ? (
+            <Input
+              size="sm"
+              className="w-36"
+              aria-label="Preview address"
+              placeholder="IP address"
+              value={address}
+              disabled={pending}
+              onChange={(event) => setDraftAddress(event.target.value)}
+              onBlur={() => {
+                // Only a typed address is saved; an untouched one follows the setting.
+                if (draftAddress !== null) void save("custom", draftAddress);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+              }}
+            />
+          ) : null}
+          <Select
+            items={PREVIEW_HOST_CHOICES}
+            value={choice}
+            disabled={pending}
+            onValueChange={(value) => {
+              if (value === null) return;
+              if (value === "custom") setDraftChoice("custom");
+              else void save(value, "");
+            }}
+          >
+            <SelectTrigger size="xs" className="w-36" aria-label="Where previews listen">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup align="end" alignItemWithTrigger={false}>
+              {PREVIEW_HOST_CHOICES.map(({ value, label }) => (
+                <SelectItem key={value} value={value}>
+                  {label}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        </span>
+      }
+    />
   );
 }
 

@@ -57,6 +57,10 @@ the host.
 agent open `localhost:8000` in the preview, T3 Code asks Trellis to publish that workspace port and
 loads the published address instead, keeping the path. If Trellis cannot publish it (for example,
 the workspace is stopped), the preview shows an error rather than loading the host's port.
+**Settings** > **Trellis** > **Previews** sets where those published ports listen: this machine
+only (the default), the local network, the tailnet, or a given address, so other devices can open
+them. Trellis moves its published ports to the new address at once, under the same ports; a
+preview already open in the browser keeps its old address until you open it again.
 
 ## Moving a thread to another project
 

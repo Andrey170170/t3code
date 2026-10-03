@@ -29,6 +29,7 @@ import {
   TrellisError,
   type TrellisBasesResult,
   type TrellisBuildBaseResult,
+  type TrellisSetPreviewHostResult,
   type TrellisDetails,
   type TrellisHistorySettings,
   type TrellisHistorySettingsUpdateResult,
@@ -759,6 +760,10 @@ export class TrellisCatalog extends Context.Service<
      * rather than queueing another build.
      */
     readonly buildBase: (name: string) => Effect.Effect<TrellisBuildBaseResult, TrellisError>;
+    /** Changes where previews listen; see `Trellis.setPreviewHost`. */
+    readonly setPreviewHost: (
+      setting: string,
+    ) => Effect.Effect<TrellisSetPreviewHostResult, TrellisError>;
     /** The Trellis service's status in full, workspaces named from the last sync. */
     readonly details: Effect.Effect<TrellisDetails, TrellisError>;
     /** Trellis's snapshot timer, retention and expiry settings, for Settings. */
@@ -1960,6 +1965,7 @@ const make = Effect.gen(function* () {
     projectFor,
     listBases: requireReady.pipe(Effect.andThen(trellis.bases)),
     buildBase,
+    setPreviewHost: (setting) => requireReady.pipe(Effect.andThen(trellis.setPreviewHost(setting))),
     details: requireReady.pipe(
       Effect.andThen(Effect.all([trellis.details, Ref.get(lastApplied)])),
       Effect.map(([details, applied]) => {

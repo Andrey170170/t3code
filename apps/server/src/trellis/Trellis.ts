@@ -26,6 +26,7 @@ import {
   type TrellisHistorySettings,
   type TrellisHistorySettingsUpdateResult,
   type TrellisHistoryValues,
+  type TrellisSetPreviewHostResult,
   type TrellisStatus,
 } from "@t3tools/contracts";
 import {
@@ -319,6 +320,26 @@ const TrellisBasesView = Schema.Struct({
  * `GET /v1/status` in full, for the settings page. Every field but `root` is
  * absent from some Trellis version; `restart_needed` from all before Ops 2.
  */
+const PreviewHostView = Schema.Struct({
+  setting: Schema.String,
+  bind: Schema.String,
+  url_host: Schema.String,
+});
+const toPreviewHost = (view: typeof PreviewHostView.Type) => ({
+  setting: view.setting,
+  bind: view.bind,
+  urlHost: view.url_host,
+});
+
+const TrellisSetPreviewsView = Schema.Struct({
+  preview_host: PreviewHostView,
+  errors: Schema.optional(
+    Schema.Array(
+      Schema.Struct({ workspace: Schema.String, port: Schema.Finite, error: Schema.String }),
+    ),
+  ),
+});
+
 const TrellisDetailsView = Schema.Struct({
   root: Schema.String,
   version: Schema.optional(Schema.String),
@@ -328,6 +349,7 @@ const TrellisDetailsView = Schema.Struct({
   base_states: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   default_base: Schema.optional(Schema.NullOr(Schema.String)),
   missing_providers: Schema.optional(Schema.Array(Schema.String)),
+  preview_host: Schema.optional(Schema.NullOr(PreviewHostView)),
   agent_homes: Schema.optional(
     Schema.Struct({ claude: Schema.NullOr(Schema.String), codex: Schema.NullOr(Schema.String) }),
   ),
@@ -362,6 +384,7 @@ const toDetails = (view: typeof TrellisDetailsView.Type): TrellisDetails => ({
   baseBuildFailures: {},
   defaultBase: view.default_base ?? null,
   missingProviders: view.missing_providers ?? [],
+  previewHost: view.preview_host == null ? null : toPreviewHost(view.preview_host),
   agentHomes: view.agent_homes ?? null,
   runningWorkspaces: view.running_workspaces?.map((id) => ({ id, name: null })) ?? null,
   restartNeeded:
@@ -745,6 +768,13 @@ export class Trellis extends Context.Service<
      * the history settings, as the timer would; never purges projects.
      */
     readonly runMaintenance: Effect.Effect<void, TrellisError>;
+    /**
+     * Changes where previews listen (`PUT /v1/settings/previews`): `lan`,
+     * `tailscale` or an IP address; existing previews are bound again there.
+     */
+    readonly setPreviewHost: (
+      setting: string,
+    ) => Effect.Effect<TrellisSetPreviewHostResult, TrellisError>;
   }
 >()("t3/trellis/Trellis") {}
 
@@ -1401,6 +1431,15 @@ const make = Effect.gen(function* () {
           wouldRemove: view.would_remove ?? 0,
         })),
       ),
+    setPreviewHost: (setting) =>
+      call(TrellisSetPreviewsView, "PUT", "/v1/settings/previews", {
+        body: { preview_host: setting },
+      }).pipe(
+        Effect.map((view) => ({
+          previewHost: toPreviewHost(view.preview_host),
+          errors: view.errors ?? [],
+        })),
+      ),
   });
 });
 
@@ -1521,6 +1560,7 @@ export function makeTestTrellis(
     historySettings: Effect.die(new Error("unused Trellis operation")),
     updateHistorySettings: unused,
     runMaintenance: Effect.die(new Error("unused Trellis operation")),
+    setPreviewHost: unused,
     ...rest,
   });
 }
