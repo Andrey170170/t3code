@@ -288,7 +288,7 @@ page_text() { pwc <<<'async page => await page.locator("body").innerText()' | jq
 
 # ---- start --------------------------------------------------------------
 log "out $OUT, work $WORK, Trellis $TRELLIS_DEV_ROOT"
-tr_ base ls | grep -qx dev || { log "the dev base is missing on $TRELLIS_DEV_ROOT"; exit 1; }
+tr_ base ls | awk '{print $1}' | grep -qx dev || { log "the dev base is missing on $TRELLIS_DEV_ROOT"; exit 1; }
 start_t3 1
 PAIR=$(sed -n 's/.*pairingUrl: \(.*\)/\1/p' "$WORK/dev-1.log" | head -1)
 for _ in $(seq 1 30); do
