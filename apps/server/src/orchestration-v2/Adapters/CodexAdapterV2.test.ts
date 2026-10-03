@@ -658,12 +658,11 @@ describe("CodexAdapterV2 process spawning", () => {
           model: "gpt-5.4",
           config: {
             "tools.update_plan.enabled": true,
-            mcp_servers: {
-              "t3-code": {
-                url: "http://127.0.0.1:43123/mcp",
-                http_headers: {
-                  Authorization: "Bearer secret-codex-token",
-                },
+            // Dotted, so servers from the command line (agent profiles) stay.
+            "mcp_servers.t3-code": {
+              url: "http://127.0.0.1:43123/mcp",
+              http_headers: {
+                Authorization: "Bearer secret-codex-token",
               },
             },
           },
@@ -714,12 +713,11 @@ describe("CodexAdapterV2 process spawning", () => {
         }).config.developer_instructions,
         "The user's own instructions.\n\nPrimer.",
       );
-      assert.deepEqual(params.config.mcp_servers, {
-        "t3-code": {
-          url: "http://host.containers.internal:43123/mcp",
-          http_headers: { Authorization: "Bearer secret-codex-token" },
-        },
+      assert.deepEqual(params.config["mcp_servers.t3-code"], {
+        url: "http://host.containers.internal:43123/mcp",
+        http_headers: { Authorization: "Bearer secret-codex-token" },
       });
+      assert.notProperty(params.config, "mcp_servers");
     } finally {
       McpProviderSession.clearMcpProviderSession(threadId);
     }

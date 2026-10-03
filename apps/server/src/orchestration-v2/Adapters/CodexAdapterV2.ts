@@ -1233,15 +1233,17 @@ export function codexThreadRuntimeParams(input: {
               .filter((part) => part !== undefined && part.length > 0)
               .join("\n\n"),
           }),
+      // A dotted key, not a nested `mcp_servers` table: Codex (0.160) lets a
+      // nested table replace every MCP server configured on its command line
+      // (`-c mcp_servers.*`, as Trellis agent profiles add them), while a
+      // dotted key merges this one server in beside them.
       ...(mcpSession === undefined
         ? {}
         : {
-            mcp_servers: {
-              "t3-code": {
-                url: withLaunchLoopbackHost(mcpSession.endpoint, launch),
-                http_headers: {
-                  Authorization: mcpSession.authorizationHeader,
-                },
+            "mcp_servers.t3-code": {
+              url: withLaunchLoopbackHost(mcpSession.endpoint, launch),
+              http_headers: {
+                Authorization: mcpSession.authorizationHeader,
               },
             },
           }),
