@@ -21,16 +21,20 @@ const FORK_RECONCILES = [
   { id: 56, name: "ReconcileAutoSettleSchema", main: 54, migration: AutoSettleDisabledAt },
 ] as const;
 
-const FORK_BASE = new Map<number, string>([
+// Rows a fork database may hold besides the fork reconciles. 50 and 51 appear
+// under main's names when the first fork build ran main's migrations directly.
+const FORK_BASE: ReadonlyArray<readonly [number, string]> = [
   [50, "ProjectionMessageAgentOrigin"],
+  [50, "ProjectionThreadPullRequests"],
+  [51, "ProjectionThreadMessageContext"],
   [52, "TaskOperations"],
   [53, "ReconcileForkSchema"],
-]);
+];
 
 /**
  * Databases from the dev_vm fork recorded fork migrations at ids 50–56, which
- * would mask main's OrchestrationV2 (55) forever. `ReconcileForkSchema` (53)
- * already applied main's 50–51 schema; apply any of main's 52–54 a fork
+ * would mask main's OrchestrationV2 (55) forever. Main's 50–51 schema is already
+ * there, from `ReconcileForkSchema` (53) or main's own migrations; apply any of main's 52–54 a fork
  * reconcile did not, then rewrite the ledger to main's so later ids run.
  * Fork leftovers (agent_origin_json, agent_task_operations) are unused and kept.
  */
@@ -50,8 +54,9 @@ export const reconcileForkMigrationLedger = Effect.fn("reconcileForkMigrationLed
       }
       const recorded = new Map(history.map((row) => [row.migration_id, row.name]));
       const known = (id: number, name: string | undefined) =>
-        FORK_BASE.get(id) === name ||
-        FORK_RECONCILES.some((entry) => entry.id === id && entry.name === name);
+        [...FORK_BASE, ...FORK_RECONCILES.map((entry) => [entry.id, entry.name] as const)].some(
+          ([knownId, knownName]) => knownId === id && knownName === name,
+        );
       if (history.some((row) => !known(row.migration_id, row.name))) {
         return yield* new Migrator.MigrationError({
           kind: "BadState",
