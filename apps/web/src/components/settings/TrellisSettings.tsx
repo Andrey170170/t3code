@@ -8,6 +8,7 @@ import {
   ActivityIcon,
   AlertTriangleIcon,
   BoxesIcon,
+  GlobeIcon,
   LightbulbIcon,
   SproutIcon,
   TrashIcon,
@@ -24,6 +25,8 @@ import { refreshTrellisStatus, trellisEnvironment } from "../../state/trellis";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { RefreshIcon } from "../ui/refresh-icon";
 import { Spinner } from "../ui/spinner";
 import { Switch } from "../ui/switch";
@@ -31,6 +34,9 @@ import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import {
+  type PreviewHostChoice,
+  previewHostChoice,
+  previewHostSetting,
   formatBytes,
   staleDetailsNotice,
   trellisVersionText,
@@ -234,7 +240,7 @@ const UNKNOWN = "Not reported";
 /**
  * The service's status and bases, from one `/v1/status` read. Older Trellis
  * versions report little beyond the root; their rows read "Not reported".
- * Trellis does not report its preview host, so it is not shown.
+ * Where previews listen shows once Trellis reports it.
  */
 function TrellisDetailsSections(props: {
   readonly environmentId: EnvironmentId;
@@ -306,6 +312,15 @@ function TrellisDetailsSections(props: {
           icon={<BoxesIcon className="size-3.5" />}
         >
           <TrellisBaseRows bases={details.bases} defaultBase={details.defaultBase} />
+        </SettingsSection>
+      )}
+      {details?.previewHost == null ? null : (
+        <SettingsSection title="Previews" icon={<GlobeIcon className="size-3.5" />}>
+          <TrellisPreviewHostRow
+            environmentId={environmentId}
+            previewHost={details.previewHost}
+            onChanged={refresh}
+          />
         </SettingsSection>
       )}
     </>
@@ -413,6 +428,110 @@ function WarningTitle({ children }: { readonly children: ReactNode }) {
       <AlertTriangleIcon className="size-3.5 shrink-0 text-warning" />
       {children}
     </span>
+  );
+}
+
+const PREVIEW_HOST_CHOICES: ReadonlyArray<{ value: PreviewHostChoice; label: string }> = [
+  { value: "local", label: "This machine" },
+  { value: "lan", label: "Local network" },
+  { value: "tailscale", label: "Tailnet" },
+  { value: "custom", label: "Address…" },
+];
+
+/**
+ * Where previews of workspace ports listen. Changing it binds every open
+ * preview again at the new address, under the same ports.
+ */
+function TrellisPreviewHostRow(props: {
+  readonly environmentId: EnvironmentId;
+  readonly previewHost: NonNullable<TrellisDetails["previewHost"]>;
+  readonly onChanged: () => void;
+}) {
+  const { environmentId, previewHost } = props;
+  const setHost = useAtomCommand(trellisEnvironment.setPreviewHost, { reportFailure: false });
+  const current = previewHostChoice(previewHost.setting);
+  const [choice, setChoice] = useState<PreviewHostChoice>(current);
+  const [address, setAddress] = useState(current === "custom" ? previewHost.setting : "");
+  const [pending, setPending] = useState(false);
+  const save = async (next: PreviewHostChoice, typed: string) => {
+    const setting = previewHostSetting(next, typed);
+    if (setting === null || setting === previewHost.setting) return;
+    setPending(true);
+    try {
+      const result = await setHost({ environmentId, input: { previewHost: setting } });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          toastManager.add({
+            type: "error",
+            title: "Could not change where previews listen",
+            description: failureMessage(result, "Trellis did not respond."),
+          });
+        }
+        setChoice(current);
+        return;
+      }
+      const { errors } = result.value;
+      toastManager.add(
+        errors.length === 0
+          ? { type: "success", title: `Previews now listen on ${result.value.previewHost.bind}` }
+          : {
+              type: "warning",
+              title: `${errors.length} preview${errors.length === 1 ? "" : "s"} could not move`,
+              description: errors
+                .map((error) => `${error.workspace} port ${error.port}: ${error.error}`)
+                .join("\n"),
+            },
+      );
+    } finally {
+      setPending(false);
+      props.onChanged();
+    }
+  };
+  return (
+    <SettingsRow
+      title="Preview address"
+      description={`Where previews of workspace ports listen: ${previewHost.bind}, opened as ${previewHost.urlHost}. This machine keeps them private; the local network or the tailnet lets other devices open them.`}
+      control={
+        <span className="inline-flex items-center gap-2">
+          {choice === "custom" ? (
+            <Input
+              size="sm"
+              className="w-36"
+              aria-label="Preview address"
+              placeholder="IP address"
+              value={address}
+              disabled={pending}
+              onChange={(event) => setAddress(event.target.value)}
+              onBlur={() => void save("custom", address)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+              }}
+            />
+          ) : null}
+          <Select
+            items={PREVIEW_HOST_CHOICES}
+            value={choice}
+            disabled={pending}
+            onValueChange={(value) => {
+              if (value === null) return;
+              setChoice(value);
+              if (value !== "custom") void save(value, address);
+            }}
+          >
+            <SelectTrigger size="xs" className="w-36" aria-label="Where previews listen">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup align="end" alignItemWithTrigger={false}>
+              {PREVIEW_HOST_CHOICES.map(({ value, label }) => (
+                <SelectItem key={value} value={value}>
+                  {label}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        </span>
+      }
+    />
   );
 }
 

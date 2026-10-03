@@ -376,6 +376,7 @@ describe("Trellis client", () => {
         default_base: "dev",
         node: "local",
         missing_providers: ["codex"],
+        preview_host: { setting: "tailscale", bind: "100.64.0.2", url_host: "node.tail.ts.net" },
         agent_homes: { claude: "/homes/claude", codex: null },
         running_workspaces: ["ws-a", "ws-b"],
         restart_needed: [{ workspace: "ws-b", reason: "started with another trellis binary" }],
@@ -407,6 +408,7 @@ describe("Trellis client", () => {
         bases: ["dev", "py"],
         defaultBase: "dev",
         missingProviders: ["codex"],
+        previewHost: { setting: "tailscale", bind: "100.64.0.2", urlHost: "node.tail.ts.net" },
         agentHomes: { claude: "/homes/claude", codex: null },
         runningWorkspaces: [
           { id: "ws-a", name: null },
@@ -428,6 +430,7 @@ describe("Trellis client", () => {
         bases: [],
         defaultBase: null,
         missingProviders: [],
+        previewHost: null,
         agentHomes: null,
         runningWorkspaces: null,
         restartNeeded: null,
@@ -436,6 +439,42 @@ describe("Trellis client", () => {
       };
       expect(result.old).toEqual(unknown);
       expect(result.podmanFailed).toEqual(unknown);
+    }),
+  );
+
+  it.effect("changes where previews listen and reports what could not be bound", () =>
+    Effect.gen(function* () {
+      const harness = setup(({ url, body }) =>
+        url !== "/v1/settings/previews"
+          ? { body: { root: "/trellis" } }
+          : body.includes('"lan"')
+            ? {
+                body: {
+                  preview_host: { setting: "lan", bind: "192.168.1.5", url_host: "192.168.1.5" },
+                  errors: [{ workspace: "ws-a", port: 3000, error: "address in use" }],
+                },
+              }
+            : {
+                status: 400,
+                body: { error: "preview_host must be lan, tailscale or an IP address" },
+              },
+      );
+      const layer = yield* Effect.promise(() => harness.listen());
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        return {
+          lan: yield* trellis.setPreviewHost("lan"),
+          refused: yield* trellis.setPreviewHost("nowhere").pipe(Effect.flip),
+        };
+      }).pipe(Effect.provide(layer));
+      expect(result.lan).toEqual({
+        previewHost: { setting: "lan", bind: "192.168.1.5", urlHost: "192.168.1.5" },
+        errors: [{ workspace: "ws-a", port: 3000, error: "address in use" }],
+      });
+      expect(result.refused.message).toBe("preview_host must be lan, tailscale or an IP address");
+      expect(harness.requests.find((request) => request.method === "PUT")?.body).toBe(
+        '{"preview_host":"lan"}',
+      );
     }),
   );
 });

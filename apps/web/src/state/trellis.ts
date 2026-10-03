@@ -104,6 +104,11 @@ export const trellisEnvironment = {
     idleTtlMs: 60_000,
     refreshIntervalMs: 60_000,
   }),
+  setPreviewHost: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:set-preview-host",
+    tag: WS_METHODS.trellisSetPreviewHost,
+    concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
+  }),
   graduate: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:graduate",
     tag: WS_METHODS.trellisGraduate,

@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
   CheckpointId,
@@ -496,6 +497,28 @@ export const TrellisWorkspaceRef = Schema.Struct({
 });
 export type TrellisWorkspaceRef = typeof TrellisWorkspaceRef.Type;
 
+export const TrellisPreviewHost = Schema.Struct({
+  setting: Schema.String,
+  bind: Schema.String,
+  urlHost: Schema.String,
+});
+export type TrellisPreviewHost = typeof TrellisPreviewHost.Type;
+
+export const TrellisSetPreviewHostInput = Schema.Struct({
+  /** `lan`, `tailscale` or an IP address. */
+  previewHost: TrimmedNonEmptyString,
+});
+export type TrellisSetPreviewHostInput = typeof TrellisSetPreviewHostInput.Type;
+
+export const TrellisSetPreviewHostResult = Schema.Struct({
+  previewHost: TrellisPreviewHost,
+  /** Previews that could not be bound at the new address. */
+  errors: Schema.Array(
+    Schema.Struct({ workspace: Schema.String, port: Schema.Finite, error: Schema.String }),
+  ),
+});
+export type TrellisSetPreviewHostResult = typeof TrellisSetPreviewHostResult.Type;
+
 /**
  * The Trellis service as `GET /v1/status` reports it, for the settings page.
  * Older Trellis versions lack most fields: those read as null (or empty).
@@ -511,6 +534,14 @@ export const TrellisDetails = Schema.Struct({
   defaultBase: Schema.NullOr(Schema.String),
   /** Configured provider CLIs not found on the service's PATH. */
   missingProviders: Schema.Array(Schema.String),
+  /**
+   * Where previews listen: the `preview_host` setting (`lan`, `tailscale` or
+   * an address), the address it binds and the host preview URLs use; null
+   * when not reported.
+   */
+  previewHost: Schema.NullOr(TrellisPreviewHost).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   /** Host paths of the provider homes mounted into workspaces; null when not reported. */
   agentHomes: Schema.NullOr(
     Schema.Struct({ claude: Schema.NullOr(Schema.String), codex: Schema.NullOr(Schema.String) }),

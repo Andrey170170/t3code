@@ -42,3 +42,25 @@ export function trellisVersionText(
 /** The workspace's project name when T3 knows it, else its id. */
 export const workspaceLabel = (workspace: TrellisWorkspaceRef): string =>
   workspace.name ?? workspace.id;
+
+/** The preview host choices Settings offers; `custom` is an address typed in. */
+export type PreviewHostChoice = "local" | "lan" | "tailscale" | "custom";
+
+/** The choice a `preview_host` setting shows as. */
+export function previewHostChoice(setting: string): PreviewHostChoice {
+  if (setting === "lan" || setting === "tailscale") return setting;
+  return setting === "127.0.0.1" || setting === "localhost" || setting === "::1"
+    ? "local"
+    : "custom";
+}
+
+/**
+ * The `preview_host` to send for a choice (`custom` sends the typed address,
+ * trimmed); null when there is nothing valid to send.
+ */
+export function previewHostSetting(choice: PreviewHostChoice, custom: string): string | null {
+  if (choice === "local") return "127.0.0.1";
+  if (choice !== "custom") return choice;
+  const address = custom.trim();
+  return address.length === 0 ? null : address;
+}

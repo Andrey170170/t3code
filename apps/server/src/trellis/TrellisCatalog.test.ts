@@ -599,6 +599,7 @@ describe("nameDetailsWorkspaces", () => {
         bases: [],
         defaultBase: null,
         missingProviders: [],
+        previewHost: null,
         agentHomes: null,
         runningWorkspaces: [
           { id: "ws-scratch", name: null },

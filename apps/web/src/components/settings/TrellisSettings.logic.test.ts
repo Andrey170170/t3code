@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { formatBytes, staleDetailsNotice, trellisVersionText } from "./TrellisSettings.logic";
+import {
+  formatBytes,
+  previewHostChoice,
+  previewHostSetting,
+  staleDetailsNotice,
+  trellisVersionText,
+} from "./TrellisSettings.logic";
 
 describe("formatBytes", () => {
   it("uses the largest decimal unit, with one decimal below ten", () => {
@@ -41,5 +47,18 @@ describe("trellisVersionText", () => {
     );
     expect(trellisVersionText({ version: "0.1.0", commit: null })).toBe("0.1.0");
     expect(trellisVersionText({ version: null, commit: null })).toBeNull();
+  });
+});
+
+describe("preview host", () => {
+  it("shows a setting as its choice and sends a choice as a setting", () => {
+    expect(previewHostChoice("lan")).toBe("lan");
+    expect(previewHostChoice("tailscale")).toBe("tailscale");
+    expect(previewHostChoice("127.0.0.1")).toBe("local");
+    expect(previewHostChoice("10.0.0.7")).toBe("custom");
+    expect(previewHostSetting("local", "")).toBe("127.0.0.1");
+    expect(previewHostSetting("tailscale", "ignored")).toBe("tailscale");
+    expect(previewHostSetting("custom", " 10.0.0.7 ")).toBe("10.0.0.7");
+    expect(previewHostSetting("custom", "  ")).toBeNull();
   });
 });
