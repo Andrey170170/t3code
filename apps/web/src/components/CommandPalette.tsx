@@ -1759,8 +1759,9 @@ function OpenCommandPaletteDialog(props: {
         });
       }
 
+      // First where Trellis is on: there a new project usually means this one.
       if (trellis?.environmentId === environmentId) {
-        sourceItems.push({
+        sourceItems.unshift({
           kind: "action",
           value: `action:add-project:${environmentId}:trellis`,
           searchTerms: ["trellis", "workspace", "new project", "clone", "git"],
