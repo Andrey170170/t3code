@@ -3210,6 +3210,12 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.trellisGetHistorySettings, trellisCatalog.historySettings, {
             "rpc.aggregate": "trellis",
           }),
+        [WS_METHODS.trellisRunMaintenance]: () =>
+          observeRpcEffect(
+            WS_METHODS.trellisRunMaintenance,
+            trellisCatalog.runMaintenance.pipe(Effect.as({})),
+            { "rpc.aggregate": "trellis" },
+          ),
         [WS_METHODS.trellisUpdateHistorySettings]: (input) =>
           observeRpcEffect(
             WS_METHODS.trellisUpdateHistorySettings,

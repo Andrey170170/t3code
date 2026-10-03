@@ -758,6 +758,8 @@ export class TrellisCatalog extends Context.Service<
     readonly updateHistorySettings: (
       values: TrellisHistoryValues,
     ) => Effect.Effect<TrellisHistorySettingsUpdateResult, TrellisError>;
+    /** Runs Trellis maintenance now; see `Trellis.runMaintenance`. */
+    readonly runMaintenance: Effect.Effect<void, TrellisError>;
     /** The T3 project for a Trellis item just created (a graduation's), made now rather than at the next poll. */
     readonly projectFor: (
       item: TrellisProjectView,
@@ -1905,6 +1907,7 @@ const make = Effect.gen(function* () {
     historySettings: requireReady.pipe(Effect.andThen(trellis.historySettings)),
     updateHistorySettings: (values) =>
       requireReady.pipe(Effect.andThen(trellis.updateHistorySettings(values))),
+    runMaintenance: requireReady.pipe(Effect.andThen(trellis.runMaintenance)),
   });
 });
 

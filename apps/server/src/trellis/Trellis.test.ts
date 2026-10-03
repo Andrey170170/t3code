@@ -525,6 +525,23 @@ describe("Trellis client", () => {
       );
     }),
   );
+
+  it.effect("runs maintenance through the user socket", () =>
+    Effect.gen(function* () {
+      const harness = setup(({ url }) =>
+        url === "/v1/maintenance" ? { body: { ok: true } } : { body: { root: "/trellis" } },
+      );
+      const layer = yield* Effect.promise(() => harness.listen());
+      yield* Effect.flatMap(Trellis.Trellis, (trellis) => trellis.runMaintenance).pipe(
+        Effect.provide(layer),
+      );
+      expect(
+        harness.requests.some(
+          (request) => request.method === "POST" && request.url === "/v1/maintenance",
+        ),
+      ).toBe(true);
+    }),
+  );
 });
 
 describe("parseKnownRoots", () => {

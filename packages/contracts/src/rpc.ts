@@ -408,6 +408,7 @@ export const WS_METHODS = {
   trellisGetDetails: "trellis.getDetails",
   trellisGetHistorySettings: "trellis.getHistorySettings",
   trellisUpdateHistorySettings: "trellis.updateHistorySettings",
+  trellisRunMaintenance: "trellis.runMaintenance",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
@@ -1328,6 +1329,13 @@ const WsTrellisUpdateHistorySettingsRpc = Rpc.make(WS_METHODS.trellisUpdateHisto
   error: TrellisRpcError,
 });
 
+/** Runs Trellis maintenance now: expiries and thinning by the history settings. */
+const WsTrellisRunMaintenanceRpc = Rpc.make(WS_METHODS.trellisRunMaintenance, {
+  payload: Schema.Struct({}),
+  success: Schema.Struct({}),
+  error: TrellisRpcError,
+});
+
 const WsAgentSessionsScanRpc = Rpc.make(WS_METHODS.agentSessionsScan, {
   payload: AgentSessionScanInput,
   success: AgentSessionScanResult,
@@ -1960,6 +1968,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsTrellisGetDetailsRpc,
   WsTrellisGetHistorySettingsRpc,
   WsTrellisUpdateHistorySettingsRpc,
+  WsTrellisRunMaintenanceRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,

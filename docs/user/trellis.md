@@ -103,7 +103,8 @@ and the trash shows the request with a **Purge** button.
 
 How long snapshots are kept, how often running workspaces are snapshotted, and when trashed ideas,
 discarded forks and incoming fork copies expire are set under **History** in **Settings** > **Trellis**;
-each row says what 0 means for it.
+each row says what 0 means for it. Changes apply at the next maintenance, about once an hour;
+**Run now** applies them at once.
 
 ## Restoring files from a turn
 

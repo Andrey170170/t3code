@@ -694,6 +694,11 @@ export class Trellis extends Context.Service<
     readonly updateHistorySettings: (
       values: TrellisHistoryValues,
     ) => Effect.Effect<TrellisHistorySettingsUpdateResult, TrellisError>;
+    /**
+     * Runs maintenance now (`POST /v1/maintenance`): expiries and thinning by
+     * the history settings, as the timer would; never purges projects.
+     */
+    readonly runMaintenance: Effect.Effect<void, TrellisError>;
   }
 >()("t3/trellis/Trellis") {}
 
@@ -1322,6 +1327,10 @@ const make = Effect.gen(function* () {
         lastThinning: view.last_thinning ?? null,
       })),
     ),
+    runMaintenance: call(Schema.Unknown, "POST", "/v1/maintenance", {
+      // Thinning and reindexing a large root take a while.
+      timeoutMs: 10 * 60_000,
+    }).pipe(Effect.asVoid),
     updateHistorySettings: (values) =>
       call(TrellisHistoryUpdateView, "PUT", "/v1/settings/history", {
         body: toHistoryPatch(values),
@@ -1448,6 +1457,7 @@ export function makeTestTrellis(
     details: Effect.die(new Error("unused Trellis operation")),
     historySettings: Effect.die(new Error("unused Trellis operation")),
     updateHistorySettings: unused,
+    runMaintenance: Effect.die(new Error("unused Trellis operation")),
     ...rest,
   });
 }

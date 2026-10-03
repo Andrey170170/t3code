@@ -687,6 +687,30 @@ function TrellisHistorySection(props: {
   const update = useAtomCommand(trellisEnvironment.updateHistorySettings, {
     reportFailure: false,
   });
+  const runMaintenance = useAtomCommand(trellisEnvironment.runMaintenance, {
+    reportFailure: false,
+  });
+  const [maintaining, setMaintaining] = useState(false);
+  const thinNow = async () => {
+    setMaintaining(true);
+    try {
+      const result = await runMaintenance({ environmentId, input: {} });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          toastManager.add({
+            type: "error",
+            title: "Could not run maintenance",
+            description: failureMessage(result, "Trellis did not respond."),
+          });
+        }
+        return;
+      }
+      toastManager.add({ type: "success", title: "Maintenance done" });
+    } finally {
+      setMaintaining(false);
+      historyQuery.refresh();
+    }
+  };
   const settings = historyQuery.data;
   // Kept in a ref as well, so commits made before a re-render see each other.
   const editsRef = useRef(NO_HISTORY_EDITS);
@@ -807,8 +831,10 @@ function TrellisHistorySection(props: {
                 control={
                   <div className="flex shrink-0 items-center gap-2">
                     <NumberField
-                      key={`${value}:${edits.resets[setting.key] ?? 0}`}
-                      defaultValue={value}
+                      // Controlled, so a commit (each arrow step) keeps the input
+                      // mounted and focused; a refusal remounts it to drop the draft.
+                      key={edits.resets[setting.key] ?? 0}
+                      value={value ?? null}
                       min={0}
                       step={1}
                       size="sm"
@@ -839,8 +865,21 @@ function TrellisHistorySection(props: {
           />
           <SettingsRow
             title="Last thinning"
-            description="Thinning runs with maintenance, about once an hour."
-            control={<Value>{lastThinningText(settings.lastThinning, formatTime)}</Value>}
+            description="Thinning runs with maintenance, about once an hour; Run now applies changed settings at once. It never purges projects."
+            control={
+              <span className="inline-flex items-center gap-2">
+                <Value>{lastThinningText(settings.lastThinning, formatTime)}</Value>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={maintaining}
+                  onClick={() => void thinNow()}
+                >
+                  {maintaining ? <Spinner size="sm" tone="muted" /> : null}
+                  {maintaining ? "Running…" : "Run now"}
+                </Button>
+              </span>
+            }
           />
         </>
       )}
