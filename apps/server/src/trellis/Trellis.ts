@@ -471,6 +471,29 @@ export interface TrellisAgentHomes {
   readonly codex: string | null;
 }
 
+/** A workspace's access to its project's knowledge tiers. */
+export interface TrellisKnowledgeAccess {
+  readonly project: string;
+  /** By group name; groups it does not see are absent. */
+  readonly groups: Readonly<Record<string, string>>;
+}
+
+const TrellisKnowledgeView = Schema.Struct({
+  project: Schema.optional(Schema.NullOr(Schema.Struct({ access: Schema.String }))),
+  groups: Schema.optional(
+    Schema.Array(Schema.Struct({ name: Schema.String, access: Schema.String })),
+  ),
+});
+const TrellisKnowledgeGroupsView = Schema.Array(Schema.Struct({ name: Schema.String }));
+
+/** What a fork's knowledge mounts are (`POST /v1/fork` `knowledge`). */
+export interface TrellisForkKnowledge {
+  readonly project?: "rw" | "ro" | "none" | undefined;
+  readonly notes?: "inherit" | "empty" | undefined;
+  readonly groups?: ReadonlyArray<string> | undefined;
+  readonly groupsRw?: ReadonlyArray<string> | undefined;
+}
+
 /** Enabled Trellis state. `shimDir` is null when provider shims could not be created. */
 export interface TrellisEnv {
   readonly root: string;
@@ -569,7 +592,19 @@ export class Trellis extends Context.Service<
       readonly name?: string | undefined;
       readonly thread?: string | undefined;
       readonly services?: "none" | "all" | ReadonlyArray<string> | undefined;
+      /** A worker spawn (`delegate_task`): its default project tier is read-only. */
+      readonly spawn?: boolean | undefined;
+      readonly knowledge?: TrellisForkKnowledge | undefined;
     }) => Effect.Effect<TrellisForkView, TrellisError>;
+    /**
+     * What knowledge a workspace sees (`GET /v1/knowledge`): its access to
+     * the project tier and the groups it sees.
+     */
+    readonly knowledge: (target: string) => Effect.Effect<TrellisKnowledgeAccess, TrellisError>;
+    /** Every knowledge group of the target's project (`GET /v1/knowledge/groups`), by name. */
+    readonly knowledgeGroups: (
+      target: string,
+    ) => Effect.Effect<ReadonlyArray<string>, TrellisError>;
     /** Records activity in the target's workspace (for example a `summary`). */
     readonly recordActivity: (input: {
       readonly target: string;
@@ -1169,7 +1204,7 @@ const make = Effect.gen(function* () {
           ...(spawnedBy === undefined ? {} : { spawned_by: spawnedBy }),
         })}`,
       ),
-    fork: ({ target, snapshot, name, thread, services }) =>
+    fork: ({ target, snapshot, name, thread, services, spawn, knowledge }) =>
       call(TrellisForkView, "POST", "/v1/fork", {
         body: {
           target,
@@ -1177,10 +1212,36 @@ const make = Effect.gen(function* () {
           ...(name === undefined ? {} : { name }),
           ...(thread === undefined ? {} : { thread }),
           ...(services === undefined ? {} : { services }),
+          ...(spawn === undefined ? {} : { spawn }),
+          ...(knowledge === undefined
+            ? {}
+            : {
+                knowledge: {
+                  ...(knowledge.project === undefined ? {} : { project: knowledge.project }),
+                  ...(knowledge.notes === undefined ? {} : { notes: knowledge.notes }),
+                  ...(knowledge.groups === undefined ? {} : { groups: knowledge.groups }),
+                  ...(knowledge.groupsRw === undefined ? {} : { groups_rw: knowledge.groupsRw }),
+                },
+              }),
         },
         // A reflink copy of the snapshot, and with services a container start.
         timeoutMs: 5 * 60_000,
       }),
+    knowledge: (target) =>
+      call(TrellisKnowledgeView, "GET", `/v1/knowledge?${query({ target })}`, {
+        timeoutMs: 5_000,
+      }).pipe(
+        Effect.map((view) => ({
+          project: view.project?.access ?? "none",
+          groups: Object.fromEntries(
+            (view.groups ?? []).map((group) => [group.name, group.access] as const),
+          ),
+        })),
+      ),
+    knowledgeGroups: (target) =>
+      call(TrellisKnowledgeGroupsView, "GET", `/v1/knowledge/groups?${query({ target })}`, {
+        timeoutMs: 5_000,
+      }).pipe(Effect.map((groups) => groups.map((group) => group.name))),
     recordActivity: (body) =>
       call(Schema.Unknown, "POST", "/v1/activities", { body }).pipe(Effect.asVoid),
     requestPurge: ({ ids, reason, thread }) =>
@@ -1524,6 +1585,8 @@ export function makeTestTrellis(
     listWorkspaces: unused,
     fork: unused,
     recordActivity: unused,
+    knowledge: unused,
+    knowledgeGroups: unused,
     requestPurge: unused,
     purge: unused,
     listProjects: unused,

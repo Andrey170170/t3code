@@ -56,7 +56,15 @@ const pathOf = (workspace: string) => `/trellis/workspaces/${workspace}/project`
  * A Trellis with one dedicated project (`prj-1`, primary workspace `ws-a`)
  * that records forks, activities, discards and purge requests.
  */
-function makeForkTrellis(input: { readonly checkpoints: Array<string> }) {
+function makeForkTrellis(input: {
+  readonly checkpoints: Array<string>;
+  /** The lead's own knowledge access, and the project's existing groups. */
+  readonly knowledge?: {
+    readonly project: string;
+    readonly groups: Record<string, string>;
+    readonly existing: Array<string>;
+  };
+}) {
   const state = {
     /** The next fork fails: `lost` after creating it (the response is lost), `before` without. */
     failNextFork: null as "lost" | "before" | null,
@@ -77,6 +85,8 @@ function makeForkTrellis(input: { readonly checkpoints: Array<string> }) {
       thread: string | undefined;
       name: string | undefined;
       services: unknown;
+      spawn?: boolean | undefined;
+      knowledge?: unknown;
     }>,
     activities: [] as Array<{ target: string; kind: string; data: unknown }>,
     purgeRequests: [] as Array<{ ids: ReadonlyArray<string>; reason?: string; thread?: string }>,
@@ -88,8 +98,16 @@ function makeForkTrellis(input: { readonly checkpoints: Array<string> }) {
     thread: string | undefined,
     name: string | undefined,
     services: unknown,
+    extra: { readonly spawn?: boolean | undefined; readonly knowledge?: unknown } = {},
   ) => {
-    state.forks.push({ snapshot, thread, name, services });
+    state.forks.push({
+      snapshot,
+      thread,
+      name,
+      services,
+      ...(extra.spawn === undefined ? {} : { spawn: extra.spawn }),
+      ...(extra.knowledge === undefined ? {} : { knowledge: extra.knowledge }),
+    });
     const id = `ws-fork${state.forks.length}`;
     const view: TrellisWorkspaceView = {
       id,
@@ -131,14 +149,22 @@ function makeForkTrellis(input: { readonly checkpoints: Array<string> }) {
         ...input.checkpoints.map((id) => ({ id, kind: "checkpoint" })),
         { id: "snap-turn", kind: "turn" },
       ] as never),
-    fork: ({ snapshot, thread, name, services }) =>
+    knowledge: () =>
+      Effect.succeed({
+        project: input.knowledge?.project ?? "rw",
+        groups: input.knowledge?.groups ?? {},
+      }),
+    knowledgeGroups: () => Effect.succeed(input.knowledge?.existing ?? []),
+    fork: ({ snapshot, thread, name, services, spawn, knowledge }) =>
       Effect.suspend(() => {
         const failing = state.failNextFork;
         state.failNextFork = null;
         if (failing === "before") {
           return Effect.fail(new TrellisError({ message: "Trellis is unavailable: restarting" }));
         }
-        return Effect.sync(() => created(snapshot, thread, name, services)).pipe(
+        return Effect.sync(() =>
+          created(snapshot, thread, name, services, { spawn, knowledge }),
+        ).pipe(
           Effect.flatMap((view) =>
             failing === "lost"
               ? Effect.fail(new TrellisError({ message: "Trellis is unavailable: timed out" }))
@@ -327,12 +353,25 @@ it.effect("spawns a worker in a fork of the latest checkpoint, in the fork's own
   return Effect.gen(function* () {
     const lead = yield* startLead;
     const result = yield* delegate(lead.threadId, {
-      fork: { from: "latest", name: "parser", services: ["web"] },
+      fork: {
+        from: "latest",
+        name: "parser",
+        services: ["web"],
+        knowledge: { project: "rw", groups: ["parsing"] },
+      },
     });
 
-    // Forked from the newest checkpoint, spawned by the lead, services passed through.
+    // Forked from the newest checkpoint, spawned by the lead as a worker spawn,
+    // services and knowledge passed through.
     assert.deepEqual(fake.state.forks, [
-      { snapshot: "snap-new", thread: lead.threadId, name: "parser", services: ["web"] },
+      {
+        snapshot: "snap-new",
+        thread: lead.threadId,
+        name: "parser",
+        services: ["web"],
+        spawn: true,
+        knowledge: { project: "rw", groups: ["parsing"] },
+      },
     ]);
     assert.equal(result.fork?.workspaceId, "ws-fork1");
     assert.equal(result.fork?.snapshot, "snap-new");
@@ -1142,4 +1181,51 @@ it("lists a project's workspaces with workers, discarded forks and their trash s
   assert.equal(discarded.unmergedReason, "commits missing from the parent");
   assert.isNull(discarded.expiresAt);
   assert.deepEqual(discarded.purgeRequested, { at: 60, reason: "dead end", by: "Lead thread" });
+});
+
+it.effect("hands a worker no more knowledge than its lead has", () => {
+  const fake = makeForkTrellis({
+    checkpoints: ["snap-new"],
+    knowledge: {
+      project: "ro",
+      groups: { design: "ro" },
+      existing: ["design", "secret", "constructor"],
+    },
+  });
+  return Effect.gen(function* () {
+    const lead = yield* startLead;
+    const refused = (knowledge: object) =>
+      delegate(lead.threadId, { fork: { from: "latest", knowledge } }).pipe(
+        Effect.flip,
+        Effect.map((error) => String((error as { readonly message?: string }).message ?? error)),
+      );
+    assert.include(yield* refused({ project: "rw" }), "project knowledge tier");
+    // Hidden groups named like object properties are still hidden.
+    assert.include(yield* refused({ groups: ["constructor"] }), '"constructor"');
+    assert.include(yield* refused({ groups: ["secret"] }), '"secret"');
+    assert.include(yield* refused({ groupsRw: ["design"] }), "write access");
+    assert.deepEqual(fake.state.forks, []);
+    // Its own groups at its own access, and new groups, are fine.
+    yield* delegate(lead.threadId, {
+      fork: { from: "latest", knowledge: { groups: ["design"], groupsRw: ["new-direction"] } },
+    });
+    assert.equal(fake.state.forks.length, 1);
+  }).pipe(Effect.provide(testLayer(fake)));
+});
+
+it.effect("a lead that sees no project knowledge hands its worker none", () => {
+  const fake = makeForkTrellis({
+    checkpoints: ["snap-new"],
+    knowledge: { project: "none", groups: {}, existing: [] },
+  });
+  return Effect.gen(function* () {
+    const lead = yield* startLead;
+    const error = yield* delegate(lead.threadId, {
+      fork: { from: "latest", knowledge: { project: "ro" } },
+    }).pipe(Effect.flip);
+    assert.include(String((error as { readonly message?: string }).message), "project knowledge");
+    // Without a request, the worker default (read) is lowered to none.
+    yield* delegate(lead.threadId, { fork: { from: "latest" } });
+    assert.deepEqual(fake.state.forks.at(-1)?.knowledge, { project: "none" });
+  }).pipe(Effect.provide(testLayer(fake)));
 });

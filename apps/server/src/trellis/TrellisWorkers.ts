@@ -53,7 +53,12 @@ import { ServerConfig } from "../config.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
 import { OrchestrationEventStore } from "../persistence/Services/OrchestrationEventStore.ts";
 import { forkParked } from "../serverActivation.ts";
-import { Trellis, type TrellisWorkspaceView, trellisRootOf } from "./Trellis.ts";
+import {
+  Trellis,
+  type TrellisForkKnowledge,
+  type TrellisWorkspaceView,
+  trellisRootOf,
+} from "./Trellis.ts";
 import { TrellisCatalog } from "./TrellisCatalog.ts";
 
 /**
@@ -92,6 +97,8 @@ export class TrellisWorkers extends Context.Service<
       readonly from: string;
       readonly name?: string | undefined;
       readonly services?: "none" | "all" | ReadonlyArray<string> | undefined;
+      /** What knowledge the fork sees; Trellis's worker defaults when absent. */
+      readonly knowledge?: TrellisForkKnowledge | undefined;
       /**
        * The caller's retry key (its clientRequestId). With one, the fork is
        * named from it and its checkpoint kept, so a retry after a lost
@@ -188,6 +195,7 @@ function workerGuide(input: {
     `[Trellis worker] You work in your own Trellis fork "${input.name}" (${input.workspaceId}), made from checkpoint ${input.snapshot} of your lead's workspace. Your files are yours alone until the lead merges them.`,
     "Commit your work and put a jj bookmark on it (`jj commit -m MSG && jj bookmark set NAME -r @-`).",
     "Your final message is recorded as the fork's summary, which the lead reads with `trellis merge-brief`: say what you did, the bookmark to fetch, and which environment changes (installed packages, configuration) the lead should carry over.",
+    "Knowledge: the project's shared notes are at /trellis/knowledge/project (read-only unless your lead granted more), any groups you were given at /trellis/knowledge/groups/<name>, and your private notes at /trellis/notes (never committed). `trellis knowledge` shows what you see.",
   ].join("\n");
 }
 
@@ -312,6 +320,64 @@ const make = Effect.gen(function* () {
       return trellisRootOf(yield* trellis.expectedRoots, path) === null ? undefined : path;
     });
 
+  /**
+   * The knowledge to fork with, or why the lead may not hand it out. T3
+   * forks on the user socket, which Trellis does not limit, so the lead's
+   * own access is the ceiling: the project tier (a worker gets `ro` unless
+   * told otherwise, so a lead that sees none hands down none) and each
+   * existing group at the access handed out. A group that does not exist
+   * yet is created by the spawn, with the lead in it.
+   */
+  /** Whether a knowledge request is the worker defaults (absent, `{}`, empty lists). */
+  const asksForNothing = (knowledge: TrellisForkKnowledge | undefined) =>
+    knowledge === undefined ||
+    (knowledge.project === undefined &&
+      knowledge.notes === undefined &&
+      (knowledge.groups ?? []).length === 0 &&
+      (knowledge.groupsRw ?? []).length === 0);
+  const knowledgeFor = Effect.fn("TrellisWorkers.knowledgeFor")(function* (
+    workspace: string,
+    knowledge: TrellisForkKnowledge | undefined,
+  ) {
+    const refuse = (message: string) => ({ refusal: message }) as const;
+    const own = yield* trellis.knowledge(workspace);
+    const rank = { none: 0, ro: 1, rw: 2 } as const;
+    const rankOf = (access: string | undefined) =>
+      access === "rw" || access === "ro" ? rank[access] : 0;
+    const requested = knowledge?.project;
+    let project = requested;
+    if (rankOf(requested ?? "ro") > rankOf(own.project)) {
+      if (requested !== undefined) {
+        return refuse(
+          `You cannot give your worker ${requested === "rw" ? "write" : "read"} access to the project knowledge tier: you do not have it yourself.`,
+        );
+      }
+      // The worker default (read) is more than the lead sees: none, like the lead.
+      project = "none";
+    }
+    const wanted = [
+      ...(knowledge?.groups ?? []).map((name) => [name, "ro"] as const),
+      ...(knowledge?.groupsRw ?? []).map((name) => [name, "rw"] as const),
+    ];
+    if (wanted.length > 0) {
+      const existing = new Set(yield* trellis.knowledgeGroups(workspace));
+      const mine = new Map(Object.entries(own.groups));
+      for (const [name, access] of wanted) {
+        if (!existing.has(name)) continue;
+        if (rankOf(mine.get(name)) < rankOf(access)) {
+          return refuse(
+            `You cannot give your worker ${access === "rw" ? "write" : "read"} access to the knowledge group "${name}": you do not have it yourself.`,
+          );
+        }
+      }
+    }
+    const fork: TrellisForkKnowledge | undefined =
+      knowledge === undefined && project === undefined
+        ? undefined
+        : { ...knowledge, ...(project === undefined ? {} : { project }) };
+    return { knowledge: fork } as const;
+  });
+
   const spawnFork: TrellisWorkers["Service"]["spawnFork"] = Effect.fn("TrellisWorkers.spawnFork")(
     function* (input) {
       const invalid = (message: string) => new TrellisForkSpawnError({ message, invalid: true });
@@ -387,6 +453,17 @@ const make = Effect.gen(function* () {
               input.from,
             );
       if ("error" in checkpoint) return yield* invalid(checkpoint.error);
+      const granted = yield* knowledgeFor(resolved.workspace.id, input.knowledge).pipe(
+        // A Trellis without knowledge tiers still forks a worker that asked
+        // for nothing in particular; any other failure stops the spawn.
+        Effect.catch((error) =>
+          asksForNothing(input.knowledge) &&
+          error.message.startsWith("This Trellis does not support")
+            ? Effect.succeed({ knowledge: undefined })
+            : Effect.fail(unavailable(error)),
+        ),
+      );
+      if ("refusal" in granted) return yield* invalid(granted.refusal);
       if (spawnKey !== undefined && remembered === undefined) {
         yield* rememberSpawn(spawnKey, checkpoint.id);
       }
@@ -397,6 +474,9 @@ const make = Effect.gen(function* () {
           name,
           thread: input.parentThreadId,
           services: input.services,
+          // A worker spawn: by default it reads the project tier, not writes it.
+          spawn: true,
+          knowledge: granted.knowledge,
         })
         .pipe(
           Effect.mapError((error) =>
