@@ -328,6 +328,13 @@ const make = Effect.gen(function* () {
    * existing group at the access handed out. A group that does not exist
    * yet is created by the spawn, with the lead in it.
    */
+  /** Whether a knowledge request is the worker defaults (absent, `{}`, empty lists). */
+  const asksForNothing = (knowledge: TrellisForkKnowledge | undefined) =>
+    knowledge === undefined ||
+    (knowledge.project === undefined &&
+      knowledge.notes === undefined &&
+      (knowledge.groups ?? []).length === 0 &&
+      (knowledge.groupsRw ?? []).length === 0);
   const knowledgeFor = Effect.fn("TrellisWorkers.knowledgeFor")(function* (
     workspace: string,
     knowledge: TrellisForkKnowledge | undefined,
@@ -450,7 +457,8 @@ const make = Effect.gen(function* () {
         // A Trellis without knowledge tiers still forks a worker that asked
         // for nothing in particular; any other failure stops the spawn.
         Effect.catch((error) =>
-          input.knowledge === undefined && error.message.startsWith("This Trellis does not support")
+          asksForNothing(input.knowledge) &&
+          error.message.startsWith("This Trellis does not support")
             ? Effect.succeed({ knowledge: undefined })
             : Effect.fail(unavailable(error)),
         ),
