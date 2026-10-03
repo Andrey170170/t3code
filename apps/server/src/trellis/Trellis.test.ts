@@ -373,9 +373,11 @@ describe("Trellis client", () => {
         started_at: 1_700_000_000,
         uptime_secs: 93_784,
         bases: ["dev", "py"],
+        base_states: { dev: "stale", py: "custom" },
         default_base: "dev",
         node: "local",
         missing_providers: ["codex"],
+        preview_host: { setting: "tailscale", bind: "100.64.0.2", url_host: "node.tail.ts.net" },
         agent_homes: { claude: "/homes/claude", codex: null },
         running_workspaces: ["ws-a", "ws-b"],
         restart_needed: [{ workspace: "ws-b", reason: "started with another trellis binary" }],
@@ -405,8 +407,12 @@ describe("Trellis client", () => {
         commit: "abc1234-dirty.5f2e",
         uptimeSecs: 93_784,
         bases: ["dev", "py"],
+        baseStates: { dev: "stale", py: "custom" },
+        buildingBases: [],
+        baseBuildFailures: {},
         defaultBase: "dev",
         missingProviders: ["codex"],
+        previewHost: { setting: "tailscale", bind: "100.64.0.2", urlHost: "node.tail.ts.net" },
         agentHomes: { claude: "/homes/claude", codex: null },
         runningWorkspaces: [
           { id: "ws-a", name: null },
@@ -426,8 +432,12 @@ describe("Trellis client", () => {
         commit: null,
         uptimeSecs: null,
         bases: [],
+        baseStates: null,
+        buildingBases: [],
+        baseBuildFailures: {},
         defaultBase: null,
         missingProviders: [],
+        previewHost: null,
         agentHomes: null,
         runningWorkspaces: null,
         restartNeeded: null,
@@ -436,6 +446,539 @@ describe("Trellis client", () => {
       };
       expect(result.old).toEqual(unknown);
       expect(result.podmanFailed).toEqual(unknown);
+    }),
+  );
+
+  it.effect("builds a base and reports its state, or Trellis's refusal", () =>
+    Effect.gen(function* () {
+      const harness = setup(({ url, body }) =>
+        url !== "/v1/bases/build"
+          ? { body: { root: "/trellis" } }
+          : body.includes('"dev"')
+            ? { body: { name: "dev", path: "/trellis/bases/dev", state: "current" } }
+            : { status: 400, body: { error: "no built-in definition for base mine" } },
+      );
+      const layer = yield* Effect.promise(() => harness.listen());
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        const built = yield* trellis.buildBase("dev");
+        const refused = yield* trellis.buildBase("mine").pipe(Effect.flip);
+        return { built, refused };
+      }).pipe(Effect.provide(layer));
+      expect(result.built).toEqual({ name: "dev", state: "current" });
+      expect(result.refused.message).toBe("no built-in definition for base mine");
+      expect(harness.requests.find((request) => request.url === "/v1/bases/build")?.body).toBe(
+        '{"name":"dev"}',
+      );
+    }),
+  );
+  it.effect("reads and changes the history settings, passing on Trellis's refusals", () =>
+    Effect.gen(function* () {
+      const values = {
+        timer_minutes: 1,
+        turn_keep_all_days: 7,
+        turn_keep_daily_days: 90,
+        timer_keep_all_hours: 2,
+        timer_keep_hourly_days: 7,
+        idea_trash_days: 30,
+        fork_trash_days: 30,
+        incoming_days: 30,
+      };
+      let historyRoute = true;
+      const harness = setup(({ method, url, body }) => {
+        if (url === "/v1/status") return { body: { root: "/trellis", role: "user" } };
+        if (url !== "/v1/settings/history" || !historyRoute) {
+          return { status: 404, body: null, raw: "" };
+        }
+        if (method === "GET") {
+          return {
+            body: {
+              // A key this T3 does not know is ignored; a missing one stays absent.
+              values: { ...values, idea_trash_days: 14, future_key: 3, incoming_days: undefined },
+              defaults: values,
+              snapshots: { timer: 12, turn: 40 },
+              last_thinning: { at: 1_700_000_000, removed: 5 },
+              free_space: 1,
+            },
+          };
+        }
+        const patch = JSON.parse(body) as Record<string, number>;
+        if ((patch.turn_keep_daily_days ?? 90) < 7) {
+          return {
+            status: 400,
+            body: {
+              error: `turn_keep_daily_days (${patch.turn_keep_daily_days}) must not be shorter than turn_keep_all_days (7)`,
+            },
+          };
+        }
+        return { body: { values: { ...values, ...patch }, would_remove: 3 } };
+      });
+      const layer = yield* Effect.promise(() => harness.listen());
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        const settings = yield* trellis.historySettings;
+        const updated = yield* trellis.updateHistorySettings({ turnKeepAllDays: 3 });
+        const everyKey = yield* trellis.updateHistorySettings({
+          timerMinutes: 2,
+          turnKeepAllDays: 8,
+          turnKeepDailyDays: 91,
+          timerKeepAllHours: 3,
+          timerKeepHourlyDays: 9,
+          ideaTrashDays: 10,
+          forkTrashDays: 11,
+          incomingDays: 0,
+        });
+        const refused = yield* trellis
+          .updateHistorySettings({ turnKeepDailyDays: 2 })
+          .pipe(Effect.flip);
+        historyRoute = false;
+        const older = yield* trellis.historySettings.pipe(Effect.flip);
+        return { settings, updated, everyKey, refused, older };
+      }).pipe(Effect.provide(layer));
+      const defaults = {
+        timerMinutes: 1,
+        turnKeepAllDays: 7,
+        turnKeepDailyDays: 90,
+        timerKeepAllHours: 2,
+        timerKeepHourlyDays: 7,
+        ideaTrashDays: 30,
+        forkTrashDays: 30,
+        incomingDays: 30,
+      };
+      const { incomingDays: _, ...withoutIncoming } = defaults;
+      expect(result.settings).toEqual({
+        values: { ...withoutIncoming, ideaTrashDays: 14 },
+        defaults,
+        snapshots: { timer: 12, turn: 40 },
+        lastThinning: { at: 1_700_000_000, removed: 5 },
+      });
+      // Only the changed key goes out, in Trellis's name.
+      expect(
+        harness.requests
+          .filter((request) => request.method === "PUT")
+          .map((request) => JSON.parse(request.body)),
+      ).toEqual([
+        { turn_keep_all_days: 3 },
+        {
+          timer_minutes: 2,
+          turn_keep_all_days: 8,
+          turn_keep_daily_days: 91,
+          timer_keep_all_hours: 3,
+          timer_keep_hourly_days: 9,
+          idea_trash_days: 10,
+          fork_trash_days: 11,
+          incoming_days: 0,
+        },
+        { turn_keep_daily_days: 2 },
+      ]);
+      expect(result.everyKey.values).toEqual({
+        timerMinutes: 2,
+        turnKeepAllDays: 8,
+        turnKeepDailyDays: 91,
+        timerKeepAllHours: 3,
+        timerKeepHourlyDays: 9,
+        ideaTrashDays: 10,
+        forkTrashDays: 11,
+        incomingDays: 0,
+      });
+      expect(result.updated).toEqual({
+        values: { ...defaults, turnKeepAllDays: 3 },
+        wouldRemove: 3,
+      });
+      expect(result.refused.message).toBe(
+        "turn_keep_daily_days (2) must not be shorter than turn_keep_all_days (7)",
+      );
+      expect(result.older.message).toBe(
+        "This Trellis does not support GET /v1/settings/history, which T3 needs here. Update Trellis to main at or after PR #40 (records/history-settings, 0bed1e8).",
+      );
+    }),
+  );
+
+  it.effect("runs maintenance through the user socket", () =>
+    Effect.gen(function* () {
+      const harness = setup(({ url }) =>
+        url === "/v1/maintenance" ? { body: { ok: true } } : { body: { root: "/trellis" } },
+      );
+      const layer = yield* Effect.promise(() => harness.listen());
+      yield* Effect.flatMap(Trellis.Trellis, (trellis) => trellis.runMaintenance).pipe(
+        Effect.provide(layer),
+      );
+      expect(
+        harness.requests.some(
+          (request) => request.method === "POST" && request.url === "/v1/maintenance",
+        ),
+      ).toBe(true);
+    }),
+  );
+  it.effect("changes where previews listen and reports what could not be bound", () =>
+    Effect.gen(function* () {
+      const harness = setup(({ url, body }) =>
+        url !== "/v1/settings/previews"
+          ? { body: { root: "/trellis" } }
+          : body.includes('"lan"')
+            ? {
+                body: {
+                  preview_host: { setting: "lan", bind: "192.168.1.5", url_host: "192.168.1.5" },
+                  errors: [{ workspace: "ws-a", port: 3000, error: "address in use" }],
+                },
+              }
+            : {
+                status: 400,
+                body: { error: "preview_host must be lan, tailscale or an IP address" },
+              },
+      );
+      const layer = yield* Effect.promise(() => harness.listen());
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        return {
+          lan: yield* trellis.setPreviewHost("lan"),
+          refused: yield* trellis.setPreviewHost("nowhere").pipe(Effect.flip),
+        };
+      }).pipe(Effect.provide(layer));
+      expect(result.lan).toEqual({
+        previewHost: { setting: "lan", bind: "192.168.1.5", urlHost: "192.168.1.5" },
+        errors: [{ workspace: "ws-a", port: 3000, error: "address in use" }],
+      });
+      expect(result.refused.message).toBe("preview_host must be lan, tailscale or an IP address");
+      expect(harness.requests.find((request) => request.method === "PUT")?.body).toBe(
+        '{"preview_host":"lan"}',
+      );
+    }),
+  );
+
+  it.effect("sends a worker spawn's knowledge in Trellis's names", () =>
+    Effect.gen(function* () {
+      const harness = setup(({ url }) =>
+        url === "/v1/fork"
+          ? {
+              body: {
+                id: "ws-f",
+                kind: "dedicated",
+                name: "w",
+                project_id: "prj",
+                base: "dev",
+                parent_snapshot: "snap-1",
+                gateway_port: 1,
+                created_at: 0,
+                deleted_at: null,
+                head: null,
+                path: "/trellis/workspaces/ws-f/project",
+                running: false,
+                warnings: [],
+              },
+            }
+          : { body: { root: "/trellis" } },
+      );
+      const layer = yield* Effect.promise(() => harness.listen());
+      yield* Effect.flatMap(Trellis.Trellis, (trellis) =>
+        trellis.fork({
+          target: "ws-a",
+          snapshot: "snap-1",
+          spawn: true,
+          knowledge: { project: "ro", notes: "empty", groupsRw: ["design"] },
+        }),
+      ).pipe(Effect.provide(layer), Effect.ignore);
+      const body = harness.requests.find((request) => request.url === "/v1/fork")?.body ?? "";
+      expect(body).toContain('"spawn":true');
+      expect(body).toContain('"knowledge":{"project":"ro","notes":"empty","groups_rw":["design"]}');
+    }),
+  );
+
+  it.effect("decodes a workspace's agent profile, its special states and errors", () =>
+    Effect.gen(function* () {
+      const P = "/trellis/workspaces/ws-1/project";
+      const H = "/homes/claude";
+      // As Trellis's `GET /v1/profile` serializes an untrusted project's view.
+      const view = {
+        target: "ws-1",
+        generated_at: 1_759_400_000,
+        effective_hash: "e1",
+        stale: true,
+        project: "prj-1",
+        trusted: false,
+        origin: "https://github.com/someone/repo",
+        layers: [
+          { name: "home", paths: [H, `${H}/.claude.json`, "/homes/codex"] },
+          { name: "global", path: "/trellis/profile/profile.toml", present: true },
+          { name: "project", path: `${P}/.trellis/profile.toml`, present: true },
+          {
+            name: "workspace",
+            path: "/trellis/workspaces/ws-1/profile/profile.toml",
+            present: false,
+          },
+        ],
+        providers: {
+          claude: {
+            mcp: [
+              {
+                name: "context7",
+                source: { layer: "home", path: `${H}/.claude.json`, scope: "user" },
+                enabled: false,
+                disabled_by: { layer: "global" },
+                status: "not enforced",
+                detail: { type: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp"] },
+              },
+              {
+                name: "old",
+                source: { layer: "home", path: `${H}/settings.json`, scope: "settings.json" },
+                enabled: false,
+                status: "not loaded",
+                detail: { type: "http", url: "https://old.example/mcp" },
+              },
+              {
+                name: "github",
+                source: { layer: "project" },
+                enabled: false,
+                status: "needs approval",
+                hash: "h1",
+                approve: { kind: "mcp", name: "github" },
+                earlier_approval: { approved_by: "user", approved_at: 1, hash: "h0" },
+                detail: {
+                  type: "http",
+                  url: "https://api.githubcopilot.com/mcp/",
+                  headers: { Authorization: "[redacted]" },
+                },
+              },
+              {
+                name: "docs",
+                source: { layer: "project" },
+                enabled: true,
+                status: "approved",
+                hash: "h2",
+                approved_by: "agent ws-1",
+                approved_at: 1_759_300_000,
+                detail: { type: "sse", url: "https://docs.example/sse" },
+              },
+            ],
+            skills: [
+              {
+                name: "broken",
+                source: { layer: "home", path: `${H}/skills/broken` },
+                enabled: false,
+                status: "error",
+                error: `${H}/skills/broken has no SKILL.md`,
+                detail: { path: `${H}/skills/broken`, head: "" },
+              },
+            ],
+            plugins: [
+              {
+                name: "superpowers@market",
+                source: { layer: "home", path: `${H}/settings.json`, scope: "settings.json" },
+                enabled: true,
+                detail: {},
+              },
+            ],
+            instructions: [
+              { layer: "home", path: `${H}/CLAUDE.md`, enabled: true, status: "not enforced" },
+              { layer: "global", text: "Use jj.", enabled: true },
+              {
+                layer: "project",
+                text: "Run make.",
+                enabled: false,
+                status: "needs approval",
+                hash: "h3",
+                approve: { kind: "instructions", name: "instructions" },
+              },
+            ],
+            repository: {
+              mcp: [
+                {
+                  name: ".mcp.json:db",
+                  source: { layer: "project", path: `${P}/.mcp.json`, scope: "repository" },
+                  enabled: false,
+                  status: "needs approval",
+                  hash: "h4",
+                  approve: { kind: "mcp", name: ".mcp.json:db" },
+                  detail: { type: "stdio", command: "db-mcp", env: { DSN: "[redacted]" } },
+                },
+              ],
+              skills: [],
+              instructions: [
+                {
+                  name: "CLAUDE.md",
+                  source: { layer: "project", path: `${P}/CLAUDE.md`, scope: "repository" },
+                  enabled: true,
+                  status: "not enforced",
+                  detail: {},
+                },
+              ],
+              settings: [
+                {
+                  name: ".claude/settings.json",
+                  source: {
+                    layer: "project",
+                    path: `${P}/.claude/settings.json`,
+                    scope: "repository",
+                  },
+                  enabled: false,
+                  status: "needs trust",
+                  detail: {},
+                },
+              ],
+            },
+            strict_mcp: false,
+          },
+          // A newer Trellis's fields and states pass through.
+          codex: {
+            mcp: [],
+            skills: [
+              {
+                name: "release",
+                source: { layer: "workspace", path: "/x/skills/release", origin: "new" },
+                enabled: true,
+                status: "quarantined",
+                detail: { path: "/x/skills/release", head: "---\nname: release\n---" },
+              },
+            ],
+            instructions: [],
+            repository: { mcp: [], skills: [], instructions: [], settings: [], hooks: [] },
+            sandbox: "strict",
+          },
+        },
+        errors: [
+          { layer: "project", item: "mcp.github", error: "${GITHUB_TOKEN} in the project layer" },
+          { layer: "home", error: "config.toml: expected a table" },
+        ],
+      };
+      // Like Trellis, `provider` limits `providers` to that one.
+      const harness = setup((request) => {
+        const params = new URL(request.url, "http://trellis").searchParams;
+        if (params.get("target") !== "ws-1") {
+          return {
+            body: { target: null, effective_hash: "e0", layers: [], providers: {}, errors: [] },
+          };
+        }
+        const provider = params.get("provider");
+        return {
+          body:
+            provider === null
+              ? view
+              : {
+                  ...view,
+                  providers: { [provider]: view.providers[provider as "claude" | "codex"] },
+                },
+        };
+      });
+      const layer = yield* Effect.promise(() => harness.listen());
+      const result = yield* Effect.gen(function* () {
+        const trellis = yield* Trellis.Trellis;
+        return {
+          workspace: yield* trellis.profile("ws-1"),
+          claudeOnly: yield* trellis.profile("ws-1", "claude"),
+          home: yield* trellis.profile(null),
+        };
+      }).pipe(Effect.provide(layer));
+      expect(harness.requests.map((request) => request.url)).toEqual([
+        "/v1/profile?target=ws-1",
+        "/v1/profile?target=ws-1&provider=claude",
+        "/v1/profile?",
+      ]);
+      // The filtered view reports Claude only; Codex reads as not reported.
+      expect(result.claudeOnly.providers.codex).toBeNull();
+      expect(result.claudeOnly.providers.claude).toEqual(result.workspace.providers.claude);
+      const { workspace } = result;
+      expect(workspace).toMatchObject({
+        target: "ws-1",
+        generatedAt: 1_759_400_000,
+        stale: true,
+        trusted: false,
+        origin: "https://github.com/someone/repo",
+      });
+      expect(workspace.layers[0]).toEqual({
+        name: "home",
+        path: null,
+        paths: [H, `${H}/.claude.json`, "/homes/codex"],
+        present: null,
+      });
+      const claude = workspace.providers.claude!;
+      expect(
+        claude.mcp.map((item) => [item.name, item.status, item.enabled, item.disabledBy]),
+      ).toEqual([
+        ["context7", "not enforced", false, "global"],
+        ["old", "not loaded", false, null],
+        ["github", "needs approval", false, null],
+        ["docs", "approved", true, null],
+      ]);
+      expect(claude.mcp[0]).toEqual({
+        name: "context7",
+        source: { layer: "home", path: `${H}/.claude.json`, scope: "user" },
+        enabled: false,
+        disabledBy: "global",
+        status: "not enforced",
+        error: null,
+        approvedBy: null,
+        detail: {
+          type: "stdio",
+          url: null,
+          command: "npx",
+          args: ["-y", "@upstash/context7-mcp"],
+          path: null,
+          head: null,
+        },
+      });
+      expect(claude.mcp[3]!.approvedBy).toBe("agent ws-1");
+      expect(claude.skills[0]).toMatchObject({
+        status: "error",
+        error: `${H}/skills/broken has no SKILL.md`,
+      });
+      expect(claude.plugins.map((item) => item.name)).toEqual(["superpowers@market"]);
+      expect(claude.instructions).toEqual([
+        {
+          layer: "home",
+          path: `${H}/CLAUDE.md`,
+          text: null,
+          enabled: true,
+          status: "not enforced",
+          error: null,
+          approvedBy: null,
+        },
+        {
+          layer: "global",
+          path: null,
+          text: "Use jj.",
+          enabled: true,
+          status: null,
+          error: null,
+          approvedBy: null,
+        },
+        {
+          layer: "project",
+          path: null,
+          text: "Run make.",
+          enabled: false,
+          status: "needs approval",
+          error: null,
+          approvedBy: null,
+        },
+      ]);
+      expect(claude.repository.mcp[0]).toMatchObject({
+        name: ".mcp.json:db",
+        source: { layer: "project", scope: "repository" },
+        status: "needs approval",
+      });
+      expect(claude.repository.settings[0]!.status).toBe("needs trust");
+      expect(claude.repository.instructions[0]!.status).toBe("not enforced");
+      expect(claude.strictMcp).toBe(false);
+      // Codex lacks plugins and strict_mcp; the unknown status is kept as is.
+      const codex = workspace.providers.codex!;
+      expect(codex.plugins).toEqual([]);
+      expect(codex.strictMcp).toBeNull();
+      expect(codex.skills[0]).toMatchObject({ name: "release", status: "quarantined" });
+      expect(workspace.errors).toEqual([
+        { layer: "project", item: "mcp.github", error: "${GITHUB_TOKEN} in the project layer" },
+        { layer: "home", item: null, error: "config.toml: expected a table" },
+      ]);
+      // The home and global view: no target, never generated, no providers reported.
+      expect(result.home).toEqual({
+        target: null,
+        generatedAt: null,
+        stale: false,
+        trusted: null,
+        origin: null,
+        layers: [],
+        providers: { claude: null, codex: null },
+        errors: [],
+      });
     }),
   );
 });

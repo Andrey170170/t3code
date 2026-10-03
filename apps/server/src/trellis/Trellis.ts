@@ -19,7 +19,19 @@
 import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 
-import { type TrellisDetails, TrellisError, type TrellisStatus } from "@t3tools/contracts";
+import {
+  type TrellisBuildBaseResult,
+  type TrellisDetails,
+  TrellisError,
+  type TrellisHistorySettings,
+  type TrellisHistorySettingsUpdateResult,
+  type TrellisHistoryValues,
+  type TrellisSetPreviewHostResult,
+  type TrellisProfile,
+  type TrellisProfileItem,
+  type TrellisProfileProvider,
+  type TrellisStatus,
+} from "@t3tools/contracts";
 import {
   isTrellisManagedPath as isSharedTrellisManagedPath,
   trellisWorkspaceIdOf,
@@ -294,6 +306,14 @@ export type TrellisGraduationOutcome =
       readonly turns: ReadonlyArray<{ readonly thread: string; readonly turn: string }>;
     };
 
+const TrellisBuildBaseView = Schema.Struct({
+  name: Schema.String,
+  state: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
+/** A base build installs packages into a fresh root filesystem. */
+const BASE_BUILD_TIMEOUT_MS = 60 * 60_000;
+
 const TrellisBasesView = Schema.Struct({
   bases: Schema.optional(Schema.Array(Schema.String)),
   default_base: Schema.optional(Schema.String),
@@ -303,14 +323,36 @@ const TrellisBasesView = Schema.Struct({
  * `GET /v1/status` in full, for the settings page. Every field but `root` is
  * absent from some Trellis version; `restart_needed` from all before Ops 2.
  */
+const PreviewHostView = Schema.Struct({
+  setting: Schema.String,
+  bind: Schema.String,
+  url_host: Schema.String,
+});
+const toPreviewHost = (view: typeof PreviewHostView.Type) => ({
+  setting: view.setting,
+  bind: view.bind,
+  urlHost: view.url_host,
+});
+
+const TrellisSetPreviewsView = Schema.Struct({
+  preview_host: PreviewHostView,
+  errors: Schema.optional(
+    Schema.Array(
+      Schema.Struct({ workspace: Schema.String, port: Schema.Finite, error: Schema.String }),
+    ),
+  ),
+});
+
 const TrellisDetailsView = Schema.Struct({
   root: Schema.String,
   version: Schema.optional(Schema.String),
   commit: Schema.optional(Schema.String),
   uptime_secs: Schema.optional(Schema.Finite),
   bases: Schema.optional(Schema.Array(Schema.String)),
+  base_states: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   default_base: Schema.optional(Schema.NullOr(Schema.String)),
   missing_providers: Schema.optional(Schema.Array(Schema.String)),
+  preview_host: Schema.optional(Schema.NullOr(PreviewHostView)),
   agent_homes: Schema.optional(
     Schema.Struct({ claude: Schema.NullOr(Schema.String), codex: Schema.NullOr(Schema.String) }),
   ),
@@ -326,6 +368,151 @@ const TrellisDetailsView = Schema.Struct({
   ),
 });
 
+/**
+ * `GET /v1/profile` (Trellis main at or after PR #47). Decoded leniently: every
+ * field Trellis may omit is optional, unknown fields and statuses pass.
+ */
+const OptionalString = Schema.optional(Schema.NullOr(Schema.String));
+const TrellisProfileItemView = Schema.Struct({
+  name: Schema.String,
+  source: Schema.Struct({ layer: Schema.String, path: OptionalString, scope: OptionalString }),
+  enabled: Schema.optional(Schema.Boolean),
+  disabled_by: Schema.optional(Schema.NullOr(Schema.Struct({ layer: Schema.String }))),
+  status: OptionalString,
+  error: OptionalString,
+  approved_by: OptionalString,
+  detail: Schema.optional(Schema.Unknown),
+});
+const TrellisProfileInstructionsView = Schema.Struct({
+  layer: Schema.String,
+  path: OptionalString,
+  text: OptionalString,
+  enabled: Schema.optional(Schema.Boolean),
+  status: OptionalString,
+  error: OptionalString,
+  approved_by: OptionalString,
+});
+const ProfileItems = Schema.optional(Schema.Array(TrellisProfileItemView));
+const TrellisProfileProviderView = Schema.Struct({
+  mcp: ProfileItems,
+  skills: ProfileItems,
+  plugins: ProfileItems,
+  instructions: Schema.optional(Schema.Array(TrellisProfileInstructionsView)),
+  repository: Schema.optional(
+    Schema.Struct({
+      mcp: ProfileItems,
+      skills: ProfileItems,
+      instructions: ProfileItems,
+      settings: ProfileItems,
+    }),
+  ),
+  strict_mcp: Schema.optional(Schema.NullOr(Schema.Boolean)),
+});
+const TrellisProfileView = Schema.Struct({
+  target: OptionalString,
+  generated_at: Schema.optional(Schema.NullOr(Schema.Finite)),
+  stale: Schema.optional(Schema.Boolean),
+  trusted: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  origin: OptionalString,
+  layers: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        name: Schema.String,
+        path: OptionalString,
+        paths: Schema.optional(Schema.Array(Schema.String)),
+        present: Schema.optional(Schema.NullOr(Schema.Boolean)),
+      }),
+    ),
+  ),
+  providers: Schema.optional(Schema.Record(Schema.String, TrellisProfileProviderView)),
+  errors: Schema.optional(
+    Schema.Array(
+      Schema.Struct({ layer: Schema.String, item: OptionalString, error: Schema.String }),
+    ),
+  ),
+});
+
+const stringField = (value: unknown, key: string): string | null =>
+  Predicate.hasProperty(value, key) && typeof value[key] === "string" ? value[key] : null;
+
+const toProfileItem = (item: typeof TrellisProfileItemView.Type): TrellisProfileItem => {
+  const args = Predicate.hasProperty(item.detail, "args") ? item.detail.args : null;
+  return {
+    name: item.name,
+    source: {
+      layer: item.source.layer,
+      path: item.source.path ?? null,
+      scope: item.source.scope ?? null,
+    },
+    enabled: item.enabled ?? true,
+    disabledBy: item.disabled_by?.layer ?? null,
+    status: item.status ?? null,
+    error: item.error ?? null,
+    approvedBy: item.approved_by ?? null,
+    detail: {
+      type: stringField(item.detail, "type"),
+      url: stringField(item.detail, "url"),
+      command: stringField(item.detail, "command"),
+      args: Array.isArray(args) ? args.filter((arg) => typeof arg === "string") : [],
+      path: stringField(item.detail, "path"),
+      head: stringField(item.detail, "head"),
+    },
+  };
+};
+
+const toProfileProvider = (
+  view: typeof TrellisProfileProviderView.Type,
+): TrellisProfileProvider => {
+  const items = (list: typeof view.mcp) => (list ?? []).map(toProfileItem);
+  return {
+    mcp: items(view.mcp),
+    skills: items(view.skills),
+    plugins: items(view.plugins),
+    instructions: (view.instructions ?? []).map((entry) => ({
+      layer: entry.layer,
+      path: entry.path ?? null,
+      text: entry.text ?? null,
+      enabled: entry.enabled ?? true,
+      status: entry.status ?? null,
+      error: entry.error ?? null,
+      approvedBy: entry.approved_by ?? null,
+    })),
+    repository: {
+      mcp: items(view.repository?.mcp),
+      skills: items(view.repository?.skills),
+      instructions: items(view.repository?.instructions),
+      settings: items(view.repository?.settings),
+    },
+    strictMcp: view.strict_mcp ?? null,
+  };
+};
+
+const toProfile = (view: typeof TrellisProfileView.Type): TrellisProfile => {
+  const provider = (name: string) => {
+    const entry = view.providers?.[name];
+    return entry === undefined ? null : toProfileProvider(entry);
+  };
+  return {
+    target: view.target ?? null,
+    generatedAt: view.generated_at ?? null,
+    stale: view.stale ?? false,
+    trusted: view.trusted ?? null,
+    origin: view.origin ?? null,
+    layers: (view.layers ?? []).map((layer) => ({
+      name: layer.name,
+      path: layer.path ?? null,
+      paths: layer.paths ?? [],
+      present: layer.present ?? null,
+    })),
+    providers: { claude: provider("claude"), codex: provider("codex") },
+    errors: (view.errors ?? []).map((entry) => ({
+      layer: entry.layer,
+      item: entry.item ?? null,
+      error: entry.error,
+    })),
+  };
+};
+
 /** The workspace (`ws`) or project a pending operation's journal data names. */
 function pendingTarget(data: unknown): string | null {
   for (const key of ["ws", "project"]) {
@@ -340,8 +527,12 @@ const toDetails = (view: typeof TrellisDetailsView.Type): TrellisDetails => ({
   commit: view.commit ?? null,
   uptimeSecs: view.uptime_secs ?? null,
   bases: view.bases ?? [],
+  baseStates: view.base_states ?? null,
+  buildingBases: [],
+  baseBuildFailures: {},
   defaultBase: view.default_base ?? null,
   missingProviders: view.missing_providers ?? [],
+  previewHost: view.preview_host == null ? null : toPreviewHost(view.preview_host),
   agentHomes: view.agent_homes ?? null,
   runningWorkspaces: view.running_workspaces?.map((id) => ({ id, name: null })) ?? null,
   restartNeeded:
@@ -360,6 +551,58 @@ const toDetails = (view: typeof TrellisDetailsView.Type): TrellisDetails => ({
       : { freeBytes: view.disk.free_bytes, totalBytes: view.disk.total_bytes },
 });
 
+/** T3's history setting names and Trellis's. */
+const HISTORY_KEYS = {
+  timerMinutes: "timer_minutes",
+  turnKeepAllDays: "turn_keep_all_days",
+  turnKeepDailyDays: "turn_keep_daily_days",
+  timerKeepAllHours: "timer_keep_all_hours",
+  timerKeepHourlyDays: "timer_keep_hourly_days",
+  ideaTrashDays: "idea_trash_days",
+  forkTrashDays: "fork_trash_days",
+  incomingDays: "incoming_days",
+} as const satisfies Record<keyof TrellisHistoryValues, string>;
+
+const HistoryValuesView = Schema.Record(Schema.String, Schema.Unknown);
+
+/**
+ * `GET /v1/settings/history`. Values are read key by key (see
+ * `toHistoryValues`), so a key T3 does not know is ignored.
+ */
+const TrellisHistorySettingsView = Schema.Struct({
+  values: HistoryValuesView,
+  defaults: HistoryValuesView,
+  snapshots: Schema.optional(Schema.Record(Schema.String, Schema.Finite)),
+  last_thinning: Schema.optional(
+    Schema.NullOr(Schema.Struct({ at: Schema.Finite, removed: Schema.Finite })),
+  ),
+});
+
+const TrellisHistoryUpdateView = Schema.Struct({
+  values: HistoryValuesView,
+  would_remove: Schema.optional(Schema.Finite),
+});
+
+/** The history values T3 knows, skipping any that are absent or not whole numbers. */
+function toHistoryValues(raw: Readonly<Record<string, unknown>>): TrellisHistoryValues {
+  const values: { -readonly [K in keyof TrellisHistoryValues]: number } = {};
+  for (const key of Object.keys(HISTORY_KEYS) as Array<keyof typeof HISTORY_KEYS>) {
+    const value = raw[HISTORY_KEYS[key]];
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0) values[key] = value;
+  }
+  return values;
+}
+
+/** A history settings update in Trellis's names. */
+function toHistoryPatch(values: TrellisHistoryValues): Record<string, number> {
+  const patch: Record<string, number> = {};
+  for (const key of Object.keys(HISTORY_KEYS) as Array<keyof typeof HISTORY_KEYS>) {
+    const value = values[key];
+    if (value !== undefined) patch[HISTORY_KEYS[key]] = value;
+  }
+  return patch;
+}
+
 const sameAgentHomes = (a: TrellisAgentHomes | undefined, b: TrellisAgentHomes | undefined) =>
   a?.claude === b?.claude && a?.codex === b?.codex && (a === undefined) === (b === undefined);
 
@@ -374,6 +617,29 @@ export const isStaleTurnMessage = (error: TrellisError) =>
 export interface TrellisAgentHomes {
   readonly claude: string | null;
   readonly codex: string | null;
+}
+
+/** A workspace's access to its project's knowledge tiers. */
+export interface TrellisKnowledgeAccess {
+  readonly project: string;
+  /** By group name; groups it does not see are absent. */
+  readonly groups: Readonly<Record<string, string>>;
+}
+
+const TrellisKnowledgeView = Schema.Struct({
+  project: Schema.optional(Schema.NullOr(Schema.Struct({ access: Schema.String }))),
+  groups: Schema.optional(
+    Schema.Array(Schema.Struct({ name: Schema.String, access: Schema.String })),
+  ),
+});
+const TrellisKnowledgeGroupsView = Schema.Array(Schema.Struct({ name: Schema.String }));
+
+/** What a fork's knowledge mounts are (`POST /v1/fork` `knowledge`). */
+export interface TrellisForkKnowledge {
+  readonly project?: "rw" | "ro" | "none" | undefined;
+  readonly notes?: "inherit" | "empty" | undefined;
+  readonly groups?: ReadonlyArray<string> | undefined;
+  readonly groupsRw?: ReadonlyArray<string> | undefined;
 }
 
 /** Enabled Trellis state. `shimDir` is null when provider shims could not be created. */
@@ -474,7 +740,19 @@ export class Trellis extends Context.Service<
       readonly name?: string | undefined;
       readonly thread?: string | undefined;
       readonly services?: "none" | "all" | ReadonlyArray<string> | undefined;
+      /** A worker spawn (`delegate_task`): its default project tier is read-only. */
+      readonly spawn?: boolean | undefined;
+      readonly knowledge?: TrellisForkKnowledge | undefined;
     }) => Effect.Effect<TrellisForkView, TrellisError>;
+    /**
+     * What knowledge a workspace sees (`GET /v1/knowledge`): its access to
+     * the project tier and the groups it sees.
+     */
+    readonly knowledge: (target: string) => Effect.Effect<TrellisKnowledgeAccess, TrellisError>;
+    /** Every knowledge group of the target's project (`GET /v1/knowledge/groups`), by name. */
+    readonly knowledgeGroups: (
+      target: string,
+    ) => Effect.Effect<ReadonlyArray<string>, TrellisError>;
     /** Records activity in the target's workspace (for example a `summary`). */
     readonly recordActivity: (input: {
       readonly target: string;
@@ -579,7 +857,15 @@ export class Trellis extends Context.Service<
       workspaceId: string,
     ) => Effect.Effect<ReadonlyArray<TrellisPort>, TrellisError>;
     /** Short agent orientation for sessions started in `target`. */
-    readonly primer: (target: string) => Effect.Effect<string, TrellisError>;
+    /**
+     * The primer for `target`; with `provider`, followed by that provider's
+     * agent profile instructions (Trellis then leaves them out of `trellis
+     * launch` for sessions marked `TRELLIS_INSTRUCTIONS=t3`).
+     */
+    readonly primer: (
+      target: string,
+      provider?: "claude" | "codex",
+    ) => Effect.Effect<string, TrellisError>;
     /**
      * Counts the times Trellis became reachable (from unreachable, or at
      * startup), so a client can resynchronize on every connect.
@@ -646,6 +932,41 @@ export class Trellis extends Context.Service<
     >;
     /** Everything `/v1/status` reports, for display; workspace names are left null. */
     readonly details: Effect.Effect<TrellisDetails, TrellisError>;
+    /**
+     * Builds a base from its built-in definition (`POST /v1/bases/build`), which
+     * replaces the old one atomically; takes minutes.
+     */
+    readonly buildBase: (name: string) => Effect.Effect<TrellisBuildBaseResult, TrellisError>;
+    /** The history settings in force, their defaults, snapshot counts and the last thinning. */
+    readonly historySettings: Effect.Effect<TrellisHistorySettings, TrellisError>;
+    /**
+     * Changes the given history settings (user socket). Trellis refuses
+     * values out of bounds or a daily turn horizon shorter than the keep-all one.
+     */
+    readonly updateHistorySettings: (
+      values: TrellisHistoryValues,
+    ) => Effect.Effect<TrellisHistorySettingsUpdateResult, TrellisError>;
+    /**
+     * Runs maintenance now (`POST /v1/maintenance`): expiries and thinning by
+     * the history settings, as the timer would; never purges projects.
+     */
+    readonly runMaintenance: Effect.Effect<void, TrellisError>;
+    /**
+     * Changes where previews listen (`PUT /v1/settings/previews`): `lan`,
+     * `tailscale` or an IP address; existing previews are bound again there.
+     */
+    readonly setPreviewHost: (
+      setting: string,
+    ) => Effect.Effect<TrellisSetPreviewHostResult, TrellisError>;
+    /**
+     * The effective agent profile of a workspace (id or path), or with a null
+     * target that of the agent homes and the global layer; `provider` limits
+     * it to one provider.
+     */
+    readonly profile: (
+      target: string | null,
+      provider?: "claude" | "codex",
+    ) => Effect.Effect<TrellisProfile, TrellisError>;
   }
 >()("t3/trellis/Trellis") {}
 
@@ -727,6 +1048,14 @@ const ROUTE_MINIMUM: ReadonlyArray<{ readonly route: string; readonly since: str
   {
     route: "POST /v1/trash/purge-requests",
     since: "main at or after PR #26 (core/stage-b-forks, 90c1ab6)",
+  },
+  ...["GET /v1/settings/history", "PUT /v1/settings/history"].map((route) => ({
+    route,
+    since: "main at or after PR #40 (records/history-settings, 0bed1e8)",
+  })),
+  {
+    route: "GET /v1/profile",
+    since: "main at or after PR #47 (env/profile-view, 8ffb0be)",
   },
 ];
 
@@ -1036,7 +1365,7 @@ const make = Effect.gen(function* () {
           ...(spawnedBy === undefined ? {} : { spawned_by: spawnedBy }),
         })}`,
       ),
-    fork: ({ target, snapshot, name, thread, services }) =>
+    fork: ({ target, snapshot, name, thread, services, spawn, knowledge }) =>
       call(TrellisForkView, "POST", "/v1/fork", {
         body: {
           target,
@@ -1044,10 +1373,36 @@ const make = Effect.gen(function* () {
           ...(name === undefined ? {} : { name }),
           ...(thread === undefined ? {} : { thread }),
           ...(services === undefined ? {} : { services }),
+          ...(spawn === undefined ? {} : { spawn }),
+          ...(knowledge === undefined
+            ? {}
+            : {
+                knowledge: {
+                  ...(knowledge.project === undefined ? {} : { project: knowledge.project }),
+                  ...(knowledge.notes === undefined ? {} : { notes: knowledge.notes }),
+                  ...(knowledge.groups === undefined ? {} : { groups: knowledge.groups }),
+                  ...(knowledge.groupsRw === undefined ? {} : { groups_rw: knowledge.groupsRw }),
+                },
+              }),
         },
         // A reflink copy of the snapshot, and with services a container start.
         timeoutMs: 5 * 60_000,
       }),
+    knowledge: (target) =>
+      call(TrellisKnowledgeView, "GET", `/v1/knowledge?${query({ target })}`, {
+        timeoutMs: 5_000,
+      }).pipe(
+        Effect.map((view) => ({
+          project: view.project?.access ?? "none",
+          groups: Object.fromEntries(
+            (view.groups ?? []).map((group) => [group.name, group.access] as const),
+          ),
+        })),
+      ),
+    knowledgeGroups: (target) =>
+      call(TrellisKnowledgeGroupsView, "GET", `/v1/knowledge/groups?${query({ target })}`, {
+        timeoutMs: 5_000,
+      }).pipe(Effect.map((groups) => groups.map((group) => group.name))),
     recordActivity: (body) =>
       call(Schema.Unknown, "POST", "/v1/activities", { body }).pipe(Effect.asVoid),
     requestPurge: ({ ids, reason, thread }) =>
@@ -1165,10 +1520,13 @@ const make = Effect.gen(function* () {
         `/v1/workspaces/${encodeURIComponent(workspaceId)}/ports`,
         { timeoutMs: 5_000 },
       ),
-    primer: (target) =>
-      call(TrellisPrimerView, "GET", `/v1/primer?${query({ target })}`, { timeoutMs: 5_000 }).pipe(
-        Effect.map((view) => view.primer),
-      ),
+    primer: (target, provider) =>
+      call(
+        TrellisPrimerView,
+        "GET",
+        `/v1/primer?${query(provider === undefined ? { target } : { target, provider })}`,
+        { timeoutMs: 5_000 },
+      ).pipe(Effect.map((view) => view.primer)),
     connects: Effect.sync(() => connects),
     reportTurn: (body) =>
       // A start waits while the workspace is checkpointing (Trellis gives up after 15 min).
@@ -1269,6 +1627,52 @@ const make = Effect.gen(function* () {
       Effect.map((view) => ({ bases: view.bases ?? [], defaultBase: view.default_base ?? null })),
     ),
     details: call(TrellisDetailsView, "GET", "/v1/status").pipe(Effect.map(toDetails)),
+    buildBase: (name) =>
+      call(TrellisBuildBaseView, "POST", "/v1/bases/build", {
+        body: { name },
+        timeoutMs: BASE_BUILD_TIMEOUT_MS,
+      }).pipe(Effect.map((view) => ({ name: view.name, state: view.state ?? null }))),
+    historySettings: call(TrellisHistorySettingsView, "GET", "/v1/settings/history").pipe(
+      Effect.map((view) => ({
+        values: toHistoryValues(view.values),
+        defaults: toHistoryValues(view.defaults),
+        snapshots: view.snapshots ?? {},
+        lastThinning: view.last_thinning ?? null,
+      })),
+    ),
+    runMaintenance: call(Schema.Unknown, "POST", "/v1/maintenance", {
+      // Thinning and reindexing a large root take a while.
+      timeoutMs: 10 * 60_000,
+    }).pipe(Effect.asVoid),
+    updateHistorySettings: (values) =>
+      call(TrellisHistoryUpdateView, "PUT", "/v1/settings/history", {
+        body: toHistoryPatch(values),
+      }).pipe(
+        Effect.map((view) => ({
+          values: toHistoryValues(view.values),
+          wouldRemove: view.would_remove ?? 0,
+        })),
+      ),
+    setPreviewHost: (setting) =>
+      call(TrellisSetPreviewsView, "PUT", "/v1/settings/previews", {
+        body: { preview_host: setting },
+      }).pipe(
+        Effect.map((view) => ({
+          previewHost: toPreviewHost(view.preview_host),
+          errors: view.errors ?? [],
+        })),
+      ),
+    profile: (target, provider) =>
+      call(
+        TrellisProfileView,
+        "GET",
+        `/v1/profile?${query({
+          ...(target === null ? {} : { target }),
+          ...(provider === undefined ? {} : { provider }),
+        })}`,
+        // Reads layer files and the homes' skills; a settings page waits on it.
+        { timeoutMs: 5_000 },
+      ).pipe(Effect.map(toProfile)),
   });
 });
 
@@ -1353,6 +1757,8 @@ export function makeTestTrellis(
     listWorkspaces: unused,
     fork: unused,
     recordActivity: unused,
+    knowledge: unused,
+    knowledgeGroups: unused,
     requestPurge: unused,
     purge: unused,
     listProjects: unused,
@@ -1385,6 +1791,12 @@ export function makeTestTrellis(
     getProject: unused,
     bases: Effect.die(new Error("unused Trellis operation")),
     details: Effect.die(new Error("unused Trellis operation")),
+    buildBase: unused,
+    historySettings: Effect.die(new Error("unused Trellis operation")),
+    updateHistorySettings: unused,
+    runMaintenance: Effect.die(new Error("unused Trellis operation")),
+    setPreviewHost: unused,
+    profile: unused,
     ...rest,
   });
 }

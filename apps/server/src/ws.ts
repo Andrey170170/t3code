@@ -3228,10 +3228,42 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.trellisListBases, trellisCatalog.listBases, {
             "rpc.aggregate": "trellis",
           }),
+        [WS_METHODS.trellisBuildBase]: (input) =>
+          observeRpcEffect(WS_METHODS.trellisBuildBase, trellisCatalog.buildBase(input.name), {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisSetPreviewHost]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisSetPreviewHost,
+            trellisCatalog.setPreviewHost(input.previewHost),
+            { "rpc.aggregate": "trellis" },
+          ),
         [WS_METHODS.trellisGetDetails]: () =>
           observeRpcEffect(WS_METHODS.trellisGetDetails, trellisCatalog.details, {
             "rpc.aggregate": "trellis",
           }),
+        [WS_METHODS.trellisGetHistorySettings]: () =>
+          observeRpcEffect(WS_METHODS.trellisGetHistorySettings, trellisCatalog.historySettings, {
+            "rpc.aggregate": "trellis",
+          }),
+        [WS_METHODS.trellisRunMaintenance]: () =>
+          observeRpcEffect(
+            WS_METHODS.trellisRunMaintenance,
+            trellisCatalog.runMaintenance.pipe(Effect.as({})),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisUpdateHistorySettings]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisUpdateHistorySettings,
+            trellisCatalog.updateHistorySettings(input),
+            { "rpc.aggregate": "trellis" },
+          ),
+        [WS_METHODS.trellisGetProfile]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisGetProfile,
+            trellisCatalog.profile(input.target ?? null),
+            { "rpc.aggregate": "trellis" },
+          ),
         [WS_METHODS.filesystemBrowse]: (input) =>
           observeRpcEffect(
             WS_METHODS.filesystemBrowse,

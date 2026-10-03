@@ -166,6 +166,42 @@ export const OrchestratorMcpTerminalDelegatedTaskStatus = Schema.Literals([
 export type OrchestratorMcpTerminalDelegatedTaskStatus =
   typeof OrchestratorMcpTerminalDelegatedTaskStatus.Type;
 
+const KnowledgeGroupName = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(64),
+  Schema.isPattern(/^[a-z0-9_-]+$/),
+);
+
+/** What knowledge a worker's fork sees; Trellis's defaults when absent. */
+export const OrchestratorMcpForkKnowledge = Schema.Struct({
+  project: Schema.optional(
+    Schema.Literals(["rw", "ro", "none"]).annotate({
+      description:
+        "The project knowledge tier (/trellis/knowledge/project): 'ro' by default for a worker, 'rw' to let it write there, 'none' to hide it.",
+    }),
+  ),
+  notes: Schema.optional(
+    Schema.Literals(["inherit", "empty"]).annotate({
+      description:
+        "Private notes (/trellis/notes): 'inherit' (default) starts from a copy of this workspace's, 'empty' starts with none.",
+    }),
+  ),
+  groups: Schema.optional(
+    Schema.Array(KnowledgeGroupName).annotate({
+      description:
+        "Knowledge groups (/trellis/knowledge/groups/<name>, names [a-z0-9_-]) the worker reads; a group that does not exist yet is created, with this workspace in it. You can share only groups you see yourself.",
+    }),
+  ),
+  groupsRw: Schema.optional(
+    Schema.Array(KnowledgeGroupName).annotate({
+      description: "Knowledge groups the worker may also write; you need write access yourself.",
+    }),
+  ),
+}).annotate({
+  description:
+    "Knowledge the fork sees. Default for a worker: the project tier read-only, a copy of your notes, no groups.",
+});
+export type OrchestratorMcpForkKnowledge = typeof OrchestratorMcpForkKnowledge.Type;
+
 /**
  * Where a delegated child works. `parent` (the default) shares the caller's
  * folder. `fork` gives it its own Trellis fork of the caller's workspace, made
@@ -194,6 +230,7 @@ export const OrchestratorMcpTaskWorkspace = Schema.Union([
             "Workspace services (.trellis/services.toml) to start in the fork: 'none' (default), 'all' or a list of names.",
         }),
       ),
+      knowledge: Schema.optional(OrchestratorMcpForkKnowledge),
     }),
   }),
 ]).annotate({

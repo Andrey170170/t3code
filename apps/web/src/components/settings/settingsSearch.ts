@@ -707,11 +707,29 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["trellis bases base image default container"],
   },
   {
+    id: "trellis-profile",
+    title: "Trellis agent profile",
+    to: "/settings/trellis",
+    scope: "environment-defaults",
+    searchTerms: [
+      "trellis agent profile mcp servers skills instructions plugins layers home global approval",
+    ],
+  },
+  {
     id: "trellis-trash",
     title: "Trellis trash",
     to: "/settings/trellis",
     scope: "environment-defaults",
     searchTerms: ["trellis trash restore deleted ideas projects forks empty purge"],
+  },
+  {
+    id: "trellis-history",
+    title: "Trellis history",
+    to: "/settings/trellis",
+    scope: "environment-defaults",
+    searchTerms: [
+      "trellis history snapshots timer retention keep thinning expiry expire trash incoming days",
+    ],
   },
   {
     id: "automatic-pull",

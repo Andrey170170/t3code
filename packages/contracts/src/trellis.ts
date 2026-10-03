@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
   CheckpointId,
@@ -496,6 +497,28 @@ export const TrellisWorkspaceRef = Schema.Struct({
 });
 export type TrellisWorkspaceRef = typeof TrellisWorkspaceRef.Type;
 
+export const TrellisPreviewHost = Schema.Struct({
+  setting: Schema.String,
+  bind: Schema.String,
+  urlHost: Schema.String,
+});
+export type TrellisPreviewHost = typeof TrellisPreviewHost.Type;
+
+export const TrellisSetPreviewHostInput = Schema.Struct({
+  /** `lan`, `tailscale` or an IP address. */
+  previewHost: TrimmedNonEmptyString,
+});
+export type TrellisSetPreviewHostInput = typeof TrellisSetPreviewHostInput.Type;
+
+export const TrellisSetPreviewHostResult = Schema.Struct({
+  previewHost: TrellisPreviewHost,
+  /** Previews that could not be bound at the new address. */
+  errors: Schema.Array(
+    Schema.Struct({ workspace: Schema.String, port: Schema.Finite, error: Schema.String }),
+  ),
+});
+export type TrellisSetPreviewHostResult = typeof TrellisSetPreviewHostResult.Type;
+
 /**
  * The Trellis service as `GET /v1/status` reports it, for the settings page.
  * Older Trellis versions lack most fields: those read as null (or empty).
@@ -507,10 +530,32 @@ export const TrellisDetails = Schema.Struct({
   commit: Schema.NullOr(Schema.String),
   uptimeSecs: Schema.NullOr(Schema.Finite),
   bases: Schema.Array(Schema.String),
+  /**
+   * Per base, whether it was built from its current definition: `current`,
+   * `stale`, `unrecorded` or `custom` (others may come); null when not reported.
+   */
+  baseStates: Schema.NullOr(Schema.Record(Schema.String, Schema.String)).pipe(
+    // Absent from servers before base rebuilds.
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /** Bases this T3 server is rebuilding now (`trellis.buildBase`); absent from older servers. */
+  buildingBases: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /** The error of each base's last build that failed, until it is built again. */
+  baseBuildFailures: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   /** May name a base that is not built (absent from `bases`). */
   defaultBase: Schema.NullOr(Schema.String),
   /** Configured provider CLIs not found on the service's PATH. */
   missingProviders: Schema.Array(Schema.String),
+  /**
+   * Where previews listen: the `preview_host` setting (`lan`, `tailscale` or
+   * an address), the address it binds and the host preview URLs use; null
+   * when not reported.
+   */
+  previewHost: Schema.NullOr(TrellisPreviewHost).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   /** Host paths of the provider homes mounted into workspaces; null when not reported. */
   agentHomes: Schema.NullOr(
     Schema.Struct({ claude: Schema.NullOr(Schema.String), codex: Schema.NullOr(Schema.String) }),
@@ -529,3 +574,165 @@ export const TrellisDetails = Schema.Struct({
   disk: Schema.NullOr(Schema.Struct({ freeBytes: Schema.Finite, totalBytes: Schema.Finite })),
 });
 export type TrellisDetails = typeof TrellisDetails.Type;
+
+export const TrellisBuildBaseInput = Schema.Struct({
+  name: TrimmedNonEmptyString,
+});
+export type TrellisBuildBaseInput = typeof TrellisBuildBaseInput.Type;
+
+export const TrellisBuildBaseResult = Schema.Struct({
+  name: Schema.String,
+  state: Schema.NullOr(Schema.String),
+});
+export type TrellisBuildBaseResult = typeof TrellisBuildBaseResult.Type;
+/**
+ * Trellis's history settings (`GET /v1/settings/history`): the snapshot
+ * timer, how long turn and timer snapshots are kept, and when trashed ideas,
+ * discarded forks and incoming copies expire. Whole numbers; 0 turns the timer
+ * off, keeps nothing past the head rules for a retention, and means never for
+ * an expiry. A key an older or newer Trellis lacks is absent.
+ */
+export const TrellisHistoryValues = Schema.Struct({
+  timerMinutes: Schema.optionalKey(NonNegativeInt),
+  turnKeepAllDays: Schema.optionalKey(NonNegativeInt),
+  turnKeepDailyDays: Schema.optionalKey(NonNegativeInt),
+  timerKeepAllHours: Schema.optionalKey(NonNegativeInt),
+  timerKeepHourlyDays: Schema.optionalKey(NonNegativeInt),
+  ideaTrashDays: Schema.optionalKey(NonNegativeInt),
+  forkTrashDays: Schema.optionalKey(NonNegativeInt),
+  incomingDays: Schema.optionalKey(NonNegativeInt),
+});
+export type TrellisHistoryValues = typeof TrellisHistoryValues.Type;
+
+export const TrellisHistorySettings = Schema.Struct({
+  values: TrellisHistoryValues,
+  defaults: TrellisHistoryValues,
+  /** Live snapshots per kind (`turn`, `timer`, ...) across live workspaces. */
+  snapshots: Schema.Record(Schema.String, Schema.Finite),
+  /** The last thinning run (`at` in Unix seconds); null before the first. */
+  lastThinning: Schema.NullOr(Schema.Struct({ at: Schema.Finite, removed: Schema.Finite })),
+});
+export type TrellisHistorySettings = typeof TrellisHistorySettings.Type;
+
+export const TrellisHistorySettingsUpdateResult = Schema.Struct({
+  values: TrellisHistoryValues,
+  /** Snapshots the next thinning would remove under the new values. */
+  wouldRemove: Schema.Finite,
+});
+export type TrellisHistorySettingsUpdateResult = typeof TrellisHistorySettingsUpdateResult.Type;
+/** `target` is a workspace id or path; without it, the home and global layers only. */
+export const TrellisProfileInput = Schema.Struct({
+  target: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type TrellisProfileInput = typeof TrellisProfileInput.Type;
+
+/**
+ * Where a profile item comes from: its layer (`home`, `global`, `project`,
+ * `workspace`, or `t3` for T3's own server), the file, and the scope within
+ * it (`user`, `settings.json`, `~/.agents`, `repository`, ...).
+ */
+export const TrellisProfileSource = Schema.Struct({
+  layer: Schema.String,
+  path: Schema.NullOr(Schema.String),
+  scope: Schema.NullOr(Schema.String),
+});
+export type TrellisProfileSource = typeof TrellisProfileSource.Type;
+
+/** An MCP server's or a skill's description, redacted by Trellis; fields a kind lacks are null. */
+export const TrellisProfileDetail = Schema.Struct({
+  /** A server's transport: `http`, `sse` or `stdio`. */
+  type: Schema.NullOr(Schema.String),
+  url: Schema.NullOr(Schema.String),
+  command: Schema.NullOr(Schema.String),
+  args: Schema.Array(Schema.String),
+  /** A skill's directory. */
+  path: Schema.NullOr(Schema.String),
+  /** The head (front matter) of a skill's SKILL.md. */
+  head: Schema.NullOr(Schema.String),
+});
+export type TrellisProfileDetail = typeof TrellisProfileDetail.Type;
+
+/** An MCP server, skill, plugin or repository file in a provider's effective profile. */
+export const TrellisProfileItem = Schema.Struct({
+  name: Schema.String,
+  source: TrellisProfileSource,
+  enabled: Schema.Boolean,
+  /** The layer that switched it off. */
+  disabledBy: Schema.NullOr(Schema.String),
+  /**
+   * `needs approval`, `approved`, `needs trust`, `not enforced` (switched
+   * off where Trellis cannot enforce it), `not loaded` (declared where the
+   * provider does not read it) or `error`; newer Trellis versions may add more.
+   */
+  status: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+  approvedBy: Schema.NullOr(Schema.String),
+  detail: TrellisProfileDetail,
+});
+export type TrellisProfileItem = typeof TrellisProfileItem.Type;
+
+/** One layer's instructions for a provider (home files by path, layers' by text). */
+export const TrellisProfileInstructions = Schema.Struct({
+  layer: Schema.String,
+  path: Schema.NullOr(Schema.String),
+  text: Schema.NullOr(Schema.String),
+  enabled: Schema.Boolean,
+  status: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+  approvedBy: Schema.NullOr(Schema.String),
+});
+export type TrellisProfileInstructions = typeof TrellisProfileInstructions.Type;
+
+export const TrellisProfileProvider = Schema.Struct({
+  mcp: Schema.Array(TrellisProfileItem),
+  skills: Schema.Array(TrellisProfileItem),
+  /** Claude's enabled plugins. */
+  plugins: Schema.Array(TrellisProfileItem),
+  instructions: Schema.Array(TrellisProfileInstructions),
+  /** The project repository's own configuration, which the provider reads from the files. */
+  repository: Schema.Struct({
+    mcp: Schema.Array(TrellisProfileItem),
+    skills: Schema.Array(TrellisProfileItem),
+    instructions: Schema.Array(TrellisProfileItem),
+    settings: Schema.Array(TrellisProfileItem),
+  }),
+  /** Claude only: whether the home's own MCP servers are left out too; null when not reported. */
+  strictMcp: Schema.NullOr(Schema.Boolean),
+});
+export type TrellisProfileProvider = typeof TrellisProfileProvider.Type;
+
+/**
+ * What each provider has active in a workspace (or, without a target, from
+ * the agent homes and the global layer), from Trellis's `GET /v1/profile`.
+ * Read only; T3's own `t3-code` server is not included.
+ */
+export const TrellisProfile = Schema.Struct({
+  target: Schema.NullOr(Schema.String),
+  /** Unix seconds the workspace's profile files were last written; null: never (or no target). */
+  generatedAt: Schema.NullOr(Schema.Finite),
+  /** The effective profile changed since the files were written. */
+  stale: Schema.Boolean,
+  trusted: Schema.NullOr(Schema.Boolean),
+  origin: Schema.NullOr(Schema.String),
+  layers: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      path: Schema.NullOr(Schema.String),
+      paths: Schema.Array(Schema.String),
+      present: Schema.NullOr(Schema.Boolean),
+    }),
+  ),
+  /** Null for a provider Trellis did not report. */
+  providers: Schema.Struct({
+    claude: Schema.NullOr(TrellisProfileProvider),
+    codex: Schema.NullOr(TrellisProfileProvider),
+  }),
+  errors: Schema.Array(
+    Schema.Struct({
+      layer: Schema.String,
+      item: Schema.NullOr(Schema.String),
+      error: Schema.String,
+    }),
+  ),
+});
+export type TrellisProfile = typeof TrellisProfile.Type;

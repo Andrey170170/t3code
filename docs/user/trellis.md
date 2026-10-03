@@ -15,7 +15,9 @@ reaches Trellis. While the integration is off, T3 Code does not contact Trellis;
 projects keep their conversations, but their agents do not run until you turn it back on.
 Once connected, the page also shows the Trellis service's version, free space and running
 workspaces, what needs attention (missing providers, workspaces needing a restart), and the bases
-new projects start from.
+new projects start from. A base built from an older definition is marked; **Rebuild** builds it
+again from its built-in definition (a few minutes). New workspaces start from the rebuilt base;
+existing ones keep their environment.
 
 T3 Code uses the socket at `/trellis/state/api.sock` unless the server was started with
 `TRELLIS_SOCKET` set.
@@ -48,6 +50,11 @@ that Trellis mounts no home for that provider). To run Trellis
 threads from other homes, set the instance's home path to the one Trellis mounts. Codex instances
 with a shadow home or a managed ChatGPT connection cannot run Trellis threads.
 
+**Agent profile** shows which MCP servers, skills and instructions each provider gets, which layer
+each comes from, and which wait for approval or cannot be switched off: in **Settings** >
+**Trellis** for the agent homes and the global layer, and in a project's settings for each of its
+workspaces (edit the layers with `trellis profile path`).
+
 A terminal opened in a Trellis project is a shell inside the workspace, at the same path you see on
 the host.
 
@@ -55,6 +62,10 @@ the host.
 agent open `localhost:8000` in the preview, T3 Code asks Trellis to publish that workspace port and
 loads the published address instead, keeping the path. If Trellis cannot publish it (for example,
 the workspace is stopped), the preview shows an error rather than loading the host's port.
+**Settings** > **Trellis** > **Previews** sets where those published ports listen: this machine
+only (the default), the local network, the tailnet, or a given address, so other devices can open
+them. Trellis moves its published ports to the new address at once, under the same ports; a
+preview already open in the browser keeps its old address until you open it again.
 
 ## Moving a thread to another project
 
@@ -100,6 +111,11 @@ running. Deleting a conversation only deletes the conversation.
 A discarded fork that holds work its parent workspace lacks (uncommitted changes, or commits not
 merged back) is kept until you purge it; the trash says why. Agents never purge: they can ask you to,
 and the trash shows the request with a **Purge** button.
+
+How long snapshots are kept, how often running workspaces are snapshotted, and when trashed ideas,
+discarded forks and incoming fork copies expire are set under **History** in **Settings** > **Trellis**;
+each row says what 0 means for it. Changes apply at the next maintenance, about once an hour;
+**Run now** applies them at once.
 
 ## Restoring files from a turn
 

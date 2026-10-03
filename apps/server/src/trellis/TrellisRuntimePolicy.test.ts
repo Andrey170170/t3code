@@ -9,6 +9,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  TrellisError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -56,6 +57,7 @@ const resolve = (input: {
   /** Roots known without asking Trellis; Trellis reports `trellisEnv` when asked. */
   readonly knownRoots?: ReadonlyArray<string>;
   readonly notAskedYet?: boolean;
+  readonly primerFails?: boolean;
   /** Symlinks: alias → target. */
   readonly aliases?: Readonly<Record<string, string>>;
   readonly providerInstances?: Parameters<typeof ServerSettingsService.layerTest>[0];
@@ -100,11 +102,13 @@ const resolve = (input: {
           expectedRoots: Effect.succeed(input.knownRoots ?? ["/trellis"]),
           ...(input.notAskedYet === true ? { current: Effect.succeed(null) } : {}),
           canonicalPath: (path) => Effect.succeed(input.aliases?.[path] ?? path),
-          primer: (target) =>
-            Effect.sync(() => {
-              primerTargets.push(target);
-              return "You are in a Trellis workspace.\n";
-            }),
+          primer: (target, provider) =>
+            input.primerFails === true
+              ? Effect.fail(new TrellisError({ message: "primer timed out" }))
+              : Effect.sync(() => {
+                  primerTargets.push(provider === undefined ? target : `${target} (${provider})`);
+                  return "You are in a Trellis workspace.\n";
+                }),
         }),
       ),
     ),
@@ -144,6 +148,7 @@ describe("TrellisRuntimePolicy", () => {
           executable: `/t3/trellis-shims/${shim}`,
           env: {
             TRELLIS_ROOT: "/trellis",
+            TRELLIS_INSTRUCTIONS: "t3",
             TRELLIS_SOCKET: "/trellis/state/api.sock",
             // A Codex app-server serves several threads, so only Claude's names one.
             ...(instance === "claudeAgent" ? { TRELLIS_THREAD: "thread-trellis-policy" } : {}),
@@ -152,8 +157,28 @@ describe("TrellisRuntimePolicy", () => {
           sessionKey: "ws-1",
           loopbackHost: "host.containers.internal",
         });
-        assert.deepEqual(primerTargets, [idea]);
+        // The primer with this provider's profile instructions, which
+        // `trellis launch` then leaves out (TRELLIS_INSTRUCTIONS=t3).
+        assert.deepEqual(primerTargets, [`${idea} (${shim})`]);
       }
+    }),
+  );
+
+  it.effect("leaves Claude's profile instructions to trellis launch when the primer fails", () =>
+    Effect.gen(function* () {
+      const { policy } = yield* resolve({
+        instance: "claudeAgent",
+        projectRoot: idea,
+        primerFails: true,
+      });
+      assert.notProperty(policy.launch?.env ?? {}, "TRELLIS_INSTRUCTIONS");
+      assert.equal(policy.launch?.instructions, TrellisRuntimePolicy.TRELLIS_T3_GUIDE);
+      // Codex threads share their workspace's app-server, launched perhaps
+      // without the profile's instructions: they wait for the primer instead.
+      assert.include(
+        yield* refusal(resolve({ instance: "codex", projectRoot: idea, primerFails: true })),
+        "could not give this thread its primer",
+      );
     }),
   );
 

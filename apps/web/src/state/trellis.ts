@@ -104,6 +104,47 @@ export const trellisEnvironment = {
     idleTtlMs: 60_000,
     refreshIntervalMs: 60_000,
   }),
+  /** Rebuilds a base from its built-in definition; takes minutes. */
+  buildBase: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:build-base",
+    tag: WS_METHODS.trellisBuildBase,
+  }),
+  /** Trellis's snapshot timer, retention and expiry settings, with snapshot counts. */
+  historySettings: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:history-settings",
+    tag: WS_METHODS.trellisGetHistorySettings,
+    staleTimeMs: 30_000,
+    idleTtlMs: 60_000,
+    // Maintenance runs hourly and other clients may change the settings.
+    refreshIntervalMs: 60_000,
+  }),
+  /** One write at a time per environment, so they reach Trellis in order. */
+  updateHistorySettings: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:update-history-settings",
+    tag: WS_METHODS.trellisUpdateHistorySettings,
+    concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
+  }),
+  runMaintenance: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:run-maintenance",
+    tag: WS_METHODS.trellisRunMaintenance,
+    concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
+  }),
+  setPreviewHost: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:trellis:set-preview-host",
+    tag: WS_METHODS.trellisSetPreviewHost,
+    concurrency: { mode: "serial", key: ({ environmentId }) => environmentId },
+  }),
+  /**
+   * The effective agent profile of a workspace (`target`), or of the agent
+   * homes and global layer without one. Layer files change rarely and by
+   * hand, so it is read when shown and on refresh, not on an interval.
+   */
+  profile: createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+    label: "environment-data:trellis:profile",
+    tag: WS_METHODS.trellisGetProfile,
+    staleTimeMs: 30_000,
+    idleTtlMs: 60_000,
+  }),
   graduate: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:trellis:graduate",
     tag: WS_METHODS.trellisGraduate,

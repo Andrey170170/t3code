@@ -153,6 +153,12 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.trellisGraduate]: AuthOrchestrationOperateScope,
   [WS_METHODS.trellisListBases]: AuthOrchestrationReadScope,
   [WS_METHODS.trellisGetDetails]: AuthOrchestrationReadScope,
+  [WS_METHODS.trellisBuildBase]: AuthOrchestrationOperateScope,
+  [WS_METHODS.trellisGetHistorySettings]: AuthOrchestrationReadScope,
+  [WS_METHODS.trellisUpdateHistorySettings]: AuthOrchestrationOperateScope,
+  [WS_METHODS.trellisRunMaintenance]: AuthOrchestrationOperateScope,
+  [WS_METHODS.trellisSetPreviewHost]: AuthOrchestrationOperateScope,
+  [WS_METHODS.trellisGetProfile]: AuthOrchestrationReadScope,
   [WS_METHODS.trellisFind]: AuthOrchestrationReadScope,
   [WS_METHODS.trellisRestoreConflicts]: AuthOrchestrationReadScope,
   // Publishes a workspace port, like preview.open.
