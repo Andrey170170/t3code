@@ -19,7 +19,12 @@
 import * as NodeHttp from "node:http";
 import * as NodePath from "node:path";
 
-import { type TrellisDetails, TrellisError, type TrellisStatus } from "@t3tools/contracts";
+import {
+  type TrellisBuildBaseResult,
+  type TrellisDetails,
+  TrellisError,
+  type TrellisStatus,
+} from "@t3tools/contracts";
 import {
   isTrellisManagedPath as isSharedTrellisManagedPath,
   trellisWorkspaceIdOf,
@@ -294,6 +299,14 @@ export type TrellisGraduationOutcome =
       readonly turns: ReadonlyArray<{ readonly thread: string; readonly turn: string }>;
     };
 
+const TrellisBuildBaseView = Schema.Struct({
+  name: Schema.String,
+  state: Schema.optional(Schema.NullOr(Schema.String)),
+});
+
+/** A base build installs packages into a fresh root filesystem. */
+const BASE_BUILD_TIMEOUT_MS = 60 * 60_000;
+
 const TrellisBasesView = Schema.Struct({
   bases: Schema.optional(Schema.Array(Schema.String)),
   default_base: Schema.optional(Schema.String),
@@ -309,6 +322,7 @@ const TrellisDetailsView = Schema.Struct({
   commit: Schema.optional(Schema.String),
   uptime_secs: Schema.optional(Schema.Finite),
   bases: Schema.optional(Schema.Array(Schema.String)),
+  base_states: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   default_base: Schema.optional(Schema.NullOr(Schema.String)),
   missing_providers: Schema.optional(Schema.Array(Schema.String)),
   agent_homes: Schema.optional(
@@ -340,6 +354,9 @@ const toDetails = (view: typeof TrellisDetailsView.Type): TrellisDetails => ({
   commit: view.commit ?? null,
   uptimeSecs: view.uptime_secs ?? null,
   bases: view.bases ?? [],
+  baseStates: view.base_states ?? null,
+  buildingBases: [],
+  baseBuildFailures: {},
   defaultBase: view.default_base ?? null,
   missingProviders: view.missing_providers ?? [],
   agentHomes: view.agent_homes ?? null,
@@ -646,6 +663,11 @@ export class Trellis extends Context.Service<
     >;
     /** Everything `/v1/status` reports, for display; workspace names are left null. */
     readonly details: Effect.Effect<TrellisDetails, TrellisError>;
+    /**
+     * Builds a base from its built-in definition (`POST /v1/bases/build`), which
+     * replaces the old one atomically; takes minutes.
+     */
+    readonly buildBase: (name: string) => Effect.Effect<TrellisBuildBaseResult, TrellisError>;
   }
 >()("t3/trellis/Trellis") {}
 
@@ -1269,6 +1291,11 @@ const make = Effect.gen(function* () {
       Effect.map((view) => ({ bases: view.bases ?? [], defaultBase: view.default_base ?? null })),
     ),
     details: call(TrellisDetailsView, "GET", "/v1/status").pipe(Effect.map(toDetails)),
+    buildBase: (name) =>
+      call(TrellisBuildBaseView, "POST", "/v1/bases/build", {
+        body: { name },
+        timeoutMs: BASE_BUILD_TIMEOUT_MS,
+      }).pipe(Effect.map((view) => ({ name: view.name, state: view.state ?? null }))),
   });
 });
 
@@ -1385,6 +1412,7 @@ export function makeTestTrellis(
     getProject: unused,
     bases: Effect.die(new Error("unused Trellis operation")),
     details: Effect.die(new Error("unused Trellis operation")),
+    buildBase: unused,
     ...rest,
   });
 }

@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import {
   CheckpointId,
@@ -507,6 +508,20 @@ export const TrellisDetails = Schema.Struct({
   commit: Schema.NullOr(Schema.String),
   uptimeSecs: Schema.NullOr(Schema.Finite),
   bases: Schema.Array(Schema.String),
+  /**
+   * Per base, whether it was built from its current definition: `current`,
+   * `stale`, `unrecorded` or `custom` (others may come); null when not reported.
+   */
+  baseStates: Schema.NullOr(Schema.Record(Schema.String, Schema.String)).pipe(
+    // Absent from servers before base rebuilds.
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  /** Bases this T3 server is rebuilding now (`trellis.buildBase`); absent from older servers. */
+  buildingBases: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /** The error of each base's last build that failed, until it is built again. */
+  baseBuildFailures: Schema.Record(Schema.String, Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   /** May name a base that is not built (absent from `bases`). */
   defaultBase: Schema.NullOr(Schema.String),
   /** Configured provider CLIs not found on the service's PATH. */
@@ -529,3 +544,14 @@ export const TrellisDetails = Schema.Struct({
   disk: Schema.NullOr(Schema.Struct({ freeBytes: Schema.Finite, totalBytes: Schema.Finite })),
 });
 export type TrellisDetails = typeof TrellisDetails.Type;
+
+export const TrellisBuildBaseInput = Schema.Struct({
+  name: TrimmedNonEmptyString,
+});
+export type TrellisBuildBaseInput = typeof TrellisBuildBaseInput.Type;
+
+export const TrellisBuildBaseResult = Schema.Struct({
+  name: Schema.String,
+  state: Schema.NullOr(Schema.String),
+});
+export type TrellisBuildBaseResult = typeof TrellisBuildBaseResult.Type;

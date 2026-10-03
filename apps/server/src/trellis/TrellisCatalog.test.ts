@@ -67,6 +67,10 @@ interface CatalogState {
   trashed: Array<string>;
   readonly trashStarted?: Deferred.Deferred<void>;
   readonly trashRelease?: Deferred.Deferred<void>;
+  /** Base builds Trellis was asked for; each waits for `buildRelease` when set. */
+  builds?: number;
+  readonly buildRelease?: Deferred.Deferred<void>;
+  baseStates?: Record<string, string>;
 }
 
 const ROOT = "/trellis";
@@ -597,6 +601,9 @@ describe("nameDetailsWorkspaces", () => {
         commit: null,
         uptimeSecs: null,
         bases: [],
+        baseStates: null,
+        buildingBases: [],
+        baseBuildFailures: {},
         defaultBase: null,
         missingProviders: [],
         agentHomes: null,
@@ -833,6 +840,32 @@ describe("TrellisCatalog service", () => {
             : state.items.filter((item) => item.deleted_at === null && item.graduated_to === null),
         ),
       listWorkspaces: () => Effect.succeed([]),
+      buildBase: (name) =>
+        Effect.gen(function* () {
+          state.builds = (state.builds ?? 0) + 1;
+          if (state.buildRelease !== undefined) yield* Deferred.await(state.buildRelease);
+          if (name === "broken") {
+            return yield* new TrellisError({ message: "definition for broken failed" });
+          }
+          return { name, state: "current" };
+        }),
+      details: Effect.sync(() => ({
+        root: ROOT,
+        version: null,
+        commit: null,
+        uptimeSecs: null,
+        bases: ["dev", "broken"],
+        baseStates: state.baseStates ?? null,
+        buildingBases: [],
+        baseBuildFailures: {},
+        defaultBase: "dev",
+        missingProviders: [],
+        agentHomes: null,
+        runningWorkspaces: null,
+        restartNeeded: null,
+        pendingOperations: [],
+        disk: null,
+      })),
       trashProject: (id) =>
         Effect.gen(function* () {
           if (state.trashStarted !== undefined)
@@ -1252,6 +1285,48 @@ describe("TrellisCatalog service", () => {
       }),
     );
   });
+  const buildState: CatalogState = {
+    items: [],
+    trashed: [],
+    buildRelease: Deferred.makeUnsafe<void>(),
+  };
+
+  effectIt.layer(catalogLayer(buildState))("base builds", (it) => {
+    it.effect("outlive their caller and join a repeated request instead of queueing", () =>
+      Effect.gen(function* () {
+        const catalog = yield* TrellisCatalog.TrellisCatalog;
+        const first = yield* Effect.forkChild(catalog.buildBase("dev"));
+        yield* Effect.yieldNow;
+        // The page that asked went away: the build goes on, still reported.
+        yield* Fiber.interrupt(first);
+        assert.deepEqual((yield* catalog.details).buildingBases, ["dev"]);
+        const second = yield* Effect.forkChild(catalog.buildBase("dev"));
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(buildState.buildRelease!, undefined);
+        assert.deepEqual(yield* Fiber.join(second), { name: "dev", state: "current" });
+        assert.equal(buildState.builds, 1);
+        assert.deepEqual((yield* catalog.details).buildingBases, []);
+        // Two first requests at once still start one build.
+        const before = buildState.builds ?? 0;
+        const [a, b] = yield* Effect.all([catalog.buildBase("py"), catalog.buildBase("py")], {
+          concurrency: "unbounded",
+        });
+        assert.deepEqual(a, b);
+        assert.equal(buildState.builds, before + 1);
+        // A failed rebuild of a current base stays reported while it is unchanged...
+        buildState.baseStates = { broken: "current" };
+        yield* catalog.details;
+        yield* catalog.buildBase("broken").pipe(Effect.flip);
+        const failed = { broken: "definition for broken failed" };
+        assert.deepEqual((yield* catalog.details).baseBuildFailures, failed);
+        assert.deepEqual((yield* catalog.details).baseBuildFailures, failed);
+        // ...and goes once Trellis reports it in another state (rebuilt from the CLI).
+        buildState.baseStates = { broken: "stale" };
+        assert.deepEqual((yield* catalog.details).baseBuildFailures, {});
+      }),
+    );
+  });
+
   const raceState: CatalogState = {
     items: [dedicated("prj-race", "Race", [workspace("ws-race")])],
     trashed: [],

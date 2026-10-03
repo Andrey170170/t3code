@@ -31,6 +31,44 @@ export function staleDetailsNotice(input: {
   return `Could not refresh: ${input.error}. Showing details from ${formatTime(input.updatedAt)}.`;
 }
 
+/**
+ * How a base relates to its definition (`base_states`), for its row: a
+ * description, whether it is worth rebuilding, and whether T3 may rebuild it
+ * (only from its built-in definition: a `custom` one would be replaced).
+ */
+export function baseStateView(state: string | null): {
+  readonly description: string | null;
+  readonly warn: boolean;
+  readonly rebuildable: boolean;
+} {
+  switch (state) {
+    case "current":
+      return { description: "Built from its current definition.", warn: false, rebuildable: true };
+    case "stale":
+      return {
+        description:
+          "Built from an older definition. Rebuild it so new workspaces get the current one.",
+        warn: true,
+        rebuildable: true,
+      };
+    case "unrecorded":
+      return {
+        description:
+          "Its definition was not recorded when it was built; rebuild to be sure it is current.",
+        warn: false,
+        rebuildable: true,
+      };
+    case "custom":
+      return {
+        description: "Built from a custom definition; rebuild it with `trellis base build --file`.",
+        warn: false,
+        rebuildable: false,
+      };
+    default:
+      return { description: null, warn: false, rebuildable: true };
+  }
+}
+
 /** `0.1.0 (abc1234)`; null when Trellis does not report a version. */
 export function trellisVersionText(
   details: Pick<TrellisDetails, "version" | "commit">,

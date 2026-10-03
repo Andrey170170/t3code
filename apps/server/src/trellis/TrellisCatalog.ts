@@ -28,6 +28,7 @@ import {
   TRELLIS_LANDING_PAD_PROJECT_ID,
   TrellisError,
   type TrellisBasesResult,
+  type TrellisBuildBaseResult,
   type TrellisDetails,
   type TrellisCreateResult,
   type TrellisFindHit,
@@ -50,6 +51,7 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -747,6 +749,13 @@ export class TrellisCatalog extends Context.Service<
     readonly discardFork: (workspaceId: string) => Effect.Effect<boolean, TrellisError>;
     /** The bases a new project (or a graduating idea) can start from. */
     readonly listBases: Effect.Effect<TrellisBasesResult, TrellisError>;
+    /**
+     * Rebuilds a base from its built-in definition; see `Trellis.buildBase`.
+     * The build runs detached from the caller, so a dropped connection does
+     * not abort it, and a second request for a base being built joins it
+     * rather than queueing another build.
+     */
+    readonly buildBase: (name: string) => Effect.Effect<TrellisBuildBaseResult, TrellisError>;
     /** The Trellis service's status in full, workspaces named from the last sync. */
     readonly details: Effect.Effect<TrellisDetails, TrellisError>;
     /** The T3 project for a Trellis item just created (a graduation's), made now rather than at the next poll. */
@@ -1819,6 +1828,56 @@ const make = Effect.gen(function* () {
     return true;
   });
 
+  // Base builds in progress, by base name; see `buildBase` in the shape.
+  const baseBuilds = new Map<string, Deferred.Deferred<TrellisBuildBaseResult, TrellisError>>();
+  // A failed build's error, kept for the settings page (its caller may be
+  // gone) until a later build succeeds or Trellis reports the base in another
+  // state than when it failed (rebuilt from the CLI). `state` is the base's
+  // state as last read, undefined until a details read sees it.
+  const baseBuildFailures = new Map<
+    string,
+    { readonly message: string; state: string | null | undefined }
+  >();
+  const lastBaseStates = new Map<string, string | null>();
+  const buildBase = Effect.fn("TrellisCatalog.buildBase")(function* (name: string) {
+    yield* requireReady;
+    const fresh = yield* Deferred.make<TrellisBuildBaseResult, TrellisError>();
+    // Looked up and registered without yielding in between, and forked
+    // uninterruptibly, so concurrent requests start one build.
+    const running = yield* Effect.uninterruptible(
+      Effect.gen(function* () {
+        const existing = baseBuilds.get(name);
+        if (existing !== undefined) return existing;
+        baseBuilds.set(name, fresh);
+        baseBuildFailures.delete(name);
+        yield* trellis.buildBase(name).pipe(
+          Effect.tapError((error) =>
+            Effect.sync(
+              () =>
+                void baseBuildFailures.set(name, {
+                  message: error.message,
+                  state: lastBaseStates.has(name) ? lastBaseStates.get(name) : undefined,
+                }),
+            ).pipe(
+              Effect.andThen(
+                Effect.logWarning("Trellis base build failed", {
+                  base: name,
+                  detail: error.message,
+                }),
+              ),
+            ),
+          ),
+          Effect.exit,
+          Effect.flatMap((exit) => Deferred.done(fresh, exit)),
+          Effect.ensuring(Effect.sync(() => void baseBuilds.delete(name))),
+          Effect.forkDetach,
+        );
+        return fresh;
+      }),
+    );
+    return yield* Deferred.await(running);
+  });
+
   return TrellisCatalog.of({
     start,
     checkProjectDelete,
@@ -1889,9 +1948,27 @@ const make = Effect.gen(function* () {
       restoreConflicts(input).pipe(asTrellisError("Could not check the restore")),
     projectFor,
     listBases: requireReady.pipe(Effect.andThen(trellis.bases)),
+    buildBase,
     details: requireReady.pipe(
       Effect.andThen(Effect.all([trellis.details, Ref.get(lastApplied)])),
-      Effect.map(([details, applied]) => nameDetailsWorkspaces(details, applied?.items ?? [])),
+      Effect.map(([details, applied]) => {
+        for (const base of details.bases) {
+          const state = details.baseStates?.[base] ?? null;
+          lastBaseStates.set(base, state);
+          const failure = baseBuildFailures.get(base);
+          if (failure === undefined) continue;
+          if (failure.state === undefined) failure.state = state;
+          // Built since by other means: no longer failed.
+          else if (failure.state !== state) baseBuildFailures.delete(base);
+        }
+        return {
+          ...nameDetailsWorkspaces(details, applied?.items ?? []),
+          buildingBases: [...baseBuilds.keys()],
+          baseBuildFailures: Object.fromEntries(
+            [...baseBuildFailures].map(([base, failure]) => [base, failure.message]),
+          ),
+        };
+      }),
     ),
   });
 });

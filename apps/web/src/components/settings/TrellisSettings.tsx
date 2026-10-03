@@ -31,6 +31,7 @@ import { toastManager } from "../ui/toast";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import {
+  baseStateView,
   formatBytes,
   staleDetailsNotice,
   trellisVersionText,
@@ -305,7 +306,15 @@ function TrellisDetailsSections(props: {
           title="Bases"
           icon={<BoxesIcon className="size-3.5" />}
         >
-          <TrellisBaseRows bases={details.bases} defaultBase={details.defaultBase} />
+          <TrellisBaseRows
+            environmentId={environmentId}
+            bases={details.bases}
+            baseStates={details.baseStates}
+            buildingBases={details.buildingBases}
+            baseBuildFailures={details.baseBuildFailures}
+            defaultBase={details.defaultBase}
+            onBuilt={refresh}
+          />
         </SettingsSection>
       )}
     </>
@@ -417,28 +426,96 @@ function WarningTitle({ children }: { readonly children: ReactNode }) {
 }
 
 function TrellisBaseRows(props: {
+  readonly environmentId: EnvironmentId;
   readonly bases: ReadonlyArray<string>;
+  readonly baseStates: TrellisDetails["baseStates"];
+  /** Builds the server runs, also ones started before this page opened. */
+  readonly buildingBases: ReadonlyArray<string>;
+  readonly baseBuildFailures: TrellisDetails["baseBuildFailures"];
   readonly defaultBase: string | null;
+  readonly onBuilt: () => void;
 }) {
-  const { bases, defaultBase } = props;
+  const { environmentId, bases, defaultBase } = props;
   const defaultMissing = defaultBase !== null && !bases.includes(defaultBase);
+  const buildBase = useAtomCommand(trellisEnvironment.buildBase, { reportFailure: false });
+  // One build at a time per root, as Trellis allows; the server joins a
+  // repeated request for the same base to the running build.
+  const [startedHere, setStartedHere] = useState<string | null>(null);
+  const building = startedHere ?? props.buildingBases[0] ?? null;
+  const rebuild = async (base: string) => {
+    setStartedHere(base);
+    try {
+      const result = await buildBase({ environmentId, input: { name: base } });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          toastManager.add({
+            type: "error",
+            title: `Could not rebuild ${base}`,
+            description: failureMessage(result, "Trellis did not respond."),
+          });
+        }
+        return;
+      }
+      toastManager.add({
+        type: "success",
+        title: `Rebuilt ${base}`,
+        description: "New workspaces start from it; existing ones keep their environment.",
+      });
+    } finally {
+      setStartedHere(null);
+      props.onBuilt();
+    }
+  };
   return (
     <>
       {bases.length === 0 && !defaultMissing ? <SettingsRow title="No bases reported" /> : null}
-      {bases.map((base) => (
-        <SettingsRow
-          key={base}
-          title={<span className="font-mono">{base}</span>}
-          description={base === defaultBase ? "New projects start from this base." : undefined}
-          control={
-            base === defaultBase ? (
-              <Badge variant="secondary" size="sm">
-                Default
-              </Badge>
-            ) : null
-          }
-        />
-      ))}
+      {bases.map((base) => {
+        const state = baseStateView(props.baseStates?.[base] ?? null);
+        const failure = props.baseBuildFailures[base];
+        const description = [
+          base === defaultBase ? "New projects start from this base." : null,
+          failure === undefined ? state.description : `The last rebuild failed: ${failure}`,
+        ]
+          .filter((line) => line !== null)
+          .join(" ");
+        return (
+          <SettingsRow
+            key={base}
+            title={
+              state.warn || failure !== undefined ? (
+                <WarningTitle>
+                  <span className="font-mono">{base}</span>
+                </WarningTitle>
+              ) : (
+                <span className="font-mono">{base}</span>
+              )
+            }
+            description={description.length > 0 ? description : undefined}
+            control={
+              <span className="inline-flex items-center gap-2">
+                {base === defaultBase ? (
+                  <Badge variant="secondary" size="sm">
+                    Default
+                  </Badge>
+                ) : null}
+                {/* `base_states` came with the build endpoint: a Trellis without them cannot build. */}
+                {state.rebuildable && props.baseStates !== null ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={building !== null}
+                    title="Builds it again from its definition; takes a few minutes."
+                    onClick={() => void rebuild(base)}
+                  >
+                    {building === base ? <Spinner size="sm" tone="muted" /> : null}
+                    {building === base ? "Rebuilding…" : "Rebuild"}
+                  </Button>
+                ) : null}
+              </span>
+            }
+          />
+        );
+      })}
       {defaultMissing ? (
         <SettingsRow
           title={
