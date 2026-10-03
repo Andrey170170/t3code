@@ -118,7 +118,7 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 /** Codex's native side conversation for one parent thread, shown in the right panel. */
-export function SideChatPanel(props: SideChatPanelProps) {
+function SideChatPanel(props: SideChatPanelProps) {
   return (
     <SideChatFocusContext value={true}>
       <section
