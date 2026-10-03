@@ -29,6 +29,7 @@ import {
   TrellisError,
   type TrellisBasesResult,
   type TrellisDetails,
+  type TrellisProfile,
   type TrellisCreateResult,
   type TrellisFindHit,
   type TrellisFindResult,
@@ -749,6 +750,8 @@ export class TrellisCatalog extends Context.Service<
     readonly listBases: Effect.Effect<TrellisBasesResult, TrellisError>;
     /** The Trellis service's status in full, workspaces named from the last sync. */
     readonly details: Effect.Effect<TrellisDetails, TrellisError>;
+    /** A workspace's effective agent profile, or (null) the agent homes' and global layer's. */
+    readonly profile: (target: string | null) => Effect.Effect<TrellisProfile, TrellisError>;
     /** The T3 project for a Trellis item just created (a graduation's), made now rather than at the next poll. */
     readonly projectFor: (
       item: TrellisProjectView,
@@ -1893,6 +1896,7 @@ const make = Effect.gen(function* () {
       Effect.andThen(Effect.all([trellis.details, Ref.get(lastApplied)])),
       Effect.map(([details, applied]) => nameDetailsWorkspaces(details, applied?.items ?? [])),
     ),
+    profile: (target) => requireReady.pipe(Effect.andThen(trellis.profile(target))),
   });
 });
 

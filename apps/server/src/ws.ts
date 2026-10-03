@@ -3232,6 +3232,12 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.trellisGetDetails, trellisCatalog.details, {
             "rpc.aggregate": "trellis",
           }),
+        [WS_METHODS.trellisGetProfile]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.trellisGetProfile,
+            trellisCatalog.profile(input.target ?? null),
+            { "rpc.aggregate": "trellis" },
+          ),
         [WS_METHODS.filesystemBrowse]: (input) =>
           observeRpcEffect(
             WS_METHODS.filesystemBrowse,

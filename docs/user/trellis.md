@@ -48,6 +48,11 @@ that Trellis mounts no home for that provider). To run Trellis
 threads from other homes, set the instance's home path to the one Trellis mounts. Codex instances
 with a shadow home or a managed ChatGPT connection cannot run Trellis threads.
 
+**Agent profile** shows which MCP servers, skills and instructions each provider gets, which layer
+each comes from, and which wait for approval or cannot be switched off: in **Settings** >
+**Trellis** for the agent homes and the global layer, and in a project's settings for each of its
+workspaces (edit the layers with `trellis profile path`).
+
 A terminal opened in a Trellis project is a shell inside the workspace, at the same path you see on
 the host.
 

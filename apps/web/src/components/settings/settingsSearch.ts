@@ -707,6 +707,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["trellis bases base image default container"],
   },
   {
+    id: "trellis-profile",
+    title: "Trellis agent profile",
+    to: "/settings/trellis",
+    scope: "environment-defaults",
+    searchTerms: [
+      "trellis agent profile mcp servers skills instructions plugins layers home global approval",
+    ],
+  },
+  {
     id: "trellis-trash",
     title: "Trellis trash",
     to: "/settings/trellis",

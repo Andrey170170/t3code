@@ -529,3 +529,120 @@ export const TrellisDetails = Schema.Struct({
   disk: Schema.NullOr(Schema.Struct({ freeBytes: Schema.Finite, totalBytes: Schema.Finite })),
 });
 export type TrellisDetails = typeof TrellisDetails.Type;
+
+/** `target` is a workspace id or path; without it, the home and global layers only. */
+export const TrellisProfileInput = Schema.Struct({
+  target: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type TrellisProfileInput = typeof TrellisProfileInput.Type;
+
+/**
+ * Where a profile item comes from: its layer (`home`, `global`, `project`,
+ * `workspace`, or `t3` for T3's own server), the file, and the scope within
+ * it (`user`, `settings.json`, `~/.agents`, `repository`, ...).
+ */
+export const TrellisProfileSource = Schema.Struct({
+  layer: Schema.String,
+  path: Schema.NullOr(Schema.String),
+  scope: Schema.NullOr(Schema.String),
+});
+export type TrellisProfileSource = typeof TrellisProfileSource.Type;
+
+/** An MCP server's or a skill's description, redacted by Trellis; fields a kind lacks are null. */
+export const TrellisProfileDetail = Schema.Struct({
+  /** A server's transport: `http`, `sse` or `stdio`. */
+  type: Schema.NullOr(Schema.String),
+  url: Schema.NullOr(Schema.String),
+  command: Schema.NullOr(Schema.String),
+  args: Schema.Array(Schema.String),
+  /** A skill's directory. */
+  path: Schema.NullOr(Schema.String),
+  /** The head (front matter) of a skill's SKILL.md. */
+  head: Schema.NullOr(Schema.String),
+});
+export type TrellisProfileDetail = typeof TrellisProfileDetail.Type;
+
+/** An MCP server, skill, plugin or repository file in a provider's effective profile. */
+export const TrellisProfileItem = Schema.Struct({
+  name: Schema.String,
+  source: TrellisProfileSource,
+  enabled: Schema.Boolean,
+  /** The layer that switched it off. */
+  disabledBy: Schema.NullOr(Schema.String),
+  /**
+   * `needs approval`, `approved`, `needs trust`, `not enforced` (switched
+   * off where Trellis cannot enforce it), `not loaded` (declared where the
+   * provider does not read it) or `error`; newer Trellis versions may add more.
+   */
+  status: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+  approvedBy: Schema.NullOr(Schema.String),
+  detail: TrellisProfileDetail,
+});
+export type TrellisProfileItem = typeof TrellisProfileItem.Type;
+
+/** One layer's instructions for a provider (home files by path, layers' by text). */
+export const TrellisProfileInstructions = Schema.Struct({
+  layer: Schema.String,
+  path: Schema.NullOr(Schema.String),
+  text: Schema.NullOr(Schema.String),
+  enabled: Schema.Boolean,
+  status: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+  approvedBy: Schema.NullOr(Schema.String),
+});
+export type TrellisProfileInstructions = typeof TrellisProfileInstructions.Type;
+
+export const TrellisProfileProvider = Schema.Struct({
+  mcp: Schema.Array(TrellisProfileItem),
+  skills: Schema.Array(TrellisProfileItem),
+  /** Claude's enabled plugins. */
+  plugins: Schema.Array(TrellisProfileItem),
+  instructions: Schema.Array(TrellisProfileInstructions),
+  /** The project repository's own configuration, which the provider reads from the files. */
+  repository: Schema.Struct({
+    mcp: Schema.Array(TrellisProfileItem),
+    skills: Schema.Array(TrellisProfileItem),
+    instructions: Schema.Array(TrellisProfileItem),
+    settings: Schema.Array(TrellisProfileItem),
+  }),
+  /** Claude only: whether the home's own MCP servers are left out too; null when not reported. */
+  strictMcp: Schema.NullOr(Schema.Boolean),
+});
+export type TrellisProfileProvider = typeof TrellisProfileProvider.Type;
+
+/**
+ * What each provider has active in a workspace (or, without a target, from
+ * the agent homes and the global layer), from Trellis's `GET /v1/profile`.
+ * Read only; T3's own `t3-code` server is not included.
+ */
+export const TrellisProfile = Schema.Struct({
+  target: Schema.NullOr(Schema.String),
+  /** Unix seconds the workspace's profile files were last written; null: never (or no target). */
+  generatedAt: Schema.NullOr(Schema.Finite),
+  /** The effective profile changed since the files were written. */
+  stale: Schema.Boolean,
+  trusted: Schema.NullOr(Schema.Boolean),
+  origin: Schema.NullOr(Schema.String),
+  layers: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      path: Schema.NullOr(Schema.String),
+      paths: Schema.Array(Schema.String),
+      present: Schema.NullOr(Schema.Boolean),
+    }),
+  ),
+  /** Null for a provider Trellis did not report. */
+  providers: Schema.Struct({
+    claude: Schema.NullOr(TrellisProfileProvider),
+    codex: Schema.NullOr(TrellisProfileProvider),
+  }),
+  errors: Schema.Array(
+    Schema.Struct({
+      layer: Schema.String,
+      item: Schema.NullOr(Schema.String),
+      error: Schema.String,
+    }),
+  ),
+});
+export type TrellisProfile = typeof TrellisProfile.Type;
