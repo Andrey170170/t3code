@@ -326,15 +326,18 @@ export const layer: Layer.Layer<
         );
         if (homeRefusal !== null) return yield* refuse(homeRefusal);
 
-        const primer = yield* trellis.primer(cwd ?? "").pipe(
-          Effect.map((text) => text.trim()),
-          Effect.catch((error) =>
-            Effect.logWarning("Trellis primer unavailable; starting without it", {
-              threadId: input.thread.id,
-              detail: error.message,
-            }).pipe(Effect.as("")),
-          ),
-        );
+        // With the provider, the primer carries the agent profile's instructions.
+        const primer = yield* trellis
+          .primer(cwd ?? "", driverKind === "claudeAgent" ? "claude" : "codex")
+          .pipe(
+            Effect.map((text) => text.trim()),
+            Effect.catch((error) =>
+              Effect.logWarning("Trellis primer unavailable; starting without it", {
+                threadId: input.thread.id,
+                detail: error.message,
+              }).pipe(Effect.as("")),
+            ),
+          );
         // The shim and Trellis CLI resolve the same root and service as T3.
         const { socketPath } = yield* trellis.connection;
         const instructions = [primer, TRELLIS_T3_GUIDE].filter((text) => text.length > 0);
@@ -342,6 +345,9 @@ export const layer: Layer.Layer<
           executable: decision.executable,
           env: {
             TRELLIS_ROOT: decision.root,
+            // The profile instructions come through the primer above, so
+            // `trellis launch` must not add them a second time.
+            TRELLIS_INSTRUCTIONS: "t3",
             TRELLIS_SOCKET: socketPath,
             // `trellis checkpoint` run by the agent excludes its own turn. A
             // Codex app-server serves every thread of the workspace, so a

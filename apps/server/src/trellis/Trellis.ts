@@ -579,7 +579,15 @@ export class Trellis extends Context.Service<
       workspaceId: string,
     ) => Effect.Effect<ReadonlyArray<TrellisPort>, TrellisError>;
     /** Short agent orientation for sessions started in `target`. */
-    readonly primer: (target: string) => Effect.Effect<string, TrellisError>;
+    /**
+     * The primer for `target`; with `provider`, followed by that provider's
+     * agent profile instructions (Trellis then leaves them out of `trellis
+     * launch` for sessions marked `TRELLIS_INSTRUCTIONS=t3`).
+     */
+    readonly primer: (
+      target: string,
+      provider?: "claude" | "codex",
+    ) => Effect.Effect<string, TrellisError>;
     /**
      * Counts the times Trellis became reachable (from unreachable, or at
      * startup), so a client can resynchronize on every connect.
@@ -1165,10 +1173,13 @@ const make = Effect.gen(function* () {
         `/v1/workspaces/${encodeURIComponent(workspaceId)}/ports`,
         { timeoutMs: 5_000 },
       ),
-    primer: (target) =>
-      call(TrellisPrimerView, "GET", `/v1/primer?${query({ target })}`, { timeoutMs: 5_000 }).pipe(
-        Effect.map((view) => view.primer),
-      ),
+    primer: (target, provider) =>
+      call(
+        TrellisPrimerView,
+        "GET",
+        `/v1/primer?${query(provider === undefined ? { target } : { target, provider })}`,
+        { timeoutMs: 5_000 },
+      ).pipe(Effect.map((view) => view.primer)),
     connects: Effect.sync(() => connects),
     reportTurn: (body) =>
       // A start waits while the workspace is checkpointing (Trellis gives up after 15 min).

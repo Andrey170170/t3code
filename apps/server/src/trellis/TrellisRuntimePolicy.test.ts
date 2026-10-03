@@ -100,9 +100,9 @@ const resolve = (input: {
           expectedRoots: Effect.succeed(input.knownRoots ?? ["/trellis"]),
           ...(input.notAskedYet === true ? { current: Effect.succeed(null) } : {}),
           canonicalPath: (path) => Effect.succeed(input.aliases?.[path] ?? path),
-          primer: (target) =>
+          primer: (target, provider) =>
             Effect.sync(() => {
-              primerTargets.push(target);
+              primerTargets.push(provider === undefined ? target : `${target} (${provider})`);
               return "You are in a Trellis workspace.\n";
             }),
         }),
@@ -144,6 +144,7 @@ describe("TrellisRuntimePolicy", () => {
           executable: `/t3/trellis-shims/${shim}`,
           env: {
             TRELLIS_ROOT: "/trellis",
+            TRELLIS_INSTRUCTIONS: "t3",
             TRELLIS_SOCKET: "/trellis/state/api.sock",
             // A Codex app-server serves several threads, so only Claude's names one.
             ...(instance === "claudeAgent" ? { TRELLIS_THREAD: "thread-trellis-policy" } : {}),
@@ -152,7 +153,9 @@ describe("TrellisRuntimePolicy", () => {
           sessionKey: "ws-1",
           loopbackHost: "host.containers.internal",
         });
-        assert.deepEqual(primerTargets, [idea]);
+        // The primer with this provider's profile instructions, which
+        // `trellis launch` then leaves out (TRELLIS_INSTRUCTIONS=t3).
+        assert.deepEqual(primerTargets, [`${idea} (${shim})`]);
       }
     }),
   );
