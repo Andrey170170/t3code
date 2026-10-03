@@ -695,7 +695,9 @@ function TrellisHistorySection(props: {
   // the settings just entered (clicking Run now commits a focused field).
   // Resolves to whether every save since the last Run now succeeded.
   const writes = useRef<Promise<boolean>>(Promise.resolve(true));
+  const maintainingRef = useRef(false);
   const thinNow = async () => {
+    maintainingRef.current = true;
     setMaintaining(true);
     try {
       const saved = await writes.current;
@@ -723,6 +725,7 @@ function TrellisHistorySection(props: {
       }
       toastManager.add({ type: "success", title: "Maintenance done" });
     } finally {
+      maintainingRef.current = false;
       setMaintaining(false);
       historyQuery.refresh();
     }
@@ -747,7 +750,8 @@ function TrellisHistorySection(props: {
   });
 
   const commit = async (key: HistoryKey, input: number | null) => {
-    if (settings === null) return;
+    // Fields and resets wait while Run now runs (see `thinNow`).
+    if (settings === null || maintainingRef.current) return;
     const current = historyFieldValue(
       key,
       historyValuesInForce(settings.values, historyQuery.dataUpdatedAt, editsRef.current),
@@ -863,6 +867,8 @@ function TrellisHistorySection(props: {
                       step={1}
                       size="sm"
                       className="w-32"
+                      // No new saves while Run now waits for the earlier ones and runs.
+                      disabled={maintaining}
                       onValueCommitted={(next) => void commit(setting.key, next)}
                     >
                       <NumberFieldGroup>
