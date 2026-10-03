@@ -15,13 +15,16 @@ import { useTrellisCreate, useTrellisStatusFor } from "./useTrellis";
 export function useNoProjectStart(currentEnvironmentId: EnvironmentId | null) {
   const { scratchEnvironmentId, startScratchThread } = useScratchProject();
   const { newIdea } = useTrellisCreate();
-  const trellisState = useTrellisStatusFor(currentEnvironmentId)?.state ?? null;
   const scratchTargetEnvironmentId = scratchEnvironmentId(currentEnvironmentId);
+  // With no current environment (the hosted app with nothing open), the one
+  // environment scratch would pick is also the one whose Trellis decides.
+  const targetEnvironmentId = currentEnvironmentId ?? scratchTargetEnvironmentId;
+  const trellisState = useTrellisStatusFor(targetEnvironmentId)?.state ?? null;
   const kind = noProjectKind({
     trellisState,
     scratchOffered: scratchTargetEnvironmentId !== null,
   });
-  const environmentId = kind === "idea" ? currentEnvironmentId : scratchTargetEnvironmentId;
+  const environmentId = kind === "idea" ? targetEnvironmentId : scratchTargetEnvironmentId;
 
   const start = useCallback(async (): Promise<void> => {
     if (kind === null || environmentId === null) return;
