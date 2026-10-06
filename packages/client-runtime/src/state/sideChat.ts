@@ -1,6 +1,6 @@
 import { WS_METHODS, type SideChatSnapshot, type SideChatStreamEvent } from "@t3tools/contracts";
 import * as Stream from "effect/Stream";
-import type { Atom } from "effect/unstable/reactivity";
+import type { Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import {
@@ -71,7 +71,7 @@ export function createSideChatEnvironmentAtoms<R, E>(
       label: "environment-data:side-chat:state",
       tag: WS_METHODS.sideChatSubscribe,
       transform: (stream) =>
-        stream.pipe(Stream.scan(null as SideChatSnapshot | null, applySideChatStreamEvent)),
+        stream.pipe(Stream.scan((): SideChatSnapshot | null => null, applySideChatStreamEvent)),
     }),
     open: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:side-chat:open",

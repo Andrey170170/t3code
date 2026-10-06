@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import { Command } from "effect/unstable/cli";
+import { Command } from "effect/cli";
 import { vi } from "vite-plus/test";
 import {
   HostProcessEnvironment,

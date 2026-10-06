@@ -7,7 +7,7 @@ import { createSideChatEnvironmentAtoms } from "@t3tools/client-runtime/state/si
 import type { EnvironmentId, SideChatTargetInput } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 
 import { environmentCatalog } from "../connection/catalog";
 import { connectionAtomRuntime } from "../connection/runtime";

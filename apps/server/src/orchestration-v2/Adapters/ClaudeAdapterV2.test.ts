@@ -43,7 +43,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { Tool } from "effect/unstable/ai";
+import { Tool } from "effect/ai";
 import { formatClaudeResumeCompactionQuestion } from "@t3tools/shared/claudeCompaction";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
@@ -52,13 +52,14 @@ import { attachmentRelativePath } from "../../attachmentStore.ts";
 import * as ServerConfig from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { PreviewControlsToolkit } from "../../mcp/toolkits/previewControls/tools.ts";
+import { HtmlToolkit } from "../../mcp/toolkits/html/tools.ts";
 import { EnvironmentToolkit } from "../../mcp/toolkits/environment/tools.ts";
 import { ProjectToolkit } from "../../mcp/toolkits/project/tools.ts";
 import { WorktreeToolkit } from "../../mcp/toolkits/worktree/tools.ts";
 import { ThreadToolkit } from "../../mcp/toolkits/thread/tools.ts";
 import { OrchestratorToolkit } from "../../mcp/toolkits/orchestrator/tools.ts";
 import { ClaudeExecutableFileCheck } from "../../provider/Drivers/ClaudeExecutable.ts";
-import type { EventNdjsonLogger } from "../../provider/Layers/EventNdjsonLogger.ts";
+import type { EventNdjsonLogger } from "../../provider/EventNdjsonLogger.ts";
 import {
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2Event,
@@ -126,6 +127,7 @@ function makeClaudeTestTurnInput(input: {
   readonly text: string;
   readonly attachments: ProviderAdapterV2TurnInput["message"]["attachments"];
   readonly providerTurnOrdinal?: number;
+  readonly nativeThreadHasTurns?: boolean;
   readonly messageCreatedBy?: ProviderAdapterV2TurnInput["message"]["createdBy"];
   readonly messageCreationSource?: ProviderAdapterV2TurnInput["message"]["creationSource"];
   readonly modelSelection?: ModelSelection;
@@ -137,6 +139,9 @@ function makeClaudeTestTurnInput(input: {
     runId: RunId.make(`run-${input.attemptId}`),
     runOrdinal: 1,
     providerTurnOrdinal: input.providerTurnOrdinal ?? 1,
+    ...(input.nativeThreadHasTurns === undefined
+      ? {}
+      : { nativeThreadHasTurns: input.nativeThreadHasTurns }),
     attemptId: input.attemptId,
     rootNodeId: NodeId.make(`node-${input.attemptId}`),
     providerThread: input.providerThread,
@@ -651,6 +656,7 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
       ...Object.values(ProjectToolkit.tools),
       ...Object.values(EnvironmentToolkit.tools),
       ...Object.values(PreviewControlsToolkit.tools),
+      ...Object.values(HtmlToolkit.tools),
     ]
       .filter((tool) => Context.get(tool.annotations, Tool.Readonly))
       .map((tool) => `mcp__t3-code__${tool.name}`)
@@ -867,6 +873,20 @@ describe("ClaudeAdapterV2 context usage", () => {
 });
 
 describe("ClaudeAdapterV2 session permissions", () => {
+  it("keeps explicit user refusals classified as user_reject", () => {
+    const result = ClaudeAdapterV2.permissionResultFromDecision({
+      toolName: "Bash",
+      decision: "decline",
+      toolInput: { command: "make" },
+      toolUseID: "denied-build",
+    });
+    assert.equal(result.behavior, "deny");
+    if (result.behavior !== "deny") return;
+    assert.equal(result.decisionClassification, "user_reject");
+    assert.equal(result.message, "User declined tool execution.");
+    assert.equal(result.interrupt, undefined);
+  });
+
   it("forces suggested permission updates to session scope", () => {
     const result = ClaudeAdapterV2.permissionResultFromDecision({
       toolName: "Bash",
@@ -1783,10 +1803,7 @@ describe("ClaudeAdapterV2 native fork", () => {
 });
 
 describe("ClaudeAdapterV2 native session identity", () => {
-  // `resumed`: the provider thread comes from an earlier session instance and
-  // is resumed on a new one (an idle release); otherwise this session
-  // allocated it, as for a new thread or a failed resume's fallback.
-  const openTurnWithOrdinal = (providerTurnOrdinal: number, resumed = false) =>
+  const openTurnWithOrdinal = (providerTurnOrdinal: number, nativeThreadHasTurns?: boolean) =>
     Effect.scoped(
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -1830,29 +1847,13 @@ describe("ClaudeAdapterV2 native session identity", () => {
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
           runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
         });
-        const allocated = yield* runtime.ensureThread({
+        const providerThread = yield* runtime.ensureThread({
           threadId,
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
           runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
         });
-        const turnRuntime = resumed
-          ? yield* adapter.openSession({
-              threadId,
-              providerSessionId: ProviderSessionId.make("provider-session-claude-identity-2"),
-              modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-              runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
-            })
-          : runtime;
-        const providerThread = resumed
-          ? yield* turnRuntime.resumeThread({
-              threadId,
-              providerThread: allocated,
-              modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-              runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
-            })
-          : allocated;
         const now = yield* DateTime.now;
-        yield* turnRuntime.startTurn(
+        yield* runtime.startTurn(
           makeClaudeTestTurnInput({
             threadId,
             providerThread,
@@ -1861,6 +1862,7 @@ describe("ClaudeAdapterV2 native session identity", () => {
             text: "Respond with identity ok",
             attachments: [],
             providerTurnOrdinal,
+            ...(nativeThreadHasTurns === undefined ? {} : { nativeThreadHasTurns }),
           }),
         );
         return openedQueries;
@@ -1880,115 +1882,19 @@ describe("ClaudeAdapterV2 native session identity", () => {
     "resumes the native session on a fresh session instance when prior provider turns exist",
     () =>
       Effect.gen(function* () {
-        const openedQueries = yield* openTurnWithOrdinal(2, true);
+        const openedQueries = yield* openTurnWithOrdinal(2);
         assert.equal(openedQueries.length, 1);
         assert.equal(openedQueries[0]?.options.resume, "native-session-identity");
         assert.equal(openedQueries[0]?.options.sessionId, undefined);
       }),
   );
 
-  // A failed resume keeps the provider-thread row (and its turn ordinals) but
-  // binds a newly allocated native session, which must be created, not resumed.
-  it.effect("creates a replacement native session even when prior provider turns exist", () =>
+  it.effect("creates a fresh native session despite earlier provider-thread turns", () =>
     Effect.gen(function* () {
-      const openedQueries = yield* openTurnWithOrdinal(3);
-      assert.equal(openedQueries.length, 1);
+      const openedQueries = yield* openTurnWithOrdinal(4, false);
       assert.equal(openedQueries[0]?.options.sessionId, "native-session-identity");
       assert.equal(openedQueries[0]?.options.resume, undefined);
     }),
-  );
-});
-
-describe("ClaudeAdapterV2 resume fallback", () => {
-  // After a failed resume, V2 binds a new native session to the same
-  // provider-thread row (`ensureThread` with the existing row) and starts the
-  // turn with that row's next ordinal. The new session must be created, not
-  // resumed.
-  it.effect("opens the replacement session fresh after a failed resume", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const idAllocator = yield* IdAllocator.IdAllocatorV2;
-        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-fallback-" });
-        const cwd = path.join(home, "workspace");
-        yield* fileSystem.makeDirectory(path.join(home, ".claude", "projects"), {
-          recursive: true,
-        });
-        yield* fileSystem.makeDirectory(cwd);
-        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          cwd,
-        });
-        const sessionIds = ["native-original", "native-replacement"];
-        const openedQueries: Array<ClaudeAdapterV2.ClaudeAgentSdkQueryOpenInput> = [];
-        const adapter = ClaudeAdapterV2.makeClaudeAdapterV2({
-          instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
-          settings: DEFAULT_CLAUDE_SETTINGS,
-          environment: { HOME: home },
-          attachmentsDir: path.join(home, "attachments"),
-          fileSystem,
-          path,
-          idAllocator,
-          queryRunner: {
-            allocateSessionId: Effect.sync(() => sessionIds.shift() ?? "native-unexpected"),
-            open: (input) =>
-              Effect.sync(() => {
-                openedQueries.push(input);
-                return {
-                  messages: Stream.empty,
-                  offer: () => Effect.void,
-                  setModel: () => Effect.void,
-                  setPermissionMode: () => Effect.void,
-                  interrupt: Effect.void,
-                  close: Effect.void,
-                };
-              }),
-            forkSession: () => Effect.die("unused forkSession"),
-            subagentLaunchToolUseId: () => Effect.succeed(null),
-            assertComplete: Effect.void,
-          },
-        });
-        const threadId = ThreadId.make("thread-claude-resume-fallback");
-        const openSession = (id: string) =>
-          adapter.openSession({
-            threadId,
-            providerSessionId: ProviderSessionId.make(id),
-            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-            runtimePolicy,
-          });
-        // An earlier session created the native thread.
-        const original = yield* (yield* openSession("provider-session-before")).ensureThread({
-          threadId,
-          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-          runtimePolicy,
-        });
-
-        const runtime = yield* openSession("provider-session-after");
-        const replacement = yield* runtime.ensureThread({
-          threadId,
-          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-          runtimePolicy,
-          existingProviderThread: { ...original, nativeThreadRef: null },
-        });
-        yield* runtime.startTurn(
-          makeClaudeTestTurnInput({
-            threadId,
-            providerThread: replacement,
-            now: yield* DateTime.now,
-            attemptId: RunAttemptId.make("run-attempt-claude-resume-fallback"),
-            text: "Continue from the summary",
-            attachments: [],
-            providerTurnOrdinal: 2,
-            runtimePolicy,
-          }),
-        );
-        assert.equal(openedQueries.length, 1);
-        assert.equal(openedQueries[0]?.options.sessionId, "native-replacement");
-        assert.equal(openedQueries[0]?.options.resume, undefined);
-      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
-    ),
   );
 });
 
@@ -2305,6 +2211,173 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
 
+  it.effect.each([
+    { isError: false, title: "Check weather" },
+    { isError: true, title: "Check weather" },
+    { isError: false, title: undefined },
+  ])("keeps late MCP display metadata with %j", ({ isError, title }) =>
+    Effect.gen(function* () {
+      const harness = yield* makeWakeHarness;
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          attemptId: RunAttemptId.make("mcp-presentation"),
+          text: "Check the weather",
+          attachments: [],
+        }),
+      );
+      const toolName = "mcp__weather__get_weather";
+      const id = "weather-call";
+      yield* Effect.promise(() =>
+        harness.getOpenedOptions()!.canUseTool!(
+          toolName,
+          { city: "Berlin" },
+          {
+            signal: new AbortController().signal,
+            toolUseID: id,
+            requestId: "weather-request",
+          },
+        ),
+      );
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          type: "assistant",
+          uuid: "weather-assistant",
+          session_id: WAKE_NATIVE_SESSION,
+          parent_tool_use_id: null,
+          message: {
+            id: "weather-message",
+            type: "message",
+            role: "assistant",
+            model: "claude-sonnet-4-6",
+            content: [{ type: "tool_use", id, name: toolName, input: { city: "Berlin" } }],
+          },
+          tool_use_meta: [
+            {
+              id,
+              display_name: title,
+              server_display_name: "Weather",
+              icon_url: "https://example.com/weather.png",
+            },
+          ],
+        }),
+      );
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          type: "user",
+          uuid: "weather-result",
+          session_id: WAKE_NATIVE_SESSION,
+          parent_tool_use_id: null,
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: id,
+                content: "Weather result",
+                is_error: isError,
+              },
+            ],
+          },
+        }),
+      );
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeResultFrame({ uuid: "weather-terminal", result: "Weather checked" }),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      const items = harness.events.flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool"
+          ? [event.turnItem]
+          : [],
+      );
+      assert.deepEqual(
+        items.map((item) => item.status),
+        ["running", "running", isError ? "failed" : "completed"],
+      );
+      assert.isNull(items[0]?.title);
+      for (const item of items.slice(1)) {
+        assert.equal(item.title, title ?? "get weather");
+        assert.deepEqual(item.toolIcon, {
+          _tag: "themed-logo",
+          logoUrl: "https://example.com/weather.png",
+        });
+        assert.deepEqual(item.toolSource, {
+          key: "mcp:weather",
+          name: "Weather",
+          kind: "integration",
+          icon: { _tag: "themed-logo", logoUrl: "https://example.com/weather.png" },
+        });
+        assert.deepEqual(item.input, { city: "Berlin" });
+      }
+      assert.equal(new Set(items.map((item) => item.id)).size, 1);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect(
+    "reuses a background shell's query for omitted and explicit Normal, but blocks Fast",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const normal = {
+            instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+            model: "claude-opus-5-5",
+          } satisfies ModelSelection;
+          const turn = (ordinal: number, modelSelection: ModelSelection) =>
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make(`attempt-normal-background:${ordinal}`),
+              text: `Request ${ordinal}`,
+              attachments: [],
+              providerTurnOrdinal: ordinal,
+              modelSelection,
+            });
+          yield* harness.runtime.startTurn(turn(1, normal));
+          const originalOptions = harness.getOpenedOptions();
+          yield* harness.offerAndWait(wakeTaskStarted);
+          yield* harness.offerAndWait(turnOneResult);
+          yield* Queue.take(harness.terminalReceipts);
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+
+          yield* harness.runtime.startTurn(
+            turn(2, {
+              ...normal,
+              options: [{ id: "fastMode", value: false }],
+            }),
+          );
+          assert.strictEqual(harness.getOpenedOptions(), originalOptions);
+          assert.lengthOf(harness.offeredMessages, 2);
+          yield* harness.offerAndWait(turnOneResult);
+          yield* Queue.take(harness.terminalReceipts);
+
+          const refused = yield* harness.runtime
+            .startTurn(
+              turn(3, {
+                ...normal,
+                options: [{ id: "fastMode", value: true }],
+              }),
+            )
+            .pipe(Effect.result);
+          assert.equal(refused._tag, "Failure");
+          if (refused._tag === "Failure") {
+            assert.instanceOf(
+              refused.failure.cause,
+              ClaudeAdapterV2.ClaudeBackgroundWorkBlocksQueryReplacementError,
+            );
+          }
+          assert.strictEqual(harness.getOpenedOptions(), originalOptions);
+          assert.lengthOf(harness.offeredMessages, 2);
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+      ),
+  );
+
   it.effect.each(["completed", "interrupted"] as const)(
     "projects Claude thinking blocks when %s",
     (status) =>
@@ -2421,6 +2494,77 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         for (const item of latest.values()) assert.notInclude(item.text, "secret-signature");
       }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect.each(["cancelled", "denied", "permission_denied", undefined])(
+    "preserves native tool non-execution metadata %s without inferring a denial from text",
+    (kind) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("attempt-tool-non-execution"),
+              text: "Run the tool.",
+              attachments: [],
+            }),
+          );
+          // Same error text can describe a cancellation or a real refusal.
+          // Each result must use its own metadata, even in a multi-result frame.
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "user",
+              uuid: "tool-non-execution",
+              session_id: WAKE_NATIVE_SESSION,
+              parent_tool_use_id: null,
+              message: {
+                role: "user",
+                content: [
+                  {
+                    type: "tool_result",
+                    tool_use_id: "tool-error",
+                    is_error: true,
+                    content: "STOP and wait for the user.",
+                  },
+                  { type: "tool_result", tool_use_id: "tool-ok", is_error: false, content: "OK" },
+                ],
+              },
+              ...(kind === undefined
+                ? {}
+                : {
+                    tool_result_meta: [
+                      { id: "tool-error", non_execution_kind: kind },
+                      { id: "tool-ok", non_execution_kind: null },
+                    ],
+                  }),
+            }),
+          );
+          yield* Queue.offer(
+            harness.sdkMessages,
+            makeResultFrame({ uuid: "result-non-execution", result: "Done" }),
+          );
+          yield* Queue.take(harness.terminalReceipts);
+          const items = harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool"
+              ? [event.turnItem]
+              : [],
+          );
+          const failed = items.findLast((item) => item.nativeItemRef?.nativeId === "tool-error")!;
+          assert.equal(failed.status, kind === "cancelled" ? "cancelled" : "failed");
+          assert.equal(failed.toolNonExecutionKind, kind);
+          const ok = items.findLast((item) => item.nativeItemRef?.nativeId === "tool-ok")!;
+          assert.equal(ok.status, "completed");
+          assert.equal(ok.toolNonExecutionKind, undefined);
+          const node = harness.events.findLast(
+            (event) =>
+              event.type === "node.updated" && event.node.nativeItemRef?.nativeId === "tool-error",
+          );
+          assert.equal(node?.type === "node.updated" ? node.node.status : undefined, failed.status);
+        }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+      ),
   );
 
   it.effect.each(
@@ -8120,6 +8264,155 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),
   );
+
+  describe("native goals", () => {
+    const syntheticFrame = (uuid: string, text: string) =>
+      claudeSdkFrame({
+        type: "assistant",
+        message: {
+          model: "<synthetic>",
+          id: uuid,
+          type: "message",
+          role: "assistant",
+          content: [{ type: "text", text }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+        parent_tool_use_id: null,
+        uuid,
+        session_id: WAKE_NATIVE_SESSION,
+      });
+    const stopHookFeedback = (uuid: string, condition: string, reason: string) =>
+      claudeSdkFrame({
+        type: "user",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: `Stop hook feedback:\n[${condition}]: ${reason}` }],
+        },
+        parent_tool_use_id: null,
+        isSynthetic: true,
+        uuid,
+        session_id: WAKE_NATIVE_SESSION,
+      });
+    const goalStatuses = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+      events.flatMap((event) =>
+        event.type === "provider_thread.updated" && event.providerThread.goal != null
+          ? [event.providerThread.goal]
+          : [],
+      );
+
+    it.effect("tracks a /goal through unmet checks until Claude stops on its own", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const condition = "all tests pass";
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("goal-attempt"),
+            text: `/goal ${condition}`,
+            attachments: [],
+          }),
+        );
+        for (const frame of [
+          syntheticFrame("goal-set", `Goal set: ${condition}`),
+          makeAssistantTextFrame({ uuid: "goal-work-1", text: "Fixing the first test." }),
+          stopHookFeedback("goal-check-1", condition, "One test still fails."),
+          makeAssistantTextFrame({ uuid: "goal-work-2", text: "All tests pass now." }),
+          makeResultFrame({ uuid: "goal-result", result: "All tests pass now." }),
+        ]) {
+          yield* Queue.offer(harness.sdkMessages, frame);
+        }
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+        assert.equal(terminal.status, "completed");
+        assert.deepEqual(goalStatuses(harness.events), [
+          { objective: condition, status: "active", checks: 0 },
+          {
+            objective: condition,
+            status: "active",
+            checks: 1,
+            lastCheck: "One test still fails.",
+          },
+          { objective: condition, status: "complete", checks: 1 },
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    );
+
+    it.effect("keeps a goal active when a hook stops the turn before the goal passes", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const condition = "the deploy succeeds";
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("goal-hook-stop-attempt"),
+            text: `/goal ${condition}`,
+            attachments: [],
+          }),
+        );
+        for (const frame of [
+          syntheticFrame("goal-hook-set", `Goal set: ${condition}`),
+          makeAssistantTextFrame({ uuid: "goal-hook-work", text: "Deploying." }),
+          makeResultFrame({
+            uuid: "goal-hook-result",
+            result: "Deploying.",
+            terminalReason: "hook_stopped",
+          }),
+        ]) {
+          yield* Queue.offer(harness.sdkMessages, frame);
+        }
+        yield* Queue.take(harness.terminalReceipts);
+        assert.deepEqual(goalStatuses(harness.events).at(-1), {
+          objective: condition,
+          status: "active",
+          checks: 0,
+        });
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    );
+
+    it.effect("keeps a goal active after a command turn with no model output", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const condition = "the build is green";
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: {
+              ...harness.providerThread,
+              goal: { objective: condition, status: "active", checks: 2 },
+            },
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("goal-show-attempt"),
+            text: "/goal",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          syntheticFrame("goal-show", `Goal active: ${condition} (2 turns)`),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({ uuid: "goal-show-result", result: "", numTurns: 0 }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+        assert.deepEqual(goalStatuses(harness.events).at(-1), {
+          objective: condition,
+          status: "active",
+          checks: 2,
+        });
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    );
+  });
 });
 
 describe("ClaudeAdapterV2 query message stream", () => {

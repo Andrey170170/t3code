@@ -1,7 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 
@@ -44,6 +44,8 @@ describe("fork migration ledger", () => {
       assert.deepStrictEqual(yield* runMigrations(), [
         [55, "OrchestrationV2"],
         [56, "RemoveRedundantProjectionIndexes"],
+        [57, "ScheduledTaskWebhooks"],
+        [58, "WebhookRelayDeliveries"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* readLedger, migrationManifest);
@@ -60,6 +62,8 @@ describe("fork migration ledger", () => {
       assert.deepStrictEqual(yield* runMigrations(), [
         [55, "OrchestrationV2"],
         [56, "RemoveRedundantProjectionIndexes"],
+        [57, "ScheduledTaskWebhooks"],
+        [58, "WebhookRelayDeliveries"],
       ]);
       assert.deepStrictEqual(yield* readLedger, migrationManifest);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -74,6 +78,8 @@ describe("fork migration ledger", () => {
         [54, "ProjectionThreadsAutoSettleDisabledAt"],
         [55, "OrchestrationV2"],
         [56, "RemoveRedundantProjectionIndexes"],
+        [57, "ScheduledTaskWebhooks"],
+        [58, "WebhookRelayDeliveries"],
       ]);
       assert.deepStrictEqual(yield* readLedger, migrationManifest);
       const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
