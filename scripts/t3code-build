@@ -261,8 +261,11 @@ node -e '
       if (typeof spec !== "string" || !spec.startsWith("catalog:")) return [name, spec];
       const explicit = spec.slice("catalog:".length).trim();
       // Like pnpm, a bare catalog: on an override selector such as
-      // `@scope/parent>effect` names the package the selector ends in.
-      const key = explicit || (name.split(">").at(-1) ?? name);
+      // `@scope/parent>effect` or `undici@^8` names the package the selector
+      // ends in, without its version range.
+      const selector = name.split(">").at(-1) ?? name;
+      const versionIndex = selector.indexOf("@", 1);
+      const key = explicit || (versionIndex === -1 ? selector : selector.slice(0, versionIndex));
       const value = catalog[key];
       if (typeof value !== "string" || !value) {
         throw new Error(`Unable to resolve ${spec} for ${packageName} dependency ${name}`);
