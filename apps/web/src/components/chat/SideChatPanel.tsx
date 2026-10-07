@@ -10,6 +10,7 @@ import {
   type PendingThreadRequests,
 } from "@t3tools/client-runtime/state/thread-requests";
 import {
+  AuthOrchestrationOperateScope,
   ProviderDriverKind,
   ThreadId,
   type ChatFileAttachment,
@@ -54,6 +55,7 @@ import {
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import { useRightPanelStore } from "../../rightPanelStore";
 import { deriveTimelineEntriesFromVisibleTurnItems } from "../../session-logic";
+import { useEnvironmentScope } from "../../state/session";
 import { closeSideChat, sideChatEnvironment } from "../../state/sideChat";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { resolveComposerInteractionMode } from "../ChatView.logic";
@@ -527,6 +529,7 @@ const SideChatComposer = memo(function SideChatComposer({
 }: SideChatComposerProps) {
   const send = useAtomCommand(sideChatEnvironment.send, { reportFailure: false });
   const respond = useAtomCommand(sideChatEnvironment.respond, { reportFailure: false });
+  const canOperateThread = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const target = { parentThreadId, sideChatId };
 
   const [draft, setDraftState] = useState(() => draftsBySideChatId.get(sideChatId) ?? EMPTY_DRAFT);
@@ -811,6 +814,7 @@ const SideChatComposer = memo(function SideChatComposer({
               <div className="ml-auto">
                 <ComposerPrimaryActions
                   compact
+                  canOperateThread={canOperateThread}
                   pendingAction={
                     progress
                       ? {
