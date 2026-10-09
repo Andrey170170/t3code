@@ -1,8 +1,9 @@
 # Custom server packages on Forgejo
 
-The custom `t3` package includes the server CLI and built web client. Desktop
-installers still use the existing `dist:desktop:*` commands; this npm workflow
-installs the server on Linux or downloads its package on other machines.
+The custom `t3` package includes the server CLI and built web client; this npm
+workflow installs the server on Linux or downloads its package on other
+machines. The Windows desktop app is released to the same Forgejo as an update
+feed; see [Windows desktop](#windows-desktop).
 
 The default registry is
 `https://git.andrei-homelab.com/api/packages/git-god/npm/`. Override it with
@@ -168,3 +169,32 @@ to its own updater with the same contract: take one exact version, exit zero
 once the install is under way outside the service, or exit non-zero with the
 reason as the last line of stderr. Given `--latest`, print the newest version
 it can install as the last line of stdout.
+
+## Windows desktop
+
+The installer needs MSVC, so it is built on the Windows machine and driven from
+this checkout over SSH. Release it with the version of the server package
+published from the same commit:
+
+```bash
+export PACKAGE_FOGEJO_TOKEN_FILE="$HOME/.config/local_packager/forgejo-token"
+scripts/t3code-desktop-release --version 0.0.45-forgejo.14 --ref COMMIT
+# Or build without publishing; the installer stays in the printed directory.
+scripts/t3code-desktop-release --version 0.0.45-forgejo.14 --build-only
+```
+
+The script sends a source archive of the commit to `C:\t3code-build`, builds
+there, checks that the update manifest describes the installer it got back,
+and uploads both. `T3CODE_WINDOWS_BUILD_HOST` (default `wsl_worker`) is an SSH
+host inside WSL on that machine: Windows programs started from WSL run
+natively, so no SSH server is needed on Windows itself. The machine needs the
+[Windows installer prerequisites](./development.md#windows-installer-prerequisites)
+and Node; the WSL runtime archive is not bundled, so this build cannot host WSL
+projects.
+
+The feed is the generic package `t3-desktop`, version `win-x64`, which holds
+`latest.yml` and the installer it names. Forgejo never overwrites a package
+file, so a release uploads the new installer, replaces the manifest, and then
+removes the previous installer. An installed app polls the feed and updates
+itself; a build made before the feed existed is replaced by running the new
+installer once. Builds are unsigned, so SmartScreen warns on a manual install.
