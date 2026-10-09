@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Builds the Windows desktop installer on the Windows build machine and
+# publishes it as the Forgejo update feed installed apps poll.
+set -euo pipefail
+usage() {
+  cat <<'HELP'
+Usage: scripts/t3code-desktop-release --version VERSION [--ref REF] [--build-only]
+
+Builds committed source (REF, default HEAD) as desktop VERSION, normally the
+version of the server package published from the same commit, and replaces the
+Windows update feed with it. --build-only stops before publishing and leaves
+the installer in a printed directory.
+
+The build runs over SSH on T3CODE_WINDOWS_BUILD_HOST (default wsl_worker), a
+WSL host of the Windows machine, in C:\t3code-build. Publishing needs
+PACKAGE_FOGEJO_TOKEN_FILE; T3CODE_REGISTRY overrides the Forgejo npm registry
+the feed address is derived from.
+HELP
+}
+die() { echo "$*" >&2; exit 1; }
+version="" ref=HEAD build_only=0
+while (($#)); do
+  case $1 in
+    --version|--ref) (($# >= 2)) || die "Missing value for $1"
+      if [[ $1 == --version ]]; then version=$2; else ref=$2; fi
+      shift 2 ;;
+    --build-only) build_only=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) die "Unknown option: $1" ;;
+  esac
+done
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+-forgejo\.[0-9]+$ ]] || die "--version must be a Forgejo release such as 0.0.45-forgejo.14."
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+host=${T3CODE_WINDOWS_BUILD_HOST:-wsl_worker}
+registry=${T3CODE_REGISTRY:-https://git.andrei-homelab.com/api/packages/git-god/npm/}
+[[ $registry =~ ^(https?://[^/]+)/api/packages/([^/]+)/npm/?$ ]] || die "Unsupported registry: $registry"
+origin=${BASH_REMATCH[1]} owner=${BASH_REMATCH[2]}
+# One fixed package version is the feed: electron-updater needs latest.yml at a stable address.
+package=t3-desktop channel=win-x64
+feed="$origin/api/packages/$owner/generic/$package/$channel"
+commit=$(git -C "$repo" rev-parse --verify "$ref^{commit}")
+token=""
+if ((!build_only)); then
+  [[ -r ${PACKAGE_FOGEJO_TOKEN_FILE:-} ]] || die "Set PACKAGE_FOGEJO_TOKEN_FILE to publish."
+  token=$(<"$PACKAGE_FOGEJO_TOKEN_FILE")
+fi
+work=$(mktemp -d)
+if ((build_only)); then trap 'rm -f -- "$work/source.tar.gz"' EXIT; else trap 'rm -rf -- "$work"' EXIT; fi
+
+echo "Building desktop $version from $commit on $host"
+git -C "$repo" archive "$commit" ':!.repos' ':!.claude' | gzip -1 > "$work/source.tar.gz"
+ssh "$host" 'mkdir -p /mnt/c/t3code-build'
+scp -q "$work/source.tar.gz" "$repo/scripts/t3code-desktop-build.ps1" "$host:/mnt/c/t3code-build/"
+ssh -o ServerAliveInterval=30 "$host" /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
+  -NoProfile -ExecutionPolicy Bypass -File 'C:\t3code-build\t3code-desktop-build.ps1' \
+  -Archive 'C:\t3code-build\source.tar.gz' -Version "$version" -UpdateUrl "$feed" </dev/null |
+  tr -d '\r' | grep --line-buffered -E '^===|error|Error' || true
+installer="T3-Code-$version-x64.exe"
+scp -q "$host:/mnt/c/t3code-build/src/release/$installer" \
+  "$host:/mnt/c/t3code-build/src/release/$installer.blockmap" \
+  "$host:/mnt/c/t3code-build/src/release/latest.yml" "$work/" ||
+  die "The build did not produce $installer and its update manifest."
+# The manifest is what installed apps trust, so it must describe this installer.
+node -e '
+  const fs = require("fs"), crypto = require("crypto");
+  const [dir, version, installer] = process.argv.slice(1);
+  const manifest = fs.readFileSync(`${dir}/latest.yml`, "utf8");
+  const sha512 = crypto.createHash("sha512").update(fs.readFileSync(`${dir}/${installer}`)).digest("base64");
+  if (!manifest.includes(`version: ${version}\n`) || !manifest.includes(`path: ${installer}\n`) || !manifest.includes(`sha512: ${sha512}\n`)) {
+    console.error("latest.yml does not describe the built installer.");
+    process.exit(1);
+  }
+' "$work" "$version" "$installer"
+if ((build_only)); then
+  echo "Built $work/$installer. Nothing was published."
+  exit 0
+fi
+
+api() { curl --fail-with-body -sS --max-time 900 -H "Authorization: token $token" "$@"; }
+# Forgejo never overwrites a package file. The installer goes up first under
+# its new name, so the manifest only ever points at a file that exists.
+for file in "$installer" "$installer.blockmap"; do
+  api -o /dev/null --upload-file "$work/$file" "$feed/$file"
+done
+api -o /dev/null -X DELETE "$feed/latest.yml" 2>/dev/null || true
+api -o /dev/null --upload-file "$work/latest.yml" "$feed/latest.yml"
+# Older installers are not kept; the server package history records releases.
+api "$origin/api/v1/packages/$owner/generic/$package/$channel/files" |
+  node -e 'for (const f of JSON.parse(require("fs").readFileSync(0, "utf8"))) console.log(f.name)' |
+  while read -r name; do
+    case $name in "$installer"|"$installer.blockmap"|latest.yml) ;; *) api -o /dev/null -X DELETE "$feed/$name" ;; esac
+  done
+published=$(curl -fsS --max-time 30 "$feed/latest.yml" | sed -n 's/^version: //p')
+[[ $published == "$version" ]] || die "The feed reports '$published' instead of $version."
+echo "Published desktop $version ($commit) to $feed"

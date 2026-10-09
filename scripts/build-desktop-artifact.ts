@@ -2591,6 +2591,23 @@ export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig"
   };
 });
 
+/**
+ * The update feed baked into the app. `T3CODE_DESKTOP_UPDATE_URL` names a
+ * directory that serves electron-builder's `latest*.yml` and the artifacts it
+ * lists, for a build distributed outside GitHub Releases; it wins over the
+ * GitHub repository settings.
+ */
+export const resolveDesktopPublishConfig = Effect.fn("resolveDesktopPublishConfig")(function* (
+  updateChannel: "latest" | "nightly",
+) {
+  const url = Option.getOrUndefined(
+    yield* Config.String("T3CODE_DESKTOP_UPDATE_URL").pipe(Config.option),
+  )?.trim();
+  return url
+    ? { provider: "generic" as const, url }
+    : yield* resolveGitHubPublishConfig(updateChannel);
+});
+
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
   return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
 }
@@ -2700,7 +2717,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
   if (!isDesktopPreviewVersion(version)) {
-    const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
+    const publishConfig = yield* resolveDesktopPublishConfig(updateChannel);
     if (publishConfig) {
       buildConfig.publish = [publishConfig];
     } else if (mockUpdates) {
