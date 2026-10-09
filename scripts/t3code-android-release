@@ -64,7 +64,9 @@ cd "$src"
 npm exec --yes --package="$(node -p 'require("./package.json").packageManager')" -- \
   pnpm install --frozen-lockfile --filter=@t3tools/mobile... >/dev/null
 cd apps/mobile
-export APP_VARIANT=preview EXPO_NO_GIT_STATUS=1 CI=1
+# With over-the-air updates off nothing reads a native fingerprint, and
+# computing one fails in a tree outside git.
+export APP_VARIANT=preview MOBILE_VERSION_POLICY=appVersion EXPO_NO_GIT_STATUS=1 CI=1
 # Over-the-air updates would replace this build's code with upstream's.
 export T3CODE_MOBILE_UPDATES_ENABLED=0
 export T3CODE_MOBILE_VERSION="$version" T3CODE_ANDROID_VERSION_CODE="$version_code"
@@ -79,7 +81,8 @@ password=$(<"$keys/keystore-password")
 apk="$src/apps/mobile/android/app/build/outputs/apk/release/app-release.apk"
 build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
 "$build_tools/apksigner" verify "$apk" >/dev/null || die "The APK is not signed correctly."
-"$build_tools/aapt2" dump badging "$apk" | grep -q "versionCode='$version_code' versionName='$version'" ||
+badging=$("$build_tools/aapt2" dump badging "$apk")
+[[ $badging == *"versionCode='$version_code' versionName='$version'"* ]] ||
   die "The APK does not carry version $version."
 if ((build_only)); then
   echo "Built $apk. Nothing was published."
