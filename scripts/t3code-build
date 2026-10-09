@@ -273,6 +273,13 @@ node -e '
       return [name, value];
     }),
   );
+  // Workspace packages are private and inlined by the bundle, so the published
+  // manifest must not ask npm for them.
+  const external = Object.fromEntries(
+    Object.entries(server.dependencies ?? {}).filter(
+      ([, spec]) => typeof spec !== "string" || !spec.startsWith("workspace:"),
+    ),
+  );
   const published = {
     name: server.name,
     repository: server.repository,
@@ -281,7 +288,7 @@ node -e '
     version: server.version,
     engines: server.engines,
     files: Array.from(new Set([...(server.files ?? []), "t3code-build.json"])),
-    dependencies: resolve(server.dependencies, "apps/server"),
+    dependencies: resolve(external, "apps/server"),
     overrides: resolve(workspace.overrides, "apps/server"),
   };
   fs.writeFileSync(serverPath, JSON.stringify(published, null, 2) + "\n");
