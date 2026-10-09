@@ -59,7 +59,10 @@ mkdir -p "$src"
 echo "Building Android $version (code $version_code) from $commit"
 git -C "$repo" archive "$commit" ':!.repos' ':!.claude' | tar -x -C "$src"
 cd "$src"
-vp install --filter=@t3tools/mobile... >/dev/null
+# The pinned package manager, as scripts/t3code-build runs it: a version
+# manager's vp shim does not resolve in a tree without node_modules.
+npm exec --yes --package="$(node -p 'require("./package.json").packageManager')" -- \
+  pnpm install --frozen-lockfile --filter=@t3tools/mobile... >/dev/null
 cd apps/mobile
 export APP_VARIANT=preview EXPO_NO_GIT_STATUS=1 CI=1
 # Over-the-air updates would replace this build's code with upstream's.
