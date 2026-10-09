@@ -652,6 +652,10 @@ export const ServerConfig = Schema.Struct({
   directEndpoints: Schema.optionalKey(ForwardCompatibleArray(ServerDirectEndpoint)),
   observability: ServerObservability,
   settings: ServerSettings,
+  /** A newer version this server can install through its own updater. Clients
+      offer it instead of their own version. Absent when the server is current
+      or cannot look one up. */
+  availableUpdateVersion: Schema.optionalKey(TrimmedNonEmptyString),
   /** Whether shell subscriptions can emit an opt-in catch-up completion marker. */
   shellResumeCompletionMarker: Schema.optionalKey(Schema.Boolean),
   /** Whether shell.openInEditor honors `LaunchEditorInput.reveal` for the

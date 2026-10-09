@@ -1,15 +1,19 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { ServerSelfUpdateError, ThreadId } from "@t3tools/contracts";
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  HostProcessArchitecture,
+  HostProcessEnvironment,
+  HostProcessPlatform,
+} from "@t3tools/shared/hostProcess";
 import * as Cause from "effect/Cause";
-import * as ConfigProvider from "effect/ConfigProvider";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
-import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { beforeEach, vi } from "vite-plus/test";
@@ -44,8 +48,13 @@ interface HarnessOptions {
   readonly preflight?: "ready" | "blocked";
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
-  /** Stderr the host update command fails with; it succeeds when omitted. */
-  readonly hostUpdate?: { readonly command: string; readonly stderr?: string };
+  /** `stderr` is what the host update command fails with; it succeeds when
+      omitted. `latest` is what its `--latest` lookup prints. */
+  readonly hostUpdate?: {
+    readonly command: string;
+    readonly stderr?: string;
+    readonly latest?: string;
+  };
 }
 
 // The staged runtime is a release archive: the fake client serves SHA256SUMS
@@ -80,6 +89,18 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) =>
       Effect.gen(function* () {
+        if (input.command === options.hostUpdate?.command && input.args[0] === "--latest") {
+          return {
+            stdout: `${options.hostUpdate.latest ?? ""}\n`,
+            stderr: "",
+            code: ChildProcessSpawner.ExitCode(options.hostUpdate.latest === undefined ? 1 : 0),
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          };
+        }
         if (input.command === options.hostUpdate?.command) {
           order.push(`host-update ${input.args.join(" ")}`);
           return {
@@ -157,19 +178,13 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
     Effect.provideService(HttpClient.HttpClient, releaseHttpClient(order)),
     Effect.provideService(HostProcessPlatform, "linux"),
     Effect.provideService(HostProcessArchitecture, "x64"),
-    Effect.provide(
-      Layer.mergeAll(
-        ServerConfig.layer({ ...config, mode: options.mode ?? "web" }),
-        ConfigProvider.layer(
-          ConfigProvider.fromEnv({
-            env:
-              options.hostUpdate === undefined
-                ? {}
-                : { T3CODE_SELF_UPDATE_COMMAND: options.hostUpdate.command },
-          }),
-        ),
-      ),
+    Effect.provideService(
+      HostProcessEnvironment,
+      options.hostUpdate === undefined
+        ? {}
+        : { T3CODE_SELF_UPDATE_COMMAND: options.hostUpdate.command },
     ),
+    Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
   );
   return { selfUpdate, order };
 });
@@ -201,6 +216,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          availableVersion: Stream.empty,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("downloading").pipe(
               Effect.andThen(reportProgress("installing")),
@@ -235,6 +251,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          availableVersion: Stream.empty,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("installing").pipe(
               Effect.as({
@@ -283,6 +300,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          availableVersion: Stream.empty,
           update: (_input, reportProgress = () => Effect.void) =>
             reportProgress("installing").pipe(Effect.andThen(Effect.fail(updateError))),
           commitDesktopUpdate: () => Effect.never,
@@ -305,6 +323,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "web",
         selfUpdate: {
+          availableVersion: Stream.empty,
           update: (
             _input,
             reportProgress = () => Effect.void,
@@ -338,6 +357,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          availableVersion: Stream.empty,
           update: () =>
             Effect.succeed({
               targetVersion: "1.2.0",
@@ -374,6 +394,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const selfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
         mode: "desktop",
         selfUpdate: {
+          availableVersion: Stream.empty,
           update: () =>
             Effect.succeed({
               targetVersion: "1.2.0",
@@ -422,6 +443,30 @@ it.layer(NodeServices.layer)("server self update", (it) => {
         method: "boot-service",
       });
       expect(order).toEqual(["host-update 0.0.42-forgejo.2"]);
+    }),
+  );
+
+  it.effect("offers the host updater's newest version only when it is newer", () =>
+    Effect.gen(function* () {
+      release.version = "0.0.42-forgejo.2";
+      const newer = yield* makeHarness({
+        managed: false,
+        hostUpdate: { command: "t3code-self-update", latest: "0.0.42-forgejo.11" },
+      });
+      expect(
+        yield* newer.selfUpdate.availableVersion.pipe(
+          Stream.filter((version) => version !== undefined),
+          Stream.runHead,
+        ),
+      ).toEqual(Option.some("0.0.42-forgejo.11"));
+
+      const current = yield* makeHarness({
+        managed: false,
+        hostUpdate: { command: "t3code-self-update", latest: "0.0.42-forgejo.2" },
+      });
+      expect(yield* Stream.runHead(current.selfUpdate.availableVersion)).toEqual(
+        Option.some(undefined),
+      );
     }),
   );
 

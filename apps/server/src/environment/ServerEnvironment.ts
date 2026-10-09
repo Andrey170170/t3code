@@ -4,7 +4,11 @@ import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type ExecutionEnvironmentDescriptor,
 } from "@t3tools/contracts";
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  HostProcessArchitecture,
+  HostProcessEnvironment,
+  HostProcessPlatform,
+} from "@t3tools/shared/hostProcess";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -17,7 +21,7 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { resolveServerInstallation } from "../cli/invocation.ts";
 import { readAgentActivityPublishingActive } from "../cloud/config.ts";
-import { hostUpdateCommandConfig, resolveServerSelfUpdateCapability } from "../cloud/selfUpdate.ts";
+import { HOST_UPDATE_COMMAND_ENV, resolveServerSelfUpdateCapability } from "../cloud/selfUpdate.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -196,7 +200,8 @@ export const make = Effect.gen(function* () {
   const serverSelfUpdate = resolveServerSelfUpdateCapability({
     desktopManaged: serverConfig.mode === "desktop",
     launcherManaged: launcher.managed,
-    hostUpdateCommand: (yield* hostUpdateCommandConfig) !== undefined,
+    hostUpdateCommand:
+      ((yield* HostProcessEnvironment)[HOST_UPDATE_COMMAND_ENV] ?? "").trim() !== "",
   });
   const serverInstallation = serverSelfUpdate === null ? yield* resolveServerInstallation : null;
   // Static is correct: the control fd is known at bootstrap, and the desktop

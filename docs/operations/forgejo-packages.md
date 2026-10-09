@@ -156,12 +156,15 @@ runs `t3code-update --yes VERSION` in a transient user unit, since the install
 restarts the service. A build installed before this existed gains the action
 after one more `t3code-update` on the machine.
 
-Clients offer the action when the server's build number is behind their own,
-so update a client first. Named instances do not get the helper: they are
-pinned to their own release line, and a client from another line must not be
-able to move them.
+The server asks the helper every minute which version Forgejo's `custom` tag
+points at (`t3code-self-update --latest`) and reports a newer one to its
+clients, which then offer it. A client also offers its own version to a server
+whose build number is behind it. Named instances do not get the helper: they
+are pinned to their own release line, and a client from another line must not
+be able to move them.
 
 Any other host can offer the action by setting `T3CODE_SELF_UPDATE_COMMAND`
 to its own updater with the same contract: take one exact version, exit zero
 once the install is under way outside the service, or exit non-zero with the
-reason as the last line of stderr.
+reason as the last line of stderr. Given `--latest`, print the newest version
+it can install as the last line of stdout.

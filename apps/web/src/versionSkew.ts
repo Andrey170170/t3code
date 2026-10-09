@@ -88,14 +88,28 @@ export function resolveVersionMismatch(
   return {
     clientVersion: normalizedClientVersion,
     serverVersion: normalizedServerVersion,
-    hint: "Version mismatch. Try syncing the client and server to the same T3 Code version.",
+    hint: VERSION_MISMATCH_HINT,
   };
 }
 
+const VERSION_MISMATCH_HINT =
+  "Version mismatch. Try syncing the client and server to the same T3 Code version.";
+
+/**
+ * The update to offer for a connected server. A server that reports a newer
+ * version it can install itself is offered that version, whatever this client
+ * runs; `clientVersion` is then the update target rather than this client's
+ * version. Otherwise the server is compared with this client.
+ */
 export function resolveServerConfigVersionMismatch(
-  serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
+  serverConfig: Pick<ServerConfig, "environment" | "availableUpdateVersion"> | null | undefined,
 ): VersionMismatch | null {
-  return resolveVersionMismatch(serverConfig?.environment.serverVersion);
+  const serverVersion = normalizeVersion(serverConfig?.environment.serverVersion);
+  const availableVersion = normalizeVersion(serverConfig?.availableUpdateVersion);
+  if (serverVersion && availableVersion) {
+    return { clientVersion: availableVersion, serverVersion, hint: VERSION_MISMATCH_HINT };
+  }
+  return resolveVersionMismatch(serverVersion);
 }
 
 /** The update path the connected server offers, or null when it only

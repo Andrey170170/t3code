@@ -6,7 +6,12 @@ import {
   type ServerSelfUpdateResult,
   type ThreadId,
 } from "@t3tools/contracts";
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  HostProcessArchitecture,
+  HostProcessEnvironment,
+  HostProcessPlatform,
+} from "@t3tools/shared/hostProcess";
+import { compareSemverVersions } from "@t3tools/shared/semver";
 import * as Cause from "effect/Cause";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
@@ -15,6 +20,9 @@ import * as Effect from "effect/Effect";
 import * as HashSet from "effect/HashSet";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -38,6 +46,8 @@ import { isExactServiceVersion, SERVICE_LAUNCHER_PROTOCOL } from "./serviceProto
 
 const PREFLIGHT_TIMEOUT = Duration.seconds(30);
 const HOST_UPDATE_HANDOFF_TIMEOUT = Duration.minutes(1);
+const HOST_UPDATE_LATEST_TIMEOUT = Duration.seconds(30);
+const HOST_UPDATE_LATEST_INTERVAL = Duration.minutes(1);
 
 /**
  * Updater owned by the host, for installs the built-in paths cannot update
@@ -45,13 +55,10 @@ const HOST_UPDATE_HANDOFF_TIMEOUT = Duration.minutes(1);
  * with an exact version and must check that version, start the install
  * outside this service so it survives the restart, and then exit: zero once
  * the install is under way, non-zero with the reason on stderr otherwise.
+ * `<command> --latest` prints the newest version it can install as the last
+ * line of stdout.
  */
-export const hostUpdateCommandConfig = Config.String("T3CODE_SELF_UPDATE_COMMAND").pipe(
-  Config.option,
-  Config.map((command) =>
-    Option.getOrUndefined(Option.filter(command, (value) => value.trim() !== "")),
-  ),
-);
+export const HOST_UPDATE_COMMAND_ENV = "T3CODE_SELF_UPDATE_COMMAND";
 
 export function resolveServerSelfUpdateCapability(input: {
   readonly desktopManaged: boolean;
@@ -78,6 +85,10 @@ export class ServerSelfUpdate extends Context.Service<
       requestId: string,
       onHandoffAccepted?: () => Effect.Effect<void>,
     ) => Effect.Effect<never, ServerSelfUpdateError>;
+    /** The newest version the host updater offers, when it is newer than
+        this server. Emits the current answer, then each change; always
+        undefined without a host update command. */
+    readonly availableVersion: Stream.Stream<string | undefined>;
   }
 >()("t3/cloud/selfUpdate/ServerSelfUpdate") {}
 
@@ -157,6 +168,7 @@ export const withRunningThreadContinuation = Effect.fn(
 
   return ServerSelfUpdate.of({
     update,
+    availableVersion: input.selfUpdate.availableVersion,
     commitDesktopUpdate: (requestId) =>
       Effect.gen(function* () {
         const shouldContinue = yield* Ref.modify(desktopContinuationTokens, (tokens) => [
@@ -203,8 +215,30 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const releaseBaseUrl = Option.getOrUndefined(
     yield* Config.String(CLI_RELEASE_BASE_URL_ENV).pipe(Config.option),
   );
-  const hostUpdateCommand = yield* hostUpdateCommandConfig;
+  const hostUpdateCommand =
+    ((yield* HostProcessEnvironment)[HOST_UPDATE_COMMAND_ENV] ?? "").trim() || undefined;
   const inFlight = yield* Ref.make(false);
+  const availableVersion = yield* SubscriptionRef.make<string | undefined>(undefined);
+  if (hostUpdateCommand !== undefined) {
+    yield* runner
+      .run({ command: hostUpdateCommand, args: ["--latest"], timeout: HOST_UPDATE_LATEST_TIMEOUT })
+      .pipe(
+        // A failed lookup keeps the last answer: an unreachable registry
+        // does not mean this server is current.
+        Effect.flatMap((result) => {
+          const latest = result.stdout.trim().split("\n").at(-1)?.trim() ?? "";
+          return result.code === 0 && isExactServiceVersion(latest)
+            ? SubscriptionRef.set(
+                availableVersion,
+                compareSemverVersions(latest, packageJson.version) > 0 ? latest : undefined,
+              )
+            : Effect.void;
+        }),
+        Effect.ignore,
+        Effect.repeat(Schedule.spaced(HOST_UPDATE_LATEST_INTERVAL)),
+        Effect.forkScoped,
+      );
+  }
 
   const capability = resolveServerSelfUpdateCapability({
     desktopManaged: serverConfig.mode === "desktop",
@@ -404,6 +438,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
 
   return ServerSelfUpdate.of({
     update,
+    availableVersion: SubscriptionRef.changes(availableVersion),
     commitDesktopUpdate: (requestId, onHandoffAccepted) =>
       desktopAppUpdate.commit(requestId, onHandoffAccepted),
   });

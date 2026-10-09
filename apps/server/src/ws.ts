@@ -1724,6 +1724,16 @@ const layerWsRpc = (
               otlpLogsEnabled: config.otlpLogsUrl !== undefined,
             },
             settings,
+            ...Option.match(
+              Option.flatMapNullishOr(
+                yield* Stream.runHead(serverSelfUpdate.availableVersion),
+                (version) => version,
+              ),
+              {
+                onNone: () => ({}),
+                onSome: (availableUpdateVersion) => ({ availableUpdateVersion }),
+              },
+            ),
             shellResumeCompletionMarker: true,
             threadResumeCompletionMarker: true,
             threadSnapshotPagination: true,
@@ -3037,9 +3047,28 @@ const layerWsRpc = (
                 ),
               );
 
+              // Rare, and it changes what every update prompt offers, so the
+              // whole config is resent: clients replace theirs on any snapshot.
+              const availableUpdateSnapshots = Stream.concat(
+                Stream.make(config.availableUpdateVersion),
+                serverSelfUpdate.availableVersion,
+              ).pipe(
+                Stream.changes,
+                Stream.drop(1),
+                Stream.mapEffect(() => loadServerConfig({ usageLimitsCommand })),
+                Stream.map((config) => ({
+                  version: 1 as const,
+                  type: "snapshot" as const,
+                  config,
+                })),
+              );
+
               return Stream.concat(
                 rpcInitialItems([{ version: 1 as const, type: "snapshot" as const, config }]),
-                withLateEditorConfig(config, liveUpdates, externalLauncher),
+                Stream.merge(
+                  withLateEditorConfig(config, liveUpdates, externalLauncher),
+                  availableUpdateSnapshots,
+                ),
               );
             }),
           ),

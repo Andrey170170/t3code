@@ -159,6 +159,25 @@ describe("versionSkew", () => {
     expect(resolveVersionMismatch("0.0.34")).toMatchObject({ serverVersion: "0.0.34" });
   });
 
+  it("offers the version a server reports it can install, even to an older client", () => {
+    branding.APP_VERSION = "0.0.45-forgejo.11";
+    const environment = {
+      environmentId: EnvironmentId.make("environment-1"),
+      label: "Remote",
+      platform: { os: "linux" as const, arch: "x64" as const },
+      serverVersion: "0.0.45-forgejo.11",
+      capabilities: { repositoryIdentity: true },
+    };
+
+    expect(resolveServerConfigVersionMismatch({ environment })).toBeNull();
+    expect(
+      resolveServerConfigVersionMismatch({
+        environment,
+        availableUpdateVersion: "0.0.45-forgejo.12",
+      }),
+    ).toMatchObject({ clientVersion: "0.0.45-forgejo.12", serverVersion: "0.0.45-forgejo.11" });
+  });
+
   it("reads the server version from config descriptors", () => {
     expect(
       resolveServerConfigVersionMismatch({
