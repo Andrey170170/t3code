@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Run by the T3 server for an in-app update, as <prefix>-self-update VERSION
+# (t3code-run sets it as T3CODE_SELF_UPDATE_COMMAND). Checks that Forgejo has
+# the exact version, then installs it from a transient unit: the install
+# restarts the service this was started from.
+set -euo pipefail
+name=$(basename -- "$0")
+prefix=${name%-self-update}
+version=${1:?Usage: $name VERSION}
+update="$HOME/.local/bin/$prefix-update"
+if ! "$update" --check "$version" >/dev/null 2>&1; then
+  echo "t3@$version was not found on Forgejo." >&2
+  exit 1
+fi
+exec systemd-run --user --collect --quiet --unit="$prefix-self-update-$(date +%s)" \
+  --setenv=PATH="$PATH" \
+  ${PACKAGE_FOGEJO_TOKEN_FILE:+--setenv=PACKAGE_FOGEJO_TOKEN_FILE="$PACKAGE_FOGEJO_TOKEN_FILE"} \
+  "$update" --yes "$version"

@@ -5,5 +5,8 @@ set -euo pipefail
 name=$(basename -- "$0")
 source "${HOME}/.config/${name%-run}/service.env"
 export PATH="$(dirname "$T3CODE_NODE"):${HOME}/.local/bin:${HOME}/.volta/bin:/usr/local/bin:/usr/bin:/bin"
+# Installed for instances that clients may update from the app.
+self_update="${HOME}/.local/bin/${name%-run}-self-update"
+if [[ -x $self_update ]]; then export T3CODE_SELF_UPDATE_COMMAND=$self_update; fi
 exec "$T3CODE_NODE" "$T3CODE_ENTRY" serve --host "$T3CODE_HOST" \
   --port "$T3CODE_PORT" --base-dir "$T3CODE_BASE" "$T3CODE_WORKDIR"

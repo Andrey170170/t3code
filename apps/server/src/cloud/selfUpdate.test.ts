@@ -3,10 +3,12 @@ import { expect, it } from "@effect/vitest";
 import { ServerSelfUpdateError, ThreadId } from "@t3tools/contracts";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Cause from "effect/Cause";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -42,6 +44,8 @@ interface HarnessOptions {
   readonly preflight?: "ready" | "blocked";
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
+  /** Stderr the host update command fails with; it succeeds when omitted. */
+  readonly hostUpdate?: { readonly command: string; readonly stderr?: string };
 }
 
 // The staged runtime is a release archive: the fake client serves SHA256SUMS
@@ -76,6 +80,19 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) =>
       Effect.gen(function* () {
+        if (input.command === options.hostUpdate?.command) {
+          order.push(`host-update ${input.args.join(" ")}`);
+          return {
+            stdout: "",
+            stderr: options.hostUpdate.stderr ?? "",
+            code: ChildProcessSpawner.ExitCode(options.hostUpdate.stderr === undefined ? 0 : 1),
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          };
+        }
         if (input.command === "tar") {
           order.push("extract");
           const stagingDir = input.args[input.args.indexOf("-C") + 1];
@@ -140,7 +157,19 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
     Effect.provideService(HttpClient.HttpClient, releaseHttpClient(order)),
     Effect.provideService(HostProcessPlatform, "linux"),
     Effect.provideService(HostProcessArchitecture, "x64"),
-    Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
+    Effect.provide(
+      Layer.mergeAll(
+        ServerConfig.layer({ ...config, mode: options.mode ?? "web" }),
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env:
+              options.hostUpdate === undefined
+                ? {}
+                : { T3CODE_SELF_UPDATE_COMMAND: options.hostUpdate.command },
+          }),
+        ),
+      ),
+    ),
   );
   return { selfUpdate, order };
 });
@@ -378,6 +407,40 @@ it.layer(NodeServices.layer)("server self update", (it) => {
         expect(Cause.hasInterruptsOnly(exit.cause)).toBe(false);
       }
       expect(events).toEqual(["clear"]);
+    }),
+  );
+
+  it.effect("hands a Forgejo build's update to the host update command", () =>
+    Effect.gen(function* () {
+      release.version = "0.0.42-forgejo.1";
+      const { selfUpdate, order } = yield* makeHarness({
+        managed: false,
+        hostUpdate: { command: "t3code-self-update" },
+      });
+      expect(yield* selfUpdate.update({ targetVersion: "0.0.42-forgejo.2" })).toEqual({
+        targetVersion: "0.0.42-forgejo.2",
+        method: "boot-service",
+      });
+      expect(order).toEqual(["host-update 0.0.42-forgejo.2"]);
+    }),
+  );
+
+  it.effect("reports why the host update command refused, and allows a retry", () =>
+    Effect.gen(function* () {
+      const { selfUpdate, order } = yield* makeHarness({
+        managed: false,
+        hostUpdate: {
+          command: "t3code-self-update",
+          stderr: "npm notice\nt3@9.9.9 is not published.\n",
+        },
+      });
+      const attempt = selfUpdate.update({ targetVersion: "9.9.9" }).pipe(Effect.flip);
+      expect((yield* attempt).reason).toBe("t3@9.9.9 is not published.");
+      expect((yield* attempt).reason).toBe("t3@9.9.9 is not published.");
+      expect((yield* selfUpdate.update({ targetVersion: "custom" }).pipe(Effect.flip)).reason).toBe(
+        "'custom' is not an exact t3 version.",
+      );
+      expect(order).toEqual(["host-update 9.9.9", "host-update 9.9.9"]);
     }),
   );
 

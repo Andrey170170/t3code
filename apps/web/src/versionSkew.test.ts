@@ -122,6 +122,17 @@ describe("versionSkew", () => {
     expect(resolveVersionMismatch("0.0.34-nightly.20260824.1126")).toBeNull();
   });
 
+  it("warns only when a Forgejo server is behind a Forgejo client's build number", () => {
+    branding.APP_VERSION = "0.0.45-forgejo.11";
+
+    expect(resolveVersionMismatch("0.0.45-forgejo.2")).toMatchObject({
+      clientVersion: "0.0.45-forgejo.11",
+      serverVersion: "0.0.45-forgejo.2",
+    });
+    expect(resolveVersionMismatch("0.0.45-forgejo.11")).toBeNull();
+    expect(resolveVersionMismatch("0.0.45-forgejo.12")).toBeNull();
+  });
+
   it("treats a nightly server built past the client as ahead, not skew", () => {
     expect(resolveVersionMismatch("0.0.35-nightly.20260818.1124")).toBeNull();
   });

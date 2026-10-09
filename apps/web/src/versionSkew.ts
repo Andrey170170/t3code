@@ -51,9 +51,11 @@ function versionCore(version: string): string {
  * The skew a user can act on: the connected server runs an older T3 Code than
  * this client, so the server is the side that needs updating.
  *
- * Two nightly builds compare their full versions, including the date and run.
- * Other combinations compare their core `major.minor.patch` only, so a stable
- * build and a nightly build with the same core do not cause an update warning.
+ * Two builds of the same numbered line (nightly, or this fork's Forgejo
+ * releases) compare their full versions, including the date, run or build
+ * number. Other combinations compare their core `major.minor.patch` only, so a
+ * stable build and a nightly build with the same core do not cause an update
+ * warning.
  * A server ahead of the client does not need an update. Versions that do not
  * parse as semver fall back to plain string inequality.
  */
@@ -68,14 +70,15 @@ export function resolveVersionMismatch(
 
   const clientCore = versionCore(normalizedClientVersion);
   const serverCore = versionCore(normalizedServerVersion);
-  const compareNightlyBuilds =
-    parseSemver(normalizedClientVersion)?.prerelease[0] === "nightly" &&
-    parseSemver(normalizedServerVersion)?.prerelease[0] === "nightly";
+  const clientLine = parseSemver(normalizedClientVersion)?.prerelease[0];
+  const compareBuilds =
+    (clientLine === "nightly" || clientLine === "forgejo") &&
+    parseSemver(normalizedServerVersion)?.prerelease[0] === clientLine;
   const serverIsBehind =
     parseSemver(clientCore) && parseSemver(serverCore)
       ? compareSemverVersions(
-          compareNightlyBuilds ? normalizedServerVersion : serverCore,
-          compareNightlyBuilds ? normalizedClientVersion : clientCore,
+          compareBuilds ? normalizedServerVersion : serverCore,
+          compareBuilds ? normalizedClientVersion : clientCore,
         ) < 0
       : normalizedServerVersion !== normalizedClientVersion;
   if (!serverIsBehind) {

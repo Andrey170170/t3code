@@ -37,13 +37,31 @@ import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 import { isExactServiceVersion, SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
 const PREFLIGHT_TIMEOUT = Duration.seconds(30);
+const HOST_UPDATE_HANDOFF_TIMEOUT = Duration.minutes(1);
+
+/**
+ * Updater owned by the host, for installs the built-in paths cannot update
+ * (the Forgejo service helpers set it). It is run as `<command> <version>`
+ * with an exact version and must check that version, start the install
+ * outside this service so it survives the restart, and then exit: zero once
+ * the install is under way, non-zero with the reason on stderr otherwise.
+ */
+export const hostUpdateCommandConfig = Config.String("T3CODE_SELF_UPDATE_COMMAND").pipe(
+  Config.option,
+  Config.map((command) =>
+    Option.getOrUndefined(Option.filter(command, (value) => value.trim() !== "")),
+  ),
+);
 
 export function resolveServerSelfUpdateCapability(input: {
   readonly desktopManaged: boolean;
   readonly launcherManaged: boolean;
+  readonly hostUpdateCommand: boolean;
 }): ServerSelfUpdateCapability | null {
   if (input.desktopManaged) return "desktop-managed" as const;
-  return input.launcherManaged ? ("boot-service" as const) : null;
+  // A host updater restarts the service into the new version, which is what
+  // clients expect of "boot-service".
+  return input.launcherManaged || input.hostUpdateCommand ? ("boot-service" as const) : null;
 }
 
 export class ServerSelfUpdate extends Context.Service<
@@ -185,10 +203,14 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const releaseBaseUrl = Option.getOrUndefined(
     yield* Config.String(CLI_RELEASE_BASE_URL_ENV).pipe(Config.option),
   );
+  const hostUpdateCommand = yield* hostUpdateCommandConfig;
   const inFlight = yield* Ref.make(false);
 
-  const capability: ServerSelfUpdateCapability | null =
-    serverConfig.mode === "desktop" ? "desktop-managed" : launcher.managed ? "boot-service" : null;
+  const capability = resolveServerSelfUpdateCapability({
+    desktopManaged: serverConfig.mode === "desktop",
+    launcherManaged: launcher.managed,
+    hostUpdateCommand: hostUpdateCommand !== undefined,
+  });
   const failWith = (reason: string, cause?: unknown) =>
     cause === undefined
       ? new ServerSelfUpdateError({ reason })
@@ -207,6 +229,46 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       return yield* failWith(
         "This server is managed by the T3 Code desktop app on its machine; update the desktop app to update it.",
       );
+    }
+    if (hostUpdateCommand !== undefined) {
+      const targetVersion = input.targetVersion.trim();
+      if (!isExactServiceVersion(targetVersion)) {
+        return yield* failWith(`'${targetVersion}' is not an exact t3 version.`);
+      }
+      if (yield* Ref.getAndSet(inFlight, true)) {
+        return yield* failWith("A server update is already in progress.");
+      }
+      return yield* Effect.gen(function* () {
+        // The host updater downloads after it has detached, so the whole
+        // update is one stage from here.
+        yield* reportProgress("installing");
+        yield* Effect.uninterruptible(
+          runner
+            .run({
+              command: hostUpdateCommand,
+              args: [targetVersion],
+              timeout: HOST_UPDATE_HANDOFF_TIMEOUT,
+            })
+            .pipe(
+              Effect.mapError((cause) =>
+                failWith("Could not run this server's update command.", cause),
+              ),
+              Effect.filterOrFail(
+                (result) => result.code === 0,
+                (result) =>
+                  failWith(
+                    result.stderr.trim().split("\n").at(-1)?.trim() ||
+                      `This server's update command refused t3@${targetVersion}.`,
+                  ),
+              ),
+              Effect.tap(() => onHandoffAccepted()),
+            ),
+        );
+        yield* Effect.logInfo("Server update handed off to the host update command.", {
+          targetVersion,
+        });
+        return { targetVersion, method: "boot-service" as const };
+      }).pipe(Effect.onError(() => Ref.set(inFlight, false)));
     }
     if (packageJson.version.includes("-forgejo.")) {
       return yield* failWith(

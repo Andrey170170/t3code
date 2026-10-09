@@ -165,6 +165,11 @@ install -d "$bin_dir" "$unit_dir"
 install -m 755 "$repo/scripts/t3code-run" "$bin_dir/$prefix-run"
 install -m 755 "$repo/scripts/t3code-pair" "$bin_dir/$prefix-pair"
 ln -sfn "$repo/scripts/t3code-update" "$bin_dir/$prefix-update"
+# A named instance is pinned to its own release line, so a client on another
+# line must not be able to update it from the app.
+if [[ -z $instance ]]; then
+  install -m 755 "$repo/scripts/t3code-self-update" "$bin_dir/$prefix-self-update"
+fi
 unit_tmp=$(mktemp "$unit_dir/.$unit.XXXXXX")
 sed -e "s|/t3code-run\$|/$prefix-run|" \
   -e "s|^Description=.*|&${instance:+ ($instance)}|" \

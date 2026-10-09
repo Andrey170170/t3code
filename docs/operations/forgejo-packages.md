@@ -142,7 +142,26 @@ unchanged until installation from this repository replaces the updater link.
 
 Upstream 0.0.41 and later ship executable archives, while this fork's Forgejo
 channel retains the Node-based npm package and the service helpers above.
-Use `t3code-update` or reinstall from Forgejo to update these builds. Built-in
-`t3 update` and remote server updates reject Forgejo builds because those paths
-download upstream executable archives. Do not use `t3 service install` to replace
-the custom service; use the Forgejo installer above to preserve its settings.
+Built-in `t3 update` rejects Forgejo builds because it downloads upstream
+executable archives. Do not use `t3 service install` to replace the custom
+service; use the Forgejo installer above to preserve its settings.
+
+## Updating from the app
+
+The default instance can be updated from a client's **Update server** action.
+The installer adds `t3code-self-update`, and `t3code-run` passes it to the
+server as `T3CODE_SELF_UPDATE_COMMAND`. The server runs it with the exact
+version the client asked for; it checks that Forgejo has that version and then
+runs `t3code-update --yes VERSION` in a transient user unit, since the install
+restarts the service. A build installed before this existed gains the action
+after one more `t3code-update` on the machine.
+
+Clients offer the action when the server's build number is behind their own,
+so update a client first. Named instances do not get the helper: they are
+pinned to their own release line, and a client from another line must not be
+able to move them.
+
+Any other host can offer the action by setting `T3CODE_SELF_UPDATE_COMMAND`
+to its own updater with the same contract: take one exact version, exit zero
+once the install is under way outside the service, or exit non-zero with the
+reason as the last line of stderr.
