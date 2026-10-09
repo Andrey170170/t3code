@@ -61,7 +61,8 @@ const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inlin
 // Clients frame documents from another origin than the environment's, so name
 // the allowed ancestors here: a browser that sees `frame-ancestors` ignores any
 // `X-Frame-Options` a reverse proxy adds. The signed URL is the access control.
-const FRAMEABLE_CONTENT_SECURITY_POLICY = "frame-ancestors *";
+// `*` covers only http(s) ancestors, so the desktop renderer is listed by name.
+const FRAMEABLE_CONTENT_SECURITY_POLICY = `frame-ancestors * ${DESKTOP_RENDERER_ORIGINS.join(" ")}`;
 const HTML_CONTENT_SECURITY_POLICY = `sandbox allow-scripts allow-forms allow-popups; ${FRAMEABLE_CONTENT_SECURITY_POLICY}`;
 
 // Types a browser may render as a document if a proxy strips the disposition
