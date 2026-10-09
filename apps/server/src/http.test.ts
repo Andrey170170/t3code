@@ -669,19 +669,25 @@ describe("assetResponseHeaders", () => {
       assetResponseHeaders("/attachments/upload.bin", { mimeType: "application/pdf" }),
     ).toMatchObject({
       "Content-Type": "application/pdf",
+      "Content-Security-Policy": "frame-ancestors * t3code://app t3code-dev://app",
+    });
+    expect(assetResponseHeaders("/workspace/paper.pdf")).toMatchObject({
+      "Content-Security-Policy": "frame-ancestors * t3code://app t3code-dev://app",
     });
     expect(
       assetResponseHeaders("/attachments/upload.bin", { mimeType: "text/html" }),
     ).toMatchObject({
       "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups",
+      "Content-Security-Policy":
+        "sandbox allow-scripts allow-forms allow-popups; frame-ancestors * t3code://app t3code-dev://app",
     });
   });
   it("serves HTML assets as utf-8 inside a sandboxed origin", () => {
     for (const path of ["/workspace/page.html", "/workspace/PAGE.HTM", "/tmp/report.html"]) {
       expect(assetResponseHeaders(path)).toMatchObject({
         "Content-Type": "text/html; charset=utf-8",
-        "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups",
+        "Content-Security-Policy":
+          "sandbox allow-scripts allow-forms allow-popups; frame-ancestors * t3code://app t3code-dev://app",
       });
     }
   });

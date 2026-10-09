@@ -160,6 +160,10 @@ const make = Effect.fn("makeWithDatabase")(function* (
         Exit.isSuccess(exit) ? (options.prepareCacheTTL ?? Duration.minutes(10)) : Duration.zero,
     });
 
+    // Older supported Node releases (24.16 at least) refuse to bind booleans; newer ones bind 0/1.
+    const bindable = (params: ReadonlyArray<unknown>) =>
+      params.map((param) => (typeof param === "boolean" ? Number(param) : param)) as any[];
+
     const runStatement = (
       statement: NodeSqlite.StatementSync,
       params: ReadonlyArray<unknown>,
@@ -169,9 +173,9 @@ const make = Effect.fn("makeWithDatabase")(function* (
         try {
           statement.setReadBigInts(Boolean(Context.get(fiber.context, Client.SafeIntegers)));
           if (hasRows(statement)) {
-            return Effect.succeed(statement.all(...(params as any)));
+            return Effect.succeed(statement.all(...bindable(params)));
           }
-          const result = statement.run(...(params as any));
+          const result = statement.run(...bindable(params));
           return Effect.succeed(raw ? (result as unknown as ReadonlyArray<any>) : []);
         } catch (cause) {
           return Effect.fail(
@@ -197,11 +201,11 @@ const make = Effect.fn("makeWithDatabase")(function* (
               if (hasRows(statement)) {
                 statement.setReturnArrays(true);
                 // Safe to cast to array after we've setReturnArrays(true)
-                return statement.all(...(params as any)) as unknown as ReadonlyArray<
+                return statement.all(...bindable(params)) as unknown as ReadonlyArray<
                   ReadonlyArray<unknown>
                 >;
               }
-              statement.run(...(params as any));
+              statement.run(...bindable(params));
               return [];
             },
             catch: (cause) =>
