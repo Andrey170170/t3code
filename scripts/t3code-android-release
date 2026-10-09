@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Builds the Android app from committed source and publishes the APK to
+# Forgejo at a fixed address a phone can install and re-check.
+set -euo pipefail
+usage() {
+  cat <<'HELP'
+Usage: scripts/t3code-android-release --version VERSION [--ref REF] [--build-only]
+
+Builds committed source (REF, default HEAD) as the preview app variant, which
+installs beside the store app, named VERSION: normally the version of the
+server package published from the same commit. --build-only stops before
+publishing and prints where the APK is.
+
+Needs a JDK 17 and Android SDK under T3CODE_ANDROID_BUILD_HOME (default
+~/.local/share/android-build, as jdk/ and sdk/) and the signing keystore and
+its password file under T3CODE_ANDROID_KEYSTORE_DIR (default
+~/.config/t3code-android). Publishing needs PACKAGE_FOGEJO_TOKEN_FILE;
+T3CODE_REGISTRY overrides the Forgejo npm registry the address is derived from.
+HELP
+}
+die() { echo "$*" >&2; exit 1; }
+version="" ref=HEAD build_only=0
+while (($#)); do
+  case $1 in
+    --version|--ref) (($# >= 2)) || die "Missing value for $1"
+      if [[ $1 == --version ]]; then version=$2; else ref=$2; fi
+      shift 2 ;;
+    --build-only) build_only=1; shift ;;
+    --help|-h) usage; exit 0 ;;
+    *) die "Unknown option: $1" ;;
+  esac
+done
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+-forgejo\.[0-9]+$ ]] || die "--version must be a Forgejo release such as 0.0.45-forgejo.14."
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+build_home=${T3CODE_ANDROID_BUILD_HOME:-$HOME/.local/share/android-build}
+keys=${T3CODE_ANDROID_KEYSTORE_DIR:-$HOME/.config/t3code-android}
+[[ -x $build_home/jdk/bin/java && -d $build_home/sdk/platforms ]] || die "No JDK and Android SDK in $build_home."
+[[ -r $keys/release.keystore && -r $keys/keystore-password ]] || die "No signing keystore in $keys."
+registry=${T3CODE_REGISTRY:-https://git.andrei-homelab.com/api/packages/git-god/npm/}
+[[ $registry =~ ^(https?://[^/]+)/api/packages/([^/]+)/npm/?$ ]] || die "Unsupported registry: $registry"
+# One fixed address, so a phone can install from it and notice a newer file.
+target="${BASH_REMATCH[1]}/api/packages/${BASH_REMATCH[2]}/generic/t3-android/arm64/t3-code.apk"
+commit=$(git -C "$repo" rev-parse --verify "$ref^{commit}")
+token=""
+if ((!build_only)); then
+  [[ -r ${PACKAGE_FOGEJO_TOKEN_FILE:-} ]] || die "Set PACKAGE_FOGEJO_TOKEN_FILE to publish."
+  token=$(<"$PACKAGE_FOGEJO_TOKEN_FILE")
+fi
+export JAVA_HOME="$build_home/jdk" ANDROID_HOME="$build_home/sdk" ANDROID_SDK_ROOT="$build_home/sdk"
+export PATH="$JAVA_HOME/bin:$PATH"
+# Android only installs an update whose version code is not lower, so it
+# follows commit time rather than the per-base-version Forgejo counter.
+version_code=$(($(git -C "$repo" show -s --format=%ct "$commit") / 60))
+
+# A clean tree every time: files from an older commit must not reach the build.
+src="$build_home/src"
+rm -rf -- "$src"
+mkdir -p "$src"
+echo "Building Android $version (code $version_code) from $commit"
+git -C "$repo" archive "$commit" ':!.repos' ':!.claude' | tar -x -C "$src"
+cd "$src"
+vp install --filter=@t3tools/mobile... >/dev/null
+cd apps/mobile
+export APP_VARIANT=preview EXPO_NO_GIT_STATUS=1 CI=1
+# Over-the-air updates would replace this build's code with upstream's.
+export T3CODE_MOBILE_UPDATES_ENABLED=0
+export T3CODE_MOBILE_VERSION="$version" T3CODE_ANDROID_VERSION_CODE="$version_code"
+npx expo prebuild --clean --platform android >/dev/null
+password=$(<"$keys/keystore-password")
+(cd android && ./gradlew :app:assembleRelease --no-daemon --console=plain --quiet \
+  -PreactNativeArchitectures=arm64-v8a \
+  -Pandroid.injected.signing.store.file="$keys/release.keystore" \
+  -Pandroid.injected.signing.store.password="$password" \
+  -Pandroid.injected.signing.key.alias=t3code \
+  -Pandroid.injected.signing.key.password="$password")
+apk="$src/apps/mobile/android/app/build/outputs/apk/release/app-release.apk"
+build_tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+"$build_tools/apksigner" verify "$apk" >/dev/null || die "The APK is not signed correctly."
+"$build_tools/aapt2" dump badging "$apk" | grep -q "versionCode='$version_code' versionName='$version'" ||
+  die "The APK does not carry version $version."
+if ((build_only)); then
+  echo "Built $apk. Nothing was published."
+  exit 0
+fi
+
+# Forgejo never overwrites a package file.
+curl -sS -o /dev/null --max-time 60 -X DELETE -H "Authorization: token $token" "$target" || true
+curl --fail-with-body -sS -o /dev/null --max-time 900 -H "Authorization: token $token" --upload-file "$apk" "$target"
+published=$(curl -fsS --max-time 600 "$target" | sha256sum)
+[[ ${published%% *} == "$(sha256sum < "$apk" | cut -d' ' -f1)" ]] || die "The published APK differs from the built one."
+echo "Published Android $version ($commit) to $target"

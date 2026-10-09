@@ -53,8 +53,19 @@ const Releases = Schema.Array(
 );
 const decodeReleases = Schema.decodeUnknownSync(Releases);
 
-/** Preserve the host's release channel and never offer a downgrade. */
-export async function findEnvironmentUpdate(currentVersion: string, signal: AbortSignal) {
+/**
+ * The version to offer a host, or null when it is current. A host that names
+ * a version it can install itself is offered that. Other hosts are checked
+ * against upstream releases, preserving their release channel and never
+ * offering a downgrade; a Forgejo build cannot install those.
+ */
+export async function findEnvironmentUpdate(
+  currentVersion: string,
+  signal: AbortSignal,
+  availableUpdateVersion?: string,
+) {
+  if (availableUpdateVersion !== undefined) return availableUpdateVersion;
+  if (currentVersion.includes("-forgejo.")) return null;
   const channel = cliReleaseChannelOf(currentVersion);
   for (let page = 1; ; page++) {
     const response = await fetch(cliReleaseIndexPageUrl(page), { signal });

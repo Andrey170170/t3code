@@ -229,7 +229,9 @@ const config: ExpoConfig = {
   slug: "t3-code",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
-  version: "2.0.0",
+  // A build released outside the stores names its own version and Android
+  // version code; store builds take theirs from EAS.
+  version: repoEnv.T3CODE_MOBILE_VERSION?.trim() || "2.0.0",
   runtimeVersion: {
     // Development manifests resolve on every launch, so avoid fingerprint's
     // expensive native-project calculation there. Preview and production stay
@@ -294,6 +296,9 @@ const config: ExpoConfig = {
   android: {
     icon: variant.assets.appIcon,
     package: variant.androidPackage,
+    ...(repoEnv.T3CODE_ANDROID_VERSION_CODE
+      ? { versionCode: Number(repoEnv.T3CODE_ANDROID_VERSION_CODE) }
+      : {}),
     ...(repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE
       ? { googleServicesFile: repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE }
       : {}),

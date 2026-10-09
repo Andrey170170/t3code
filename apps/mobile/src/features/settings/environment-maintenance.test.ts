@@ -160,6 +160,16 @@ describe("environment maintenance access", () => {
 describe("environment release checks", () => {
   const signal = new AbortController().signal;
 
+  it("offers a Forgejo host only the version it reports, without asking upstream", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    expect(await findEnvironmentUpdate("0.0.45-forgejo.13", signal, "0.0.45-forgejo.14")).toBe(
+      "0.0.45-forgejo.14",
+    );
+    expect(await findEnvironmentUpdate("0.0.45-forgejo.14", signal)).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("keeps stable hosts on stable releases and ignores drafts", async () => {
     vi.stubGlobal(
       "fetch",
