@@ -2603,8 +2603,10 @@ export const resolveDesktopPublishConfig = Effect.fn("resolveDesktopPublishConfi
   const url = Option.getOrUndefined(
     yield* Config.String("T3CODE_DESKTOP_UPDATE_URL").pipe(Config.option),
   )?.trim();
+  // Named explicitly: electron-builder would otherwise call the manifest after
+  // the version's prerelease tag, and the app asks for its channel's name.
   return url
-    ? { provider: "generic" as const, url }
+    ? { provider: "generic" as const, url, channel: updateChannel }
     : yield* resolveGitHubPublishConfig(updateChannel);
 });
 

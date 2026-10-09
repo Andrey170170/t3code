@@ -52,8 +52,8 @@ git -C "$repo" archive "$commit" ':!.repos' ':!.claude' | gzip -1 > "$work/sourc
 ssh "$host" 'mkdir -p /mnt/c/t3code-build'
 scp -q "$work/source.tar.gz" "$repo/scripts/t3code-desktop-build.ps1" "$host:/mnt/c/t3code-build/"
 ssh -o ServerAliveInterval=30 "$host" /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe \
-  -NoProfile -ExecutionPolicy Bypass -File 'C:\t3code-build\t3code-desktop-build.ps1' \
-  -Archive 'C:\t3code-build\source.tar.gz' -Version "$version" -UpdateUrl "$feed" </dev/null |
+  -NoProfile -ExecutionPolicy Bypass -File C:/t3code-build/t3code-desktop-build.ps1 \
+  -Archive C:/t3code-build/source.tar.gz -Version "$version" -UpdateUrl "$feed" </dev/null |
   tr -d '\r' | grep --line-buffered -E '^===|error|Error' || true
 installer="T3-Code-$version-x64.exe"
 scp -q "$host:/mnt/c/t3code-build/src/release/$installer" \

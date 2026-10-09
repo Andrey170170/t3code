@@ -305,6 +305,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.deepStrictEqual(config, {
         provider: "generic",
         url: "https://packages.example/desktop/win-x64",
+        channel: "latest",
       });
     }),
   );
