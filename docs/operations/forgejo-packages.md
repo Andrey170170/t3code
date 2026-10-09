@@ -14,6 +14,22 @@ readable only by your account and set `PACKAGE_FOGEJO_TOKEN_FILE` to its path.
 The helper uses a temporary npm authentication file and removes it afterward;
 an existing user npmrc is also supported when no token file is supplied.
 
+## Release everything
+
+Clients and servers must speak the same orchestration protocol, so a release
+normally covers all three apps under one version:
+
+```bash
+export PACKAGE_FOGEJO_TOKEN_FILE="$HOME/.config/local_packager/forgejo-token"
+npm run release:forgejo
+```
+
+It publishes the server package as below, then runs the
+[Windows desktop](#windows-desktop) and [Android](#android) releases from the
+same commit with that version. The server package is published first and never
+withdrawn; a client build that fails (the Windows machine asleep, say) is
+reported and can be retried on its own with the printed version and commit.
+
 ## Build and publish
 
 From this checkout, with Node 24 and npm installed:
@@ -198,3 +214,27 @@ file, so a release uploads the new installer, replaces the manifest, and then
 removes the previous installer. An installed app polls the feed and updates
 itself; a build made before the feed existed is replaced by running the new
 installer once. Builds are unsigned, so SmartScreen warns on a manual install.
+
+## Android
+
+```bash
+scripts/t3code-android-release --version 0.0.45-forgejo.15 --ref COMMIT
+```
+
+Builds on this machine, for `arm64` only, and replaces one APK at a fixed
+address: the generic package `t3-android`, version `arm64`, file `t3-code.apk`.
+Install it from that address on the phone. Forgejo reports the file's
+modification time, which an updater that tracks a direct APK link (such as
+Obtainium) can use to notice a new build.
+
+The build is the `preview` variant (`com.t3tools.t3code.preview`), so it
+installs beside the store app, and it has over-the-air updates off: those come
+from upstream's Expo project and would replace this build's code. Push
+notifications need a Firebase project and relay of your own and are not set up.
+
+It needs a JDK 17 as `jdk/` and an Android SDK as `sdk/` under
+`~/.local/share/android-build` (platforms 36 and 37.0, build-tools 36.0.0 and
+37.0.0, NDK 27.1.12297006, CMake 3.30.5), and the signing keystore
+`release.keystore` (alias `t3code`) with `keystore-password` under
+`~/.config/t3code-android`. Keep a copy of both keystore files: Android only
+updates an installed app with a build signed by the same key.

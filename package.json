@@ -50,6 +50,7 @@
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules apps/*/dist apps/*/dist-electron packages/*/dist .vite-plus apps/*/.vite-plus packages/*/.vite-plus",
     "sync:repos": "node scripts/sync-reference-repos.ts",
     "publish:forgejo": "node scripts/t3code-forgejo.mjs publish",
+    "release:forgejo": "scripts/t3code-release",
     "install:forgejo": "node scripts/t3code-forgejo.mjs install"
   },
   "devDependencies": {

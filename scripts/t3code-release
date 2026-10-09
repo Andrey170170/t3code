@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Releases the server package, the Windows desktop app and the Android app to
+# Forgejo under one version; see docs/operations/forgejo-packages.md.
+set -euo pipefail
+if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+  cat <<'HELP'
+Usage: npm run release:forgejo [-- --ref REF]
+
+Publishes committed source (REF, default HEAD; the checkout must be clean
+without --ref) as the next numbered server package, then builds and publishes
+the desktop and Android apps from the same commit under that version.
+
+The server package is published first and is never withdrawn: a client build
+that fails is reported, and can be retried with scripts/t3code-desktop-release
+or scripts/t3code-android-release and the printed version and commit.
+HELP
+  exit 0
+fi
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+[[ -r ${PACKAGE_FOGEJO_TOKEN_FILE:-} ]] || { echo "Set PACKAGE_FOGEJO_TOKEN_FILE to publish." >&2; exit 1; }
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+node "$repo/scripts/t3code-forgejo.mjs" publish "$@" --output "$work/artifact"
+read -r version commit < <(node -p 'const b = require(process.argv[1]); `${b.version} ${b.commit}`' "$work/artifact/build.json")
+failed=()
+"$repo/scripts/t3code-desktop-release" --version "$version" --ref "$commit" || failed+=(desktop)
+"$repo/scripts/t3code-android-release" --version "$version" --ref "$commit" || failed+=(android)
+echo
+echo "Released $version from $commit: server${failed[*]:+, but not: ${failed[*]}}"
+((${#failed[@]} == 0))
