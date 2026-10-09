@@ -57,13 +57,14 @@ const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inlin
 // opaque origin: scripts run, but same-origin cookies, storage, and API calls are
 // out of reach. Relative sibling assets still load through their signed URLs.
 // No modals: agent HTML can open without a click (inline renders, and mobile
-// loads it as the top document), and must not raise blocking dialogs.
+// loads it as the top document), and must not raise blocking dialogs. Downloads
+// stay allowed so download links and buttons in the page work.
 // Clients frame documents from another origin than the environment's, so name
 // the allowed ancestors here: a browser that sees `frame-ancestors` ignores any
 // `X-Frame-Options` a reverse proxy adds. The signed URL is the access control.
 // `*` covers only http(s) ancestors, so the desktop renderer is listed by name.
 const FRAMEABLE_CONTENT_SECURITY_POLICY = `frame-ancestors * ${DESKTOP_RENDERER_ORIGINS.join(" ")}`;
-const HTML_CONTENT_SECURITY_POLICY = `sandbox allow-scripts allow-forms allow-popups; ${FRAMEABLE_CONTENT_SECURITY_POLICY}`;
+const HTML_CONTENT_SECURITY_POLICY = `sandbox allow-scripts allow-forms allow-popups allow-downloads; ${FRAMEABLE_CONTENT_SECURITY_POLICY}`;
 
 // Types a browser may render as a document if a proxy strips the disposition
 // header. Downloads of these fall back to octet-stream.

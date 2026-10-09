@@ -17,8 +17,8 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
-import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
-import type { ProviderAdapterV2Event } from "../orchestration-v2/ProviderAdapter.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import type { ProviderAdapterV2Event } from "@t3tools/provider-core/server/ProviderAdapter";
 import {
   applySideChatProviderEvent,
   type SideChatEventContext,

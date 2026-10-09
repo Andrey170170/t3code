@@ -7,9 +7,9 @@ import type {
 } from "@t3tools/contracts";
 import type * as DateTime from "effect/DateTime";
 
-import type { IdAllocatorV2Shape } from "../orchestration-v2/IdAllocator.ts";
-import type { ProviderAdapterV2Event } from "../orchestration-v2/ProviderAdapter.ts";
-import { makeProviderFailureTurnItem } from "../orchestration-v2/ProviderFailure.ts";
+import type { IdAllocatorV2Shape } from "@t3tools/provider-core/server/IdAllocator";
+import type { ProviderAdapterV2Event } from "@t3tools/provider-core/server/ProviderAdapter";
+import { makeProviderFailureTurnItem } from "@t3tools/provider-core/server/failure";
 
 /** The next snapshot plus the stream frames that describe the change to subscribers. */
 export interface SideChatTransition {

@@ -679,7 +679,7 @@ describe("assetResponseHeaders", () => {
     ).toMatchObject({
       "Content-Type": "text/html; charset=utf-8",
       "Content-Security-Policy":
-        "sandbox allow-scripts allow-forms allow-popups; frame-ancestors * t3code://app t3code-dev://app",
+        "sandbox allow-scripts allow-forms allow-popups allow-downloads; frame-ancestors * t3code://app t3code-dev://app",
     });
   });
   it("serves HTML assets as utf-8 inside a sandboxed origin", () => {
@@ -687,7 +687,7 @@ describe("assetResponseHeaders", () => {
       expect(assetResponseHeaders(path)).toMatchObject({
         "Content-Type": "text/html; charset=utf-8",
         "Content-Security-Policy":
-          "sandbox allow-scripts allow-forms allow-popups; frame-ancestors * t3code://app t3code-dev://app",
+          "sandbox allow-scripts allow-forms allow-popups allow-downloads; frame-ancestors * t3code://app t3code-dev://app",
       });
     }
   });
