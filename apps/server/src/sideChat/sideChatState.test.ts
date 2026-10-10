@@ -17,7 +17,6 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type { ProviderAdapterV2Event } from "@t3tools/provider-core/server/ProviderAdapter";
 import {
   applySideChatProviderEvent,
@@ -80,13 +79,9 @@ const request: OrchestrationV2RuntimeRequest = {
   resolvedAt: null,
 };
 
-/** The reducer's context, with the real (pure) id allocator. */
-const makeContext = Effect.gen(function* () {
-  const context: SideChatEventContext = {
-    providerThreadId,
-    idAllocator: yield* IdAllocator.IdAllocatorV2,
-    now,
-  };
+/** The reducer's context and a fold over it. */
+const makeContext = Effect.sync(() => {
+  const context: SideChatEventContext = { providerThreadId, now };
   const fold = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
     events.reduce<SideChatTransition>(
       (previous, event) => {
@@ -96,7 +91,7 @@ const makeContext = Effect.gen(function* () {
       { snapshot, events: [] },
     );
   return { context, fold };
-}).pipe(Effect.provide(IdAllocator.layer));
+});
 
 const providerTurn = (status: "running" | "completed" | "failed"): ProviderAdapterV2Event => ({
   type: "provider_turn.updated",

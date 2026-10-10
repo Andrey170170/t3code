@@ -29,6 +29,9 @@ const seedFork = (
     }
   });
 
+// Main's migrations from `id` on, so the tests survive each new upstream migration.
+const manifestFrom = (id: number) => migrationManifest.filter(([migrationId]) => migrationId >= id);
+
 const readLedger = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const rows = yield* sql<{ readonly migration_id: number; readonly name: string }>`
@@ -41,12 +44,7 @@ describe("fork migration ledger", () => {
   it.effect("rewrites a current fork ledger so V2 migrations run", () =>
     Effect.gen(function* () {
       yield* seedFork(54, 56);
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [55, "OrchestrationV2"],
-        [56, "RemoveRedundantProjectionIndexes"],
-        [57, "ScheduledTaskWebhooks"],
-        [58, "WebhookRelayDeliveries"],
-      ]);
+      assert.deepStrictEqual(yield* runMigrations(), manifestFrom(55));
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* readLedger, migrationManifest);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -59,12 +57,7 @@ describe("fork migration ledger", () => {
         [51, "ProjectionThreadMessageContext"],
         ...FORK_LEDGER.slice(1),
       ]);
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [55, "OrchestrationV2"],
-        [56, "RemoveRedundantProjectionIndexes"],
-        [57, "ScheduledTaskWebhooks"],
-        [58, "WebhookRelayDeliveries"],
-      ]);
+      assert.deepStrictEqual(yield* runMigrations(), manifestFrom(55));
       assert.deepStrictEqual(yield* readLedger, migrationManifest);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
@@ -73,14 +66,7 @@ describe("fork migration ledger", () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* seedFork(52, 54);
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [53, "PullRequestFilesViewed"],
-        [54, "ProjectionThreadsAutoSettleDisabledAt"],
-        [55, "OrchestrationV2"],
-        [56, "RemoveRedundantProjectionIndexes"],
-        [57, "ScheduledTaskWebhooks"],
-        [58, "WebhookRelayDeliveries"],
-      ]);
+      assert.deepStrictEqual(yield* runMigrations(), manifestFrom(53));
       assert.deepStrictEqual(yield* readLedger, migrationManifest);
       const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
       assert.ok(columns.some((column) => column.name === "auto_settle_disabled_at"));

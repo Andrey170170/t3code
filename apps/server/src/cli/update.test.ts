@@ -7,12 +7,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import { Command } from "effect/cli";
 import { vi } from "vite-plus/test";
-import {
-  HostProcessEnvironment,
-  HostProcessInvokedAs,
-  HostProcessPlatform,
-  HostProcessWorkingDirectory,
-} from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { repointLauncher, resolveLauncherPath, updateCommand } from "./update.ts";
 
@@ -56,7 +51,7 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
 
       assert.deepStrictEqual(Option.getOrUndefined(repointed), launcher);
       assert.equal(yield* fs.readLink(launcher), newExe);
-    }).pipe(Effect.scoped, Effect.provideService(HostProcessPlatform, "linux")),
+    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect("leaves a plain copy or a foreign symlink alone", () =>
@@ -90,7 +85,7 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
       }
       assert.equal(yield* fs.readLink(foreign), elsewhere);
       assert.equal(yield* fs.readLink(otherLauncher), otherHome);
-    }).pipe(Effect.scoped, Effect.provideService(HostProcessPlatform, "linux")),
+    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 
   it.effect("finds the launcher a bare command name resolved to on PATH", () =>
@@ -103,26 +98,26 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
       yield* fs.writeFileString(launcher, "");
 
       const bare = yield* resolveLauncherPath.pipe(
-        Effect.provideService(HostProcessInvokedAs, "t3"),
-        Effect.provideService(HostProcessEnvironment, {
+        Effect.provideService(HostProcess.InvokedAs, "t3"),
+        Effect.provideService(HostProcess.Environment, {
           PATH: `${path.join(root, "missing")}:${path.join(root, "bin")}`,
         }),
-        Effect.provideService(HostProcessWorkingDirectory, root),
+        Effect.provideService(HostProcess.WorkingDirectory, root),
       );
       const relative = yield* resolveLauncherPath.pipe(
-        Effect.provideService(HostProcessInvokedAs, "./bin/t3"),
-        Effect.provideService(HostProcessEnvironment, { PATH: "" }),
-        Effect.provideService(HostProcessWorkingDirectory, root),
+        Effect.provideService(HostProcess.InvokedAs, "./bin/t3"),
+        Effect.provideService(HostProcess.Environment, { PATH: "" }),
+        Effect.provideService(HostProcess.WorkingDirectory, root),
       );
       const absent = yield* resolveLauncherPath.pipe(
-        Effect.provideService(HostProcessInvokedAs, "t3"),
-        Effect.provideService(HostProcessEnvironment, { PATH: path.join(root, "missing") }),
-        Effect.provideService(HostProcessWorkingDirectory, root),
+        Effect.provideService(HostProcess.InvokedAs, "t3"),
+        Effect.provideService(HostProcess.Environment, { PATH: path.join(root, "missing") }),
+        Effect.provideService(HostProcess.WorkingDirectory, root),
       );
 
       assert.equal(bare, launcher);
       assert.equal(relative, launcher);
       assert.equal(absent, undefined);
-    }).pipe(Effect.scoped, Effect.provideService(HostProcessPlatform, "linux")),
+    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
   );
 });

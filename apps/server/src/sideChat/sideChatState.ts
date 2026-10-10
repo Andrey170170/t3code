@@ -7,7 +7,6 @@ import type {
 } from "@t3tools/contracts";
 import type * as DateTime from "effect/DateTime";
 
-import type { IdAllocatorV2Shape } from "@t3tools/provider-core/server/IdAllocator";
 import type { ProviderAdapterV2Event } from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderFailureTurnItem } from "@t3tools/provider-core/server/failure";
 
@@ -127,7 +126,6 @@ function settleActiveTurn(snapshot: SideChatSnapshot): SideChatTransition {
 export interface SideChatEventContext {
   /** The side chat's own native thread, once the fork exists. */
   readonly providerThreadId: ProviderThreadId | null;
-  readonly idAllocator: IdAllocatorV2Shape;
   readonly now: DateTime.Utc;
 }
 
@@ -141,7 +139,6 @@ function recordTurnFailure(
   return upsertSideChatTurnItem(
     snapshot,
     makeProviderFailureTurnItem({
-      idAllocator: context.idAllocator,
       driver: event.driver,
       threadId: snapshot.sideChatId,
       runId: userMessage?.runId ?? null,

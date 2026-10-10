@@ -27,7 +27,6 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import {
   ProviderAdapterTurnStartError,
   type ProviderAdapterV2EphemeralForkInput,
@@ -35,7 +34,7 @@ import {
   type ProviderAdapterV2InterruptInput,
   type ProviderAdapterV2OpenSessionInput,
   type ProviderAdapterV2SessionRuntime,
-  type ProviderAdapterV2Shape,
+  type ProviderAdapterV2,
   type ProviderAdapterV2SteerInput,
   type ProviderAdapterV2TurnInput,
 } from "@t3tools/provider-core/server/ProviderAdapter";
@@ -125,7 +124,7 @@ const makeHarness = (
       ...(options.parentDriver === undefined ? {} : { driver: options.parentDriver }),
     });
     const unused = () => Effect.die("unused in side chat tests");
-    const adapter: ProviderAdapterV2Shape = {
+    const adapter: ProviderAdapterV2["Service"] = {
       instanceId,
       driver: codex,
       getCapabilities: unused,
@@ -197,7 +196,6 @@ const makeHarness = (
             list: () => Effect.succeed([instanceId]),
           }),
           RuntimePolicy.layer,
-          IdAllocator.layer,
         ),
       ),
     );

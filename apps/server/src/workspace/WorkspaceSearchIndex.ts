@@ -27,7 +27,7 @@ import type {
   ProjectSearchContentsResult,
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
-import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
+import { isProjectFaviconPath } from "@t3tools/shared/projectFavicon";
 
 // Executable archives carry fff-node's patched require export. npm installs
 // receive its import-only manifest, so resolve the ESM entry before requiring
@@ -173,7 +173,7 @@ function mapFileSearchResult(
 ): ProjectSearchEntriesResult {
   const entries = result.items.flatMap((item) => {
     const entry = toFileEntry(item);
-    return entry && (!imageOnly || isWorkspaceImagePreviewPath(entry.path)) ? [entry] : [];
+    return entry && (!imageOnly || isProjectFaviconPath(entry.path)) ? [entry] : [];
   });
   return {
     entries: entries.slice(0, limit),

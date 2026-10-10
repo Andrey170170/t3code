@@ -43,9 +43,8 @@ import * as Stream from "effect/Stream";
 import type {
   ProviderAdapterV2RuntimePolicy,
   ProviderAdapterV2SessionRuntime,
-  ProviderAdapterV2Shape,
+  ProviderAdapterV2,
 } from "@t3tools/provider-core/server/ProviderAdapter";
-import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
@@ -236,7 +235,6 @@ const make = Effect.gen(function* () {
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const runtimePolicies = yield* RuntimePolicy.RuntimePolicyV2;
-  const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const layerScope = yield* Effect.scope;
   const openLock = yield* Semaphore.make(1);
   const byParent = new Map<ThreadId, SideChat>();
@@ -334,7 +332,7 @@ const make = Effect.gen(function* () {
   const start = (
     chat: SideChat,
     input: {
-      readonly adapter: ProviderAdapterV2Shape;
+      readonly adapter: ProviderAdapterV2["Service"];
       readonly sourceNativeThreadId: string;
       readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
     },
@@ -361,7 +359,6 @@ const make = Effect.gen(function* () {
             if (current.status === "closed") return [null, unchanged(current)] as const;
             const transition = applySideChatProviderEvent(current, event, {
               providerThreadId,
-              idAllocator,
               now,
             });
             const turnId = transition.snapshot.activeProviderTurnId;
