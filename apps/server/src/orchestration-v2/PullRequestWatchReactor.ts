@@ -245,13 +245,17 @@ export const make = Effect.gen(function* () {
   const lives = new Map<string, WatchLife>();
   /**
    * Wakes still waiting in their thread's queue, per watch (by `lifeKey`), with the watch as it
-   * was before the wake. News that arrives before the agent reads one folds into it, so a busy
-   * thread gets one combined report instead of a run per pass. Kept in memory: after a restart,
-   * the next news queues its own wake.
+   * was before the wake and the remarks its report was built from. News that arrives before the
+   * agent reads one folds into it, so a busy thread gets one combined report instead of a run per
+   * pass. Kept in memory: after a restart, the next news queues its own wake.
    */
   const queuedWakes = new Map<
     string,
-    { readonly messageId: MessageId; readonly before: ThreadPullRequestWatch }
+    {
+      readonly messageId: MessageId;
+      readonly before: ThreadPullRequestWatch;
+      readonly remarks: ReadonlyArray<PullRequestComment> | null;
+    }
   >();
 
   const lifeOf = (target: WatchTarget): WatchLife => {
@@ -372,8 +376,12 @@ export const make = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const queued = yield* queuedWakeOf(target);
+      // A pass that did not read the remarks keeps the ones the queued wake already tells.
+      const foldRemarks = remarks ?? queued?.remarks ?? null;
       const combined =
-        queued === undefined ? undefined : evaluatePullRequestWatch(queued.before, detail, remarks);
+        queued === undefined
+          ? undefined
+          : evaluatePullRequestWatch(queued.before, detail, foldRemarks);
       // News the queued wake told and that has since undone itself can leave nothing to fold.
       const folded = queued !== undefined && combined !== undefined && combined.changes.length > 0;
       const told = folded ? combined : report;
@@ -393,6 +401,7 @@ export const make = Effect.gen(function* () {
       queuedWakes.set(lifeKey(target), {
         messageId,
         before: folded ? queued.before : target.watch,
+        remarks: folded ? foldRemarks : remarks,
       });
       if (!folded) yield* woke(target);
       if (told.exhausted) yield* ended(target, "comment-limit");

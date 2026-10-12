@@ -3004,24 +3004,28 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         reviewState: null,
       });
       let comments: Array<PullRequestComment> = [];
+      let lint: "success" | "failure" = "success";
+      // A truncated activity read leaves the remarks unread for that pass.
+      let remarksUnreadable = false;
       const reactor = yield* PullRequestWatchReactor.make.pipe(
         Effect.provide(
           Layer.mergeAll(
             NodeServices.layer,
             Layer.mock(PullRequestService.PullRequestService)({
               detail: () =>
-                Effect.succeed(
-                  watchedPullRequestDetail({
+                Effect.sync(() => ({
+                  ...watchedPullRequestDetail({
                     projectId,
                     number: 12,
                     at: "2026-10-02T12:00:00.000Z",
                   }),
-                ),
+                  checks: [{ name: "lint", status: lint, description: null, url: null }],
+                })),
               activity: () =>
                 Effect.sync(() => ({
                   comments,
                   commentCount: comments.length,
-                  commentsTruncated: false,
+                  commentsTruncated: remarksUnreadable,
                   reviewThreads: [],
                   commits: [],
                 })),
@@ -3057,6 +3061,17 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         '  - reviewer: "Comment one."',
         '  - reviewer: "Comment two."',
       ]);
+
+      // A pass that cannot read the remarks still keeps the comments the wake already tells.
+      lint = "failure";
+      remarksUnreadable = true;
+      yield* TestClock.adjust("11 minutes");
+      yield* reactor.sweep;
+      remarksUnreadable = false;
+      const withChecks = yield* wakes;
+      assert.lengthOf(withChecks, 1);
+      assert.include(withChecks[0]!.text, "- Checks failed");
+      assert.lengthOf(commentLines(withChecks[0]!.text), 2);
 
       // Once the agent is past that wake, news wakes it again with only what is new.
       const queued = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
