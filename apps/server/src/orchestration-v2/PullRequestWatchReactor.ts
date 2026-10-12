@@ -4,6 +4,7 @@ import {
   type OrchestrationV2Notification,
   type PullRequestActivity,
   type PullRequestComment,
+  type PullRequestDetail,
   type PullRequestRef,
   type PullRequestThreadCommentsResult,
   type ThreadPullRequestLink,
@@ -34,7 +35,11 @@ import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-import { evaluatePullRequestWatch, pullRequestWatchMessage } from "./pullRequestWatch.ts";
+import {
+  evaluatePullRequestWatch,
+  pullRequestWatchMessage,
+  type PullRequestWatchReport,
+} from "./pullRequestWatch.ts";
 
 /**
  * Minutes between passes. Checks take minutes, so a faster pass mostly spends the host's rate
@@ -238,6 +243,16 @@ export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const bootedAt = yield* Clock.currentTimeMillis;
   const lives = new Map<string, WatchLife>();
+  /**
+   * Wakes still waiting in their thread's queue, per watch (by `lifeKey`), with the watch as it
+   * was before the wake. News that arrives before the agent reads one folds into it, so a busy
+   * thread gets one combined report instead of a run per pass. Kept in memory: after a restart,
+   * the next news queues its own wake.
+   */
+  const queuedWakes = new Map<
+    string,
+    { readonly messageId: MessageId; readonly before: ThreadPullRequestWatch }
+  >();
 
   const lifeOf = (target: WatchTarget): WatchLife => {
     const existing = lives.get(lifeKey(target));
@@ -265,6 +280,7 @@ export const make = Effect.gen(function* () {
   const reportEnd = (key: string, life: WatchLife, reason: WatchEndReason) =>
     Effect.gen(function* () {
       lives.delete(key);
+      queuedWakes.delete(key);
       const now = yield* Clock.currentTimeMillis;
       const quietMs = now - life.pushedAt;
       yield* Effect.logInfo("pull request watch ended", {
@@ -302,11 +318,16 @@ export const make = Effect.gen(function* () {
   /**
    * Records what a pass saw, and wakes the agent with it. The orchestrator applies this only
    * while the same watch is on, so a stop or restart that lands during the host read wins.
+   * A wake given the message ID of a queued wake rewrites that wake instead of queuing another.
    */
   const record = (
     target: WatchTarget,
     next: ThreadPullRequestWatch | null,
-    wake?: { readonly text: string; readonly notification: OrchestrationV2Notification },
+    wake?: {
+      readonly text: string;
+      readonly notification: OrchestrationV2Notification;
+      readonly messageId?: MessageId;
+    },
   ) =>
     Effect.gen(function* () {
       const uuid = yield* crypto.randomUUIDv4;
@@ -319,8 +340,62 @@ export const make = Effect.gen(function* () {
         watch: next,
         ...(wake === undefined
           ? {}
-          : { wake: { ...wake, messageId: MessageId.make(`message:pr-watch:${uuid}`) } }),
+          : {
+              wake: {
+                ...wake,
+                messageId: wake.messageId ?? MessageId.make(`message:pr-watch:${uuid}`),
+              },
+            }),
       });
+    });
+
+  /** The queued wake news can still fold into, or undefined once the agent started on it. */
+  const queuedWakeOf = (target: WatchTarget) =>
+    Effect.gen(function* () {
+      const key = lifeKey(target);
+      const queued = queuedWakes.get(key);
+      if (queued === undefined) return undefined;
+      const { runs } = yield* projections.getThreadRecords(target.thread.id, ["runs"]);
+      if (runs.some((run) => run.userMessageId === queued.messageId && run.status === "queued")) {
+        return queued;
+      }
+      queuedWakes.delete(key);
+      return undefined;
+    });
+
+  /** Wakes the agent with what changed since it was last told, folding into a queued wake. */
+  const wake = (
+    target: WatchTarget,
+    detail: PullRequestDetail,
+    remarks: ReadonlyArray<PullRequestComment> | null,
+    report: PullRequestWatchReport,
+  ) =>
+    Effect.gen(function* () {
+      const queued = yield* queuedWakeOf(target);
+      const combined =
+        queued === undefined ? undefined : evaluatePullRequestWatch(queued.before, detail, remarks);
+      // News the queued wake told and that has since undone itself can leave nothing to fold.
+      const folded = queued !== undefined && combined !== undefined && combined.changes.length > 0;
+      const told = folded ? combined : report;
+      const messageId = folded
+        ? queued.messageId
+        : MessageId.make(`message:pr-watch:${yield* crypto.randomUUIDv4}`);
+      yield* record(target, told.exhausted ? null : told.next, {
+        ...pullRequestWatchMessage({
+          number: target.link.number,
+          url: target.link.url,
+          baseBranch: detail.baseBranch,
+          headSha: told.next.headSha,
+          report: told,
+        }),
+        messageId,
+      }).pipe(Effect.tapError(() => Effect.sync(() => queuedWakes.delete(lifeKey(target)))));
+      queuedWakes.set(lifeKey(target), {
+        messageId,
+        before: folded ? queued.before : target.watch,
+      });
+      if (!folded) yield* woke(target);
+      if (told.exhausted) yield* ended(target, "comment-limit");
     });
 
   // A watch that cannot read its pull request ends with a wake saying so, rather than showing
@@ -549,22 +624,7 @@ export const make = Effect.gen(function* () {
     });
     yield* eachTarget(group, (target) => {
       const report = evaluatePullRequestWatch(target.watch, detail, remarks);
-      if (report.changes.length > 0) {
-        return record(
-          target,
-          report.exhausted ? null : report.next,
-          pullRequestWatchMessage({
-            number: target.link.number,
-            url: target.link.url,
-            baseBranch: detail.baseBranch,
-            headSha: report.next.headSha,
-            report,
-          }),
-        ).pipe(
-          Effect.tap(() => woke(target)),
-          Effect.tap(() => (report.exhausted ? ended(target, "comment-limit") : Effect.void)),
-        );
-      }
+      if (report.changes.length > 0) return wake(target, detail, remarks, report);
       return watchesEqual(report.next, target.watch) ? Effect.void : record(target, report.next);
     });
   });

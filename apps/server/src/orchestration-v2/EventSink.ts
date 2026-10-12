@@ -314,17 +314,30 @@ const layerBase: Layer.Layer<
             : [],
         ),
       );
+      // Items placed earlier in this batch are not projected yet, so later items of the same
+      // run learn its band from here.
+      const runBands = new Map<RunId, number>();
       return Effect.forEach(
         events,
-        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-          event.type === "turn-item.updated"
-            ? turnItemPositions
-                .normalize(
-                  event.payload,
-                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
-                )
-                .pipe(Effect.map((payload) => ({ ...event, payload })))
-            : Effect.succeed(event),
+        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> => {
+          if (event.type !== "turn-item.updated") return Effect.succeed(event);
+          const runId = event.payload.runId;
+          const runOrdinal = runId === null ? undefined : runOrdinals.get(runId);
+          const runBand = runId === null ? undefined : runBands.get(runId);
+          return turnItemPositions
+            .normalize(event.payload, {
+              ...(runOrdinal === undefined ? {} : { runOrdinal }),
+              ...(runBand === undefined ? {} : { runBand }),
+            })
+            .pipe(
+              Effect.map((payload) => {
+                if (runId !== null) {
+                  runBands.set(runId, TurnItemPositionStore.positionBand(payload.ordinal));
+                }
+                return { ...event, payload };
+              }),
+            );
+        },
         { concurrency: 1 },
       );
     };
