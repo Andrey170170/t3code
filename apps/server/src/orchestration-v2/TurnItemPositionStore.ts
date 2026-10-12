@@ -85,9 +85,14 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
             SELECT CASE WHEN ${runId} IS NULL THEN 0 ELSE COALESCE(
               CAST(${runBand ?? null} AS INTEGER),
               (
-                SELECT MIN(ordinal)
-                FROM orchestration_v2_projection_turn_items
-                WHERE thread_id = ${threadId} AND run_id = ${runId}
+                -- Positions, not projected ordinals: databases upgraded through the V2
+                -- migration kept provider ordinals on projected items.
+                SELECT MIN(position.ordinal)
+                FROM orchestration_v2_projection_turn_items AS item
+                JOIN orchestration_v2_turn_item_positions AS position
+                  ON position.thread_id = item.thread_id
+                  AND position.turn_item_id = item.turn_item_id
+                WHERE item.thread_id = ${threadId} AND item.run_id = ${runId}
               ) / 1000000,
               MAX(
                 COALESCE(

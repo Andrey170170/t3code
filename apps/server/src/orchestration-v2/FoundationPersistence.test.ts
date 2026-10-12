@@ -3386,7 +3386,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
   it.effect("places runs on the timeline in the order they started", () =>
     Effect.gen(function* () {
       const eventSink = yield* EventSink.EventSinkV2;
-      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const sql = yield* SqlClient.SqlClient;
       const now = yield* DateTime.now;
       const threadId = ThreadId.make("thread:foundation-start-order");
       const runOf = (ordinal: number) => RunId.make(`run:foundation-start-order:${ordinal}`);
@@ -3463,14 +3463,27 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       // Run 3 jumps the queue and starts before run 2; both items of a batch share a band.
       yield* eventSink.write({ events: [itemEvent("jumped", 3), itemEvent("jumped-reply", 3)] });
       yield* eventSink.write({ events: [itemEvent("late", 2)] });
+      // Databases upgraded through the V2 migration kept provider ordinals on projected items;
+      // the run's band comes from its positions.
+      yield* sql`
+        UPDATE orchestration_v2_projection_turn_items
+        SET ordinal = 7
+        WHERE thread_id = ${threadId} AND run_id = ${runOf(3)}
+      `;
       // A message steered into run 2, and a later update to run 3, keep their runs' bands.
       yield* eventSink.write({ events: [itemEvent("steered", 2), itemEvent("jumped-late", 3)] });
 
-      const items = (yield* projectionStore.getThreadProjection(threadId)).turnItems;
+      const positions = yield* sql<{ readonly turn_item_id: string; readonly ordinal: number }>`
+        SELECT turn_item_id, ordinal
+        FROM orchestration_v2_turn_item_positions
+        WHERE thread_id = ${threadId}
+        ORDER BY ordinal
+      `;
       const ordinalOf = (name: string) =>
-        items.find((item) => item.id === `turn-item:foundation-start-order:${name}`)!.ordinal;
+        positions.find((row) => row.turn_item_id === `turn-item:foundation-start-order:${name}`)!
+          .ordinal;
       assert.deepEqual(
-        items.toSorted((left, right) => left.ordinal - right.ordinal).map((item) => item.id),
+        positions.map((row) => row.turn_item_id),
         ["first", "jumped", "jumped-reply", "jumped-late", "late", "steered"].map(
           (name) => `turn-item:foundation-start-order:${name}`,
         ),
