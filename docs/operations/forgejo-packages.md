@@ -238,3 +238,9 @@ It needs a JDK 17 as `jdk/` and an Android SDK as `sdk/` under
 `release.keystore` (alias `t3code`) with `keystore-password` under
 `~/.config/t3code-android`. Keep a copy of both keystore files: Android only
 updates an installed app with a build signed by the same key.
+
+Every release builds a fresh tree, so files from an older commit cannot reach
+the APK. Install `ccache` (`sudo apt install ccache`) to keep that from meaning
+a full native compile each time: the script uses it when present, along with
+Gradle's build cache, and runs the build at low priority. The first build after
+installing it, or after a dependency bump, is still a full compile.

@@ -48,6 +48,15 @@ if ((!build_only)); then
 fi
 export JAVA_HOME="$build_home/jdk" ANDROID_HOME="$build_home/sdk" ANDROID_SDK_ROOT="$build_home/sdk"
 export PATH="$JAVA_HOME/bin:$PATH"
+# The tree below is rebuilt every time, so caches carry unchanged work across
+# releases. Both answer only for identical inputs, and the tree's path never
+# changes, so a cached result is the one a fresh compile would produce.
+if command -v ccache >/dev/null; then
+  export CCACHE_DIR="$build_home/ccache" CCACHE_MAXSIZE=10G
+  export CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache
+else
+  echo "ccache is not installed, so native code compiles without a cache." >&2
+fi
 # Android only installs an update whose version code is not lower, so it
 # follows commit time rather than the per-base-version Forgejo counter.
 version_code=$(($(git -C "$repo" show -s --format=%ct "$commit") / 60))
@@ -72,7 +81,11 @@ export T3CODE_MOBILE_UPDATES_ENABLED=0
 export T3CODE_MOBILE_VERSION="$version" T3CODE_ANDROID_VERSION_CODE="$version_code"
 npx expo prebuild --clean --platform android >/dev/null
 password=$(<"$keys/keystore-password")
-(cd android && ./gradlew :app:assembleRelease --no-daemon --console=plain --quiet \
+# A release build is background work: it yields CPU and disk to whatever else
+# runs here, and half the cores' worth of Gradle workers keeps the native
+# builds from running dozens of compilers at once.
+(cd android && nice -n 10 ionice -c 2 -n 7 ./gradlew :app:assembleRelease \
+  --no-daemon --console=plain --quiet --build-cache --max-workers=$((($(nproc) + 1) / 2)) \
   -PreactNativeArchitectures=arm64-v8a \
   -Pandroid.injected.signing.store.file="$keys/release.keystore" \
   -Pandroid.injected.signing.store.password="$password" \
