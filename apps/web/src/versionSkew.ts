@@ -49,7 +49,8 @@ function versionCore(version: string): string {
 
 /**
  * The skew a user can act on: the connected server runs an older T3 Code than
- * this client, so the server is the side that needs updating.
+ * this client (or than `clientVersion`, the version this client is about to
+ * update to), so the server is the side that needs updating.
  *
  * Two builds of the same numbered line (nightly, or this fork's Forgejo
  * releases) compare their full versions, including the date, run or build
@@ -61,8 +62,9 @@ function versionCore(version: string): string {
  */
 export function resolveVersionMismatch(
   serverVersion: string | null | undefined,
+  clientVersion: string = APP_VERSION,
 ): VersionMismatch | null {
-  const normalizedClientVersion = normalizeVersion(APP_VERSION);
+  const normalizedClientVersion = normalizeVersion(clientVersion);
   const normalizedServerVersion = normalizeVersion(serverVersion);
   if (!normalizedClientVersion || !normalizedServerVersion) {
     return null;

@@ -755,6 +755,7 @@ const SideChatComposer = memo(function SideChatComposer({
             />
             <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
               <ProviderModelPicker
+                environmentId={environmentId}
                 activeInstanceId={modelSelection.instanceId}
                 model={modelSelection.model}
                 lockedProvider={CODEX_DRIVER}

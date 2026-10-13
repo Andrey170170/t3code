@@ -21,15 +21,7 @@ import type {
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import * as Option from "effect/Option";
-import {
-  type MouseEvent,
-  useCallback,
-  useEffect,
-  useEffectEvent,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import {
   CheckIcon,
@@ -125,6 +117,7 @@ import {
 } from "./chat/threadDetailsPanelStyles";
 import { getSourceControlPresentation, sourceControlIcon } from "~/sourceControlPresentation";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
+import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
 import { useOpenLink } from "~/browser/useOpenLink";
 
 interface GitActionsControlProps {
@@ -1061,7 +1054,6 @@ export default function GitActionsControl({
   );
   const vcsActionState = useAtomValue(vcsActionManager.stateAtom(sourceControlScope));
   const visibleInlineSuccess = inlineSuccess?.scopeKey === successScopeKey ? inlineSuccess : null;
-  let runGitActionWithToast: (input: RunGitActionWithToastInput) => Promise<void>;
 
   useEffect(() => {
     if (!inlineSuccess) return;
@@ -1257,8 +1249,10 @@ export default function GitActionsControl({
     };
   }, [activeEnvironmentId, gitCwd, refreshVcsStatus]);
 
-  runGitActionWithToast = useEffectEvent(
-    async ({
+  // React 19.2 leaves useEffectEvent stale inside the memoized details panel.
+  // Bind each render's actions to its checkout and thread, including retained toast actions.
+  const runGitActionWithToast = useCallback(
+    async function runGitActionWithToast({
       action,
       commitMessage,
       onConfirmed,
@@ -1266,7 +1260,7 @@ export default function GitActionsControl({
       statusOverride,
       featureBranch = false,
       filePaths,
-    }: RunGitActionWithToastInput) => {
+    }: RunGitActionWithToastInput) {
       if (
         activeEnvironmentId === null ||
         !readEnvironmentScope(activeEnvironmentId, AuthSourceControlWriteScope) ||
@@ -1414,6 +1408,20 @@ export default function GitActionsControl({
         });
       }
     },
+    [
+      activeDraftThread,
+      activeEnvironmentId,
+      activeServerThread,
+      gitStatusForActions,
+      isDefaultRef,
+      isLocalDraftThread,
+      isPanel,
+      openPrLink,
+      runImmediateGitAction,
+      successScopeKey,
+      syncThreadBranchAfterGitAction,
+      threadToastData,
+    ],
   );
 
   const continuePendingDefaultBranchAction = () => {
@@ -1910,8 +1918,10 @@ export default function GitActionsControl({
           <FileDiffIcon className={THREAD_DETAILS_PANEL_ICON_CLASS} aria-hidden />
           <span className={cn("flex-1 text-left", THREAD_DETAILS_PANEL_LABEL_CLASS)}>Changes</span>
           <span className="flex items-center gap-1 font-mono text-2xs tabular-nums">
-            <span className="text-success">+{changesTotals?.insertions ?? 0}</span>
-            <span className="text-destructive">-{changesTotals?.deletions ?? 0}</span>
+            <span className="text-success">+{formatDiffCount(changesTotals?.insertions ?? 0)}</span>
+            <span className="text-destructive">
+              -{formatDiffCount(changesTotals?.deletions ?? 0)}
+            </span>
           </span>
         </ThreadDetailsControl>
       ) : null}
@@ -2021,11 +2031,11 @@ export default function GitActionsControl({
                                     ) : (
                                       <>
                                         <span className="text-diff-addition">
-                                          +{file.insertions}
+                                          +{formatDiffCount(file.insertions)}
                                         </span>
                                         <span className="text-muted-foreground"> / </span>
                                         <span className="text-diff-deletion">
-                                          -{file.deletions}
+                                          -{formatDiffCount(file.deletions)}
                                         </span>
                                       </>
                                     )}
@@ -2039,11 +2049,11 @@ export default function GitActionsControl({
                     </div>
                     <div className="flex justify-end font-mono">
                       <span className="text-diff-addition">
-                        +{selectedFiles.reduce((sum, f) => sum + f.insertions, 0)}
+                        +{formatDiffCount(selectedFiles.reduce((sum, f) => sum + f.insertions, 0))}
                       </span>
                       <span className="text-muted-foreground"> / </span>
                       <span className="text-diff-deletion">
-                        -{selectedFiles.reduce((sum, f) => sum + f.deletions, 0)}
+                        -{formatDiffCount(selectedFiles.reduce((sum, f) => sum + f.deletions, 0))}
                       </span>
                     </div>
                   </div>
