@@ -10,14 +10,17 @@ release start only after Andrei approves that report. Each stage's criterion
 says when it is done.
 
 The scratch worktree lives outside the repository (`/tmp/t3-merge-scout`), so
-the main checkout stays clean on `dev_vm` until the merge is approved.
+the main checkout stays clean on `dev_vm` until the merge is approved. Every
+command names `dev_vm` rather than `HEAD`, since the skill may run from another
+branch. Shell variables do not survive the approval gate, so recompute `MB`
+when a later stage needs it.
 
 ## 1. Scout
 
 ```bash
-git fetch upstream && git fetch origin
-MB=$(git merge-base HEAD upstream/main)
-git worktree add --detach /tmp/t3-merge-scout HEAD
+git fetch upstream && git fetch origin   # local dev_vm must equal origin/dev_vm
+MB=$(git merge-base dev_vm upstream/main)
+git worktree add --detach /tmp/t3-merge-scout dev_vm
 cd /tmp/t3-merge-scout && git merge --no-ff --no-commit upstream/main
 ```
 
@@ -30,21 +33,24 @@ Gather, in the scratch worktree:
   on upstream's new structure. Use `resolving-merge-conflicts` for anything
   non-trivial.
 - **Overlap**: files changed on both sides,
-  `comm -12 <(git diff --name-only $MB HEAD | sort) <(git diff --name-only $MB upstream/main | sort)`.
+  `comm -12 <(git diff --name-only $MB dev_vm | sort) <(git diff --name-only $MB upstream/main | sort)`.
   A clean textual merge can still break a fork feature, so read the upstream
   commits behind each overlapping file.
 - **Redundant fork patches**: for each fork feature or fix
-  (`git log --no-merges upstream/main..HEAD`), check whether upstream now does
+  (`git log --no-merges upstream/main..dev_vm`), check whether upstream now does
   the same thing. If it does, propose dropping the fork's version.
 - **Migration ledger**: list upstream's new migrations, and read the live ledger
   read-only:
   `sqlite3 "file:$HOME/.local/share/t3code/userdata/statev2.sqlite?mode=ro" "select * from effect_sql_migrations order by migration_id"`.
   Every recorded id must carry upstream's name. The fork never adds rows to this
   ledger; fork schema goes in its own table.
-- **Build health**: install dependencies, typecheck each package, and run the
-  fork's tests (see Gotchas). Use
-  `git diff --name-only $MB HEAD -- '*.test.ts' '*.test.tsx'`, plus the tests
-  for overlapping files.
+- **Build health**: install dependencies, then typecheck each package that
+  holds a file from `git diff --name-only $MB dev_vm`. Upstream CI covers the
+  rest. Then run these tests (see Gotchas): the fork's
+  (`git diff --name-only $MB dev_vm -- '*.test.ts' '*.test.tsx'`), the tests for
+  overlapping files, and every test upstream added or changed in a directory
+  that holds a fork-changed file. New upstream tests there can assert behavior
+  the fork deliberately changed.
 
 Done when the report covers: what's new, every conflict and its resolution, each
 adaptation that the typecheck or tests forced, redundant fork patches, semantic
@@ -55,14 +61,18 @@ stop and wait for approval.
 ## 2. Merge
 
 1. Fetch again. If `upstream/main` moved, copy the resolved files out, stage
-   everything, `git merge --abort`, merge the new tip, restore the resolutions,
-   and rerun typecheck and tests.
+   everything, `git merge --abort`, and merge the new tip. Restore a saved
+   resolution only for a file that
+   `git diff --name-only <old tip> upstream/main` does not list. Resolve the
+   listed files again, since a copy would discard upstream's newer content.
+   Then rerun typecheck and tests.
 2. Commit in the scratch worktree as
    `merge(upstream): integrate <Month D> updates with fork compatibility`. The
    body names each adaptation and why, with no list of upstream features.
 3. The pre-commit hook formats staged files, so check that the result still
    differs from upstream only in fork files. This must print nothing:
-   `comm -23 <(git diff --name-only upstream/main HEAD | sort) <(git diff --name-only $MB dev_vm | sort)`.
+   `comm -23 <(git diff --name-only upstream/main HEAD | sort) <(git diff --name-only $(git merge-base dev_vm upstream/main) dev_vm | sort)`
+   (run before the fast-forward, while `dev_vm` is still the pre-merge tip).
 4. In the main checkout, `git merge --ff-only <merge commit>`, then
    `git push origin dev_vm`.
 
