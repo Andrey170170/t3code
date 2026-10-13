@@ -76,8 +76,8 @@ export function collectRestartingMachines(
  * The servers that "update everything" moves to `targetVersion`: connected,
  * permitted, able to update over RPC, and behind the target. A server whose
  * own updater offers a newer version moves to that version instead, which it
- * installs without npm. Two kinds stay out. Servers this app hosts would relaunch the app mid-run, and the app's
- * own install updates them anyway. A service on another release channel
+ * installs without npm. Two kinds stay out. Servers this app hosts would
+ * relaunch the app mid-run, and the app's own install updates them anyway. A service on another release channel
  * stays there; a desktop-managed server follows its own app's update feed, so
  * the channel rule does not apply to it.
  */
@@ -102,14 +102,16 @@ export function collectServerUpdateTargets(
       return [];
     }
     const serverVersion = config.environment.serverVersion;
+    // The updater only offers a version newer than the server on its own line.
     const serverOffer = config.availableUpdateVersion;
-    const serverTarget = serverOffer ?? targetVersion;
-    if (resolveVersionMismatch(serverVersion, serverTarget) === null) return [];
-    if (
-      selfUpdate !== "desktop-managed" &&
-      cliReleaseChannelOf(serverVersion) !== cliReleaseChannelOf(serverTarget)
-    ) {
-      return [];
+    if (serverOffer === undefined) {
+      if (resolveVersionMismatch(serverVersion, targetVersion) === null) return [];
+      if (
+        selfUpdate !== "desktop-managed" &&
+        cliReleaseChannelOf(serverVersion) !== cliReleaseChannelOf(targetVersion)
+      ) {
+        return [];
+      }
     }
     return [
       {
@@ -120,7 +122,7 @@ export function collectServerUpdateTargets(
         desktopAppUpdate,
         threadContinuation: supportsServerUpdateThreadContinuation(config),
         continueThreadsAfterServerUpdate: config.settings.continueThreadsAfterServerUpdate ?? false,
-        targetVersion: serverTarget,
+        targetVersion: serverOffer ?? targetVersion,
         waitsForNpm: selfUpdate !== "desktop-managed" && serverOffer === undefined,
       },
     ];
