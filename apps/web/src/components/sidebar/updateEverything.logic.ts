@@ -16,6 +16,9 @@ export interface UpdateEverythingMachine {
   readonly serverConfig: {
     readonly environment: ServerConfig["environment"];
     readonly settings: Pick<ServerConfig["settings"], "continueThreadsAfterServerUpdate">;
+    /** A newer version the server's own updater can install (this fork's
+        Forgejo helper reports it). */
+    readonly availableUpdateVersion?: string;
   } | null;
   readonly connected: boolean;
   /** Served by the desktop app this client runs in (the primary backend or a
@@ -24,6 +27,12 @@ export interface UpdateEverythingMachine {
   /** The session holds the scope a server update needs. */
   readonly canMaintain: boolean;
   readonly updateState: ServerUpdateState;
+}
+
+/** A server a run updates. `waitsForNpm` marks one that downloads
+    `targetVersion` from npm, so it waits until npm publishes it. */
+export interface UpdateEverythingServer extends ServerUpdateTarget {
+  readonly waitsForNpm: boolean;
 }
 
 /** A server that restarts during a run. */
@@ -65,16 +74,17 @@ export function collectRestartingMachines(
 
 /**
  * The servers that "update everything" moves to `targetVersion`: connected,
- * permitted, able to update over RPC, and behind the target. Two kinds stay
- * out. Servers this app hosts would relaunch the app mid-run, and the app's
- * own install updates them anyway. A service on another release channel
+ * permitted, able to update over RPC, and behind the target. A server whose
+ * own updater offers a newer version moves to that version instead, which it
+ * installs without npm. Two kinds stay out. Servers this app hosts would
+ * relaunch the app mid-run, and the app's own install updates them anyway. A service on another release channel
  * stays there; a desktop-managed server follows its own app's update feed, so
  * the channel rule does not apply to it.
  */
 export function collectServerUpdateTargets(
   machines: ReadonlyArray<UpdateEverythingMachine>,
   targetVersion: string,
-): ServerUpdateTarget[] {
+): UpdateEverythingServer[] {
   return machines.flatMap((machine) => {
     const config = machine.serverConfig;
     if (
@@ -92,12 +102,16 @@ export function collectServerUpdateTargets(
       return [];
     }
     const serverVersion = config.environment.serverVersion;
-    if (resolveVersionMismatch(serverVersion, targetVersion) === null) return [];
-    if (
-      selfUpdate !== "desktop-managed" &&
-      cliReleaseChannelOf(serverVersion) !== cliReleaseChannelOf(targetVersion)
-    ) {
-      return [];
+    // The updater only offers a version newer than the server on its own line.
+    const serverOffer = config.availableUpdateVersion;
+    if (serverOffer === undefined) {
+      if (resolveVersionMismatch(serverVersion, targetVersion) === null) return [];
+      if (
+        selfUpdate !== "desktop-managed" &&
+        cliReleaseChannelOf(serverVersion) !== cliReleaseChannelOf(targetVersion)
+      ) {
+        return [];
+      }
     }
     return [
       {
@@ -108,7 +122,8 @@ export function collectServerUpdateTargets(
         desktopAppUpdate,
         threadContinuation: supportsServerUpdateThreadContinuation(config),
         continueThreadsAfterServerUpdate: config.settings.continueThreadsAfterServerUpdate ?? false,
-        targetVersion,
+        targetVersion: serverOffer ?? targetVersion,
+        waitsForNpm: selfUpdate !== "desktop-managed" && serverOffer === undefined,
       },
     ];
   });
