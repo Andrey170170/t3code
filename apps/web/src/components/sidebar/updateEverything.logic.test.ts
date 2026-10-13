@@ -61,6 +61,32 @@ describe("collectServerUpdateTargets", () => {
       ["other-desktop", "0.0.50"],
     ]);
   });
+
+  it("moves a server to the version its own updater offers, without waiting for npm", () => {
+    const offering = (id: string, serverVersion: string, offer: string) => {
+      const base = machine(id, serverVersion, "boot-service");
+      return {
+        ...base,
+        serverConfig: { ...base.serverConfig!, availableUpdateVersion: offer },
+      };
+    };
+    const targets = collectServerUpdateTargets(
+      [
+        offering("forgejo", "0.0.45-forgejo.18", "0.0.45-forgejo.19"),
+        machine("npm", "0.0.40", "boot-service"),
+        machine("desktop", "0.0.40", "desktop-managed"),
+      ],
+      "0.0.45-forgejo.19",
+    );
+
+    expect(
+      targets.map((target) => [target.serverLabel, target.targetVersion, target.waitsForNpm]),
+    ).toEqual([
+      ["forgejo", "0.0.45-forgejo.19", false],
+      ["npm", "0.0.45-forgejo.19", true],
+      ["desktop", "0.0.45-forgejo.19", false],
+    ]);
+  });
 });
 
 describe("collectRestartingMachines", () => {
