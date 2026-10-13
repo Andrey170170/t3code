@@ -243,4 +243,14 @@ Every release builds a fresh tree, so files from an older commit cannot reach
 the APK. Install `ccache` (`sudo apt install ccache`) to keep that from meaning
 a full native compile each time: the script uses it when present, along with
 Gradle's build cache, and runs the build at low priority. The first build after
-installing it, or after a dependency bump, is still a full compile.
+installing it, or after a dependency bump, is still a full compile: about five
+minutes here, against two with a warm cache.
+
+A build needs about 18 GB of memory at its peak: Gradle, the Kotlin daemon and
+up to 28 compilers at once. This VM uses Hyper-V dynamic memory and shares the
+PC with WSL, so it grows that far only when the host has the memory free. Start
+an Android build only while WSL is idle, which it may not be right after
+`release:forgejo` finishes the desktop build there. A build that could not get
+the memory has pushed the VM into swap and frozen it until a hard reset.
+`autoMemoryReclaim=gradual` in `.wslconfig` makes WSL give memory back after
+its own builds.
