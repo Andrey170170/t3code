@@ -3079,6 +3079,8 @@ const OrchestrationV2InternalCommand = Schema.Union([
    * Records what a pull request watch saw, and wakes the agent in the same transaction when
    * `wake` is set. Rejected once the watch started at `startedAt` has ended, and a wake is
    * rejected on a settled or archived thread, so a read that raced either changes nothing.
+   * A wake reusing the message ID of an earlier wake rewrites that message while its run is
+   * still queued, and is rejected once that run started.
    */
   Schema.Struct({
     type: Schema.Literal("thread.pull-request-watch.sync"),

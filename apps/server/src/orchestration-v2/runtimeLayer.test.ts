@@ -2943,6 +2943,155 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("folds news into a wake the agent has not started on", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projectId = ProjectId.make("pr-watch-fold-project");
+      const threadId = ThreadId.make("runtime-pull-request-watch-fold");
+      yield* seedProject({
+        projectId,
+        title: "Watch fold",
+        workspaceRoot: "/workspace/watch-fold",
+        defaultModelSelection: null,
+        createdAt: "2026-10-01T00:00:00.000Z",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("pr-watch-fold-create"),
+        threadId,
+        projectId,
+        title: "Watch fold",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+      });
+      // A busy agent: wakes queue behind this run.
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("pr-watch-fold-busy"),
+        threadId,
+        messageId: MessageId.make("pr-watch-fold-busy"),
+        text: "Keep the provider occupied.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request.watch",
+        commandId: CommandId.make("pr-watch-fold-start"),
+        threadId,
+        host: "github.com",
+        repository: "pingdotgg/t3code",
+        number: 12,
+        watching: true,
+        link: { url: "https://github.com/pingdotgg/t3code/pull/12", source: "agent" },
+      });
+
+      const comment = (id: string, createdAt: string): PullRequestComment => ({
+        id,
+        kind: "issue-comment",
+        author: { login: "reviewer", name: null, avatarUrl: null },
+        body: `Comment ${id}.`,
+        createdAt,
+        url: null,
+        path: null,
+        reviewState: null,
+      });
+      let comments: Array<PullRequestComment> = [];
+      let lint: "success" | "failure" = "success";
+      // A truncated activity read leaves the remarks unread for that pass.
+      let remarksUnreadable = false;
+      const reactor = yield* PullRequestWatchReactor.make.pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            Layer.mock(PullRequestService.PullRequestService)({
+              detail: () =>
+                Effect.sync(() => ({
+                  ...watchedPullRequestDetail({
+                    projectId,
+                    number: 12,
+                    at: "2026-10-02T12:00:00.000Z",
+                  }),
+                  checks: [{ name: "lint", status: lint, description: null, url: null }],
+                })),
+              activity: () =>
+                Effect.sync(() => ({
+                  comments,
+                  commentCount: comments.length,
+                  commentsTruncated: remarksUnreadable,
+                  reviewThreads: [],
+                  commits: [],
+                })),
+            }),
+          ),
+        ),
+      );
+      const wakes = Effect.map(orchestrator.getThreadProjection(threadId), (projection) =>
+        projection.runs.flatMap((run) => {
+          const message = projection.messages.find(
+            (candidate) => candidate.id === run.userMessageId && candidate.notification,
+          );
+          return message === undefined ? [] : [{ status: run.status, text: message.text }];
+        }),
+      );
+      const commentLines = (text: string) =>
+        text.split("\n").filter((line) => line.startsWith("  - reviewer"));
+
+      yield* reactor.sweep;
+      comments = [comment("one", "2999-01-01T00:00:01.000Z")];
+      yield* TestClock.adjust("11 minutes");
+      yield* reactor.sweep;
+      comments = [...comments, comment("two", "2999-01-01T00:00:02.000Z")];
+      yield* TestClock.adjust("11 minutes");
+      yield* reactor.sweep;
+
+      // One queued wake that tells both comments once.
+      const folded = yield* wakes;
+      assert.lengthOf(folded, 1);
+      assert.equal(folded[0]!.status, "queued");
+      assert.include(folded[0]!.text, "- 2 new comments:");
+      assert.deepEqual(commentLines(folded[0]!.text), [
+        '  - reviewer: "Comment one."',
+        '  - reviewer: "Comment two."',
+      ]);
+
+      // A pass that cannot read the remarks still keeps the comments the wake already tells.
+      lint = "failure";
+      remarksUnreadable = true;
+      yield* TestClock.adjust("11 minutes");
+      yield* reactor.sweep;
+      remarksUnreadable = false;
+      const withChecks = yield* wakes;
+      assert.lengthOf(withChecks, 1);
+      assert.include(withChecks[0]!.text, "- Checks failed");
+      assert.lengthOf(commentLines(withChecks[0]!.text), 2);
+
+      // Once the agent is past that wake, news wakes it again with only what is new.
+      const queued = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+        (run) => run.status === "queued",
+      )!;
+      yield* orchestrator.dispatch({
+        type: "queued-run.cancel",
+        commandId: CommandId.make("pr-watch-fold-cancel"),
+        threadId,
+        runId: queued.id,
+      });
+      comments = [...comments, comment("three", "2999-01-01T00:00:03.000Z")];
+      yield* TestClock.adjust("11 minutes");
+      yield* reactor.sweep;
+      const after = yield* wakes;
+      assert.lengthOf(after, 2);
+      assert.deepEqual(commentLines(after[1]!.text), ['  - reviewer: "Comment three."']);
+    }),
+  );
+
   it.effect.each([
     "single page",
     "paginated",

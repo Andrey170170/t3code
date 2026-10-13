@@ -3382,6 +3382,117 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       assert.lengthOf((yield* projectionStore.getThreadProjection(threadId)).turnItems, 151);
     }),
   );
+
+  it.effect("places runs on the timeline in the order they started", () =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:foundation-start-order");
+      const runOf = (ordinal: number) => RunId.make(`run:foundation-start-order:${ordinal}`);
+      const runEvent = (ordinal: number) =>
+        ({
+          id: EventId.make(`event:foundation-start-order:run:${ordinal}`),
+          type: "run.created",
+          threadId,
+          runId: runOf(ordinal),
+          providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: runOf(ordinal),
+            threadId,
+            ordinal,
+            providerInstanceId,
+            modelSelection,
+            providerThreadId: null,
+            userMessageId: MessageId.make(`message:foundation-start-order:${ordinal}`),
+            rootNodeId: null,
+            activeAttemptId: null,
+            status: "queued",
+            queuePosition: ordinal,
+            requestedAt: now,
+            startedAt: null,
+            completedAt: null,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        }) satisfies OrchestrationV2DomainEvent;
+      const itemEvent = (name: string, ordinal: number) =>
+        ({
+          id: EventId.make(`event:foundation-start-order:item:${name}`),
+          type: "turn-item.updated",
+          threadId,
+          runId: runOf(ordinal),
+          providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`turn-item:foundation-start-order:${name}`),
+            threadId,
+            runId: runOf(ordinal),
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 0,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "dynamic_tool",
+            toolName: name,
+            input: {},
+            output: {},
+          },
+        }) satisfies OrchestrationV2DomainEvent;
+
+      yield* eventSink.write({
+        events: [
+          threadCreatedEvent({
+            id: "event:foundation-start-order:thread",
+            thread: makeThread(threadId, now),
+            now,
+          }),
+          runEvent(1),
+          runEvent(2),
+          runEvent(3),
+          itemEvent("first", 1),
+        ],
+      });
+      // Run 3 jumps the queue and starts before run 2; both items of a batch share a band.
+      yield* eventSink.write({ events: [itemEvent("jumped", 3), itemEvent("jumped-reply", 3)] });
+      yield* eventSink.write({ events: [itemEvent("late", 2)] });
+      // Databases upgraded through the V2 migration kept provider ordinals on projected items;
+      // the run's band comes from its positions.
+      yield* sql`
+        UPDATE orchestration_v2_projection_turn_items
+        SET ordinal = 7
+        WHERE thread_id = ${threadId} AND run_id = ${runOf(3)}
+      `;
+      // A message steered into run 2, and a later update to run 3, keep their runs' bands.
+      yield* eventSink.write({ events: [itemEvent("steered", 2), itemEvent("jumped-late", 3)] });
+
+      const positions = yield* sql<{ readonly turn_item_id: string; readonly ordinal: number }>`
+        SELECT turn_item_id, ordinal
+        FROM orchestration_v2_turn_item_positions
+        WHERE thread_id = ${threadId}
+        ORDER BY ordinal
+      `;
+      const ordinalOf = (name: string) =>
+        positions.find((row) => row.turn_item_id === `turn-item:foundation-start-order:${name}`)!
+          .ordinal;
+      assert.deepEqual(
+        positions.map((row) => row.turn_item_id),
+        ["first", "jumped", "jumped-reply", "jumped-late", "late", "steered"].map(
+          (name) => `turn-item:foundation-start-order:${name}`,
+        ),
+      );
+      assert.equal(TurnItemPositionStore.positionBand(ordinalOf("first")), 1);
+      assert.equal(TurnItemPositionStore.positionBand(ordinalOf("jumped")), 3);
+      assert.equal(TurnItemPositionStore.positionBand(ordinalOf("late")), 4);
+    }),
+  );
 });
 
 it.live("keeps claiming new work after repeated idle periods", () =>

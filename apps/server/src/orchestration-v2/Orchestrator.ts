@@ -2349,8 +2349,61 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "The pull request watch ended or its thread settled while it was read.",
         });
       }
+      // A wake that reuses a queued wake's message folds into it rather than queuing another run.
+      const replacedRun =
+        command.wake === undefined
+          ? undefined
+          : (yield* projectionStore
+              .getThreadRecords(command.threadId, ["runs"])
+              .pipe(
+                Effect.mapError(
+                  (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+                ),
+              )).runs.find((run) => run.userMessageId === command.wake?.messageId);
+      if (replacedRun !== undefined && replacedRun.status !== "queued") {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "The pull request wake being updated already started.",
+        });
+      }
       yield* dispatchThreadMutation(command, events, effects);
       if (command.wake === undefined) return;
+      if (replacedRun !== undefined) {
+        const message = yield* projectionStore
+          .getRunMessage(command.threadId, replacedRun.id)
+          .pipe(
+            Effect.mapError(
+              (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+            ),
+          );
+        if (message === undefined) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Queued run ${replacedRun.id} has no user message.`,
+          });
+        }
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "message.updated",
+          threadId: command.threadId,
+          runId: replacedRun.id,
+          ...(replacedRun.rootNodeId === null ? {} : { nodeId: replacedRun.rootNodeId }),
+          providerInstanceId: replacedRun.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            ...message,
+            text: command.wake.text,
+            notification: command.wake.notification,
+            updatedAt: now,
+          },
+        });
+        return;
+      }
       yield* dispatchMessage(
         {
           type: "message.dispatch",
