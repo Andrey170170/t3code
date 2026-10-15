@@ -46,11 +46,51 @@ describe("classifyScope", () => {
 
 describe("agentSliceMemoryLimits", () => {
   it("leaves 6 GB before throttling and 4 GB before a kill on large machines", () => {
-    expect(agentSliceMemoryLimits(64 * GiB)).toEqual({ high: 58 * GiB, max: 60 * GiB });
+    expect(agentSliceMemoryLimits(64 * GiB)).toEqual({
+      high: 58 * GiB,
+      max: 60 * GiB,
+      swapMax: 4 * GiB,
+      ignored: [],
+    });
   });
 
   it("still gives agents most of a small machine", () => {
-    expect(agentSliceMemoryLimits(8 * GiB)).toEqual({ high: 4 * GiB, max: 6 * GiB });
+    expect(agentSliceMemoryLimits(8 * GiB)).toMatchObject({ high: 4 * GiB, max: 6 * GiB });
+  });
+
+  it("takes limits from the environment over what RAM reports now", () => {
+    // A ballooned VM reports 5 GB but can grow to 32 GB.
+    const env = {
+      T3CODE_AGENT_MEMORY_HIGH: "26G",
+      T3CODE_AGENT_MEMORY_MAX: "28g",
+      T3CODE_AGENT_MEMORY_SWAP_MAX: "512M",
+    };
+    expect(agentSliceMemoryLimits(5 * GiB, env)).toEqual({
+      high: 26 * GiB,
+      max: 28 * GiB,
+      swapMax: 512 * 1024 ** 2,
+      ignored: [],
+    });
+  });
+
+  it("lifts a limit set to infinity", () => {
+    const limits = agentSliceMemoryLimits(64 * GiB, { T3CODE_AGENT_MEMORY_SWAP_MAX: "infinity" });
+    expect(limits).toMatchObject({ swapMax: "infinity", ignored: [] });
+  });
+
+  it("keeps the default for an unreadable override and reports it", () => {
+    const limits = agentSliceMemoryLimits(64 * GiB, {
+      T3CODE_AGENT_MEMORY_HIGH: "lots",
+      // Too large to pass to systemctl exactly.
+      T3CODE_AGENT_MEMORY_MAX: `${"9".repeat(25)}T`,
+      T3CODE_AGENT_MEMORY_SWAP_MAX: "0",
+    });
+    expect(limits).toEqual({
+      high: 58 * GiB,
+      max: 60 * GiB,
+      swapMax: 0,
+      ignored: ["T3CODE_AGENT_MEMORY_HIGH", "T3CODE_AGENT_MEMORY_MAX"],
+    });
   });
 });
 
