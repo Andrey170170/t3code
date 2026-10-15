@@ -28,11 +28,17 @@ const GiB = 1024 ** 3;
 
 const SIZE_UNITS: Record<string, number> = { "": 1, K: 1024, M: 1024 ** 2, G: GiB, T: 1024 ** 4 };
 
-/** Reads a size such as `24G` the way systemd does, in powers of 1024. */
-function parseSize(text: string): number | undefined {
-  const match = /^(\d+)([KMGT]?)$/i.exec(text.trim());
+/**
+ * Reads a size such as `24G` the way systemd does, in powers of 1024, or
+ * `infinity` to lift the limit. Decimals and percentages are not accepted.
+ */
+function parseSize(text: string): number | "infinity" | undefined {
+  const trimmed = text.trim();
+  if (trimmed === "infinity") return "infinity";
+  const match = /^(\d+)([KMGT]?)$/i.exec(trimmed);
   if (match === null) return undefined;
-  return Number(match[1]) * (SIZE_UNITS[(match[2] ?? "").toUpperCase()] ?? 1);
+  const size = Number(match[1]) * (SIZE_UNITS[(match[2] ?? "").toUpperCase()] ?? 1);
+  return Number.isSafeInteger(size) ? size : undefined;
 }
 
 const LIMIT_OVERRIDES = {
@@ -46,16 +52,19 @@ const LIMIT_OVERRIDES = {
  * before they are throttled and 4 GB before the kernel kills one, so the
  * server, sshd, and tailscaled keep working. Small machines still give agents
  * at least half of RAM before throttling and three quarters before a kill.
- * Swap is capped so an agent that outgrows the slice is killed instead of
- * thrashing swap while the kernel throttles every agent and terminal in it.
+ * Swap is capped: with unlimited swap a slice over its high limit can page
+ * forever without reaching max, so the kernel throttles every agent and
+ * terminal in it and never kills anything. With the cap, usage keeps climbing
+ * toward max, where the kernel kills one agent.
  *
  * The defaults follow RAM at the first launch. A VM with dynamic memory
  * reports only what it holds at that moment, so set the matching
- * `T3CODE_AGENT_MEMORY_*` variable to override any limit. A value that does
- * not parse keeps the default and is listed in `ignored`.
+ * `T3CODE_AGENT_MEMORY_*` variable to override any limit. Override high and
+ * max together; the other one still follows RAM. A value that does not parse
+ * keeps the default and is listed in `ignored`.
  */
 export function agentSliceMemoryLimits(totalBytes: number, env: NodeJS.ProcessEnv = {}) {
-  const defaults = {
+  const defaults: Record<"high" | "max" | "swapMax", number | "infinity"> = {
     high: Math.max(totalBytes - 6 * GiB, Math.floor(totalBytes / 2)),
     max: Math.max(totalBytes - 4 * GiB, Math.floor(totalBytes * 0.75)),
     swapMax: 4 * GiB,

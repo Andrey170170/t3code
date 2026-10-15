@@ -73,16 +73,23 @@ describe("agentSliceMemoryLimits", () => {
     });
   });
 
+  it("lifts a limit set to infinity", () => {
+    const limits = agentSliceMemoryLimits(64 * GiB, { T3CODE_AGENT_MEMORY_SWAP_MAX: "infinity" });
+    expect(limits).toMatchObject({ swapMax: "infinity", ignored: [] });
+  });
+
   it("keeps the default for an unreadable override and reports it", () => {
     const limits = agentSliceMemoryLimits(64 * GiB, {
       T3CODE_AGENT_MEMORY_HIGH: "lots",
+      // Too large to pass to systemctl exactly.
+      T3CODE_AGENT_MEMORY_MAX: `${"9".repeat(25)}T`,
       T3CODE_AGENT_MEMORY_SWAP_MAX: "0",
     });
     expect(limits).toEqual({
       high: 58 * GiB,
       max: 60 * GiB,
       swapMax: 0,
-      ignored: ["T3CODE_AGENT_MEMORY_HIGH"],
+      ignored: ["T3CODE_AGENT_MEMORY_HIGH", "T3CODE_AGENT_MEMORY_MAX"],
     });
   });
 });
