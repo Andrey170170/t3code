@@ -77,6 +77,9 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
       runBand,
     }) =>
       Effect.gen(function* () {
+        const existing = yield* existingPosition(threadId, turnItemId);
+        if (existing !== undefined) return existing;
+
         // The run's band: the batch's hint, else its placed items' band, else the next free band
         // (never below its ordinal). Items without a run use band 0. 1000000 is BAND_SIZE.
         yield* sql`

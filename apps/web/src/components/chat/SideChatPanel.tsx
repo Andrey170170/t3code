@@ -463,6 +463,8 @@ function SideChatConversation({
       ) : (
         <SideChatComposer
           environmentId={environmentId}
+          threadRef={props.threadRef}
+          cwd={snapshot.cwd}
           parentThreadId={parentThreadId}
           sideChatId={sideChatId}
           serverModelSelection={snapshot.modelSelection}
@@ -488,6 +490,9 @@ function SideChatConversation({
 
 interface SideChatComposerProps {
   environmentId: EnvironmentId;
+  /** The parent's thread, which resolves links in agent questions. */
+  threadRef: ScopedThreadRef;
+  cwd: string;
   parentThreadId: ThreadId;
   sideChatId: ThreadId;
   /** The selection the server last ran with; local draft overrides win until sent. */
@@ -511,6 +516,8 @@ interface SideChatComposerProps {
 /** Owns the draft, so keystrokes do not re-render the timeline and streaming does not re-render this. */
 const SideChatComposer = memo(function SideChatComposer({
   environmentId,
+  threadRef,
+  cwd,
   parentThreadId,
   sideChatId,
   serverModelSelection,
@@ -698,6 +705,8 @@ const SideChatComposer = memo(function SideChatComposer({
       ) : null}
       <ComposerPendingUserInputPanel
         pendingUserInputs={[...pending.userInputs]}
+        cwd={cwd}
+        threadRef={threadRef}
         respondingRequestIds={respondingRequestIds}
         answers={answers}
         questionIndex={questionIndex}

@@ -334,7 +334,7 @@ export const make = Effect.gen(function* () {
     },
   ) =>
     Effect.gen(function* () {
-      const uuid = yield* crypto.randomUUIDv4;
+      const uuid = yield* crypto.randomUUIDv4();
       yield* engine.dispatch({
         type: "thread.pull-request-watch.sync",
         commandId: CommandId.make(`server:pr-watch:${target.thread.id}:${uuid}`),
@@ -387,7 +387,7 @@ export const make = Effect.gen(function* () {
       const told = folded ? combined : report;
       const messageId = folded
         ? queued.messageId
-        : MessageId.make(`message:pr-watch:${yield* crypto.randomUUIDv4}`);
+        : MessageId.make(`message:pr-watch:${yield* crypto.randomUUIDv4()}`);
       yield* record(target, told.exhausted ? null : told.next, {
         ...pullRequestWatchMessage({
           number: target.link.number,
