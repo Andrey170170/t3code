@@ -3659,10 +3659,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const pendingSubagentFramesByToolUseId = yield* Ref.make(
           new Map<string, ReadonlyArray<SDKMessage>>(),
         );
+        // `wakeTurnEnded`: see endBufferedWakeTurn. Buffering another frame drops it.
         const wakeBuffers = yield* Ref.make(
           new Map<
             string,
-            { readonly messages: ReadonlyArray<SDKMessage>; readonly detail: string | null }
+            {
+              readonly messages: ReadonlyArray<SDKMessage>;
+              readonly detail: string | null;
+              readonly wakeTurnEnded?: true;
+            }
           >(),
         );
         // Background work that ended and has not been named by a wake offer yet,
@@ -3724,6 +3729,32 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           });
         const clearWakeReports = (nativeThreadId: string) =>
           takeWakeReports(nativeThreadId).pipe(Effect.asVoid);
+        // Called when a result ends, inside the attached prompt turn, a wake
+        // turn Claude opened before that turn attached: Claude folded the
+        // prompt into it, or ran it first. Its buffered `init` (and any root
+        // output that beat the attach) would keep the wake's continuation
+        // waiting for a result that already went to the prompt turn, so drop
+        // them, and mark the entry so the continuation settles once it has
+        // replayed what is left. A buffered result still closes its own turn.
+        const endBufferedWakeTurn = (nativeThreadId: string) =>
+          Ref.update(wakeBuffers, (current) => {
+            const entry = current.get(nativeThreadId);
+            if (entry === undefined) return current;
+            const lastResult = entry.messages.findLastIndex((m) => m.type === "result");
+            const messages = entry.messages.filter(
+              (m, index) =>
+                index < lastResult ||
+                !(
+                  isClaudeTurnStartMessage(m) ||
+                  ((m.type === "assistant" || m.type === "user") &&
+                    parentToolUseIdFromSdkMessage(m) === null)
+                ),
+            );
+            const next = new Map(current);
+            if (messages.length === 0) next.delete(nativeThreadId);
+            else next.set(nativeThreadId, { ...entry, messages, wakeTurnEnded: true });
+            return next;
+          });
         // Last roster entry per opaque task. An empty roster level can land before
         // the task's notification, and the wake still needs to name the task.
         const lastKnownOpaqueTasks = yield* Ref.make(
@@ -7815,6 +7846,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           ) {
             // This user turn ran the wake itself, so no offer will name its work.
             yield* clearWakeReports(liveQuery.nativeThreadId);
+            yield* endBufferedWakeTurn(liveQuery.nativeThreadId);
             yield* Effect.logInfo("orchestration-v2.claude-task-notification-result-accepted", {
               providerTurnId: context.providerTurnId,
               num_turns: message.num_turns,
@@ -8103,6 +8135,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               // This turn showed the wake, so no offer will name its work.
               yield* clearWakeReports(liveQuery.nativeThreadId);
             }
+            yield* endBufferedWakeTurn(liveQuery.nativeThreadId);
             yield* Effect.logInfo("orchestration-v2.claude-result-for-other-turn", {
               providerTurnId: context.providerTurnId,
               origin: message.origin?.kind,
@@ -8854,7 +8887,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 yield* attachTurn;
                 // Exit and interrupt cleanup can run during transcript reads.
                 // Keep pending outcomes visible until replay applies them.
-                const drained = (yield* Ref.get(wakeBuffers)).get(nativeThreadId)?.messages ?? [];
+                const drainedEntry = (yield* Ref.get(wakeBuffers)).get(nativeThreadId);
+                const drained = drainedEntry?.messages ?? [];
                 yield* Ref.update(requestedContinuations, (current) => {
                   const updated = new Set(current);
                   updated.delete(nativeThreadId);
@@ -8920,7 +8954,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     entry.type === "assistant" ||
                     isClaudeTurnStartMessage(entry),
                 );
-                if (hasOpaqueTaskNotification && !hasNativeWakeFrame) {
+                // A wake turn that already ended in a prompt turn sends nothing more.
+                if (
+                  drainedEntry?.wakeTurnEnded === true ||
+                  (hasOpaqueTaskNotification && !hasNativeWakeFrame)
+                ) {
                   const completedAt = yield* DateTime.now;
                   yield* finalizeActiveTurn({ context, status: "completed", completedAt });
                 }

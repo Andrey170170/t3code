@@ -6608,6 +6608,197 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  // A subagent wake leaves its notification for the wake run to replay; a
+  // command's is settled by its replay tombstone, so both kinds are covered.
+  const foldedWakeTasks = {
+    command: { started: wakeTaskStarted, notification: wakeNotification },
+    subagent: {
+      started: claudeSdkFrame({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-folded-wake-subagent",
+        tool_use_id: "toolu-folded-wake-subagent",
+        description: "Background review",
+        subagent_type: "general-purpose",
+        task_type: "local_agent",
+        prompt: "Review the diff.",
+        uuid: "00000000-0000-4000-8000-000000000151",
+        session_id: WAKE_NATIVE_SESSION,
+      }),
+      notification: claudeSdkFrame({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "task-folded-wake-subagent",
+        tool_use_id: "toolu-folded-wake-subagent",
+        status: "completed",
+        output_file: "/tmp/task-folded-wake-subagent.output",
+        summary: "Review finished.",
+        uuid: "00000000-0000-4000-8000-000000000152",
+        session_id: WAKE_NATIVE_SESSION,
+      }),
+    },
+  };
+  for (const [kind, task] of Object.entries(foldedWakeTasks)) {
+    it.effect(
+      `settles the ${kind} wake run at once when Claude folds a queued prompt into its wake turn`,
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const harness = yield* makeWakeHarness;
+            const now = yield* DateTime.now;
+
+            yield* harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now,
+                attemptId: RunAttemptId.make("attempt-claude-folded-wake-1"),
+                text: "Run the build in the background.",
+                attachments: [],
+              }),
+            );
+            yield* Queue.offer(harness.sdkMessages, task.started);
+            yield* Queue.offer(harness.sdkMessages, turnOneResult);
+            yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+
+            // Claude opens the wake turn while no T3 turn is attached.
+            yield* harness.offerAndWait(task.notification);
+            yield* harness.offerAndWait(wakeTurnInit);
+            assert.lengthOf(harness.continuationRequests, 1);
+
+            // A queued prompt starts a second later, and Claude answers it inside
+            // the wake turn: one result, with the wake's origin and the prompt's echo.
+            yield* harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now,
+                attemptId: RunAttemptId.make("attempt-claude-folded-wake-2"),
+                text: "Update on pull request #70.",
+                attachments: [],
+                providerTurnOrdinal: 2,
+              }),
+            );
+            yield* Queue.offer(harness.sdkMessages, wakeAssistant);
+            yield* Queue.offer(
+              harness.sdkMessages,
+              claudeSdkFrame({
+                ...makeResultFrame({
+                  uuid: "00000000-0000-4000-8000-000000000150",
+                  result: WAKE_RESULT_TEXT,
+                  numTurns: 4,
+                  origin: { kind: "task-notification" },
+                }),
+                user_message_uuids: [harness.promptUuid(1)],
+              }),
+            );
+            yield* awaitUntil(() => harness.terminalEvents().length === 2, "folded turn terminal");
+
+            // The wake run queued for that turn has nothing left to wait for.
+            yield* harness.runtime.startTurn(
+              makeClaudeTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now,
+                attemptId: RunAttemptId.make("attempt-claude-folded-wake-3"),
+                text: "Background task completed.",
+                attachments: [],
+                providerTurnOrdinal: 3,
+                messageCreatedBy: "agent",
+                messageCreationSource: "provider",
+              }),
+            );
+            yield* awaitUntil(() => harness.terminalEvents().length === 3, "wake run terminal");
+            assert.equal(harness.terminalEvents()[2]?.status, "completed");
+            assert.lengthOf(harness.offeredMessages, 2);
+          }).pipe(
+            Effect.provide(
+              Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            ),
+          ),
+        ),
+    );
+  }
+
+  it.effect("settles the wake run at once when its turn ran before a queued prompt's", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-wake-first-1"),
+            text: "Run the build in the background.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, wakeTaskStarted);
+        // Echoing only on the result: later wake output streams without holding.
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({ ...turnOneResult, user_message_uuid: harness.promptUuid(0) }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "first turn terminal");
+
+        yield* harness.offerAndWait(wakeNotification);
+        yield* harness.offerAndWait(wakeTurnInit);
+        assert.lengthOf(harness.continuationRequests, 1);
+
+        // The queued prompt attaches, but Claude finishes the wake turn first,
+        // then runs the prompt's own turn.
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-wake-first-2"),
+            text: "Update on pull request #70.",
+            attachments: [],
+            providerTurnOrdinal: 2,
+          }),
+        );
+        yield* Queue.offer(harness.sdkMessages, wakeAssistant);
+        yield* Queue.offer(harness.sdkMessages, wakeResult);
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            ...makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000151",
+              result: "PR_REPLY",
+            }),
+            user_message_uuid: harness.promptUuid(1),
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 2, "prompt turn terminal");
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-wake-first-3"),
+            text: "Background task completed.",
+            attachments: [],
+            providerTurnOrdinal: 3,
+            messageCreatedBy: "agent",
+            messageCreationSource: "provider",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 3, "wake run terminal");
+        assert.equal(harness.terminalEvents()[2]?.status, "completed");
+        assert.lengthOf(harness.offeredMessages, 2);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("terminalizes an agent server wake from a positive task-notification result", () =>
     Effect.scoped(
       Effect.gen(function* () {
