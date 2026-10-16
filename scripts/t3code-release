@@ -1,30 +1,108 @@
 #!/usr/bin/env bash
 # Releases the server package, the Windows desktop app and the Android app to
 # Forgejo under one version; see docs/operations/forgejo-packages.md.
+#
+# The release runs in a systemd user unit, so it outlives the shell or agent
+# session that started it. Progress is kept per commit, so running it again
+# finishes the same version instead of publishing a new one.
 set -euo pipefail
-if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+usage() {
   cat <<'HELP'
 Usage: npm run release:forgejo [-- --ref REF]
+       scripts/t3code-release --wait [--ref REF]
 
 Publishes committed source (REF, default HEAD; the checkout must be clean
 without --ref) as the next numbered server package, then builds and publishes
 the desktop and Android apps from the same commit under that version.
 
-The server package is published first and is never withdrawn: a client build
-that fails is reported, and can be retried with scripts/t3code-desktop-release
-or scripts/t3code-android-release and the printed version and commit.
+It starts the systemd user unit t3code-release-<commit> and returns; --wait
+waits for that unit to end and reports what was released. The output goes to
+~/.local/state/t3code-release/<commit>/log, next to the published server
+artifact (artifact/package.tgz and build.json).
+
+The server package is published first and is never withdrawn. When a client
+build fails or the run stops, the same command finishes it: what is already
+published is skipped, and the clients are built under the recorded version.
 HELP
-  exit 0
-fi
+}
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-[[ -r ${PACKAGE_FOGEJO_TOKEN_FILE:-} ]] || { echo "Set PACKAGE_FOGEJO_TOKEN_FILE to publish." >&2; exit 1; }
-work=$(mktemp -d)
-trap 'rm -rf -- "$work"' EXIT
-node "$repo/scripts/t3code-forgejo.mjs" publish "$@" --output "$work/artifact"
-read -r version commit < <(node -p 'const b = require(process.argv[1]); `${b.version} ${b.commit}`' "$work/artifact/build.json")
-failed=()
-"$repo/scripts/t3code-desktop-release" --version "$version" --ref "$commit" || failed+=(desktop)
-"$repo/scripts/t3code-android-release" --version "$version" --ref "$commit" || failed+=(android)
-echo
-echo "Released $version from $commit: server${failed[*]:+, but not: ${failed[*]}}"
-((${#failed[@]} == 0))
+mode=start
+ref=
+while (($#)); do
+  case $1 in
+    --ref) ref=${2:?--ref needs a value}; shift 2 ;;
+    --wait) mode=wait; shift ;;
+    # What the unit runs; ref is then the resolved commit.
+    --run) mode=run; shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ $mode == start ]]; then
+  # The builder's check resolves the commit and refuses a dirty checkout without --ref.
+  commit=$("$repo/scripts/t3code-build" --source "$repo" ${ref:+--ref "$ref"} --check | sed -n 's/^commit=//p')
+else
+  commit=$(git -C "$repo" rev-parse --verify "${ref:-HEAD}^{commit}")
+fi
+[[ -n $commit ]] || { echo "Could not resolve the commit to release." >&2; exit 1; }
+state="${XDG_STATE_HOME:-$HOME/.local/state}/t3code-release/$commit"
+unit="t3code-release-${commit:0:12}"
+
+# Reports what is published from this commit; fails while anything is missing.
+summary() {
+  local part released=(server) missing=()
+  [[ -s $state/version ]] || { echo "Nothing is published from $commit yet."; return 1; }
+  for part in desktop android; do
+    if [[ -e $state/$part ]]; then released+=("$part"); else missing+=("$part"); fi
+  done
+  echo "Released $(<"$state/version") from $commit: ${released[*]}${missing[*]:+; not yet: ${missing[*]}}"
+  ((${#missing[@]} == 0))
+}
+
+case $mode in
+  run)
+    mkdir -p "$state"
+    echo "== $(date -Is) releasing $commit"
+    if [[ ! -s $state/version ]]; then
+      rm -rf -- "$state/artifact"
+      node "$repo/scripts/t3code-forgejo.mjs" publish --ref "$commit" --output "$state/artifact"
+      node -p 'require(process.argv[1]).version' "$state/artifact/build.json" >"$state/version"
+    fi
+    version=$(<"$state/version")
+    for part in desktop android; do
+      [[ -e $state/$part ]] && continue
+      if "$repo/scripts/t3code-$part-release" --version "$version" --ref "$commit"; then
+        touch "$state/$part"
+      fi
+    done
+    echo
+    summary
+    ;;
+  start)
+    if summary >/dev/null; then summary; exit 0; fi
+    if systemctl --user -q is-active "$unit"; then
+      echo "$unit is already releasing $commit. Log: $state/log"
+    else
+      [[ -r ${PACKAGE_FOGEJO_TOKEN_FILE:-} ]] || { echo "Set PACKAGE_FOGEJO_TOKEN_FILE to publish." >&2; exit 1; }
+      mkdir -p "$state"
+      pass=()
+      for name in PATH HOME PACKAGE_FOGEJO_TOKEN_FILE XDG_STATE_HOME SSH_AUTH_SOCK \
+        T3CODE_REGISTRY T3CODE_WINDOWS_BUILD_HOST; do
+        [[ -v $name ]] && pass+=(-E "$name")
+      done
+      # The swap cap matches the agent slice it used to run in: an Android build starved of
+      # memory is killed instead of freezing the VM in swap, and a rerun picks it up.
+      systemd-run --user --collect --quiet --unit="$unit" --working-directory="$repo" "${pass[@]}" \
+        -p MemorySwapMax=4G \
+        -p StandardOutput="append:$state/log" -p StandardError="append:$state/log" \
+        -- "$repo/scripts/t3code-release" --run --ref "$commit"
+      echo "Started $unit to release $commit. Log: $state/log"
+    fi
+    echo "Wait for it with: scripts/t3code-release --wait --ref $commit"
+    ;;
+  wait)
+    while systemctl --user -q is-active "$unit"; do sleep 15; done
+    summary || { echo "Log: $state/log"; exit 1; }
+    ;;
+esac
