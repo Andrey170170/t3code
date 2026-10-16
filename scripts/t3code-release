@@ -87,8 +87,10 @@ case $mode in
       [[ -r ${PACKAGE_FOGEJO_TOKEN_FILE:-} ]] || { echo "Set PACKAGE_FOGEJO_TOKEN_FILE to publish." >&2; exit 1; }
       mkdir -p "$state"
       pass=()
+      # Everything the release scripts read from the caller's environment.
       for name in PATH HOME PACKAGE_FOGEJO_TOKEN_FILE XDG_STATE_HOME SSH_AUTH_SOCK \
-        T3CODE_REGISTRY T3CODE_WINDOWS_BUILD_HOST; do
+        T3CODE_REGISTRY T3CODE_WINDOWS_BUILD_HOST T3CODE_ANDROID_BUILD_HOME \
+        T3CODE_ANDROID_KEYSTORE_DIR; do
         [[ -v $name ]] && pass+=(-E "$name")
       done
       # The swap cap matches the agent slice it used to run in: an Android build starved of

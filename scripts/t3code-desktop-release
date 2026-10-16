@@ -78,8 +78,10 @@ fi
 
 api() { curl --fail-with-body -sS --max-time 900 -H "Authorization: token $token" "$@"; }
 # Forgejo never overwrites a package file. The installer goes up first under
-# its new name, so the manifest only ever points at a file that exists.
+# its new name, so the manifest only ever points at a file that exists. One
+# left by an earlier attempt at this version is replaced, so a retry can finish.
 for file in "$installer" "$installer.blockmap"; do
+  api -o /dev/null -X DELETE "$feed/$file" 2>/dev/null || true
   api -o /dev/null --upload-file "$work/$file" "$feed/$file"
 done
 api -o /dev/null -X DELETE "$feed/latest.yml" 2>/dev/null || true
