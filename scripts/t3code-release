@@ -48,6 +48,28 @@ fi
 [[ -n $commit ]] || { echo "Could not resolve the commit to release." >&2; exit 1; }
 state="${XDG_STATE_HOME:-$HOME/.local/state}/t3code-release/$commit"
 unit="t3code-release-${commit:0:12}"
+forgejo="$repo/scripts/t3code-forgejo.mjs"
+
+# Publishes the server package into $state/artifact. An artifact an earlier run built
+# is recorded when its upload already went through, and published as is otherwise, so
+# a run stopped mid-upload does not take a second version number.
+publish_server() {
+  local built
+  if [[ -s $state/artifact/build.json ]]; then
+    built=$(node -p 'require(process.argv[1]).version' "$state/artifact/build.json")
+    rm -rf -- "$state/check"
+    if node "$forgejo" download --version "$built" --output "$state/check" >/dev/null 2>&1 &&
+      cmp -s "$state/check/t3-$built.tgz" "$state/artifact/package.tgz"; then
+      rm -rf -- "$state/check"
+      return
+    fi
+    rm -rf -- "$state/check"
+    # Refuses when the number went to another build meanwhile; this commit is then rebuilt.
+    node "$forgejo" publish --artifact "$state/artifact" && return
+  fi
+  rm -rf -- "$state/artifact"
+  node "$forgejo" publish --ref "$commit" --output "$state/artifact"
+}
 
 # Reports what is published from this commit; fails while anything is missing.
 summary() {
@@ -69,11 +91,20 @@ case $mode in
     flock -n 9 || { echo "== $(date -Is) waiting for another release to finish"; flock 9; }
     echo "== $(date -Is) releasing $commit"
     if [[ ! -s $state/version ]]; then
-      rm -rf -- "$state/artifact"
-      node "$repo/scripts/t3code-forgejo.mjs" publish --ref "$commit" --output "$state/artifact"
+      publish_server
       node -p 'require(process.argv[1]).version' "$state/artifact/build.json" >"$state/version"
     fi
     version=$(<"$state/version")
+    # The feeds hold one version each: clients of a release a newer one has replaced
+    # would downgrade them and split desktop from Android.
+    if [[ ! -e $state/desktop || ! -e $state/android ]]; then
+      latest=$(node "$forgejo" check | sed -n 's/^t3@\([^ ]*\) .*/\1/p')
+      if [[ $latest != "$version" ]]; then
+        echo "Not publishing clients for $version: Forgejo's newest release is now ${latest:-unknown}."
+        summary
+        exit 1
+      fi
+    fi
     for part in desktop android; do
       [[ -e $state/$part ]] && continue
       if "$repo/scripts/t3code-$part-release" --version "$version" --ref "$commit"; then
