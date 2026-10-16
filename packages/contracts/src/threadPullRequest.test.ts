@@ -55,7 +55,7 @@ it.effect("decodes thread pull request links with snapshot and stack", () =>
   }),
 );
 
-it.effect("decodes a watch saved before passed checks were recorded", () =>
+it.effect("decodes a watch saved before passed checks and 👍 were recorded", () =>
   Effect.gen(function* () {
     const [link] = yield* decodeLinks([
       {
@@ -81,5 +81,7 @@ it.effect("decodes a watch saved before passed checks were recorded", () =>
     ]);
 
     assert.deepStrictEqual(link?.watch?.passedChecks, []);
+    // Null, so its first complete read records the 👍 already there instead of reporting them.
+    assert.isNull(link?.watch?.thumbsUp);
   }),
 );

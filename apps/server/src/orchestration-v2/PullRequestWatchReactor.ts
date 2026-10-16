@@ -37,6 +37,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
   evaluatePullRequestWatch,
+  pullRequestThumbsUp,
   pullRequestWatchMessage,
   type PullRequestWatchReport,
 } from "./pullRequestWatch.ts";
@@ -210,6 +211,7 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
     left.passedChecks.join("\n") === right.passedChecks.join("\n") &&
     left.remarksThrough === right.remarksThrough &&
     left.remarkIds.join("\n") === right.remarkIds.join("\n") &&
+    left.thumbsUp?.join("\n") === right.thumbsUp?.join("\n") &&
     left.conflicting === right.conflicting &&
     left.wakes === right.wakes
   );
@@ -217,11 +219,11 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
 
 /**
  * Wakes a thread's agent when a pull request it watches (`watch_pull_request`) needs a look:
- * checks finished on the head commit, someone else commented, or the branch started to
- * conflict. A pass every two minutes looks at each watched pull request once for all the threads
- * of a project that watch it. Where the host has a fingerprint, one batched read of those tells
- * the pass which pull requests moved, and only those are read; elsewhere a pull request is read
- * unless its sync snapshot has not moved while nothing is in flight.
+ * checks finished on the head commit, someone else commented or gave it a 👍, or the branch
+ * started to conflict. A pass every two minutes looks at each watched pull request once for all
+ * the threads of a project that watch it. Where the host has a fingerprint, one batched read of
+ * those tells the pass which pull requests moved, and only those are read; elsewhere a pull
+ * request is read unless its sync snapshot has not moved while nothing is in flight.
  * Settling or archiving a thread ends its watches, and a merged or closed pull request ends
  * its watch. Each ended watch is logged once with why it ended and how long it went without
  * a push, for debugging watches that live too long.
@@ -245,9 +247,10 @@ export const make = Effect.gen(function* () {
   const lives = new Map<string, WatchLife>();
   /**
    * Wakes still waiting in their thread's queue, per watch (by `lifeKey`), with the watch as it
-   * was before the wake and the remarks its report was built from. News that arrives before the
-   * agent reads one folds into it, so a busy thread gets one combined report instead of a run per
-   * pass. Kept in memory: after a restart, the next news queues its own wake.
+   * was before the wake, the remarks and 👍 its report was built from, and who it already tells
+   * gave a 👍. News that arrives before the agent reads one folds into it, so a busy thread gets
+   * one combined report instead of a run per pass. Kept in memory: after a restart, the next news
+   * queues its own wake.
    */
   const queuedWakes = new Map<
     string,
@@ -255,6 +258,8 @@ export const make = Effect.gen(function* () {
       readonly messageId: MessageId;
       readonly before: ThreadPullRequestWatch;
       readonly remarks: ReadonlyArray<PullRequestComment> | null;
+      readonly thumbsUp: ReadonlyArray<string> | null;
+      readonly thumbsUpNews: ReadonlyArray<string>;
     }
   >();
 
@@ -372,16 +377,33 @@ export const make = Effect.gen(function* () {
     target: WatchTarget,
     detail: PullRequestDetail,
     remarks: ReadonlyArray<PullRequestComment> | null,
+    thumbsUp: ReadonlyArray<string> | null,
     report: PullRequestWatchReport,
   ) =>
     Effect.gen(function* () {
       const queued = yield* queuedWakeOf(target);
       // A pass that did not read the remarks keeps the ones the queued wake already tells.
       const foldRemarks = remarks ?? queued?.remarks ?? null;
+      const foldThumbsUp = thumbsUp ?? queued?.thumbsUp ?? null;
+      // A 👍 has no time, so comparing with `before` alone would miss one given again since:
+      // each 👍 a pass reported counts as news for the whole queued wake while it stays.
+      const reportNews = report.changes.find((change) => change.kind === "thumbs-up")?.actors ?? [];
+      const thumbsUpNews = [...new Set([...(queued?.thumbsUpNews ?? []), ...reportNews])];
+      const newsKeys = new Set(thumbsUpNews.map((actor) => actor.toLowerCase()));
       const combined =
         queued === undefined
           ? undefined
-          : evaluatePullRequestWatch(queued.before, detail, foldRemarks);
+          : evaluatePullRequestWatch(
+              {
+                ...queued.before,
+                thumbsUp:
+                  queued.before.thumbsUp?.filter((actor) => !newsKeys.has(actor.toLowerCase())) ??
+                  null,
+              },
+              detail,
+              foldRemarks,
+              foldThumbsUp,
+            );
       // News the queued wake told and that has since undone itself can leave nothing to fold.
       const folded = queued !== undefined && combined !== undefined && combined.changes.length > 0;
       const told = folded ? combined : report;
@@ -400,8 +422,13 @@ export const make = Effect.gen(function* () {
       }).pipe(Effect.tapError(() => Effect.sync(() => queuedWakes.delete(lifeKey(target)))));
       queuedWakes.set(lifeKey(target), {
         messageId,
-        before: folded ? queued.before : target.watch,
+        // A watch's first complete read records the 👍 already there; later folds compare with it.
+        before: folded
+          ? queued.before
+          : { ...target.watch, thumbsUp: target.watch.thumbsUp ?? report.next.thumbsUp },
         remarks: folded ? foldRemarks : remarks,
+        thumbsUp: folded ? foldThumbsUp : thumbsUp,
+        thumbsUpNews: folded ? thumbsUpNews : reportNews,
       });
       if (!folded) yield* woke(target);
       if (told.exhausted) yield* ended(target, "comment-limit");
@@ -619,6 +646,9 @@ export const make = Effect.gen(function* () {
     const remarks = Option.isSome(activity)
       ? yield* readRemarks(group.key, reference, activity.value)
       : null;
+    // A conversation read short can also be missing its reactions, so it does not move the 👍.
+    const thumbsUp =
+      Option.isSome(activity) && remarks !== null ? pullRequestThumbsUp(activity.value) : null;
     lastReads.set(group.key, {
       at: plan.activity || last === undefined ? now : last.at,
       fingerprint: group.fingerprint,
@@ -632,8 +662,8 @@ export const make = Effect.gen(function* () {
       remarks: fingerprint?.remarks ?? null,
     });
     yield* eachTarget(group, (target) => {
-      const report = evaluatePullRequestWatch(target.watch, detail, remarks);
-      if (report.changes.length > 0) return wake(target, detail, remarks, report);
+      const report = evaluatePullRequestWatch(target.watch, detail, remarks, thumbsUp);
+      if (report.changes.length > 0) return wake(target, detail, remarks, thumbsUp, report);
       return watchesEqual(report.next, target.watch) ? Effect.void : record(target, report.next);
     });
   });

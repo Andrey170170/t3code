@@ -95,9 +95,9 @@ export type ThreadPullRequestKey = typeof ThreadPullRequestKey.Type;
 
 /**
  * Present while the server watches the pull request for its thread. The server wakes the
- * thread's agent when checks finish on the head commit, someone else comments, or the branch
- * starts to conflict. The other fields record what the agent was last told, so each change is
- * reported once.
+ * thread's agent when checks finish on the head commit, someone else comments or gives the pull
+ * request a 👍, or the branch starts to conflict. The other fields record what the agent was
+ * last told, so each change is reported once.
  */
 export const ThreadPullRequestWatch = Schema.Struct({
   startedAt: IsoDateTime,
@@ -118,8 +118,16 @@ export const ThreadPullRequestWatch = Schema.Struct({
   remarksThrough: IsoDateTime,
   /** Remarks created exactly at `remarksThrough` that were reported, so a late one still counts. */
   remarkIds: Schema.Array(TrimmedNonEmptyString),
+  /**
+   * Who else had given the pull request itself a 👍 at the last complete read, so a new one (or
+   * one taken back and given again) is news. Reactions carry no time, so this is null until the
+   * first complete read records the ones already there, as on watches saved before it existed.
+   */
+  thumbsUp: Schema.NullOr(Schema.Array(TrimmedNonEmptyString)).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   conflicting: Schema.Boolean,
-  /** Comment-only wakes in a row. Watching stops at a limit, so bots cannot loop it. */
+  /** Wakes in a row with only comments or 👍. Watching stops at a limit, so bots cannot loop it. */
   wakes: NonNegativeInt,
 });
 export type ThreadPullRequestWatch = typeof ThreadPullRequestWatch.Type;

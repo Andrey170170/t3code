@@ -181,10 +181,11 @@ export const make = Effect.gen(function* () {
             .listDiscussions(input)
             .pipe(Effect.orElseSucceed(() => ({ threads: [], truncated: true }))),
           // The notes endpoint carries no award of any kind, so they are read alongside it. A
-          // failed read costs the conversation its reactions rather than its words.
+          // failed read costs the conversation its reactions rather than its words, and leaves
+          // the merge request's own out, so a watch does not take them for taken back.
           cli.listReactions(input).pipe(
             Effect.orElseSucceed(() => ({
-              reactions: [] as ReadonlyArray<PullRequestReaction>,
+              reactions: undefined,
               reactionsByNoteId: new Map<string, ReadonlyArray<PullRequestReaction>>(),
             })),
           ),
@@ -193,7 +194,7 @@ export const make = Effect.gen(function* () {
       ).pipe(
         Effect.mapError(fail("getChangeRequestActivity")),
         Effect.map(([notes, commits, discussions, awards]): ProviderChangeRequestActivity => ({
-          reactions: awards.reactions,
+          ...(awards.reactions === undefined ? {} : { reactions: awards.reactions }),
           comments: notes.comments.map((comment) => ({
             ...comment,
             reactions: awards.reactionsByNoteId.get(comment.id) ?? [],

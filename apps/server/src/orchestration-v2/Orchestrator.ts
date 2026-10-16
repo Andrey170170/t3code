@@ -3251,6 +3251,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     passedChecks: [],
                     remarksThrough: startedAt,
                     remarkIds: [],
+                    thumbsUp: null,
                     conflicting: false,
                     wakes: 0,
                   });
