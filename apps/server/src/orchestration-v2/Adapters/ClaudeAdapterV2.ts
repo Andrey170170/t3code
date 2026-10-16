@@ -3724,6 +3724,32 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           });
         const clearWakeReports = (nativeThreadId: string) =>
           takeWakeReports(nativeThreadId).pipe(Effect.asVoid);
+        // Called when a result ends, inside the attached prompt turn, a wake
+        // turn Claude opened before that turn attached: Claude folded the
+        // prompt into it, or ran it first. Its buffered `init` (and any root
+        // output that beat the attach) would keep the wake's continuation
+        // waiting for a result that already went to the prompt turn, so drop
+        // them. A buffered result still closes its own turn on replay.
+        const endBufferedWakeTurn = (nativeThreadId: string) =>
+          Ref.update(wakeBuffers, (current) => {
+            const entry = current.get(nativeThreadId);
+            if (entry === undefined) return current;
+            const lastResult = entry.messages.findLastIndex((m) => m.type === "result");
+            const messages = entry.messages.filter(
+              (m, index) =>
+                index < lastResult ||
+                !(
+                  isClaudeTurnStartMessage(m) ||
+                  ((m.type === "assistant" || m.type === "user") &&
+                    parentToolUseIdFromSdkMessage(m) === null)
+                ),
+            );
+            if (messages.length === entry.messages.length) return current;
+            const next = new Map(current);
+            if (messages.length === 0) next.delete(nativeThreadId);
+            else next.set(nativeThreadId, { ...entry, messages });
+            return next;
+          });
         // Last roster entry per opaque task. An empty roster level can land before
         // the task's notification, and the wake still needs to name the task.
         const lastKnownOpaqueTasks = yield* Ref.make(
@@ -7815,6 +7841,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           ) {
             // This user turn ran the wake itself, so no offer will name its work.
             yield* clearWakeReports(liveQuery.nativeThreadId);
+            yield* endBufferedWakeTurn(liveQuery.nativeThreadId);
             yield* Effect.logInfo("orchestration-v2.claude-task-notification-result-accepted", {
               providerTurnId: context.providerTurnId,
               num_turns: message.num_turns,
@@ -8103,6 +8130,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               // This turn showed the wake, so no offer will name its work.
               yield* clearWakeReports(liveQuery.nativeThreadId);
             }
+            yield* endBufferedWakeTurn(liveQuery.nativeThreadId);
             yield* Effect.logInfo("orchestration-v2.claude-result-for-other-turn", {
               providerTurnId: context.providerTurnId,
               origin: message.origin?.kind,
