@@ -43,6 +43,12 @@ token=""
 if ((!build_only)); then
   [[ -r ${PACKAGE_FOGEJO_TOKEN_FILE:-} ]] || die "Set PACKAGE_FOGEJO_TOKEN_FILE to publish."
   token=$(<"$PACKAGE_FOGEJO_TOKEN_FILE")
+  # A retry after the feed already took this version has nothing left to do, and
+  # must not touch the installer installed apps are being sent to.
+  if [[ $(curl -fsS --max-time 30 "$feed/latest.yml" 2>/dev/null | sed -n 's/^version: //p') == "$version" ]]; then
+    echo "Desktop $version is already published to $feed"
+    exit 0
+  fi
 fi
 work=$(mktemp -d)
 if ((build_only)); then trap 'rm -f -- "$work/source.tar.gz"' EXIT; else trap 'rm -rf -- "$work"' EXIT; fi
@@ -79,7 +85,8 @@ fi
 api() { curl --fail-with-body -sS --max-time 900 -H "Authorization: token $token" "$@"; }
 # Forgejo never overwrites a package file. The installer goes up first under
 # its new name, so the manifest only ever points at a file that exists. One
-# left by an earlier attempt at this version is replaced, so a retry can finish.
+# left by an earlier attempt at this version is replaced so a retry can finish;
+# the feed does not point at it yet, or the check above would have stopped.
 for file in "$installer" "$installer.blockmap"; do
   api -o /dev/null -X DELETE "$feed/$file" 2>/dev/null || true
   api -o /dev/null --upload-file "$work/$file" "$feed/$file"
