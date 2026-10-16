@@ -8,6 +8,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   PULL_REQUEST_WATCH_WAKE_LIMIT,
   evaluatePullRequestWatch,
+  pullRequestThumbsUp,
   pullRequestWatchMessage,
 } from "./pullRequestWatch.ts";
 
@@ -258,6 +259,20 @@ describe("evaluatePullRequestWatch", () => {
     assert.deepEqual(evaluate(watch(), detail(), noRemarks, ["agent-user"]).changes, []);
     const told = watch({ thumbsUp: ["reviewer"] });
     assert.deepEqual(evaluate(told, detail(), null, null).next.thumbsUp, ["reviewer"]);
+    // A host that did not report the pull request's own reactions did not take any back.
+    const unread = pullRequestThumbsUp({
+      comments: [],
+      commentCount: 0,
+      commentsTruncated: false,
+      reviewThreads: [],
+      commits: [],
+    });
+    assert.deepEqual(evaluate(told, detail(), noRemarks, unread).next.thumbsUp, ["reviewer"]);
+  });
+
+  it("matches who gave a 👍 regardless of case", () => {
+    const told = watch({ thumbsUp: ["ReviewBot"] });
+    assert.deepEqual(evaluate(told, detail(), noRemarks, ["reviewbot"]).changes, []);
   });
 
   it("spends the comment wake limit on 👍", () => {

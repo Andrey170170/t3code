@@ -3018,7 +3018,9 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         path: null,
         reviewState: null,
       });
-      let comments: Array<PullRequestComment> = [];
+      let comments: Array<PullRequestComment> = [comment("one", "2999-01-01T00:00:01.000Z")];
+      // Already there at the first read, so only recorded.
+      let thumbsUp: Array<string> = ["chatgpt-codex-connector"];
       let lint: "success" | "failure" = "success";
       // A truncated activity read leaves the remarks unread for that pass.
       let remarksUnreadable = false;
@@ -3043,6 +3045,14 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
                   commentsTruncated: remarksUnreadable,
                   reviewThreads: [],
                   commits: [],
+                  reactions: [
+                    {
+                      content: "thumbs-up" as const,
+                      count: thumbsUp.length,
+                      actors: thumbsUp,
+                      viewerHasReacted: false,
+                    },
+                  ],
                 })),
             }),
           ),
@@ -3060,18 +3070,18 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         text.split("\n").filter((line) => line.startsWith("  - reviewer"));
 
       yield* reactor.sweep;
-      comments = [comment("one", "2999-01-01T00:00:01.000Z")];
-      yield* TestClock.adjust("11 minutes");
-      yield* reactor.sweep;
       comments = [...comments, comment("two", "2999-01-01T00:00:02.000Z")];
+      thumbsUp = [...thumbsUp, "coderabbitai"];
       yield* TestClock.adjust("11 minutes");
       yield* reactor.sweep;
 
-      // One queued wake that tells both comments once.
+      // One queued wake that tells both comments and the new 👍 once.
       const folded = yield* wakes;
       assert.lengthOf(folded, 1);
       assert.equal(folded[0]!.status, "queued");
       assert.include(folded[0]!.text, "- 2 new comments:");
+      assert.include(folded[0]!.text, "- coderabbitai gave the pull request a 👍.");
+      assert.notInclude(folded[0]!.text, "chatgpt-codex-connector");
       assert.deepEqual(commentLines(folded[0]!.text), [
         '  - reviewer: "Comment one."',
         '  - reviewer: "Comment two."',
@@ -3104,6 +3114,18 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const after = yield* wakes;
       assert.lengthOf(after, 2);
       assert.deepEqual(commentLines(after[1]!.text), ['  - reviewer: "Comment three."']);
+      assert.notInclude(after[1]!.text, "👍");
+
+      // A 👍 taken back and given again while that wake waits is news for it.
+      thumbsUp = ["coderabbitai"];
+      yield* TestClock.adjust("11 minutes");
+      yield* reactor.sweep;
+      thumbsUp = ["coderabbitai", "chatgpt-codex-connector"];
+      yield* TestClock.adjust("11 minutes");
+      yield* reactor.sweep;
+      const regiven = yield* wakes;
+      assert.lengthOf(regiven, 2);
+      assert.include(regiven[1]!.text, "- chatgpt-codex-connector gave the pull request a 👍.");
     }),
   );
 

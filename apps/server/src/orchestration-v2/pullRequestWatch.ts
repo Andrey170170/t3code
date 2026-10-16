@@ -23,11 +23,14 @@ export type PullRequestWatchChange =
   | { readonly kind: "conflicting" };
 
 /**
- * Who gave the pull request itself a 👍, as far as the host named them. A review bot such as
- * Codex says "no findings" this way instead of commenting.
+ * Who gave the pull request itself a 👍, as far as the host named them, or null when the host
+ * reports no reactions on it (none at all, or a read that failed). A review bot such as Codex
+ * says "no findings" this way instead of commenting.
  */
-export const pullRequestThumbsUp = (activity: PullRequestActivity): ReadonlyArray<string> =>
-  activity.reactions?.find((reaction) => reaction.content === "thumbs-up")?.actors ?? [];
+export const pullRequestThumbsUp = (activity: PullRequestActivity): ReadonlyArray<string> | null =>
+  activity.reactions === undefined
+    ? null
+    : (activity.reactions.find((reaction) => reaction.content === "thumbs-up")?.actors ?? []);
 
 export interface PullRequestWatchReport {
   /** What the agent has not been told yet. Empty means no wake. */
@@ -113,8 +116,8 @@ export function evaluatePullRequestWatch(
   // is news.
   const othersThumbsUp = thumbsUp?.filter((actor) => actor.toLowerCase() !== own);
   if (othersThumbsUp !== undefined && watch.thumbsUp !== null) {
-    const told = watch.thumbsUp;
-    const actors = othersThumbsUp.filter((actor) => !told.includes(actor));
+    const told = new Set(watch.thumbsUp.map((actor) => actor.toLowerCase()));
+    const actors = othersThumbsUp.filter((actor) => !told.has(actor.toLowerCase()));
     if (actors.length > 0) changes.push({ kind: "thumbs-up", actors });
   }
 
