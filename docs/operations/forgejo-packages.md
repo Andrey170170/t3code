@@ -26,9 +26,17 @@ npm run release:forgejo
 
 It publishes the server package as below, then runs the
 [Windows desktop](#windows-desktop) and [Android](#android) releases from the
-same commit with that version. The server package is published first and never
-withdrawn; a client build that fails (the Windows machine asleep, say) is
-reported and can be retried on its own with the printed version and commit.
+same commit with that version. The release runs in the systemd user unit
+`t3code-release-<commit>`, so it outlives the terminal or agent session that
+started it, and the command returns once the unit is started. Wait for the
+outcome with `scripts/t3code-release --wait`, which can be run again from any
+later session. The output goes to `~/.local/state/t3code-release/<commit>/log`,
+next to the published server artifact.
+
+The server package is published first and never withdrawn. Progress is kept per
+commit, so when a client build fails (the Windows machine asleep, say) or the
+run stops, running the same command again finishes it under the same version.
+To publish a commit again under a new number, remove its state directory first.
 
 ## Build and publish
 

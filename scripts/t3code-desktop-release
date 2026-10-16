@@ -39,13 +39,26 @@ origin=${BASH_REMATCH[1]} owner=${BASH_REMATCH[2]}
 package=t3-desktop channel=win-x64
 feed="$origin/api/packages/$owner/generic/$package/$channel"
 commit=$(git -C "$repo" rev-parse --verify "$ref^{commit}")
+work=$(mktemp -d)
+if ((build_only)); then trap 'rm -f -- "$work/source.tar.gz"' EXIT; else trap 'rm -rf -- "$work"' EXIT; fi
 token=""
 if ((!build_only)); then
   [[ -r ${PACKAGE_FOGEJO_TOKEN_FILE:-} ]] || die "Set PACKAGE_FOGEJO_TOKEN_FILE to publish."
   token=$(<"$PACKAGE_FOGEJO_TOKEN_FILE")
+  # A retry after the feed already took this version has nothing left to do, and
+  # must not touch the installer installed apps are being sent to. Only a missing
+  # feed counts as unpublished: a read that failed says nothing either way.
+  status=$(curl -sS --max-time 30 -o "$work/feed.yml" -w '%{http_code}' "$feed/latest.yml") || status=000
+  case $status in
+    200)
+      if [[ $(sed -n 's/^version: //p' "$work/feed.yml") == "$version" ]]; then
+        echo "Desktop $version is already published to $feed"
+        exit 0
+      fi ;;
+    404) ;;
+    *) die "Could not read $feed/latest.yml (HTTP $status); try again." ;;
+  esac
 fi
-work=$(mktemp -d)
-if ((build_only)); then trap 'rm -f -- "$work/source.tar.gz"' EXIT; else trap 'rm -rf -- "$work"' EXIT; fi
 
 echo "Building desktop $version from $commit on $host"
 git -C "$repo" archive "$commit" ':!.repos' ':!.claude' | gzip -1 > "$work/source.tar.gz"
@@ -78,8 +91,11 @@ fi
 
 api() { curl --fail-with-body -sS --max-time 900 -H "Authorization: token $token" "$@"; }
 # Forgejo never overwrites a package file. The installer goes up first under
-# its new name, so the manifest only ever points at a file that exists.
+# its new name, so the manifest only ever points at a file that exists. One
+# left by an earlier attempt at this version is replaced so a retry can finish;
+# the feed does not point at it yet, or the check above would have stopped.
 for file in "$installer" "$installer.blockmap"; do
+  api -o /dev/null -X DELETE "$feed/$file" 2>/dev/null || true
   api -o /dev/null --upload-file "$work/$file" "$feed/$file"
 done
 api -o /dev/null -X DELETE "$feed/latest.yml" 2>/dev/null || true
