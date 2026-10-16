@@ -58,14 +58,19 @@ publish_server() {
   if [[ -s $state/artifact/build.json ]]; then
     built=$(node -p 'require(process.argv[1]).version' "$state/artifact/build.json")
     rm -rf -- "$state/check"
-    if node "$forgejo" download --version "$built" --output "$state/check" >/dev/null 2>&1 &&
-      cmp -s "$state/check/t3-$built.tgz" "$state/artifact/package.tgz"; then
+    if node "$forgejo" download --version "$built" --output "$state/check" >/dev/null 2>&1; then
+      local same=0
+      cmp -s "$state/check/t3-$built.tgz" "$state/artifact/package.tgz" && same=1
       rm -rf -- "$state/check"
+      ((same)) && return
+      # The number holds another build, so this commit is rebuilt under the next one.
+    else
+      rm -rf -- "$state/check"
+      # Missing, or the read failed. Publishing refuses an existing version, so a failed
+      # read after the upload went through stops the run here rather than taking a new number.
+      node "$forgejo" publish --artifact "$state/artifact"
       return
     fi
-    rm -rf -- "$state/check"
-    # Refuses when the number went to another build meanwhile; this commit is then rebuilt.
-    node "$forgejo" publish --artifact "$state/artifact" && return
   fi
   rm -rf -- "$state/artifact"
   node "$forgejo" publish --ref "$commit" --output "$state/artifact"
