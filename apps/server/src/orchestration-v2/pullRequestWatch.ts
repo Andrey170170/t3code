@@ -1,5 +1,6 @@
 import type {
   OrchestrationV2Notification,
+  PullRequestActivity,
   PullRequestCheck,
   PullRequestComment,
   PullRequestDetail,
@@ -7,8 +8,8 @@ import type {
 } from "@t3tools/contracts";
 
 /**
- * Wakes in a row that bring only comments. Check, conflict, or push news resets the count, so
- * this only stops a chatty bot looping an agent that is replying to it.
+ * Wakes in a row that bring only comments or 👍. Check, conflict, or push news resets the count,
+ * so this only stops a chatty bot looping an agent that is replying to it.
  */
 export const PULL_REQUEST_WATCH_WAKE_LIMIT = 10;
 const LISTED_ITEMS = 10;
@@ -18,7 +19,15 @@ export type PullRequestWatchChange =
   | { readonly kind: "checks-failed"; readonly failed: ReadonlyArray<PullRequestCheck> }
   | { readonly kind: "checks-passed"; readonly count: number; readonly required: boolean }
   | { readonly kind: "remarks"; readonly remarks: ReadonlyArray<PullRequestComment> }
+  | { readonly kind: "thumbs-up"; readonly actors: ReadonlyArray<string> }
   | { readonly kind: "conflicting" };
+
+/**
+ * Who gave the pull request itself a 👍, as far as the host named them. A review bot such as
+ * Codex says "no findings" this way instead of commenting.
+ */
+export const pullRequestThumbsUp = (activity: PullRequestActivity): ReadonlyArray<string> =>
+  activity.reactions?.find((reaction) => reaction.content === "thumbs-up")?.actors ?? [];
 
 export interface PullRequestWatchReport {
   /** What the agent has not been told yet. Empty means no wake. */
@@ -37,14 +46,15 @@ const isFailedCheck = (check: PullRequestCheck) =>
  * Compares a watched pull request with what its agent was last told. Each check is reported as
  * soon as it fails, so a check that never finishes (an advisory review bot) cannot hold the
  * news back. "Passed" is reported once the checks the base branch requires all passed, or all
- * checks where the host marks none required. Remarks count when someone other than the agent's
- * own account wrote them, so its own replies never wake it. `remarks` is null when the
- * conversation could not be read; remarks then wait for a later pass.
+ * checks where the host marks none required. Remarks and 👍 count when someone other than the
+ * agent's own account gave them, so its own replies never wake it. `remarks` and `thumbsUp` are
+ * null when the conversation could not be read in full; their news then waits for a later pass.
  */
 export function evaluatePullRequestWatch(
   watch: ThreadPullRequestWatch,
   detail: Pick<PullRequestDetail, "headSha" | "checks" | "mergeability" | "viewer" | "author">,
   remarks: ReadonlyArray<PullRequestComment> | null,
+  thumbsUp: ReadonlyArray<string> | null,
 ): PullRequestWatchReport {
   const changes: Array<PullRequestWatchChange> = [];
   const headSha = detail.headSha ?? null;
@@ -98,6 +108,16 @@ export function evaluatePullRequestWatch(
     ...atLatest.map((remark) => remark.id),
   ];
 
+  // A reaction has no time, so the first complete read only records the 👍 already there. The
+  // record is who has one now: a bot that takes its 👍 back to review a push and gives it again
+  // is news.
+  const othersThumbsUp = thumbsUp?.filter((actor) => actor.toLowerCase() !== own);
+  if (othersThumbsUp !== undefined && watch.thumbsUp !== null) {
+    const told = watch.thumbsUp;
+    const actors = othersThumbsUp.filter((actor) => !told.includes(actor));
+    if (actors.length > 0) changes.push({ kind: "thumbs-up", actors });
+  }
+
   if (detail.mergeability === "conflicting" && !watch.conflicting) {
     changes.push({ kind: "conflicting" });
   }
@@ -105,7 +125,9 @@ export function evaluatePullRequestWatch(
   const conflicting =
     detail.mergeability === "unknown" ? watch.conflicting : detail.mergeability === "conflicting";
 
-  const commentsOnly = changes.length > 0 && changes.every((change) => change.kind === "remarks");
+  const commentsOnly =
+    changes.length > 0 &&
+    changes.every((change) => change.kind === "remarks" || change.kind === "thumbs-up");
   const progress = headMoved || (changes.length > 0 && !commentsOnly);
   const wakes = (progress ? 0 : watch.wakes) + (commentsOnly ? 1 : 0);
   return {
@@ -118,6 +140,7 @@ export function evaluatePullRequestWatch(
       passedChecks,
       remarksThrough,
       remarkIds,
+      thumbsUp: othersThumbsUp ?? watch.thumbsUp,
       conflicting,
       wakes,
     },
@@ -167,6 +190,8 @@ function changeLines(
           return `  - ${remark.author?.login ?? "someone"}${where}: ${said}${remark.url ? ` ${remark.url}` : ""}`;
         }),
       ];
+    case "thumbs-up":
+      return [`- ${change.actors.join(", ")} gave the pull request a 👍.`];
     case "conflicting":
       return [`- The branch now conflicts with ${context.baseBranch}.`];
   }
@@ -176,6 +201,7 @@ const SUMMARY: Record<PullRequestWatchChange["kind"], string> = {
   "checks-failed": "checks failed",
   "checks-passed": "checks passed",
   remarks: "new comments",
+  "thumbs-up": "👍",
   conflicting: "merge conflict",
 };
 
@@ -197,7 +223,7 @@ export function pullRequestWatchMessage(input: {
     ...changes.flatMap((change) => changeLines(change, context)),
     "",
     exhausted
-      ? `T3 Code stopped watching after ${PULL_REQUEST_WATCH_WAKE_LIMIT} comment-only updates in a row. Call watch_pull_request to watch it again.`
+      ? `T3 Code stopped watching after ${PULL_REQUEST_WATCH_WAKE_LIMIT} updates in a row with only comments or 👍. Call watch_pull_request to watch it again.`
       : "Look into each item and act on it as your task requires. T3 Code keeps watching and wakes you on the next change, so end your turn when you are done. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.",
   ].join("\n");
   const failed = changes.some(

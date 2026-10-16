@@ -794,6 +794,7 @@ layer("GitHubPullRequestApi.layer", (it) => {
         comments: { totalCount: comments, nodes: [] },
         reviews: { totalCount: 0, nodes: [] },
         reviewThreads: { totalCount: 0 },
+        reactions: { totalCount: 0 },
         commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
       });
       mockedExecute.mockReturnValueOnce(

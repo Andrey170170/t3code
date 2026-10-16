@@ -2133,6 +2133,7 @@ describe("pull request watch fingerprints", () => {
       readonly failed: number;
       readonly commentEditedAt: string | null;
       readonly reviews: number;
+      readonly thumbsUp?: number;
     }) => ({
       state: "OPEN",
       mergeable: "MERGEABLE",
@@ -2140,6 +2141,7 @@ describe("pull request watch fingerprints", () => {
       comments: { totalCount: 1, nodes: [{ lastEditedAt: input.commentEditedAt }] },
       reviews: { totalCount: input.reviews, nodes: [] },
       reviewThreads: { totalCount: 0 },
+      reactions: { totalCount: input.thumbsUp ?? 0 },
       commits: {
         nodes: [
           {
@@ -2177,12 +2179,15 @@ describe("pull request watch fingerprints", () => {
     const checkFinished = fingerprint({ ...base, running: 1, failed: 1 });
     const summaryEdited = fingerprint({ ...base, commentEditedAt: "2026-10-05T23:47:43Z" });
     const replied = fingerprint({ ...base, reviews: 2 });
+    const approved = fingerprint({ ...base, thumbsUp: 1 });
 
     expect(checkFinished.status).not.toBe(before.status);
     expect(checkFinished.remarks).toBe(before.remarks);
     expect(summaryEdited.remarks).not.toBe(before.remarks);
     expect(summaryEdited.status).toBe(before.status);
     expect(replied.remarks).not.toBe(before.remarks);
+    expect(approved.remarks).not.toBe(before.remarks);
+    expect(approved.status).toBe(before.status);
     // A pull request GitHub had no answer for is left for a full read.
     expect(decode(null, pullRequest(base)).has(0)).toBe(false);
   });

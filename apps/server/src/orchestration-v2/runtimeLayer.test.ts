@@ -2817,6 +2817,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       let checks: { lint: CheckStatus; test: CheckStatus } = { lint: "pending", test: "pending" };
       let cachedChecks: typeof checks | null = null;
       let comments: Array<PullRequestComment> = [];
+      let thumbsUp: Array<string> = [];
       let detailReads = 0;
       let activityReads = 0;
       const reactor = yield* PullRequestWatchReactor.make.pipe(
@@ -2873,6 +2874,12 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
                     commentsTruncated: false,
                     reviewThreads: [],
                     commits: [],
+                    reactions: thumbsUp.map(() => ({
+                      content: "thumbs-up" as const,
+                      count: thumbsUp.length,
+                      actors: thumbsUp,
+                      viewerHasReacted: false,
+                    })),
                   };
                 }),
             }),
@@ -2940,6 +2947,14 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       yield* reactor.sweep;
       assert.deepEqual(reads(), { detail: 5, activity: 3 });
       assert.deepEqual(yield* summaries, ["#11: checks failed", "#11: new comments"]);
+
+      // A review bot's 👍 on the pull request moves the remarks too. The comment wake is still
+      // queued, so the 👍 joins it.
+      thumbsUp = ["chatgpt-codex-connector"];
+      fingerprint = { status: "OPEN settled", remarks: "1 1" };
+      yield* reactor.sweep;
+      assert.deepEqual(reads(), { detail: 6, activity: 4 });
+      assert.deepEqual(yield* summaries, ["#11: checks failed", "#11: new comments, 👍"]);
     }),
   );
 

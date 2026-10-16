@@ -2228,6 +2228,7 @@ const WATCH_FINGERPRINT_CHECK_COUNTS =
  * requests, where the detail and activity reads it gates cost sixteen for one. Counts and the
  * newest edit cover new comments, reviews (a reply in a review thread is a review), threads, and
  * a bot rewriting its summary; check counts by state move whenever a check starts or finishes.
+ * The count of the pull request's own 👍 moves when a review bot gives or takes back its verdict.
  * Comments come most recently updated first, since an edit moves `updatedAt`, so an edit to an
  * old comment on a long pull request is still in the page. Reviews have no such order: an edit
  * to a review older than the last hundred waits for the watch's periodic full read, as do edits
@@ -2238,6 +2239,7 @@ const PULL_REQUEST_WATCH_FINGERPRINT_SELECTION =
   `comments(first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) { ${WATCH_FINGERPRINT_EDITS} } ` +
   `reviews(last: 100) { ${WATCH_FINGERPRINT_EDITS} } ` +
   "reviewThreads { totalCount } " +
+  "reactions(content: THUMBS_UP) { totalCount } " +
   `commits(last: 1) { nodes { commit { statusCheckRollup { contexts { ${WATCH_FINGERPRINT_CHECK_COUNTS} } } } } }`;
 
 /** Watch fingerprints for pull requests on one host, one aliased lookup each; null when unsafe. */
@@ -2276,6 +2278,7 @@ const decodeWatchFingerprintEntry = Schema.decodeUnknownExit(
     comments: RawEditedSchema,
     reviews: RawEditedSchema,
     reviewThreads: Schema.Struct({ totalCount: Schema.Int }),
+    reactions: Schema.Struct({ totalCount: Schema.Int }),
     commits: Schema.Struct({
       nodes: Schema.Array(
         Schema.NullOr(
@@ -2340,6 +2343,7 @@ export function decodePullRequestWatchFingerprintsJson(
         pr.reviews.totalCount,
         newestEdit(pr.reviews),
         pr.reviewThreads.totalCount,
+        pr.reactions.totalCount,
       ].join(" "),
     });
   }
