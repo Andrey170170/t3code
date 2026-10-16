@@ -63,6 +63,10 @@ summary() {
 case $mode in
   run)
     mkdir -p "$state"
+    # One release at a time across commits: each picks the next version from what
+    # is published, and a newer release's clients must not be overwritten by an older one's.
+    exec 9>"${state%/*}/lock"
+    flock -n 9 || { echo "== $(date -Is) waiting for another release to finish"; flock 9; }
     echo "== $(date -Is) releasing $commit"
     if [[ ! -s $state/version ]]; then
       rm -rf -- "$state/artifact"
@@ -85,6 +89,9 @@ case $mode in
       echo "$unit is already releasing $commit. Log: $state/log"
     else
       [[ -r ${PACKAGE_FOGEJO_TOKEN_FILE:-} ]] || { echo "Set PACKAGE_FOGEJO_TOKEN_FILE to publish." >&2; exit 1; }
+      # Without lingering, the user manager and this unit stop with the last login session.
+      [[ $(loginctl show-user "$USER" -p Linger --value 2>/dev/null) == yes ]] ||
+        echo "Warning: lingering is off, so the release stops when you log out (loginctl enable-linger)." >&2
       mkdir -p "$state"
       pass=()
       # Everything the release scripts read from the caller's environment.
