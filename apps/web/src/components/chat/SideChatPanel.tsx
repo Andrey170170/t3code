@@ -32,16 +32,7 @@ import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import { AsyncResult } from "effect/reactivity";
 import { MessagesSquare } from "lucide-react";
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type Dispatch,
-  type SetStateAction,
-} from "react";
+import { memo, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 import { resolveShortcutCommand } from "../../keybindings";
 import { getAppModelOptionsForInstance } from "../../modelSelection";
@@ -346,51 +337,48 @@ function SideChatConversation({
   const [liveFollow, setLiveFollow] = useState(true);
   const [modelPickerOpen, setModelPickerOpen] = useComposerMenuState(false);
   const listRef = useRef<LegendListRef | null>(null);
-  const followLive = useCallback(() => setLiveFollow(true), []);
-  const stopFollowing = useCallback(() => setLiveFollow(false), []);
+  const followLive = () => setLiveFollow(true);
+  const stopFollowing = () => setLiveFollow(false);
 
   const starting = snapshot.status === "starting";
   const running = !ended && snapshot.status === "running";
   const composerLocked = ended || starting;
 
-  const timelineEntries = useMemo(() => {
-    const visibleTurnItems = snapshot.turnItems.map(
-      (item, position): OrchestrationV2ProjectedTurnItem => ({
-        position,
-        visibility: "local",
-        sourceThreadId: sideChatId,
-        sourceItemId: item.id,
-        item,
-      }),
-    );
-    return deriveTimelineEntriesFromVisibleTurnItems({ visibleTurnItems, optimisticMessages: [] });
-  }, [sideChatId, snapshot.turnItems]);
-  const activeTurnStartedAt = useMemo(() => {
-    if (!running) return null;
-    const latestUserMessage = snapshot.turnItems.findLast((item) => item.type === "user_message");
-    if (!latestUserMessage) return null;
-    return DateTime.formatIso(latestUserMessage.startedAt ?? latestUserMessage.updatedAt);
-  }, [running, snapshot.turnItems]);
+  const visibleTurnItems = snapshot.turnItems.map(
+    (item, position): OrchestrationV2ProjectedTurnItem => ({
+      position,
+      visibility: "local",
+      sourceThreadId: sideChatId,
+      sourceItemId: item.id,
+      item,
+    }),
+  );
+  const timelineEntries = deriveTimelineEntriesFromVisibleTurnItems({
+    visibleTurnItems,
+    optimisticMessages: [],
+  });
+  const latestUserMessage = running
+    ? snapshot.turnItems.findLast((item) => item.type === "user_message")
+    : undefined;
+  const activeTurnStartedAt = latestUserMessage
+    ? DateTime.formatIso(latestUserMessage.startedAt ?? latestUserMessage.updatedAt)
+    : null;
 
   // Without a pending request the result is constant, so streaming frames keep the composer still.
-  const pending = useMemo(
-    () =>
-      snapshot.runtimeRequests.some((request) => request.status === "pending")
-        ? derivePendingThreadRequests({
-            runtimeRequests: snapshot.runtimeRequests,
-            turnItems: snapshot.turnItems,
-          })
-        : EMPTY_PENDING,
-    [snapshot.runtimeRequests, snapshot.turnItems],
-  );
+  const pending = snapshot.runtimeRequests.some((request) => request.status === "pending")
+    ? derivePendingThreadRequests({
+        runtimeRequests: snapshot.runtimeRequests,
+        turnItems: snapshot.turnItems,
+      })
+    : EMPTY_PENDING;
 
-  const handleInterrupt = useCallback(() => {
+  const handleInterrupt = () => {
     void interrupt({ environmentId, input: { parentThreadId, sideChatId } }).then((result) => {
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         setError(errorMessage(squashAtomCommandFailure(result), "Could not stop the side chat."));
       }
     });
-  }, [environmentId, interrupt, parentThreadId, sideChatId]);
+  };
   const visibleError = error ?? failureMessage ?? snapshot.error ?? null;
 
   return (
@@ -445,7 +433,6 @@ function SideChatConversation({
               resolvedTheme={props.resolvedTheme}
               timestampFormat={props.settings.timestampFormat}
               workspaceRoot={snapshot.cwd}
-              providerStatuses={props.providerStatuses}
               runs={EMPTY_ARRAY}
               anchorMessageId={null}
               onAnchorReady={noop}
@@ -569,22 +556,14 @@ const SideChatComposer = memo(function SideChatComposer({
       ? runtimeModeOptions.filter((option) => supportedRuntimeModes.includes(option.mode))
       : runtimeModeOptions;
   // Side chats keep the parent's provider instance; only its model and traits can change.
-  const instanceEntries = useMemo(
-    () =>
-      deriveProviderInstanceEntries(props.providerStatuses).filter(
-        (entry) => entry.instanceId === modelSelection.instanceId,
-      ),
-    [props.providerStatuses, modelSelection.instanceId],
+  const instanceEntries = deriveProviderInstanceEntries(props.providerStatuses).filter(
+    (entry) => entry.instanceId === modelSelection.instanceId,
   );
-  const modelOptionsByInstance = useMemo(
-    () =>
-      new Map(
-        instanceEntries.map((entry) => [
-          entry.instanceId,
-          getAppModelOptionsForInstance(props.settings, entry, modelSelection.model),
-        ]),
-      ),
-    [instanceEntries, props.settings, modelSelection.model],
+  const modelOptionsByInstance = new Map(
+    instanceEntries.map((entry) => [
+      entry.instanceId,
+      getAppModelOptionsForInstance(props.settings, entry, modelSelection.model),
+    ]),
   );
 
   const approval = pending.approvals[0];

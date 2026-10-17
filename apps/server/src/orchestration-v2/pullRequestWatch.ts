@@ -33,11 +33,8 @@ export const pullRequestThumbsUp = (activity: PullRequestActivity): ReadonlyArra
     : (activity.reactions.find((reaction) => reaction.content === "thumbs-up")?.actors ?? []);
 
 export interface PullRequestWatchReport {
-  /** What the agent has not been told yet. Empty means no wake. */
   readonly changes: ReadonlyArray<PullRequestWatchChange>;
-  /** The watch to record, whether or not anything is reported. */
   readonly next: ThreadPullRequestWatch;
-  /** This report spends the last wake before the limit, so watching stops after it. */
   readonly exhausted: boolean;
 }
 
@@ -71,14 +68,12 @@ export function evaluatePullRequestWatch(
     const failed = detail.checks.filter(isFailedCheck);
     const newlyFailed = failed.filter((check) => !failedChecks.includes(check.name));
     if (newlyFailed.length > 0) changes.push({ kind: "checks-failed", failed: newlyFailed });
-    // A check that runs again leaves the list, so a rerun that fails again is reported.
     failedChecks = failed.map((check) => check.name);
 
     const required = detail.checks.filter((check) => check.required === true);
     const gate = required.length > 0 ? required : detail.checks;
     const passedNow = gate.every((check) => check.status !== "pending" && !isFailedCheck(check));
     const gateNames = gate.map((check) => check.name);
-    // A watch saved before passedChecks existed takes the current names, so it does not wake.
     const told = passed && passedChecks.length === 0 ? gateNames : passedChecks;
     // A required job created and finished between two passes is never seen pending. Without
     // required checks, any check counts, and advisory bots keep adding passed ones: no wake.
@@ -92,7 +87,6 @@ export function evaluatePullRequestWatch(
 
   const own = (detail.viewer ?? detail.author?.login)?.toLowerCase();
   const through = Date.parse(watch.remarksThrough);
-  // An edit counts as new activity, so bots that rewrite one summary comment still wake the agent.
   const activeAt = (remark: PullRequestComment) => remark.editedAt ?? remark.createdAt;
   // GitHub times are per second, so remarks at the boundary time are told apart by ID.
   const fresh = (remarks ?? []).filter((remark) => {
@@ -208,7 +202,6 @@ const SUMMARY: Record<PullRequestWatchChange["kind"], string> = {
   conflicting: "merge conflict",
 };
 
-/** The wake the agent reads and the timeline notification the user sees. */
 export function pullRequestWatchMessage(input: {
   readonly number: number;
   readonly url: string;
