@@ -688,7 +688,11 @@ export function upsertProviderTurn(
   });
 }
 
-/** A stale run snapshot must not erase fields that other events recorded on the run. */
+/**
+ * A stale run snapshot must not erase fields that other events recorded on the run.
+ * A steered follow-up binds `delegatedTaskId` to a turn already in flight, whose
+ * terminal update replays the run as it was when the turn started.
+ */
 function preserveRunRecordedFields(
   current: OrchestrationV2Run | undefined,
   next: OrchestrationV2Run,
@@ -696,6 +700,9 @@ function preserveRunRecordedFields(
   if (current === undefined) return next;
   return {
     ...next,
+    ...(next.delegatedTaskId === undefined && current.delegatedTaskId !== undefined
+      ? { delegatedTaskId: current.delegatedTaskId }
+      : {}),
     ...(next.delegatedCompletion === undefined && current.delegatedCompletion !== undefined
       ? { delegatedCompletion: current.delegatedCompletion }
       : {}),
@@ -1999,7 +2006,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 requested_at = excluded.requested_at,
                 completed_at = excluded.completed_at,
                 payload_json = ${keepRecordedRunField(
-                  keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedCompletion"),
+                  keepRecordedRunField(
+                    keepRecordedRunField(sql`excluded.payload_json`, "$.delegatedTaskId"),
+                    "$.delegatedCompletion",
+                  ),
                   "$.restartCancelledBackgroundWork",
                 )}
             `;

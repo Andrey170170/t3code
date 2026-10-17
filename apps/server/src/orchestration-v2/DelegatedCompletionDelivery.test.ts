@@ -942,7 +942,14 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
       "restarted",
       "stopped",
       "overlapping",
+      "steered",
     ] as const;
+    const finishedStatus = (outcome: (typeof outcomes)[number]) =>
+      outcome === "stopped"
+        ? "interrupted"
+        : outcome === "restarted" || outcome === "overlapping" || outcome === "steered"
+          ? "completed"
+          : outcome;
     it.effect.each(outcomes)(
       "delivers a %s follow-up independently of the original task",
       (outcome) =>
@@ -1095,6 +1102,9 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
               commandId: CommandId.make(`command:followup-stop-${outcome}`),
             });
           }
+          // A steered follow-up binds its task to a turn that is already running, so the
+          // turn finishes with the run snapshot taken at its start, before the binding.
+          const { delegatedTaskId: _delegatedTaskId, ...runBeforeBinding } = run;
           // Reconciliation skips the live terminal listener; recovery must finish this recorded task.
           yield* eventSink.write({
             commandId: reconcileCommandId(`followup-finish-${outcome}`),
@@ -1106,13 +1116,8 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
                 runId: run.id,
                 occurredAt: now,
                 payload: {
-                  ...run,
-                  status:
-                    outcome === "stopped"
-                      ? "interrupted"
-                      : outcome === "restarted" || outcome === "overlapping"
-                        ? "completed"
-                        : outcome,
+                  ...(outcome === "steered" ? runBeforeBinding : run),
+                  status: finishedStatus(outcome),
                   startedAt: now,
                   completedAt: now,
                 },
@@ -1136,14 +1141,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             assert.equal(later.status, "pending");
             assert.isNull(later.result);
           }
-          assert.equal(
-            followup.status,
-            outcome === "stopped"
-              ? "interrupted"
-              : outcome === "restarted" || outcome === "overlapping"
-                ? "completed"
-                : outcome,
-          );
+          assert.equal(followup.status, finishedStatus(outcome));
           assert.equal(
             followup.completionDelivery?.state,
             outcome === "stopped" ? "disposed" : "claimed",
