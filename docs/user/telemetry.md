@@ -1,7 +1,7 @@
 # Product usage data
 
-The T3 Code server sends product usage events to T3 Code's own endpoint at `ingest.t3.codes`,
-associated with a hashed account or installation identifier. The endpoint keeps a copy of each
+This build collects no product usage events unless a server opts in. When enabled, the T3 Code
+server sends them to T3 Code's own endpoint at `ingest.t3.codes`, associated with a hashed account or installation identifier. The endpoint keeps a copy of each
 event and forwards events to PostHog. Events include the provider, model, reasoning effort,
 permission mode, turn result, duration, release channel, and main-agent token totals when
 available.
@@ -9,8 +9,8 @@ available.
 Events do not include prompts, responses, file contents, authentication tokens, conversation IDs,
 raw provider events, or child-agent output. Child-agent token use is excluded from the totals.
 
-To disable collection, set `T3CODE_TELEMETRY_ENABLED=false` in the server's environment before
-starting it. This stops product events from being recorded or sent.
+To enable collection, set `T3CODE_TELEMETRY_ENABLED=true` in the server's environment before
+starting it. Without it, product events are neither recorded nor sent.
 
 The desktop app reads the variable from your shell profile (for example `~/.zshrc`) on macOS and
 Linux, so export it there and restart the app. On Windows, set it as a user environment variable.
