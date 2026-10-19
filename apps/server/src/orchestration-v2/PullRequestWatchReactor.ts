@@ -300,6 +300,7 @@ export const make = Effect.gen(function* () {
       readonly notification: OrchestrationV2Notification;
       readonly messageId?: MessageId;
     },
+    endedWatch?: ThreadPullRequestWatch,
   ) =>
     Effect.gen(function* () {
       const uuid = yield* crypto.randomUUIDv4();
@@ -310,6 +311,7 @@ export const make = Effect.gen(function* () {
         ...identityOf(target.link),
         startedAt: target.watch.startedAt,
         watch: next,
+        ...(endedWatch === undefined ? {} : { endedWatch }),
         ...(wake === undefined
           ? {}
           : {
@@ -373,16 +375,22 @@ export const make = Effect.gen(function* () {
       const messageId = folded
         ? queued.messageId
         : MessageId.make(`message:pr-watch:${yield* crypto.randomUUIDv4()}`);
-      yield* record(target, told.exhausted ? null : told.next, {
-        ...pullRequestWatchMessage({
-          number: target.link.number,
-          url: target.link.url,
-          baseBranch: detail.baseBranch,
-          headSha: told.next.headSha,
-          report: told,
-        }),
-        messageId,
-      }).pipe(Effect.tapError(() => Effect.sync(() => queuedWakes.delete(lifeKey(target)))));
+      // An ending watch keeps what this pass saw, so watching again starts from it.
+      yield* record(
+        target,
+        told.exhausted ? null : told.next,
+        {
+          ...pullRequestWatchMessage({
+            number: target.link.number,
+            url: target.link.url,
+            baseBranch: detail.baseBranch,
+            headSha: told.next.headSha,
+            report: told,
+          }),
+          messageId,
+        },
+        told.exhausted ? told.next : undefined,
+      ).pipe(Effect.tapError(() => Effect.sync(() => queuedWakes.delete(lifeKey(target)))));
       queuedWakes.set(lifeKey(target), {
         messageId,
         // A watch's first complete read records the 👍 already there; later folds compare with it.

@@ -11,7 +11,7 @@ import {
   extractMarkdownLinkHrefs,
   inlineCodeFilePathCandidate,
 } from "@t3tools/shared/markdownLinks";
-import { isAbsolutePath } from "@t3tools/shared/path";
+import { isAbsolutePath, resolveWorkspaceFilePath } from "@t3tools/shared/path";
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
 import { AuthFilesystemReadScope, AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import {
@@ -192,15 +192,19 @@ import {
   readEnvironmentScope,
   readPreparedConnection,
   useEnvironmentScope,
+  usePreparedConnection,
 } from "../state/session";
 import { previewEnvironment } from "../state/preview";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { projectEnvironment } from "../state/projects";
+import { filesystemEnvironment } from "../state/filesystem";
 import {
   claimWorkspaceBasenameLookup,
   needsWorkspaceBasenameLookup,
+  pickStrippedWorkspaceMatch,
   pickWorkspaceBasenameMatch,
+  stripRepeatedWorkspacePrefix,
   WORKSPACE_BASENAME_LOOKUP_LIMIT,
 } from "../workspaceBasenameLookup";
 import {
@@ -209,6 +213,7 @@ import {
   resolvePullRequestPreviewTarget,
   useOpenChangeRequestLink,
 } from "~/lib/openPullRequestLink";
+import { observeResize } from "~/lib/observeResize";
 import { useOpenLink } from "../browser/useOpenLink";
 import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { isPreviewAvailableFor } from "../browser/previewRuntime";
@@ -237,6 +242,7 @@ interface ChatMarkdownProps {
   onUseArtifactTemplate?: ((template: CodexArtifactTemplate) => void) | undefined;
   onRunShellCommand?: ((command: string) => void) | undefined;
   imageBaseDir?: string | undefined;
+  workspaceMutationId?: string | null | undefined;
   onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
   extraRemarkPlugins?: NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
   renderContextReference?: ((reference: ChatMarkdownContextReference) => ReactNode) | undefined;
@@ -538,14 +544,58 @@ function readInitialWordWrapSetting(): boolean {
   return getClientSettings().wordWrap;
 }
 
+/**
+ * Whether any cell is clipped in the unwrapped layout. Only then does the wrap
+ * toggle change anything, so short tables hide it. Measures with the container
+ * briefly unwrapped and restores it before the browser paints.
+ */
+function tableHasClippedCells(container: HTMLElement, table: HTMLTableElement): boolean {
+  const viewport = table.closest<HTMLElement>('[data-slot="scroll-area-viewport"]');
+  const scrollLeft = viewport?.scrollLeft ?? 0;
+  const previous = container.dataset.expanded;
+  container.dataset.expanded = "false";
+  try {
+    for (const row of table.rows) {
+      for (const cell of row.cells) {
+        if (cell.scrollWidth > cell.clientWidth) return true;
+      }
+    }
+    return false;
+  } finally {
+    if (previous === undefined) delete container.dataset.expanded;
+    else container.dataset.expanded = previous;
+    // The unwrapped layout can be narrower and clamp a sideways scroll.
+    if (viewport && scrollLeft > 0) viewport.scrollLeft = scrollLeft;
+  }
+}
+
 function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tableRef = useRef<HTMLTableElement | null>(null);
   const [expanded, setExpanded] = useState(readInitialWordWrapSetting);
+  const [hasClippedCells, setHasClippedCells] = useState(false);
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const expandLabel = expanded ? "Collapse table cells" : "Expand table cells";
   const copyLabel = copied ? "Copied" : "Copy table";
+
+  const measureClippedCells = () => {
+    const container = containerRef.current;
+    const table = tableRef.current;
+    if (!container || !table) return;
+    setHasClippedCells(tableHasClippedCells(container, table));
+  };
+
+  // A streamed cell can grow until it clips while the table keeps its size,
+  // so remeasure after every render, not only on resize.
+  useLayoutEffect(measureClippedCells);
+
+  // Column width changes can clip a cell without rendering this table.
+  useLayoutEffect(() => {
+    const table = tableRef.current;
+    if (!table) return;
+    return observeResize(table, measureClippedCells);
+  }, [measureClippedCells]);
 
   function toggleExpanded() {
     const table = tableRef.current;
@@ -619,23 +669,27 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
         </table>
       </ScrollArea>
       <div className="mt-0.5 flex items-center justify-between select-none">
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                type="button"
-                variant={expanded ? "secondary" : "ghost-muted"}
-                size="icon-xs"
-                aria-pressed={expanded}
-                onClick={toggleExpanded}
-                aria-label={expandLabel}
-              />
-            }
-          >
-            <MorphIcon className="size-3" icon={expanded ? Minimize2 : Maximize2} />
-          </TooltipTrigger>
-          <TooltipPopup side="top">{expandLabel}</TooltipPopup>
-        </Tooltip>
+        {hasClippedCells ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  variant={expanded ? "secondary" : "ghost-muted"}
+                  size="icon-xs"
+                  aria-pressed={expanded}
+                  onClick={toggleExpanded}
+                  aria-label={expandLabel}
+                />
+              }
+            >
+              <MorphIcon className="size-3" icon={expanded ? Minimize2 : Maximize2} />
+            </TooltipTrigger>
+            <TooltipPopup side="top">{expandLabel}</TooltipPopup>
+          </Tooltip>
+        ) : (
+          <span />
+        )}
         <Menu>
           <Tooltip>
             <TooltipTrigger
@@ -1528,11 +1582,47 @@ export const ChatMarkdownAssetImage = memo(function ChatMarkdownAssetImage(props
   readonly framed?: boolean | undefined;
   readonly fallbackSrc?: string | undefined;
   readonly workspaceRoot?: string | undefined;
+  readonly workspaceMutationId?: string | null | undefined;
   readonly onImageExpand?: ((preview: ExpandedImagePreview) => void) | undefined;
 }) {
   const assetUrl = useAssetUrlState(props.environmentId, props.resource);
   const refreshAssetUrl = useAssetUrlRefresh(props.environmentId, props.resource);
+  const connectionReady = usePreparedConnection(props.environmentId)._tag === "Some";
   const resource = props.resource;
+  const refreshToken = JSON.stringify([props.environmentId, resource, props.workspaceMutationId]);
+  const handledRefreshToken = useRef<string | null | undefined>(undefined);
+  const assetLoading = assetUrl._tag === "Loading" || assetUrl.waiting === true;
+  useEffect(() => {
+    if (!connectionReady) {
+      handledRefreshToken.current = null;
+      return;
+    }
+    if (
+      props.workspaceMutationId === undefined ||
+      props.kind === "video" ||
+      (resource._tag !== "media-file" && resource._tag !== "workspace-file") ||
+      handledRefreshToken.current === refreshToken
+    ) {
+      return;
+    }
+    if (assetLoading) {
+      // Only the initial mount shares a pending request; edits and reconnects need a new one.
+      if (handledRefreshToken.current === undefined) {
+        handledRefreshToken.current = refreshToken;
+      }
+      return;
+    }
+    handledRefreshToken.current = refreshToken;
+    void refreshAssetUrl().catch(() => undefined);
+  }, [
+    assetLoading,
+    connectionReady,
+    props.kind,
+    props.workspaceMutationId,
+    refreshAssetUrl,
+    refreshToken,
+    resource._tag,
+  ]);
   const path =
     resource._tag === "media-file"
       ? resource.path
@@ -2262,6 +2352,7 @@ function useChatMarkdownState({
   onUseArtifactTemplate,
   onRunShellCommand,
   imageBaseDir,
+  workspaceMutationId,
   onImageExpand,
   renderContextReference,
   headingLevelOffset = 0,
@@ -2309,6 +2400,10 @@ function useChatMarkdownState({
   });
   const searchProjectEntries = useAtomQueryRunner(projectEnvironment.searchEntries, {
     reportFailure: false,
+  });
+  const getFilesystemMetadata = useAtomQueryRunner(filesystemEnvironment.getMetadata, {
+    reportFailure: false,
+    refresh: true,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, {
     reportFailure: false,
@@ -2533,49 +2628,68 @@ function useChatMarkdownState({
       openPreview,
     });
   };
-  const findWorkspaceBasenameMatch = async (workspaceRelativePath: string) => {
+  const findWorkspaceFileMatch = async (fileLinkMeta: MarkdownFileLinkMeta) => {
+    const workspaceRelativePath = fileLinkMeta.workspaceLookupPath;
     if (
+      !workspaceRelativePath ||
       !cwd ||
       environmentId === null ||
-      !readEnvironmentScope(environmentId, AuthFilesystemReadScope) ||
-      !needsWorkspaceBasenameLookup(workspaceRelativePath)
+      !readEnvironmentScope(environmentId, AuthFilesystemReadScope)
     ) {
       return null;
     }
+    const isBasename = needsWorkspaceBasenameLookup(workspaceRelativePath);
+    const strippedPath = isBasename
+      ? null
+      : stripRepeatedWorkspacePrefix(workspaceRelativePath, cwd);
+    if (!isBasename && strippedPath === null) return null;
     const result = await searchProjectEntries({
       environmentId,
       input: {
         cwd,
-        query: workspaceRelativePath,
+        query: strippedPath ?? workspaceRelativePath,
         limit: WORKSPACE_BASENAME_LOOKUP_LIMIT,
         kind: "file",
       },
     });
-    return result._tag === "Success"
-      ? pickWorkspaceBasenameMatch(workspaceRelativePath, result.value.entries)
-      : null;
+    if (result._tag !== "Success") return null;
+    if (strippedPath === null) {
+      return pickWorkspaceBasenameMatch(workspaceRelativePath, result.value.entries);
+    }
+    const match = pickStrippedWorkspaceMatch(strippedPath, cwd, result.value.entries);
+    if (match === null) return null;
+    // Search can be truncated or still scanning, so it cannot rule out the
+    // literal path. Check the host before redirecting to the stripped match.
+    const metadata = await getFilesystemMetadata({
+      environmentId,
+      input: { paths: [resolveWorkspaceFilePath(workspaceRelativePath, cwd)] },
+    });
+    return metadata._tag === "Success" && metadata.value.entries[0] === null ? match : null;
   };
-  const openFileInPanel = (panelPath: string, line: number | undefined) => {
+  const openFileInPanel = (fileLinkMeta: MarkdownFileLinkMeta, panelPath: string) => {
     if (!threadRef) return;
     // Claimed on every open so a synchronous one supersedes a lookup already
     // in flight.
     const isLatestLookup = claimWorkspaceBasenameLookup();
-    const openAt = (path: string) => useRightPanelStore.getState().openFile(threadRef, path, line);
-    if (!cwd || !needsWorkspaceBasenameLookup(panelPath)) {
+    const openAt = (path: string) =>
+      useRightPanelStore.getState().openFile(threadRef, path, fileLinkMeta.line);
+    if (
+      fileLinkMeta.workspaceLookupPath === null ||
+      !cwd ||
+      (!needsWorkspaceBasenameLookup(panelPath) &&
+        stripRepeatedWorkspacePrefix(panelPath, cwd) === null)
+    ) {
       openAt(panelPath);
       return;
     }
     void (async () => {
-      const match = await findWorkspaceBasenameMatch(panelPath);
+      const match = await findWorkspaceFileMatch(fileLinkMeta);
       if (!isLatestLookup()) return;
       openAt(match ?? panelPath);
     })();
   };
   const revealMarkdownFileInFileManager = async (fileLinkMeta: MarkdownFileLinkMeta) => {
-    const workspaceRelativePath = fileLinkMeta.workspaceRelativePath;
-    const match = workspaceRelativePath
-      ? await findWorkspaceBasenameMatch(workspaceRelativePath)
-      : null;
+    const match = await findWorkspaceFileMatch(fileLinkMeta);
     const filePath = match && cwd ? resolvePathLinkTarget(match, cwd) : fileLinkMeta.filePath;
     return revealFileInFileManager(filePath);
   };
@@ -2614,7 +2728,7 @@ function useChatMarkdownState({
         theme={resolvedTheme}
         threadRef={threadRef}
         {...(canUseShellActions ? { onOpen: openInPreferredEditor } : {})}
-        onOpenInPanel={openFileInPanel}
+        onOpenInPanel={(path) => openFileInPanel(fileLinkMeta, path)}
         onOpenMedia={
           threadRef && canPreviewMedia
             ? () => openMarkdownMedia(mediaPath, fileLinkMeta.filePath)
@@ -2651,6 +2765,7 @@ function useChatMarkdownState({
     renderContextReference,
     headingLevelOffset,
     imageBaseDir,
+    workspaceMutationId,
     inlineCodeFileLinkMetaByText,
     isStreaming,
     linkTargetPreference,
@@ -3099,6 +3214,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
       githubMedia,
       imageBaseDir,
       threadRef,
+      workspaceMutationId,
       renderContextReference,
     } = use(ChatMarkdownRendererContext);
     const imageExpand = use(MarkdownLinkContext) ? undefined : expandMedia;
@@ -3210,6 +3326,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
           standalone={standalone}
           style={authoredSizeStyle}
           workspaceRoot={cwd}
+          workspaceMutationId={workspaceMutationId}
           onImageExpand={imageExpand}
         />
       );

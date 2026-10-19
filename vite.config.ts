@@ -2,6 +2,8 @@ import "vite-plus/test/config";
 import { defineConfig } from "vite-plus";
 import * as NodeURL from "node:url";
 
+const DOM_TEST_ENVIRONMENT_ALLOWLIST: Array<string> = [];
+
 const RESTRICTED_IMPORT_PATHS = [
   {
     name: "@t3tools/client-runtime",
@@ -175,6 +177,11 @@ export default defineConfig({
     },
     overrides: [
       {
+        files: ["apps/**/src/**", "packages/**/src/**"],
+        excludeFiles: DOM_TEST_ENVIRONMENT_ALLOWLIST,
+        rules: { "t3code/no-dom-test-environment": "error" },
+      },
+      {
         files: ["packages/client-runtime/src/state/**", "apps/{web,mobile,desktop}/src/**"],
         rules: { "t3code/no-rpc-permission-bypass": ["error", { allowRawClientAccess: false }] },
       },
@@ -246,6 +253,15 @@ export default defineConfig({
       {
         files: ["apps/mobile/src/**"],
         rules: { "t3code/no-mobile-uniwind-theme-escape-hatches": "error" },
+      },
+      {
+        files: ["apps/mobile/src/**"],
+        excludeFiles: [
+          "apps/mobile/src/components/ui/AppSymbol.tsx",
+          "apps/mobile/src/components/ui/AppSymbol.ios.tsx",
+          "apps/mobile/src/features/pull-requests/pullRequestGlyphs.ts",
+        ],
+        rules: { "t3code/no-mobile-pull-request-glyph-literals": "error" },
       },
       {
         // React commits state set in a raw ResizeObserver callback after the paint, so derived
@@ -362,6 +378,20 @@ export default defineConfig({
         rules: { "t3code/no-hermes-unsupported-apis": "error" },
       },
       {
+        // Mobile is ratcheting toward full React Compiler coverage
+        // (apps/mobile/src/reactCompilerCoverage.test.ts). Directives would hide bailouts from it;
+        // the manual memo hooks go once the allowlist there is empty.
+        files: ["apps/mobile/src/**/*.{ts,tsx}"],
+        rules: { "t3code/no-manual-memo": ["error", { allowMemoHooks: true }] },
+      },
+      {
+        // The compiler only compiles a use* function that calls a hook; one that calls none is
+        // silently left as a plain function, so whatever it returns loses its caching.
+        files: ["apps/web/src/**/*.{ts,tsx}", "apps/mobile/src/**/*.{ts,tsx}"],
+        excludeFiles: ["**/*.test.ts", "**/*.test.tsx"],
+        rules: { "t3code/no-hookless-use-function": "error" },
+      },
+      {
         files: [
           "apps/mobile/src/features/archive/ArchivedThreadsScreen.tsx",
           "apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx",
@@ -381,10 +411,8 @@ export default defineConfig({
           "apps/mobile/src/features/settings/appearance/components/FontSizeSliderRow.tsx",
           "apps/mobile/src/features/threads/NewTaskContextPickerScreens.tsx",
           "apps/mobile/src/features/threads/ThreadQueueControl.tsx",
-          "apps/mobile/src/features/threads/ThreadAgentsSheet.tsx",
           "apps/mobile/src/features/review/ReviewCommentCard.tsx",
           "apps/mobile/src/features/threads/ThreadSettingsSheet.tsx",
-          "apps/mobile/src/features/threads/git/GitOverviewSheet.tsx",
           "apps/mobile/src/features/threads/thread-list-items.tsx",
           "apps/mobile/src/features/threads/thread-list-v2-items.tsx",
           "apps/mobile/src/lib/useMobileNavigationTheme.ts",

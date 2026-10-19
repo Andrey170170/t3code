@@ -62,6 +62,11 @@ import {
   type ChangeRequestTerminology,
 } from "@t3tools/shared/sourceControl";
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import {
+  parseGitHubRepositorySelector,
+  resolveGitHubRepository,
+} from "@t3tools/source-control-github/server/gitHubRepositoryResolution";
 import {
   normalizeThreadPullRequestKey,
   threadPullRequestKeyOf,
@@ -616,6 +621,11 @@ function headBranchProbe(
   );
 }
 
+/** A URL's host as `new URL` reads it: lowercased, any non-default port kept, `:443` dropped. */
+function urlHost(url: string): string | null {
+  return URL.canParse(url) ? new URL(url).host : null;
+}
+
 function appendUnique(values: string[], next: string | null | undefined): void {
   const trimmed = next?.trim() ?? "";
   if (trimmed.length === 0 || values.includes(trimmed)) {
@@ -703,6 +713,7 @@ export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const environment = yield* HostProcess.Environment;
 
   const sourceControlProvider = (cwd: string) => sourceControlProviders.resolve({ cwd });
   const serverSettingsService = yield* ServerSettings.ServerSettingsService;
@@ -1373,6 +1384,41 @@ export const make = Effect.gen(function* () {
   const readConfigValueNullable = (cwd: string, key: string) =>
     gitCore.readConfigValue(cwd, key).pipe(Effect.orElseSucceed(() => null));
 
+  // Whether the GitHub provider creates PRs in the only remote. It picks GH_REPO when that
+  // parses, else what resolveGitHubRepository makes of the remote and its gh-resolved mark from
+  // `gh repo set-default`, given the host the provider's context gets from the remote URL. An
+  // HTTPS remote keeps a non-default port there, and the provider then ignores the mark. With no
+  // answer at all, the provider falls back to the remote itself.
+  const targetsOnlyRemote = Effect.fn("targetsOnlyRemote")(function* (
+    cwd: string,
+    remoteName: string,
+    remote: { readonly remoteUrl: string | null; readonly repositoryNameWithOwner: string | null },
+  ) {
+    const baseUrl =
+      remote.remoteUrl === null
+        ? undefined
+        : detectSourceControlProviderFromGitRemoteUrl(remote.remoteUrl)?.baseUrl;
+    const host = baseUrl === undefined ? null : urlHost(baseUrl);
+    const repository = remote.repositoryNameWithOwner?.toLowerCase();
+    const fromEnvironment = parseGitHubRepositorySelector(environment.GH_REPO ?? "", host ?? "");
+    if (fromEnvironment !== null) {
+      const { host: targetHost, owner, name } = fromEnvironment;
+      return (
+        host !== null &&
+        urlHost(`https://${targetHost}`) === host &&
+        `${owner}/${name}`.toLowerCase() === repository
+      );
+    }
+    const mark = yield* readConfigValueNullable(cwd, `remote.${remoteName}.gh-resolved`);
+    const { locator } = resolveGitHubRepository({
+      remotes: remote.remoteUrl === null ? "" : `${remoteName}\t${remote.remoteUrl} (fetch)`,
+      resolved: mark === null ? "" : `remote.${remoteName}.gh-resolved ${mark}`,
+      hostHint: host ?? undefined,
+      defaultHost: host ?? "github.com",
+    });
+    return locator === null || `${locator.owner}/${locator.name}`.toLowerCase() === repository;
+  });
+
   const resolveHostingProvider = Effect.fn("resolveHostingProvider")(function* (
     cwd: string,
     branch: string | null,
@@ -1402,6 +1448,7 @@ export const make = Effect.gen(function* () {
   ) {
     if (!remoteName) {
       return {
+        remoteUrl: null,
         remoteUrlKey: null,
         repositoryNameWithOwner: null,
         ownerLogin: null,
@@ -1425,6 +1472,7 @@ export const make = Effect.gen(function* () {
       repositoryNameWithOwner = parseRepositoryNameWithOwnerFromRemoteUrl(remoteUrl, provider);
     }
     return {
+      remoteUrl,
       remoteUrlKey: remoteUrl ? normalizeGitRemoteUrl(remoteUrl) : null,
       repositoryNameWithOwner,
       ownerLogin: parseRepositoryOwnerLogin(repositoryNameWithOwner),
@@ -1463,14 +1511,35 @@ export const make = Effect.gen(function* () {
       remoteName,
     );
 
+    // With no origin to compare against, the only remote is the repository gh targets
+    // unless GH_REPO or `gh repo set-default` (gh-resolved) names another, so a branch on it
+    // is not a fork. With several remotes, or with that other target, it may still be a fork.
+    const isOnlyRemote =
+      remoteName !== null &&
+      remoteName !== "origin" &&
+      originRepository.remoteUrlKey === null &&
+      (yield* gitCore
+        .execute({
+          operation: "GitManager.resolveBranchHeadContext.remotes",
+          cwd,
+          args: ["remote"],
+          timeoutMs: 5_000,
+        })
+        .pipe(
+          Effect.map(
+            (result) => result.stdout.split("\n").filter((name) => name.trim().length > 0).length,
+          ),
+          Effect.orElseSucceed(() => 0),
+        )) === 1 &&
+      (yield* targetsOnlyRemote(cwd, remoteName, remoteRepository));
+    const isForeignRemote = remoteName !== null && remoteName !== "origin" && !isOnlyRemote;
+
     const isCrossRepository =
       remoteRepository.repositoryNameWithOwner !== null &&
       originRepository.repositoryNameWithOwner !== null
         ? remoteRepository.repositoryNameWithOwner.toLowerCase() !==
           originRepository.repositoryNameWithOwner.toLowerCase()
-        : remoteName !== null &&
-          remoteName !== "origin" &&
-          remoteRepository.repositoryNameWithOwner !== null;
+        : isForeignRemote && remoteRepository.repositoryNameWithOwner !== null;
 
     const ownerHeadSelector =
       remoteRepository.ownerLogin && headBranch.length > 0
@@ -1478,8 +1547,7 @@ export const make = Effect.gen(function* () {
         : null;
     const remoteAliasHeadSelector =
       remoteName && headBranch.length > 0 ? `${remoteName}:${headBranch}` : null;
-    const shouldProbeRemoteOwnedSelectors =
-      isCrossRepository || (remoteName !== null && remoteName !== "origin");
+    const shouldProbeRemoteOwnedSelectors = isCrossRepository || isForeignRemote;
 
     const headSelectors: string[] = [];
     if (isCrossRepository && shouldProbeRemoteOwnedSelectors) {
@@ -1899,16 +1967,39 @@ export const make = Effect.gen(function* () {
     };
   });
 
-  const resolveBaseBranch = Effect.fn("resolveBaseBranch")(function* (
+  const resolvePrBase = Effect.fn("resolvePrBase")(function* (
     cwd: string,
     branch: string,
     upstreamRef: string | null,
     headContext: Pick<BranchHeadContext, "isCrossRepository" | "remoteName">,
   ) {
+    const configuredRef = yield* gitCore.readConfigValue(cwd, `branch.${branch}.t3-merge-base-ref`);
+    if (configuredRef?.startsWith("refs/heads/") || configuredRef?.startsWith("refs/remotes/")) {
+      const configuredBranch = yield* gitCore.resolveBranchName(cwd, configuredRef);
+      if (configuredBranch) return { baseBranch: configuredBranch, baseRef: configuredRef };
+    }
+
     const configured = yield* gitCore.readConfigValue(cwd, `branch.${branch}.gh-merge-base`);
     if (configured) {
+      const localRef = configured.startsWith("refs/") ? configured : `refs/heads/${configured}`;
+      const localBranch = yield* gitCore.resolveBranchName(cwd, localRef);
+      if (localBranch) {
+        const shadowsRemote =
+          configured.includes("/") &&
+          !configured.startsWith("refs/") &&
+          (yield* gitCore.resolveBranchName(cwd, `refs/remotes/${configured}`)) !== null;
+        return {
+          baseBranch: localBranch,
+          baseRef: configured.startsWith("refs/") || shadowsRemote ? localRef : localBranch,
+        };
+      }
+      if (configured.includes("/") && !configured.startsWith("refs/")) {
+        const remoteRef = `refs/remotes/${configured}`;
+        const remoteBranch = yield* gitCore.resolveBranchName(cwd, remoteRef);
+        if (remoteBranch) return { baseBranch: remoteBranch, baseRef: remoteRef };
+      }
       const configuredBranch = yield* gitCore.resolveBranchName(cwd, configured);
-      if (configuredBranch) return configuredBranch;
+      if (configuredBranch) return { baseBranch: configuredBranch, baseRef: configuredBranch };
     }
 
     if (upstreamRef && !headContext.isCrossRepository) {
@@ -1916,7 +2007,7 @@ export const make = Effect.gen(function* () {
         remoteName: headContext.remoteName,
       });
       if (upstreamBranch.length > 0 && upstreamBranch !== branch) {
-        return upstreamBranch;
+        return { baseBranch: upstreamBranch, baseRef: upstreamBranch };
       }
     }
 
@@ -1925,7 +2016,7 @@ export const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => null),
     );
     if (defaultFromProvider) {
-      return defaultFromProvider;
+      return { baseBranch: defaultFromProvider, baseRef: defaultFromProvider };
     }
 
     const defaultFromRemote = yield* gitCore.resolvePrimaryRemoteName(cwd).pipe(
@@ -1933,16 +2024,17 @@ export const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => null),
     );
     if (defaultFromRemote) {
-      return defaultFromRemote;
+      return { baseBranch: defaultFromRemote, baseRef: defaultFromRemote };
     }
 
-    return "main";
+    return { baseBranch: "main", baseRef: "main" };
   });
 
   const resolveBaseRangeRef = Effect.fn("resolveBaseRangeRef")(function* (
     cwd: string,
     baseBranch: string,
   ) {
+    if (baseBranch.startsWith("refs/")) return baseBranch;
     const remoteName = yield* gitCore
       .resolvePrimaryRemoteName(cwd)
       .pipe(Effect.orElseSucceed(() => null));
@@ -1969,12 +2061,14 @@ export const make = Effect.gen(function* () {
       filePaths?: readonly string[];
       settings: SourceControlTextGenerationSettings;
     }) {
-      const context = yield* gitCore.prepareCommitContext(input.cwd, input.filePaths);
+      const customCommit = parseCustomCommitMessage(input.commitMessage ?? "");
+      const context = yield* gitCore.prepareCommitContext(input.cwd, input.filePaths, {
+        includePatch: customCommit === null,
+      });
       if (!context) {
         return null;
       }
 
-      const customCommit = parseCustomCommitMessage(input.commitMessage ?? "");
       if (customCommit) {
         return {
           subject: customCommit.subject,
@@ -2165,13 +2259,18 @@ export const make = Effect.gen(function* () {
       };
     }
 
-    const baseBranch = yield* resolveBaseBranch(cwd, branch, details.upstreamRef, headContext);
+    const { baseBranch, baseRef } = yield* resolvePrBase(
+      cwd,
+      branch,
+      details.upstreamRef,
+      headContext,
+    );
     yield* emit({
       kind: "phase_started",
       phase: "pr",
       label: `Generating ${terms.shortLabel} content...`,
     });
-    const baseRangeRef = yield* resolveBaseRangeRef(cwd, baseBranch);
+    const baseRangeRef = yield* resolveBaseRangeRef(cwd, baseRef);
     const rangeContext = yield* gitCore.readRangeContext(cwd, baseRangeRef);
     const policy = yield* resolveStylePolicy(cwd, settings);
     const changeRequestTemplate =
@@ -2661,7 +2760,6 @@ export const make = Effect.gen(function* () {
           // findLocalHeadBranch also accepts a branch that merely shares the head's bare name —
           // a fork PR opened from "main" matches the user's own local main. That checkout is
           // somebody else's work, so it keeps its tracking config and nothing else.
-          yield* ensureExistingWorktreeUpstream(worktreePath);
           return {
             pullRequest,
             branch: localPullRequestBranch,
@@ -2745,26 +2843,34 @@ export const make = Effect.gen(function* () {
       });
 
       const findLocalHeadBranch = Effect.fn("findLocalHeadBranch")(function* (cwd: string) {
-        const result = yield* gitCore.listRefs({ cwd, refresh: true });
-        const localBranch = result.refs.find(
-          (branch) => !branch.isRemote && branch.name === localPullRequestBranch,
-        );
-        if (localBranch) {
-          return localBranch;
-        }
-        if (localPullRequestBranch === pullRequest.headBranch) {
-          return null;
-        }
-
-        for (const branch of result.refs) {
-          if (branch.isRemote || branch.name !== pullRequest.headBranch || !branch.worktreePath) {
-            continue;
-          }
-
-          const worktreePath = yield* canonicalizeExistingPath(branch.worktreePath);
-          if (worktreePath !== rootWorktreePath) {
-            return branch;
-          }
+        for (const [index, name] of [
+          ...new Set([localPullRequestBranch, pullRequest.headBranch]),
+        ].entries()) {
+          let cursor: number | undefined;
+          do {
+            const result = yield* gitCore.listRefs({
+              cwd,
+              refKind: "local",
+              query: name,
+              cursor,
+              refresh: index === 0 && cursor === undefined,
+            });
+            for (const branch of result.refs) {
+              if (branch.name !== name) {
+                continue;
+              }
+              if (name === localPullRequestBranch) {
+                return branch;
+              }
+              if (branch.worktreePath) {
+                const worktreePath = yield* canonicalizeExistingPath(branch.worktreePath);
+                if (worktreePath !== rootWorktreePath) {
+                  return branch;
+                }
+              }
+            }
+            cursor = result.nextCursor ?? undefined;
+          } while (cursor !== undefined);
         }
 
         return null;
