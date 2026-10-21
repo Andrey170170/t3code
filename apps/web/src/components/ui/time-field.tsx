@@ -94,6 +94,12 @@ function TimeField({
           if (typed.length === 1 && typed[0] !== value) onValueChange(typed[0]!);
           setDraft(null);
         }}
+        onKeyDown={(event) => {
+          // With nothing to pick, Enter would submit the surrounding form with
+          // the last committed time while the field shows something else.
+          const unresolved = draft !== null && (draft.trim() === "" || matches.length === 0);
+          if (event.key === "Enter" && unresolved) event.preventDefault();
+        }}
         onPointerDown={(event) => {
           focusedBeforePressRef.current = document.activeElement === event.currentTarget;
         }}

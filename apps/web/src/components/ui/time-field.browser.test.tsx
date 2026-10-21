@@ -107,6 +107,32 @@ describe("TimeField", () => {
     expect(committed).toEqual(["21:00"]);
   });
 
+  it("does not submit its form while the typed text is not a time", async () => {
+    const committed: string[] = [];
+    let submits = 0;
+    await using screen = await render(
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          submits += 1;
+        }}
+      >
+        <ControlledTimeField initial="09:00" committed={committed} />
+        <button type="submit">Snooze</button>
+      </form>,
+      { router: false },
+    );
+    const input = timeInput(screen);
+    input.focus();
+    await userEvent.keyboard("{Control>}a{/Control}{Backspace}{Enter}");
+    await userEvent.keyboard("soon{Enter}");
+    expect(submits).toBe(0);
+    await userEvent.keyboard("{Control>}a{/Control}21{Enter}");
+    expect(committed).toEqual(["21:00"]);
+    await userEvent.keyboard("{Enter}");
+    expect(submits).toBe(1);
+  });
+
   it("keeps an unambiguous typed time when focus leaves", async () => {
     const committed: string[] = [];
     await using screen = await render(
