@@ -84,6 +84,7 @@ function TimeField({
       <ComboboxInput
         {...inputProps}
         triggerIcon={<ClockIcon />}
+        triggerLabel="Choose time"
         onBlur={() => {
           // Leaving keeps an unambiguous typed time rather than silently
           // reverting it; ambiguous or invalid text reverts. Blur also covers

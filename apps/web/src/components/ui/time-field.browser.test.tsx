@@ -131,6 +131,19 @@ describe("TimeField", () => {
     expect(committed).toEqual([]);
   });
 
+  it("reverts a typed draft on Escape", async () => {
+    const input = await render("09:00");
+    await userEvent.click(input);
+    await userEvent.keyboard("21");
+    await vi.waitFor(() => expect(options().length).toBeGreaterThan(0));
+    await userEvent.keyboard("{Escape}");
+    expect(input.value).toBe("09:00");
+    await userEvent.keyboard("soon{Escape}");
+    expect(input.value).toBe("09:00");
+    await userEvent.keyboard("{Tab}");
+    expect(committed).toEqual([]);
+  });
+
   it("relabels the shown time when the clock format changes", async () => {
     const input = await render("21:00");
     expect(input.value).toBe("21:00");
