@@ -85,8 +85,9 @@ which is also why tool events carry no per-thread sequence.
 ## Delivery
 
 The server sends batches to the ingest endpoint at `ingest.t3.codes`, which archives
-every event and forwards some of them to PostHog. A send can fail after the endpoint
-has stored the batch, so every retry is a copy.
+every event and forwards some of them to PostHog. This fork's builds default to the
+fork's own collector instead and send nothing without a `T3CODE_POSTHOG_KEY`. A send
+can fail after the endpoint has stored the batch, so every retry is a copy.
 [Delivery](../../apps/server/src/telemetry/AnalyticsService.ts) gives each event a
 uuid when it is recorded (the endpoint rejects events without one), backs off after
 a failed send, and drops a batch after a few tries. Without these limits, one stuck

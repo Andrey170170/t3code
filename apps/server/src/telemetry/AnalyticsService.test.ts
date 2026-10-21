@@ -272,10 +272,15 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
     }),
   );
 
-  // The fork keeps usage private by default; an unset flag must stay off across upstream syncs.
+  // The fork keeps usage private by default; an unset flag must stay off across upstream syncs,
+  // and the fork's collector has no built-in key to fall back on.
   it.effect.each([
-    { label: "disabled", enabled: { T3CODE_TELEMETRY_ENABLED: false } },
-    { label: "not opted in", enabled: {} },
+    {
+      label: "disabled",
+      enabled: { T3CODE_TELEMETRY_ENABLED: false, T3CODE_POSTHOG_KEY: "phc_test_key" },
+    },
+    { label: "not opted in", enabled: { T3CODE_POSTHOG_KEY: "phc_test_key" } },
+    { label: "missing its key", enabled: { T3CODE_TELEMETRY_ENABLED: true } },
   ])("does not send batch requests when telemetry is $label", ({ enabled }) =>
     Effect.gen(function* () {
       const capturedPaths: Array<string> = [];
@@ -286,7 +291,6 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
       const layerConfig = ConfigProvider.layer(
         ConfigProvider.fromUnknown({
           ...enabled,
-          T3CODE_POSTHOG_KEY: "phc_test_key",
           T3CODE_POSTHOG_HOST: "http://localhost",
         }),
       );
@@ -316,6 +320,52 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
       }).pipe(Effect.provide(layerRuntime));
 
       assert.deepEqual(capturedPaths, []);
+    }),
+  );
+
+  // Every other fixture overrides the host, so only this one notices a sync restoring upstream's.
+  it.effect("an opted-in server reports to the fork's collector by default", () =>
+    Effect.gen(function* () {
+      const sent: Array<{ readonly url: string; readonly apiKey: unknown }> = [];
+      const client = HttpClient.make((request) =>
+        Effect.sync(() => {
+          if (request.body._tag === "Uint8Array") {
+            const body = JSON.parse(new TextDecoder().decode(request.body.body));
+            sent.push({ url: request.url, apiKey: body.api_key });
+          }
+          return HttpClientResponse.fromWeb(request, new Response(null, { status: 204 }));
+        }),
+      );
+      const layerRuntime = AnalyticsService.layer.pipe(
+        Layer.provideMerge(
+          ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-telemetry-host-" }),
+        ),
+        Layer.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromUnknown({
+              T3CODE_TELEMETRY_ENABLED: true,
+              T3CODE_POSTHOG_KEY: "phc_test_key",
+            }),
+          ),
+        ),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(HostProcess.Platform, "linux"),
+            Layer.succeed(HostProcess.Architecture, "arm64"),
+            Layer.succeed(HttpClient.HttpClient, client),
+          ),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const analytics = yield* AnalyticsService.AnalyticsService;
+        yield* analytics.record("test.default_host", { index: 1 });
+        yield* analytics.flush;
+      }).pipe(Effect.provide(layerRuntime));
+
+      assert.deepEqual(sent, [
+        { url: "https://t3-telemetry.andrei-homelab.com/batch/", apiKey: "phc_test_key" },
+      ]);
     }),
   );
 });
