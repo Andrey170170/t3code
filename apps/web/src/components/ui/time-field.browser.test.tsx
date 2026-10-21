@@ -218,18 +218,36 @@ describe("TimeField", () => {
 
   it("keeps a typed time when the list is closed with its button", async () => {
     const committed: string[] = [];
+    let submits = 0;
     await using screen = await render(
-      <ControlledTimeField initial="09:00" committed={committed} />,
+      <ControlledTimeField
+        initial="09:00"
+        committed={committed}
+        onSubmit={() => {
+          submits += 1;
+        }}
+      />,
     );
     const input = timeInput(screen);
+    const closeList = async () => {
+      await vi.waitFor(() => expect(options().length).toBeGreaterThan(0));
+      await userEvent.click(screen.container.querySelector('button[aria-label="Choose time"]')!);
+      await vi.waitFor(() => expect(options()).toHaveLength(0));
+    };
     await userEvent.click(input);
     await userEvent.keyboard("21");
-    await vi.waitFor(() => expect(options().length).toBeGreaterThan(0));
-    await userEvent.click(screen.container.querySelector('button[aria-label="Choose time"]')!);
-    await vi.waitFor(() => expect(options()).toHaveLength(0));
+    await closeList();
     expect(input.value).toBe("21");
     await userEvent.keyboard("{Tab}");
     expect(committed).toEqual(["21:00"]);
+    // Enter commits a typed time too, though Base UI only picks from an open list.
+    await userEvent.click(input);
+    await userEvent.keyboard("{Control>}a{/Control}7:45pm");
+    await closeList();
+    await userEvent.keyboard("{Enter}");
+    expect(committed).toEqual(["21:00", "19:45"]);
+    expect(input.value).toBe("19:45");
+    expect(submits).toBe(0);
   });
 
   it("relabels the shown time when the clock format changes", async () => {

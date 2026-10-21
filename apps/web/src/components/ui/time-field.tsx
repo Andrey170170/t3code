@@ -56,6 +56,14 @@ function TimeField({
     return [...new Set([...parsed, ...(labelled ? [labelled] : []), ...prefixed])].toSorted();
   };
   const matches = draft === null || draft.trim() === "" ? items : typedTimes(draft, false);
+  const exactTime = (text: string) => {
+    const typed = typedTimes(text, true);
+    return typed.length === 1 ? typed[0]! : null;
+  };
+  const commit = (next: string) => {
+    if (next !== value) onValueChange(next);
+    setDraft(null);
+  };
 
   return (
     <Combobox<string>
@@ -89,17 +97,18 @@ function TimeField({
           // value, as `<input type="time">` does, so a button pressed next
           // cannot act on the time the field no longer shows. Blur also covers
           // edits made while the list was closed.
-          if (draft === null) return;
-          const typed = typedTimes(draft, true);
-          const next = typed.length === 1 ? typed[0]! : "";
-          if (next !== value) onValueChange(next);
-          setDraft(null);
+          if (draft !== null) commit(exactTime(draft) ?? "");
         }}
         onKeyDown={(event) => {
           // While editing, Enter only picks a time; submitting the surrounding
           // form would send the last committed time while the field shows the
-          // draft. Base UI still selects the highlighted item.
-          if (event.key === "Enter" && draft !== null) event.preventDefault();
+          // draft. Base UI selects the highlighted item from an open list;
+          // with the list closed, Enter takes an unambiguous typed time.
+          if (event.key !== "Enter" || draft === null) return;
+          event.preventDefault();
+          if (event.currentTarget.ariaExpanded === "true") return;
+          const typed = exactTime(draft);
+          if (typed !== null) commit(typed);
         }}
         onPointerDown={(event) => {
           focusedBeforePressRef.current = document.activeElement === event.currentTarget;
