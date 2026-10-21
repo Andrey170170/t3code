@@ -86,12 +86,14 @@ function TimeField({
         triggerIcon={<ClockIcon />}
         triggerLabel="Choose time"
         onBlur={() => {
-          // Leaving keeps an unambiguous typed time rather than silently
-          // reverting it; ambiguous or invalid text reverts. Blur also covers
+          // Leaving keeps an unambiguous typed time. Anything else clears the
+          // value, as `<input type="time">` does, so a button pressed next
+          // cannot act on the time the field no longer shows. Blur also covers
           // edits made while the list was closed.
           if (draft === null) return;
           const typed = typedTimes(draft, true);
-          if (typed.length === 1 && typed[0] !== value) onValueChange(typed[0]!);
+          const next = typed.length === 1 ? typed[0]! : "";
+          if (next !== value) onValueChange(next);
           setDraft(null);
         }}
         onKeyDown={(event) => {

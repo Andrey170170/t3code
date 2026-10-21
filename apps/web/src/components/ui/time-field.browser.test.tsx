@@ -10,14 +10,23 @@ function ControlledTimeField({
   initial,
   committed,
   timestampFormat = "24-hour",
+  onSubmit,
 }: {
   initial: string;
   committed: string[];
   timestampFormat?: TimestampFormat;
+  onSubmit?: (value: string) => void;
 }) {
   const [value, setValue] = useState(initial);
   return (
-    <>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit?.(value);
+      }}
+    >
+      {/* Above the field, where the open list cannot cover it. */}
+      <button type="submit">Snooze</button>
       <TimeField
         aria-label="Time"
         timestampFormat={timestampFormat}
@@ -28,7 +37,7 @@ function ControlledTimeField({
         }}
       />
       <button type="button">Elsewhere</button>
-    </>
+    </form>
   );
 }
 
@@ -93,14 +102,11 @@ describe("TimeField", () => {
   it("replaces the shown time when reached with Tab", async () => {
     const committed: string[] = [];
     await using screen = await render(
-      <>
-        <button type="button">Before</button>
-        <ControlledTimeField initial="09:00" committed={committed} />
-      </>,
+      <ControlledTimeField initial="09:00" committed={committed} />,
       { router: false },
     );
     const input = timeInput(screen);
-    screen.container.querySelector<HTMLButtonElement>("button")!.focus();
+    screen.container.querySelector<HTMLButtonElement>('button[type="submit"]')!.focus();
     await userEvent.keyboard("{Tab}");
     expect(document.activeElement).toBe(input);
     await userEvent.keyboard("21{Tab}");
@@ -111,15 +117,13 @@ describe("TimeField", () => {
     const committed: string[] = [];
     let submits = 0;
     await using screen = await render(
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
+      <ControlledTimeField
+        initial="09:00"
+        committed={committed}
+        onSubmit={() => {
           submits += 1;
         }}
-      >
-        <ControlledTimeField initial="09:00" committed={committed} />
-        <button type="submit">Snooze</button>
-      </form>,
+      />,
       { router: false },
     );
     const input = timeInput(screen);
@@ -149,7 +153,7 @@ describe("TimeField", () => {
     await vi.waitFor(() => expect(input.value).toBe("21:00"));
   });
 
-  it("reverts text that is not a time", async () => {
+  it("clears the value when text that is not a time is left", async () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="09:00" committed={committed} />,
@@ -164,8 +168,25 @@ describe("TimeField", () => {
       ),
     );
     await userEvent.keyboard("{Tab}");
-    expect(committed).toEqual([]);
-    await vi.waitFor(() => expect(input.value).toBe("09:00"));
+    expect(committed).toEqual([""]);
+    expect(input.value).toBe("");
+  });
+
+  it("submits no time when a button is pressed while the text is not a time", async () => {
+    const committed: string[] = [];
+    const submitted: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField
+        initial="09:00"
+        committed={committed}
+        onSubmit={(value) => submitted.push(value)}
+      />,
+      { router: false },
+    );
+    await userEvent.click(timeInput(screen));
+    await userEvent.keyboard("soon");
+    await userEvent.click(screen.container.querySelector('button[type="submit"]')!);
+    expect(submitted).toEqual([""]);
   });
 
   it("keeps showing the time when Escape is pressed with the list closed", async () => {
@@ -219,7 +240,7 @@ describe("TimeField", () => {
     expect(input.value.replace(/\s/g, " ")).toMatch(/^9:00 pm$/i);
   });
 
-  it("lets the time be cleared before typing a new one, reverting if left empty", async () => {
+  it("lets the time be cleared", async () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="09:00" committed={committed} />,
@@ -230,8 +251,8 @@ describe("TimeField", () => {
     await userEvent.keyboard("{Control>}a{/Control}{Backspace}");
     expect(input.value).toBe("");
     await userEvent.keyboard("{Tab}");
-    expect(committed).toEqual([]);
-    expect(input.value).toBe("09:00");
+    expect(committed).toEqual([""]);
+    expect(input.value).toBe("");
   });
 
   it("commits only the clicked item after typing", async () => {
