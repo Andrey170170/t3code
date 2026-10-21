@@ -272,10 +272,15 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
     }),
   );
 
-  // The fork keeps usage private by default; an unset flag must stay off across upstream syncs.
+  // The fork keeps usage private by default; an unset flag must stay off across upstream syncs,
+  // and the fork's collector has no built-in key to fall back on.
   it.effect.each([
-    { label: "disabled", enabled: { T3CODE_TELEMETRY_ENABLED: false } },
-    { label: "not opted in", enabled: {} },
+    {
+      label: "disabled",
+      enabled: { T3CODE_TELEMETRY_ENABLED: false, T3CODE_POSTHOG_KEY: "phc_test_key" },
+    },
+    { label: "not opted in", enabled: { T3CODE_POSTHOG_KEY: "phc_test_key" } },
+    { label: "missing its key", enabled: { T3CODE_TELEMETRY_ENABLED: true } },
   ])("does not send batch requests when telemetry is $label", ({ enabled }) =>
     Effect.gen(function* () {
       const capturedPaths: Array<string> = [];
@@ -286,7 +291,6 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
       const layerConfig = ConfigProvider.layer(
         ConfigProvider.fromUnknown({
           ...enabled,
-          T3CODE_POSTHOG_KEY: "phc_test_key",
           T3CODE_POSTHOG_HOST: "http://localhost",
         }),
       );

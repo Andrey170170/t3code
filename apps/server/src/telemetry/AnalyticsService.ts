@@ -72,13 +72,12 @@ function retryDelayMs(failures: number, random: number): number {
 }
 
 const TelemetryEnvConfig = Config.all({
-  posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(
-    Config.withDefault("phc_XOWci4oZP4VvLiEyrFqkFjP4CZn55mjYYBMREK5Wd6m"),
-  ),
+  // This fork's builds report to the fork's own collector, which needs its key from the
+  // environment, and keep product usage private unless a server opts in.
+  posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(Config.withDefault("")),
   posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(
-    Config.withDefault("https://ingest.t3.codes"),
+    Config.withDefault("https://t3-telemetry.andrei-homelab.com"),
   ),
-  // This fork's builds keep product usage private unless a server opts in.
   enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(Config.withDefault(false)),
   flushBatchSize: Config.Number("T3CODE_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
   maxBufferedEvents: Config.Number("T3CODE_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
@@ -136,7 +135,11 @@ function serverOsFromNodePlatform(platform: string): ClientOs {
 /** @public */
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
-  const telemetryConfig = yield* TelemetryEnvConfig;
+  const envConfig = yield* TelemetryEnvConfig;
+  const telemetryConfig = {
+    ...envConfig,
+    enabled: envConfig.enabled && envConfig.posthogKey.trim() !== "",
+  };
   const httpClient = yield* HttpClient.HttpClient;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const { distinctId, installId } = yield* getTelemetryIdentity;
