@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { parseTimeOfDay, TIME_OF_DAY_SLOTS, timeOfDayOptions } from "./timeOfDay";
+import { parseTimeOfDay, timeOfDayOptions } from "./timeOfDay";
 
 describe("parseTimeOfDay", () => {
   it("reads explicit AM/PM spellings", () => {
@@ -17,6 +17,8 @@ describe("parseTimeOfDay", () => {
     expect(parseTimeOfDay("19h05", false)).toEqual(["19:05"]);
     expect(parseTimeOfDay("730pm", true)).toEqual(["19:30"]);
     expect(parseTimeOfDay("0:00", true)).toEqual(["00:00"]);
+    expect(parseTimeOfDay("0730", false)).toEqual(["07:30"]);
+    expect(parseTimeOfDay("12345", false)).toEqual([]);
   });
 
   it("offers both halves of the day for a bare hour on a 12-hour clock only", () => {
@@ -50,9 +52,10 @@ describe("parseTimeOfDay", () => {
 
 describe("timeOfDayOptions", () => {
   it("lists every quarter hour of the day", () => {
-    expect(TIME_OF_DAY_SLOTS).toHaveLength(96);
-    expect(TIME_OF_DAY_SLOTS.at(0)).toBe("00:00");
-    expect(TIME_OF_DAY_SLOTS.at(-1)).toBe("23:45");
+    const slots = timeOfDayOptions("");
+    expect(slots).toHaveLength(96);
+    expect(slots.at(0)).toBe("00:00");
+    expect(slots.at(-1)).toBe("23:45");
   });
 
   it("slots an off-grid value into order so it stays selectable", () => {
@@ -63,7 +66,7 @@ describe("timeOfDayOptions", () => {
       "19:05",
       "19:15",
     ]);
-    expect(timeOfDayOptions("19:15")).toBe(TIME_OF_DAY_SLOTS);
-    expect(timeOfDayOptions("")).toBe(TIME_OF_DAY_SLOTS);
+    expect(timeOfDayOptions("19:15")).toBe(timeOfDayOptions(""));
+    expect(timeOfDayOptions("25:00")).toBe(timeOfDayOptions(""));
   });
 });

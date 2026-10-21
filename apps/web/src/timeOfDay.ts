@@ -12,7 +12,7 @@ function toTimeOfDay(hour: number, minute: number): string {
   return `${pad(hour)}:${pad(minute)}`;
 }
 
-export const TIME_OF_DAY_SLOTS: ReadonlyArray<string> = Array.from({ length: 24 }, (_, hour) =>
+const TIME_OF_DAY_SLOTS: ReadonlyArray<string> = Array.from({ length: 24 }, (_, hour) =>
   SLOT_MINUTES.map((minute) => toTimeOfDay(hour, minute)),
 ).flat();
 
@@ -27,8 +27,12 @@ export function timeOfDayOptions(value: string): ReadonlyArray<string> {
 }
 
 const MERIDIEM = String.raw`\s*(?:([ap])\.?\s*m?\.?)?`;
-const SEPARATED_PATTERN = new RegExp(String.raw`^(\d{1,2})[:.h](\d{0,2})${MERIDIEM}$`, "i");
-const COMPACT_PATTERN = new RegExp(String.raw`^(\d{1,4})${MERIDIEM}$`, "i");
+// Separated minutes may be partial ("7:3"). Compact entries ("730", "1905")
+// backtrack so their last two digits are the minutes.
+const ENTRY_PATTERN = new RegExp(
+  String.raw`^(\d{1,2})(?:[:.h](\d{0,2})|(\d{2}))?${MERIDIEM}$`,
+  "i",
+);
 
 function hourCandidates(hour: number, meridiem: string | undefined, hour12: boolean): number[] {
   if (meridiem) {
@@ -51,24 +55,10 @@ export function parseTimeOfDay(
   hour12: boolean,
   exact = false,
 ): ReadonlyArray<string> {
-  const input = text.trim();
-  let hourText: string;
-  let minuteText: string;
-  let meridiem: string | undefined;
-  const separated = SEPARATED_PATTERN.exec(input);
-  if (separated) {
-    hourText = separated[1]!;
-    minuteText = separated[2]!;
-    meridiem = separated[3];
-  } else {
-    const compact = COMPACT_PATTERN.exec(input);
-    if (!compact) return [];
-    const digits = compact[1]!;
-    // "730" and "1905" carry their minutes in the last two digits.
-    hourText = digits.length > 2 ? digits.slice(0, -2) : digits;
-    minuteText = digits.length > 2 ? digits.slice(-2) : "";
-    meridiem = compact[2];
-  }
+  const match = ENTRY_PATTERN.exec(text.trim());
+  if (!match) return [];
+  const [, hourText, separatedMinutes, compactMinutes, meridiem] = match;
+  const minuteText = separatedMinutes ?? compactMinutes ?? "";
   let minutes: number[];
   if (minuteText.length === 2) minutes = Number(minuteText) < 60 ? [Number(minuteText)] : [];
   else if (exact) minutes = minuteText === "" ? [0] : [];

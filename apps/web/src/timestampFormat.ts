@@ -1,5 +1,7 @@
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 
+import { isTimeOfDay } from "./timeOfDay";
+
 function getTimestampFormatOptions(
   timestampFormat: TimestampFormat,
   includeSeconds: boolean,
@@ -149,10 +151,10 @@ export function formatShortTimestamp(isoDate: string, timestampFormat: Timestamp
 
 /** Labels a local `HH:mm` time of day; anything else formats as "". */
 export function formatTimeOfDay(timeOfDay: string, timestampFormat: TimestampFormat): string {
-  const match = /^(\d{2}):(\d{2})$/.exec(timeOfDay);
-  if (!match) return "";
+  if (!isTimeOfDay(timeOfDay)) return "";
+  const [hour, minute] = timeOfDay.split(":").map(Number);
   // No zone changes its clocks on January 1, so every wall-clock time exists.
-  const date = new Date(2000, 0, 1, Number(match[1]), Number(match[2]));
+  const date = new Date(2000, 0, 1, hour, minute);
   return getTimestampFormatter(timestampFormat, false).format(date);
 }
 
