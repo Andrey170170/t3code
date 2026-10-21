@@ -1,3 +1,4 @@
+import type { TimestampFormat } from "@t3tools/contracts/settings";
 import { formatHourShort } from "@t3tools/shared/usageFormat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -63,6 +64,34 @@ describe("formatShortTimestamp", () => {
     expect(formatHourShort(date, undefined, resolveHour12("12-hour"))).toBe("3 PM");
     expect(formatHourShort(date, undefined, resolveHour12("24-hour"))).toBe("15:00");
   });
+});
+
+describe("normalizeTimeEntry", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  const locales = ["en-US", "en-GB", "zh-CN", "zh-TW", "ko-KR", "fi-FI", "ar-EG", "hi-IN"];
+  it.each(locales.flatMap((locale) => ["locale", "12-hour", "24-hour"].map((f) => [locale, f])))(
+    "reads every %s %s time-of-day label back as its own time",
+    async (locale, format) => {
+      vi.stubGlobal("window", { desktopBridge: { getSystemLocale: () => locale } });
+      vi.resetModules();
+      const { formatTimeOfDay, normalizeTimeEntry, resolveHour12 } =
+        await import("./timestampFormat");
+      const { parseTimeOfDay, timeOfDayOptions } = await import("./timeOfDay");
+      const timestampFormat = format as TimestampFormat;
+      const hour12 = resolveHour12(timestampFormat);
+      for (const time of [...timeOfDayOptions(""), "19:06", "00:01", "12:59"]) {
+        const label = formatTimeOfDay(time, timestampFormat);
+        expect(
+          parseTimeOfDay(normalizeTimeEntry(label, timestampFormat), hour12, true),
+          label,
+        ).toEqual([time]);
+      }
+    },
+  );
 });
 
 describe("resolveWeekStartsOn", () => {

@@ -158,6 +158,56 @@ export function formatTimeOfDay(timeOfDay: string, timestampFormat: TimestampFor
   return getTimestampFormatter(timestampFormat, false).format(date);
 }
 
+interface TimeEntryTokens {
+  readonly digits: ReadonlyArray<string>;
+  readonly dayPeriods: ReadonlyArray<readonly [token: string, ascii: "am" | "pm"]>;
+}
+
+const timeEntryTokensCache = new Map<TimestampFormat, TimeEntryTokens>();
+
+function timeEntryTokens(timestampFormat: TimestampFormat): TimeEntryTokens {
+  const cached = timeEntryTokensCache.get(timestampFormat);
+  if (cached) return cached;
+  const formatter = getTimestampFormatter(timestampFormat, false);
+  const digitFormatter = new Intl.NumberFormat(timestampLocale, {
+    numberingSystem: formatter.resolvedOptions().numberingSystem,
+    useGrouping: false,
+  });
+  const dayPeriod = (hour: number) =>
+    formatter
+      .formatToParts(new Date(2000, 0, 1, hour))
+      .find((part) => part.type === "dayPeriod")
+      ?.value.trim();
+  const am = dayPeriod(1);
+  const pm = dayPeriod(13);
+  const tokens: TimeEntryTokens = {
+    digits: Array.from({ length: 10 }, (_, digit) => digitFormatter.format(digit)),
+    dayPeriods: am && pm && am !== pm ? [[am, "am"] as const, [pm, "pm"] as const] : [],
+  };
+  timeEntryTokensCache.set(timestampFormat, tokens);
+  return tokens;
+}
+
+/**
+ * Rewrites a time typed the way `formatTimeOfDay` displays it (local digits,
+ * day periods such as "下午" or "ip.") into the ASCII form `parseTimeOfDay` reads.
+ */
+export function normalizeTimeEntry(text: string, timestampFormat: TimestampFormat): string {
+  const { digits, dayPeriods } = timeEntryTokens(timestampFormat);
+  // Bidi marks surround day periods in right-to-left locales.
+  let entry = text.replace(/[؜‎‏]/g, "");
+  digits.forEach((digit, value) => {
+    entry = entry.replaceAll(digit, String(value));
+  });
+  const lowered = entry.toLowerCase();
+  for (const [token, ascii] of dayPeriods) {
+    const start = lowered.indexOf(token.toLowerCase());
+    if (start !== -1)
+      return `${entry.slice(0, start)}${entry.slice(start + token.length)} ${ascii}`;
+  }
+  return entry;
+}
+
 const numericDateFormatter = new Intl.DateTimeFormat(timestampLocale, {
   month: "numeric",
   day: "numeric",

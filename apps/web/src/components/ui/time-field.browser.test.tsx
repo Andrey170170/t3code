@@ -1,3 +1,4 @@
+import type { TimestampFormat } from "@t3tools/contracts/settings";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -23,13 +24,19 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-function ControlledTimeField({ initial }: { initial: string }) {
+function ControlledTimeField({
+  initial,
+  timestampFormat = "24-hour",
+}: {
+  initial: string;
+  timestampFormat?: TimestampFormat;
+}) {
   const [value, setValue] = useState(initial);
   return (
     <>
       <TimeField
         aria-label="Time"
-        timestampFormat="24-hour"
+        timestampFormat={timestampFormat}
         value={value}
         onValueChange={(next) => {
           committed.push(next);
@@ -41,8 +48,10 @@ function ControlledTimeField({ initial }: { initial: string }) {
   );
 }
 
-async function render(initial: string) {
-  await act(async () => root.render(<ControlledTimeField initial={initial} />));
+async function render(initial: string, timestampFormat: TimestampFormat = "24-hour") {
+  await act(async () =>
+    root.render(<ControlledTimeField initial={initial} timestampFormat={timestampFormat} />),
+  );
   return container.querySelector<HTMLInputElement>('input[aria-label="Time"]')!;
 }
 
@@ -106,5 +115,26 @@ describe("TimeField", () => {
     await userEvent.keyboard("{Tab}");
     expect(committed).toEqual([]);
     await vi.waitFor(() => expect(input.value).toBe("09:00"));
+  });
+
+  it("keeps showing the time when Escape is pressed with the list closed", async () => {
+    const input = await render("09:00");
+    input.focus();
+    await userEvent.keyboard("{Escape}");
+    expect(input.value).toBe("09:00");
+    await userEvent.click(input);
+    await vi.waitFor(() => expect(options().length).toBeGreaterThan(0));
+    await userEvent.keyboard("{Escape}");
+    await vi.waitFor(() => expect(options()).toHaveLength(0));
+    await userEvent.keyboard("{Escape}");
+    expect(input.value).toBe("09:00");
+    expect(committed).toEqual([]);
+  });
+
+  it("relabels the shown time when the clock format changes", async () => {
+    const input = await render("21:00");
+    expect(input.value).toBe("21:00");
+    await render("21:00", "12-hour");
+    expect(input.value.replace(/\s/g, " ")).toMatch(/^9:00 pm$/i);
   });
 });

@@ -5,7 +5,7 @@ import { ClockIcon } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { parseTimeOfDay, timeOfDayOptions } from "~/timeOfDay";
-import { formatTimeOfDay, resolveHour12 } from "~/timestampFormat";
+import { formatTimeOfDay, normalizeTimeEntry, resolveHour12 } from "~/timestampFormat";
 
 import {
   Combobox,
@@ -33,12 +33,14 @@ function TimeField({
   className?: string;
   "aria-label"?: string;
 }) {
-  const [inputValue, setInputValue] = useState("");
+  // The text being typed, or null while the input shows the committed time.
+  const [draft, setDraft] = useState<string | null>(null);
   const focusedBeforePressRef = useRef(false);
   const hour12 = resolveHour12(timestampFormat);
   const items = timeOfDayOptions(value);
-  const query = inputValue.trim();
-  const matches = query === "" ? items : parseTimeOfDay(query, hour12);
+  const parseDraft = (exact: boolean) =>
+    parseTimeOfDay(normalizeTimeEntry(draft ?? "", timestampFormat), hour12, exact);
+  const matches = draft === null || draft.trim() === "" ? items : parseDraft(false);
   const formatLabel = (item: string) => formatTimeOfDay(item, timestampFormat);
 
   return (
@@ -46,18 +48,29 @@ function TimeField({
       items={items}
       filteredItems={matches}
       value={value === "" ? null : value}
+      inputValue={draft ?? formatLabel(value)}
       autoHighlight
       itemToStringLabel={formatLabel}
-      onInputValueChange={setInputValue}
+      onInputValueChange={(next, details) => {
+        // Base UI also clears or refills the input itself (Escape, item
+        // press); those fall back to the committed time.
+        setDraft(details.reason === "input-change" ? next : null);
+      }}
       onValueChange={(next) => {
         if (next !== null) onValueChange(next);
       }}
       onOpenChange={(open, details) => {
-        if (open || (details.reason !== "focus-out" && details.reason !== "outside-press")) return;
+        if (open) return;
         // Leaving the field keeps an unambiguous typed time rather than
         // silently reverting it; Escape and ambiguous text still revert.
-        const typed = parseTimeOfDay(query, hour12, true);
-        if (typed.length === 1 && typed[0] !== value) onValueChange(typed[0]!);
+        if (
+          draft !== null &&
+          (details.reason === "focus-out" || details.reason === "outside-press")
+        ) {
+          const typed = parseDraft(true);
+          if (typed.length === 1 && typed[0] !== value) onValueChange(typed[0]!);
+        }
+        setDraft(null);
       }}
     >
       <ComboboxInput
