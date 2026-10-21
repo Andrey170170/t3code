@@ -66,19 +66,18 @@ function TimeField({
       autoHighlight
       itemToStringLabel={formatLabel}
       onInputValueChange={(next, details) => {
-        // Typing or deleting edits the draft. Base UI's own rewrites (Escape,
-        // item press, close) fall back to the committed time.
-        const edited = details.reason === "input-change" || details.reason === "input-clear";
-        setDraft(edited ? next : null);
+        // Typing edits the draft; Escape and picking an item end it. Base UI
+        // also rewrites the input when the list closes, which would discard
+        // the draft before blur settles it, so other reasons are ignored.
+        if (details.reason === "input-change") setDraft(next);
+        else if (details.reason === "escape-key" || details.reason === "item-press") setDraft(null);
       }}
       onValueChange={(next) => {
         if (next !== null) onValueChange(next);
       }}
       onOpenChange={(open, details) => {
-        // Leaving the field is settled on blur instead.
-        if (!open && details.reason !== "focus-out" && details.reason !== "outside-press") {
-          setDraft(null);
-        }
+        // Escape cancels the draft; any other close keeps it for blur to settle.
+        if (!open && details.reason === "escape-key") setDraft(null);
       }}
     >
       <ComboboxInput

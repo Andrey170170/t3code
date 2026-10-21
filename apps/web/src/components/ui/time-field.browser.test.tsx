@@ -54,7 +54,6 @@ describe("TimeField", () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="19:05" committed={committed} />,
-      { router: false },
     );
     const input = timeInput(screen);
     expect(input.value).toBe("19:05");
@@ -72,7 +71,6 @@ describe("TimeField", () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="09:00" committed={committed} />,
-      { router: false },
     );
     const input = timeInput(screen);
     await userEvent.click(input);
@@ -86,7 +84,6 @@ describe("TimeField", () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="09:00" committed={committed} />,
-      { router: false },
     );
     const input = timeInput(screen);
     await userEvent.click(input);
@@ -103,7 +100,6 @@ describe("TimeField", () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="09:00" committed={committed} />,
-      { router: false },
     );
     const input = timeInput(screen);
     screen.container.querySelector<HTMLButtonElement>('button[type="submit"]')!.focus();
@@ -124,7 +120,6 @@ describe("TimeField", () => {
           submits += 1;
         }}
       />,
-      { router: false },
     );
     const input = timeInput(screen);
     input.focus();
@@ -143,7 +138,6 @@ describe("TimeField", () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="09:00" committed={committed} />,
-      { router: false },
     );
     const input = timeInput(screen);
     await userEvent.click(input);
@@ -157,7 +151,6 @@ describe("TimeField", () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="09:00" committed={committed} />,
-      { router: false },
     );
     const input = timeInput(screen);
     await userEvent.click(input);
@@ -181,7 +174,6 @@ describe("TimeField", () => {
         committed={committed}
         onSubmit={(value) => submitted.push(value)}
       />,
-      { router: false },
     );
     await userEvent.click(timeInput(screen));
     await userEvent.keyboard("soon");
@@ -193,7 +185,6 @@ describe("TimeField", () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="09:00" committed={committed} />,
-      { router: false },
     );
     const input = timeInput(screen);
     input.focus();
@@ -212,7 +203,6 @@ describe("TimeField", () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="09:00" committed={committed} />,
-      { router: false },
     );
     const input = timeInput(screen);
     await userEvent.click(input);
@@ -226,11 +216,26 @@ describe("TimeField", () => {
     expect(committed).toEqual([]);
   });
 
+  it("keeps a typed time when the list is closed with its button", async () => {
+    const committed: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField initial="09:00" committed={committed} />,
+    );
+    const input = timeInput(screen);
+    await userEvent.click(input);
+    await userEvent.keyboard("21");
+    await vi.waitFor(() => expect(options().length).toBeGreaterThan(0));
+    await userEvent.click(screen.container.querySelector('button[aria-label="Choose time"]')!);
+    await vi.waitFor(() => expect(options()).toHaveLength(0));
+    expect(input.value).toBe("21");
+    await userEvent.keyboard("{Tab}");
+    expect(committed).toEqual(["21:00"]);
+  });
+
   it("relabels the shown time when the clock format changes", async () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="21:00" committed={committed} />,
-      { router: false },
     );
     const input = timeInput(screen);
     expect(input.value).toBe("21:00");
@@ -244,7 +249,6 @@ describe("TimeField", () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="09:00" committed={committed} />,
-      { router: false },
     );
     const input = timeInput(screen);
     input.focus();
@@ -259,7 +263,6 @@ describe("TimeField", () => {
     const committed: string[] = [];
     await using screen = await render(
       <ControlledTimeField initial="09:00" committed={committed} />,
-      { router: false },
     );
     const input = timeInput(screen);
     await userEvent.click(input);
