@@ -46,7 +46,8 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 
 import { formatRelativeTime } from "../../timestampFormat";
-import { useEnvironmentSettings } from "../../hooks/useSettings";
+import { isTimeOfDay } from "../../timeOfDay";
+import { useClientSettings, useEnvironmentSettings } from "../../hooks/useSettings";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
 import {
   applyProviderInstanceSettings,
@@ -111,6 +112,7 @@ import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
+import { TimeField } from "../ui/time-field";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -1116,6 +1118,7 @@ function ScheduledTaskEditorForm({
       matchesScheduledTaskScope(scope, environmentId, project.id),
   );
   const settings = useEnvironmentSettings(environmentId);
+  const timestampFormat = useClientSettings((clientSettings) => clientSettings.timestampFormat);
   const providers =
     useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
   const canOperate = useAtomValue(
@@ -1217,6 +1220,10 @@ function ScheduledTaskEditorForm({
       (!Number.isSafeInteger(schedule.everyMs) || schedule.everyMs < MIN_SCHEDULED_TASK_INTERVAL_MS)
     ) {
       reportFailure("Invalid interval", "Enter an interval of at least one minute.");
+      return;
+    }
+    if (schedule.type === "fixed_time" && !isTimeOfDay(schedule.timeOfDay)) {
+      reportFailure("Invalid time", "Choose the time of day to run at.");
       return;
     }
     if (draft.workspaceMode === "existing_worktree" && !draft.existingWorktreePath.trim()) {
@@ -1687,14 +1694,13 @@ function ScheduledTaskEditorForm({
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex items-center gap-2">
                   <Label htmlFor="scheduled-task-time">Run at</Label>
-                  <Input
-                    type="time"
+                  <TimeField
                     id="scheduled-task-time"
-                    nativeInput
                     className="w-32"
+                    timestampFormat={timestampFormat}
                     value={draft.timeOfDay}
-                    onChange={(event) =>
-                      setDraft((current) => ({ ...current, timeOfDay: event.target.value }))
+                    onValueChange={(timeOfDay) =>
+                      setDraft((current) => ({ ...current, timeOfDay }))
                     }
                   />
                   <span className="text-xs text-muted-foreground">on</span>

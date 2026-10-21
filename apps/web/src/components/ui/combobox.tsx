@@ -33,6 +33,8 @@ function ComboboxInput({
   showTrigger = true,
   showClear = false,
   startAddon,
+  triggerIcon,
+  triggerLabel,
   size,
   unstyled = false,
   ...props
@@ -40,6 +42,8 @@ function ComboboxInput({
   showTrigger?: boolean;
   showClear?: boolean;
   startAddon?: React.ReactNode;
+  triggerIcon?: React.ReactNode;
+  triggerLabel?: string;
   size?: "sm" | "default" | "lg" | number;
   unstyled?: boolean;
   ref?: React.Ref<HTMLInputElement>;
@@ -82,13 +86,14 @@ function ComboboxInput({
       />
       {showTrigger && (
         <ComboboxTrigger
+          aria-label={triggerLabel}
           className={cn(
             "-translate-y-1/2 absolute top-1/2 inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md border border-transparent opacity-80 outline-none transition-opacity pointer-coarse:after:absolute pointer-coarse:after:min-h-11 pointer-coarse:after:min-w-11 hover:opacity-100 has-[+[data-slot=combobox-clear]]:hidden sm:size-7 [&_svg:not([class*='size-'])]:size-4.5 sm:[&_svg:not([class*='size-'])]:size-4 [&_svg]:pointer-events-none [&_svg]:shrink-0",
             sizeValue === "sm" ? "end-0" : "end-0.5",
           )}
         >
           <ComboboxPrimitive.Icon data-slot="combobox-icon">
-            <ChevronsUpDownIcon />
+            {triggerIcon ?? <ChevronsUpDownIcon />}
           </ComboboxPrimitive.Icon>
         </ComboboxTrigger>
       )}

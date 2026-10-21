@@ -9,10 +9,11 @@ import {
 import { Button } from "./ui/button";
 import { CalendarIcon } from "lucide-react";
 import { Calendar } from "./ui/calendar";
+import { useClientSettings } from "../hooks/useSettings";
 import { weekStartsOn } from "../timestampFormat";
 import { Popover, PopoverTrigger, PopoverPopup } from "./ui/popover";
-import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { TimeField } from "./ui/time-field";
 import { Toggle, ToggleGroup } from "./ui/toggle-group";
 import { Select, SelectTrigger, SelectValue, SelectPopup, SelectItem } from "./ui/select";
 import {
@@ -63,6 +64,7 @@ function CustomSnoozeDialog() {
   const [amount, setAmount] = useState("2");
   const [unit, setUnit] = useState<"minutes" | "hours" | "days">("hours");
   const [error, setError] = useState<string | null>(null);
+  const timestampFormat = useClientSettings((settings) => settings.timestampFormat);
   const input: CustomSnoozeInput =
     mode === "date" ? { mode, date: localSnoozeDate(date), time } : { mode, amount, unit };
   return (
@@ -147,21 +149,18 @@ function CustomSnoozeDialog() {
                         </PopoverPopup>
                       </Popover>
                     </div>
-                    <Label className="flex min-w-0 flex-col items-stretch" htmlFor={`${id}-time`}>
-                      Time
-                      <Input
-                        nativeInput
+                    <div className="flex min-w-0 flex-col gap-1.5">
+                      <Label htmlFor={`${id}-time`}>Time</Label>
+                      <TimeField
                         id={`${id}-time`}
-                        className="h-9 sm:h-8"
-                        type="time"
-                        required
+                        timestampFormat={timestampFormat}
                         value={time}
-                        onChange={(event) => {
-                          setTime(event.target.value);
+                        onValueChange={(next) => {
+                          setTime(next);
                           setError(null);
                         }}
                       />
-                    </Label>
+                    </div>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

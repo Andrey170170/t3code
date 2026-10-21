@@ -1,5 +1,7 @@
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 
+import { isTimeOfDay, toTimeOfDay } from "./timeOfDay";
+
 function getTimestampFormatOptions(
   timestampFormat: TimestampFormat,
   includeSeconds: boolean,
@@ -137,6 +139,58 @@ export function formatShortTimestamp(isoDate: string, timestampFormat: Timestamp
   const date = parseTimestampDate(isoDate);
   if (!date) return "";
   return getTimestampFormatter(timestampFormat, false).format(date);
+}
+
+/** Labels a local `HH:mm` time of day; anything else formats as "". */
+export function formatTimeOfDay(timeOfDay: string, timestampFormat: TimestampFormat): string {
+  if (!isTimeOfDay(timeOfDay)) return "";
+  const [hour, minute] = timeOfDay.split(":").map(Number);
+  // No zone changes its clocks on January 1, so every wall-clock time exists.
+  const date = new Date(2000, 0, 1, hour, minute);
+  return getTimestampFormatter(timestampFormat, false).format(date);
+}
+
+// Case, spacing and invisible bidi marks vary between how a label is shown
+// and how it is typed back.
+function comparableTimeText(text: string): string {
+  return text
+    .replace(/\p{Cf}/gu, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase();
+}
+
+const timeOfDayByLabelCache = new Map<TimestampFormat, ReadonlyMap<string, string>>();
+
+/**
+ * The time of day whose `formatTimeOfDay` label `text` is, so any displayed
+ * label (local digits, "下午7:05", "19 h 05") reads back as its own time.
+ */
+export function timeOfDayForLabel(
+  text: string,
+  timestampFormat: TimestampFormat,
+): string | undefined {
+  let byLabel = timeOfDayByLabelCache.get(timestampFormat);
+  if (!byLabel) {
+    const entries = Array.from({ length: 24 * 60 }, (_, minutes) => {
+      const time = toTimeOfDay(Math.floor(minutes / 60), minutes % 60);
+      return [comparableTimeText(formatTimeOfDay(time, timestampFormat)), time] as const;
+    });
+    byLabel = new Map(entries);
+    timeOfDayByLabelCache.set(timestampFormat, byLabel);
+  }
+  return byLabel.get(comparableTimeText(text));
+}
+
+/** Whether the label of `timeOfDay` starts with `text`, compared like `timeOfDayForLabel`. */
+export function timeOfDayLabelStartsWith(
+  timeOfDay: string,
+  text: string,
+  timestampFormat: TimestampFormat,
+): boolean {
+  return comparableTimeText(formatTimeOfDay(timeOfDay, timestampFormat)).startsWith(
+    comparableTimeText(text),
+  );
 }
 
 const numericDateFormatter = new Intl.DateTimeFormat(timestampLocale, {
