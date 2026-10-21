@@ -475,8 +475,11 @@ const NewTaskSheetStack = createNativeStackNavigator({
     NewTaskDraft: createNativeStackScreen({
       screen: NewTaskDraftRouteScreen,
       linking: "draft",
+      // These Android screens draw their own toolbar; see DETAIL_HEADER_OPTIONS for why the
+      // native header must be hidden from the first layout rather than after mount.
       options: {
         headerBackVisible: false,
+        headerShown: Platform.OS !== "android",
         title: "",
       },
     }),
@@ -484,6 +487,7 @@ const NewTaskSheetStack = createNativeStackNavigator({
       screen: NewTaskEnvironmentPickerRouteScreen,
       linking: "draft/environment",
       options: {
+        headerShown: Platform.OS !== "android",
         title: "Environment",
       },
     }),
@@ -491,6 +495,7 @@ const NewTaskSheetStack = createNativeStackNavigator({
       screen: NewTaskBranchPickerRouteScreen,
       linking: "draft/branch",
       options: {
+        headerShown: Platform.OS !== "android",
         title: "Branch",
       },
     }),
