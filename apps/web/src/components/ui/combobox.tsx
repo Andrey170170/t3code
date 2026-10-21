@@ -33,6 +33,7 @@ function ComboboxInput({
   showTrigger = true,
   showClear = false,
   startAddon,
+  triggerIcon,
   size,
   unstyled = false,
   ...props
@@ -40,6 +41,7 @@ function ComboboxInput({
   showTrigger?: boolean;
   showClear?: boolean;
   startAddon?: React.ReactNode;
+  triggerIcon?: React.ReactNode;
   size?: "sm" | "default" | "lg" | number;
   unstyled?: boolean;
   ref?: React.Ref<HTMLInputElement>;
@@ -88,7 +90,7 @@ function ComboboxInput({
           )}
         >
           <ComboboxPrimitive.Icon data-slot="combobox-icon">
-            <ChevronsUpDownIcon />
+            {triggerIcon ?? <ChevronsUpDownIcon />}
           </ComboboxPrimitive.Icon>
         </ComboboxTrigger>
       )}

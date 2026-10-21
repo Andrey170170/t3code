@@ -147,6 +147,15 @@ export function formatShortTimestamp(isoDate: string, timestampFormat: Timestamp
   return getTimestampFormatter(timestampFormat, false).format(date);
 }
 
+/** Labels a local `HH:mm` time of day; anything else formats as "". */
+export function formatTimeOfDay(timeOfDay: string, timestampFormat: TimestampFormat): string {
+  const match = /^(\d{2}):(\d{2})$/.exec(timeOfDay);
+  if (!match) return "";
+  // No zone changes its clocks on January 1, so every wall-clock time exists.
+  const date = new Date(2000, 0, 1, Number(match[1]), Number(match[2]));
+  return getTimestampFormatter(timestampFormat, false).format(date);
+}
+
 const numericDateFormatter = new Intl.DateTimeFormat(timestampLocale, {
   month: "numeric",
   day: "numeric",
