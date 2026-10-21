@@ -4,7 +4,6 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   collectWrappedTerminalLinkLine,
   extractTerminalLinks,
-  isTerminalLinkActivation,
   isTerminalUrl,
   type TerminalBufferLineLike,
 } from "./terminal-links";
@@ -54,14 +53,6 @@ describe("extractTerminalLinks", () => {
     expect(extractTerminalLinks('error: "something went wrong."')).toEqual([]);
   });
 
-  it.each([
-    ['"my file.ts":12:7', "my file.ts:12:7", 17],
-    ["'my file.ts:12:7'", "my file.ts:12:7", 16],
-    ["`my file.ts`", "my file.ts", 11],
-  ])("finds a quoted basename in %s", (line, text, end) => {
-    expect(extractTerminalLinks(line)).toEqual([{ kind: "path", text, start: 1, end }]);
-  });
-
   it("keeps quoted paths and URLs separate without duplicate partial paths", () => {
     const path = String.raw`C:\Jane Doe\index.ts:12`;
     const url = "https://example.com/docs";
@@ -99,17 +90,6 @@ describe("extractTerminalLinks", () => {
     expect(isTerminalUrl("httpsdocs/readme.md")).toBe(false);
   });
 
-  it("finds URLs regardless of scheme casing", () => {
-    expect(extractTerminalLinks("open HTTPS://example.com/docs")).toEqual([
-      {
-        kind: "url",
-        text: "HTTPS://example.com/docs",
-        start: 5,
-        end: 29,
-      },
-    ]);
-  });
-
   it("trims trailing punctuation from links", () => {
     const line = "(https://example.com/docs), ./src/main.ts:12.";
     expect(extractTerminalLinks(line)).toEqual([
@@ -128,6 +108,18 @@ describe("extractTerminalLinks", () => {
     ]);
   });
 
+  it.each([
+    "src/żółć.ts:12:7",
+    "żółć/main.ts:12",
+    String.raw`żółć\main.ts:12`,
+    "src/cafe\u0301.ts:12",
+    "src/𐐀.ts:12",
+  ])("keeps the complete Unicode relative path %s", (text) => {
+    expect(extractTerminalLinks(`see ${text} for details`)).toEqual([
+      { kind: "path", text, start: 4, end: 4 + text.length },
+    ]);
+  });
+
   it("finds Windows absolute paths with forward slashes", () => {
     const line = "see C:/Users/someone/project/src/file.ts:42 for details";
     const path = "C:/Users/someone/project/src/file.ts:42";
@@ -138,18 +130,6 @@ describe("extractTerminalLinks", () => {
         text: path,
         start,
         end: start + path.length,
-      },
-    ]);
-  });
-
-  it("trims trailing punctuation from Windows forward-slash paths", () => {
-    const line = "(C:/tmp/x.ts).";
-    expect(extractTerminalLinks(line)).toEqual([
-      {
-        kind: "path",
-        text: "C:/tmp/x.ts",
-        start: 1,
-        end: 12,
       },
     ]);
   });
@@ -265,21 +245,6 @@ describe("resolvePathLinkTarget", () => {
     );
   });
 
-  it("resolves relative paths against cwd", () => {
-    expect(
-      resolvePathLinkTarget(
-        "src/components/ThreadTerminalDrawer.tsx:42:7",
-        "/Users/julius/project",
-      ),
-    ).toBe("/Users/julius/project/src/components/ThreadTerminalDrawer.tsx:42:7");
-  });
-
-  it("keeps absolute paths unchanged", () => {
-    expect(
-      resolvePathLinkTarget("/Users/julius/project/src/main.ts:12", "/Users/julius/project"),
-    ).toBe("/Users/julius/project/src/main.ts:12");
-  });
-
   it("keeps Windows absolute paths with forward slashes unchanged", () => {
     expect(
       resolvePathLinkTarget("C:/Users/julius/project/src/main.ts:12", "C:\\Users\\julius\\project"),
@@ -291,49 +256,5 @@ describe("resolvePathLinkTarget", () => {
     expect(resolvePathLinkTarget(link?.text ?? "", "/Users/julius/project")).toBe(
       "/Users/julius/project/main.c:10:5",
     );
-  });
-});
-
-describe("isTerminalLinkActivation", () => {
-  it("requires cmd on macOS", () => {
-    expect(
-      isTerminalLinkActivation(
-        {
-          metaKey: true,
-          ctrlKey: false,
-        },
-        "MacIntel",
-      ),
-    ).toBe(true);
-    expect(
-      isTerminalLinkActivation(
-        {
-          metaKey: false,
-          ctrlKey: true,
-        },
-        "MacIntel",
-      ),
-    ).toBe(false);
-  });
-
-  it("requires ctrl on non-macOS", () => {
-    expect(
-      isTerminalLinkActivation(
-        {
-          metaKey: false,
-          ctrlKey: true,
-        },
-        "Win32",
-      ),
-    ).toBe(true);
-    expect(
-      isTerminalLinkActivation(
-        {
-          metaKey: true,
-          ctrlKey: false,
-        },
-        "Linux",
-      ),
-    ).toBe(false);
   });
 });

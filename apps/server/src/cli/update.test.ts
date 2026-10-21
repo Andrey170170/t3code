@@ -1,31 +1,65 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import { Command } from "effect/cli";
-import { vi } from "vite-plus/test";
-import * as HostProcess from "@t3tools/shared/HostProcess";
+import { HttpClient, HttpClientResponse } from "effect/http";
+import { afterEach, vi } from "vite-plus/test";
 
-import { repointLauncher, resolveLauncherPath, updateCommand } from "./update.ts";
+import packageJson from "../../package.json" with { type: "json" };
+import {
+  repointLauncher,
+  resolveLauncherPath,
+  resolveNewestVersion,
+  updateCommand,
+} from "./update.ts";
 
-vi.mock("../../package.json", async (importOriginal) => {
-  const original = await importOriginal<{ default: typeof import("../../package.json") }>();
-  return { ...original, default: { ...original.default, version: "0.0.42-forgejo.1" } };
-});
+afterEach(() => vi.restoreAllMocks());
+
+it.effect("authenticates each release page until the requested channel is found", () =>
+  Effect.gen(function* () {
+    const pages: string[] = [];
+    const httpClient = HttpClient.make((request) => {
+      const url = new URL(request.url);
+      assert.equal(url.origin, "https://api.github.com");
+      assert.equal(url.pathname, "/repos/pingdotgg/t3code/releases");
+      assert.equal(request.headers.accept, "application/vnd.github+json");
+      assert.equal(request.headers.authorization, "Bearer gh-token");
+      const page = url.searchParams.get("page") ?? "";
+      pages.push(page);
+      const tag_name = page === "1" ? "v1.2.4-preview.20260101.1" : "v1.2.3";
+      return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json([{ tag_name }])));
+    });
+    const version = yield* resolveNewestVersion("stable").pipe(
+      Effect.provideService(HostProcess.Environment, { GH_TOKEN: "gh-token" }),
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+    );
+    assert.equal(version, "1.2.3");
+    assert.deepStrictEqual(pages, ["1", "2"]);
+  }),
+);
 
 it.layer(NodeServices.layer)("t3 update launcher", (it) => {
   it.effect("keeps Forgejo installs off the upstream updater before resolving host state", () =>
     Effect.gen(function* () {
+      const version = packageJson.version;
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          packageJson.version = version;
+        }),
+      );
+      packageJson.version = "0.0.42-forgejo.1";
       for (const args of [[], ["0.0.43", "--yes"], ["--channel", "nightly", "--yes"]]) {
         const error = yield* Command.runWith(updateCommand, { version: "0.0.42-forgejo.1" })(
           args,
         ).pipe(Effect.flip);
         assert.include(error.message, "t3code-update");
       }
-    }).pipe(Effect.provide(NetService.layer)),
+    }).pipe(Effect.provide(NetService.layer), Effect.scoped),
   );
 
   it.effect("repoints a symlink that lives in a runtime versions tree", () =>

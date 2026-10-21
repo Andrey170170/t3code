@@ -2,7 +2,6 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { createHashHistory, createBrowserHistory } from "@tanstack/react-router";
 
-import "katex/dist/katex.min.css";
 import "./index.css";
 
 import { prepareProviderAuthDelivery } from "./providerAuthDelivery";

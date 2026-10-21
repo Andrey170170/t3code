@@ -73,7 +73,7 @@ export function gitLabViewerPermissions(input: {
   };
 }
 
-export function gitLabProviderFailure(
+function gitLabProviderFailure(
   error: GitLabPullRequestCli.GitLabPullRequestCliError,
 ): PullRequestProviderFailure {
   if (error._tag === "GitLabCliUnavailableError") return { reason: "missing-tool" };
@@ -94,6 +94,23 @@ export const make = Effect.gen(function* () {
       detail: error.detail,
       cause: error,
     });
+
+  // Optional endpoints may lose part of the activity, but an unusable CLI or account must
+  // reach the caller so it can report authentication failures and pause a throttled host.
+  const recoverRead = <A>(
+    read: Effect.Effect<A, GitLabPullRequestCli.GitLabPullRequestCliError>,
+    fallback: A,
+  ) =>
+    read.pipe(
+      Effect.catch((error) => {
+        const { reason } = gitLabProviderFailure(error);
+        return reason === "rate-limited" ||
+          reason === "unauthenticated" ||
+          reason === "missing-tool"
+          ? Effect.fail(error)
+          : Effect.succeed(fallback);
+      }),
+    );
 
   const provider: PullRequestProviderApi = {
     kind: SourceControlProviderKind.make("gitlab"),
@@ -155,22 +172,16 @@ export const make = Effect.gen(function* () {
     getChangeRequestActivity: (input) =>
       Effect.all(
         [
-          cli
-            .listNotes(input)
-            .pipe(Effect.orElseSucceed(() => ({ comments: [], truncated: true }))),
-          cli.listCommits(input).pipe(Effect.orElseSucceed(() => [])),
-          cli
-            .listDiscussions(input)
-            .pipe(Effect.orElseSucceed(() => ({ threads: [], truncated: true }))),
+          recoverRead(cli.listNotes(input), { comments: [], truncated: true }),
+          recoverRead(cli.listCommits(input), []),
+          recoverRead(cli.listDiscussions(input), { threads: [], truncated: true }),
           // The notes endpoint carries no award of any kind, so they are read alongside it. A
           // failed read costs the conversation its reactions rather than its words, and leaves
           // the merge request's own out, so a watch does not take them for taken back.
-          cli.listReactions(input).pipe(
-            Effect.orElseSucceed(() => ({
-              reactions: undefined,
-              reactionsByNoteId: new Map<string, ReadonlyArray<PullRequestReaction>>(),
-            })),
-          ),
+          recoverRead<{
+            readonly reactions: ReadonlyArray<PullRequestReaction> | undefined;
+            readonly reactionsByNoteId: ReadonlyMap<string, ReadonlyArray<PullRequestReaction>>;
+          }>(cli.listReactions(input), { reactions: undefined, reactionsByNoteId: new Map() }),
         ],
         { concurrency: 4 },
       ).pipe(

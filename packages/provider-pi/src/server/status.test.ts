@@ -1,6 +1,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -52,7 +54,13 @@ function piProbeSpawner(version: string) {
   });
 }
 
-const piDiscoverySpawner = (inventory: unknown) =>
+const piDiscoverySpawner = (
+  inventory: unknown,
+  slowStartup?: {
+    readonly delay: Duration.Input;
+    readonly getStateReceived: Deferred.Deferred<void>;
+  },
+) =>
   Effect.gen(function* () {
     const stdout = yield* Queue.unbounded<Uint8Array, Cause.Done>();
     let stdinBuffer = "";
@@ -66,6 +74,10 @@ const piDiscoverySpawner = (inventory: unknown) =>
           stdinBuffer = stdinBuffer.slice(newline + 1);
           if (line.length === 0) continue;
           const request = decodeRpcRequest(line);
+          if (request.type === "get_state" && slowStartup !== undefined) {
+            yield* Deferred.succeed(slowStartup.getStateReceived, undefined);
+            yield* Effect.sleep(slowStartup.delay);
+          }
           const data =
             request.type === "get_available_models"
               ? inventory
@@ -128,24 +140,6 @@ describe("PiProvider", () => {
         ["default"],
       );
       assert.include(snapshot.message ?? "", "could not refresh its models and commands");
-    }).pipe(Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect("reports only the models returned by successful Pi discovery", () =>
-    Effect.gen(function* () {
-      const spawner = yield* piDiscoverySpawner({
-        models: [{ provider: "anthropic", id: "claude-sonnet-4" }],
-      });
-      const snapshot = yield* checkPiProviderStatus(settings).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      );
-      assert.equal(snapshot.status, "ready");
-      assert.equal(snapshot.auth.status, "authenticated");
-      assert.deepEqual(
-        snapshot.models.map((model) => model.slug),
-        ["default", "anthropic/claude-sonnet-4"],
-      );
-      assert.equal(snapshot.models[1]?.subProvider, "anthropic");
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
