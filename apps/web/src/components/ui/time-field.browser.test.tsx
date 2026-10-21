@@ -250,6 +250,27 @@ describe("TimeField", () => {
     expect(submits).toBe(0);
   });
 
+  it("keeps Escape from reaching a surrounding dialog while reverting a draft", async () => {
+    const committed: string[] = [];
+    let escapes = 0;
+    const countEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") escapes += 1;
+    };
+    document.addEventListener("keydown", countEscape);
+    await using screen = await render(<ControlledTimeField initial="" committed={committed} />);
+    const input = timeInput(screen);
+    await userEvent.click(input);
+    await userEvent.keyboard("21");
+    await vi.waitFor(() => expect(options().length).toBeGreaterThan(0));
+    await userEvent.click(screen.container.querySelector('button[aria-label="Choose time"]')!);
+    await vi.waitFor(() => expect(options()).toHaveLength(0));
+    await userEvent.keyboard("{Escape}");
+    document.removeEventListener("keydown", countEscape);
+    expect(escapes).toBe(0);
+    expect(input.value).toBe("");
+    expect(committed).toEqual([]);
+  });
+
   it("relabels the shown time when the clock format changes", async () => {
     const committed: string[] = [];
     await using screen = await render(

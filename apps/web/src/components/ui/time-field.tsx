@@ -100,6 +100,18 @@ function TimeField({
           if (draft !== null) commit(exactTime(draft) ?? "");
         }}
         onKeyDown={(event) => {
+          // Escape with the list closed reverts the draft. Base UI lets it
+          // through to a surrounding dialog when no time is set, which would
+          // close the dialog instead.
+          if (
+            event.key === "Escape" &&
+            draft !== null &&
+            event.currentTarget.ariaExpanded !== "true"
+          ) {
+            event.stopPropagation();
+            setDraft(null);
+            return;
+          }
           // While editing, Enter only picks a time; submitting the surrounding
           // form would send the last committed time while the field shows the
           // draft. Base UI selects the highlighted item from an open list;
