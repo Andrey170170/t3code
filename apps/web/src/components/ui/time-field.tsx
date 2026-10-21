@@ -5,7 +5,12 @@ import { ClockIcon } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { parseTimeOfDay, timeOfDayOptions } from "~/timeOfDay";
-import { formatTimeOfDay, normalizeTimeEntry, resolveHour12 } from "~/timestampFormat";
+import {
+  formatTimeOfDay,
+  resolveHour12,
+  timeOfDayForLabel,
+  timeOfDayLabelStartsWith,
+} from "~/timestampFormat";
 
 import {
   Combobox,
@@ -38,10 +43,19 @@ function TimeField({
   const focusedBeforePressRef = useRef(false);
   const hour12 = resolveHour12(timestampFormat);
   const items = timeOfDayOptions(value);
-  const parseDraft = (exact: boolean) =>
-    parseTimeOfDay(normalizeTimeEntry(draft ?? "", timestampFormat), hour12, exact);
-  const matches = draft === null || draft.trim() === "" ? items : parseDraft(false);
   const formatLabel = (item: string) => formatTimeOfDay(item, timestampFormat);
+  // Times the typed text could mean: the ASCII forms `parseTimeOfDay` reads,
+  // plus any time whose displayed label it is, or else begins.
+  const typedTimes = (text: string, exact: boolean) => {
+    const parsed = parseTimeOfDay(text, hour12, exact);
+    const labelled = timeOfDayForLabel(text, timestampFormat);
+    const prefixed =
+      exact || parsed.length > 0
+        ? []
+        : items.filter((item) => timeOfDayLabelStartsWith(item, text, timestampFormat));
+    return [...new Set([...parsed, ...(labelled ? [labelled] : []), ...prefixed])].toSorted();
+  };
+  const matches = draft === null || draft.trim() === "" ? items : typedTimes(draft, false);
 
   return (
     <Combobox<string>
@@ -52,30 +66,33 @@ function TimeField({
       autoHighlight
       itemToStringLabel={formatLabel}
       onInputValueChange={(next, details) => {
-        // Base UI also clears or refills the input itself (Escape, item
-        // press); those fall back to the committed time.
-        setDraft(details.reason === "input-change" ? next : null);
+        // Typing or deleting edits the draft. Base UI's own rewrites (Escape,
+        // item press, close) fall back to the committed time.
+        const edited = details.reason === "input-change" || details.reason === "input-clear";
+        setDraft(edited ? next : null);
       }}
       onValueChange={(next) => {
         if (next !== null) onValueChange(next);
       }}
       onOpenChange={(open, details) => {
-        if (open) return;
-        // Leaving the field keeps an unambiguous typed time rather than
-        // silently reverting it; Escape and ambiguous text still revert.
-        if (
-          draft !== null &&
-          (details.reason === "focus-out" || details.reason === "outside-press")
-        ) {
-          const typed = parseDraft(true);
-          if (typed.length === 1 && typed[0] !== value) onValueChange(typed[0]!);
+        // Leaving the field is settled on blur instead.
+        if (!open && details.reason !== "focus-out" && details.reason !== "outside-press") {
+          setDraft(null);
         }
-        setDraft(null);
       }}
     >
       <ComboboxInput
         {...inputProps}
         triggerIcon={<ClockIcon />}
+        onBlur={() => {
+          // Leaving keeps an unambiguous typed time rather than silently
+          // reverting it; ambiguous or invalid text reverts. Blur also covers
+          // edits made while the list was closed.
+          if (draft === null) return;
+          const typed = typedTimes(draft, true);
+          if (typed.length === 1 && typed[0] !== value) onValueChange(typed[0]!);
+          setDraft(null);
+        }}
         onPointerDown={(event) => {
           focusedBeforePressRef.current = document.activeElement === event.currentTarget;
         }}

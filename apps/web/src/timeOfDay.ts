@@ -8,7 +8,7 @@ function pad(part: number): string {
   return String(part).padStart(2, "0");
 }
 
-function toTimeOfDay(hour: number, minute: number): string {
+export function toTimeOfDay(hour: number, minute: number): string {
   return `${pad(hour)}:${pad(minute)}`;
 }
 

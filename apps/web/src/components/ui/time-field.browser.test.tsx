@@ -137,4 +137,24 @@ describe("TimeField", () => {
     await render("21:00", "12-hour");
     expect(input.value.replace(/\s/g, " ")).toMatch(/^9:00 pm$/i);
   });
+
+  it("lets the time be cleared before typing a new one, reverting if left empty", async () => {
+    const input = await render("09:00");
+    input.focus();
+    await userEvent.keyboard("{Control>}a{/Control}{Backspace}");
+    expect(input.value).toBe("");
+    await userEvent.keyboard("{Tab}");
+    expect(committed).toEqual([]);
+    expect(input.value).toBe("09:00");
+  });
+
+  it("commits only the clicked item after typing", async () => {
+    const input = await render("09:00");
+    await userEvent.click(input);
+    await userEvent.keyboard("7");
+    await vi.waitFor(() => expect(options().length).toBe(4));
+    await userEvent.click(options().find((option) => option.textContent === "07:15")!);
+    expect(committed).toEqual(["07:15"]);
+    expect(input.value).toBe("07:15");
+  });
 });
