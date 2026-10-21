@@ -90,6 +90,23 @@ describe("TimeField", () => {
     expect(input.value).toBe("19:30");
   });
 
+  it("replaces the shown time when reached with Tab", async () => {
+    const committed: string[] = [];
+    await using screen = await render(
+      <>
+        <button type="button">Before</button>
+        <ControlledTimeField initial="09:00" committed={committed} />
+      </>,
+      { router: false },
+    );
+    const input = timeInput(screen);
+    screen.container.querySelector<HTMLButtonElement>("button")!.focus();
+    await userEvent.keyboard("{Tab}");
+    expect(document.activeElement).toBe(input);
+    await userEvent.keyboard("21{Tab}");
+    expect(committed).toEqual(["21:00"]);
+  });
+
   it("keeps an unambiguous typed time when focus leaves", async () => {
     const committed: string[] = [];
     await using screen = await render(
