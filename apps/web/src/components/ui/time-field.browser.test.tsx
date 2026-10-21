@@ -1,34 +1,18 @@
 import type { TimestampFormat } from "@t3tools/contracts/settings";
-import { act, useState } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { useState } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
+import { render, type Screen } from "../../../test/render";
 import { TimeField } from "./time-field";
-
-let root: Root;
-let container: HTMLDivElement;
-let committed: string[];
-
-beforeEach(() => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  committed = [];
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-
-afterEach(async () => {
-  await act(async () => root.unmount());
-  container.remove();
-  vi.unstubAllGlobals();
-});
 
 function ControlledTimeField({
   initial,
+  committed,
   timestampFormat = "24-hour",
 }: {
   initial: string;
+  committed: string[];
   timestampFormat?: TimestampFormat;
 }) {
   const [value, setValue] = useState(initial);
@@ -48,11 +32,8 @@ function ControlledTimeField({
   );
 }
 
-async function render(initial: string, timestampFormat: TimestampFormat = "24-hour") {
-  await act(async () =>
-    root.render(<ControlledTimeField initial={initial} timestampFormat={timestampFormat} />),
-  );
-  return container.querySelector<HTMLInputElement>('input[aria-label="Time"]')!;
+function timeInput(screen: Screen) {
+  return screen.container.querySelector<HTMLInputElement>('input[aria-label="Time"]')!;
 }
 
 function options() {
@@ -61,7 +42,12 @@ function options() {
 
 describe("TimeField", () => {
   it("opens on the current time, even between slots", async () => {
-    const input = await render("19:05");
+    const committed: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField initial="19:05" committed={committed} />,
+      { router: false },
+    );
+    const input = timeInput(screen);
     expect(input.value).toBe("19:05");
     await userEvent.click(input);
     await vi.waitFor(() => expect(options()).toHaveLength(97));
@@ -74,7 +60,12 @@ describe("TimeField", () => {
   });
 
   it("commits a picked slot", async () => {
-    const input = await render("09:00");
+    const committed: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField initial="09:00" committed={committed} />,
+      { router: false },
+    );
+    const input = timeInput(screen);
     await userEvent.click(input);
     await vi.waitFor(() => expect(options().length).toBeGreaterThan(0));
     await userEvent.click(options().find((option) => option.textContent === "13:30")!);
@@ -83,7 +74,12 @@ describe("TimeField", () => {
   });
 
   it("narrows the list to what was typed and commits it with Enter", async () => {
-    const input = await render("09:00");
+    const committed: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField initial="09:00" committed={committed} />,
+      { router: false },
+    );
+    const input = timeInput(screen);
     await userEvent.click(input);
     await userEvent.keyboard("7:30pm");
     await vi.waitFor(() =>
@@ -95,16 +91,26 @@ describe("TimeField", () => {
   });
 
   it("keeps an unambiguous typed time when focus leaves", async () => {
-    const input = await render("09:00");
+    const committed: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField initial="09:00" committed={committed} />,
+      { router: false },
+    );
+    const input = timeInput(screen);
     await userEvent.click(input);
     await userEvent.keyboard("21");
-    await userEvent.click(container.querySelector("button:not([data-slot])")!);
+    await userEvent.click(screen.container.querySelector("button:not([data-slot])")!);
     expect(committed).toEqual(["21:00"]);
     await vi.waitFor(() => expect(input.value).toBe("21:00"));
   });
 
   it("reverts text that is not a time", async () => {
-    const input = await render("09:00");
+    const committed: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField initial="09:00" committed={committed} />,
+      { router: false },
+    );
+    const input = timeInput(screen);
     await userEvent.click(input);
     await userEvent.keyboard("soon");
     await vi.waitFor(() =>
@@ -118,7 +124,12 @@ describe("TimeField", () => {
   });
 
   it("keeps showing the time when Escape is pressed with the list closed", async () => {
-    const input = await render("09:00");
+    const committed: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField initial="09:00" committed={committed} />,
+      { router: false },
+    );
+    const input = timeInput(screen);
     input.focus();
     await userEvent.keyboard("{Escape}");
     expect(input.value).toBe("09:00");
@@ -132,7 +143,12 @@ describe("TimeField", () => {
   });
 
   it("reverts a typed draft on Escape", async () => {
-    const input = await render("09:00");
+    const committed: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField initial="09:00" committed={committed} />,
+      { router: false },
+    );
+    const input = timeInput(screen);
     await userEvent.click(input);
     await userEvent.keyboard("21");
     await vi.waitFor(() => expect(options().length).toBeGreaterThan(0));
@@ -145,14 +161,26 @@ describe("TimeField", () => {
   });
 
   it("relabels the shown time when the clock format changes", async () => {
-    const input = await render("21:00");
+    const committed: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField initial="21:00" committed={committed} />,
+      { router: false },
+    );
+    const input = timeInput(screen);
     expect(input.value).toBe("21:00");
-    await render("21:00", "12-hour");
+    await screen.rerender(
+      <ControlledTimeField initial="21:00" committed={committed} timestampFormat="12-hour" />,
+    );
     expect(input.value.replace(/\s/g, " ")).toMatch(/^9:00 pm$/i);
   });
 
   it("lets the time be cleared before typing a new one, reverting if left empty", async () => {
-    const input = await render("09:00");
+    const committed: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField initial="09:00" committed={committed} />,
+      { router: false },
+    );
+    const input = timeInput(screen);
     input.focus();
     await userEvent.keyboard("{Control>}a{/Control}{Backspace}");
     expect(input.value).toBe("");
@@ -162,7 +190,12 @@ describe("TimeField", () => {
   });
 
   it("commits only the clicked item after typing", async () => {
-    const input = await render("09:00");
+    const committed: string[] = [];
+    await using screen = await render(
+      <ControlledTimeField initial="09:00" committed={committed} />,
+      { router: false },
+    );
+    const input = timeInput(screen);
     await userEvent.click(input);
     await userEvent.keyboard("7");
     await vi.waitFor(() => expect(options().length).toBe(4));
