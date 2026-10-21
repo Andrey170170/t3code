@@ -126,6 +126,8 @@ describe("TimeField", () => {
     input.focus();
     await userEvent.keyboard("{Control>}a{/Control}{Backspace}{Enter}");
     await userEvent.keyboard("soon{Enter}");
+    // Shift+Enter skips Base UI's item selection, leaving the draft unpicked.
+    await userEvent.keyboard("{Control>}a{/Control}21{Shift>}{Enter}{/Shift}");
     expect(submits).toBe(0);
     await userEvent.keyboard("{Control>}a{/Control}21{Enter}");
     expect(committed).toEqual(["21:00"]);

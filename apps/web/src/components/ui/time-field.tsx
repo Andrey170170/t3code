@@ -95,10 +95,10 @@ function TimeField({
           setDraft(null);
         }}
         onKeyDown={(event) => {
-          // With nothing to pick, Enter would submit the surrounding form with
-          // the last committed time while the field shows something else.
-          const unresolved = draft !== null && (draft.trim() === "" || matches.length === 0);
-          if (event.key === "Enter" && unresolved) event.preventDefault();
+          // While editing, Enter only picks a time; submitting the surrounding
+          // form would send the last committed time while the field shows the
+          // draft. Base UI still selects the highlighted item.
+          if (event.key === "Enter" && draft !== null) event.preventDefault();
         }}
         onPointerDown={(event) => {
           focusedBeforePressRef.current = document.activeElement === event.currentTarget;
