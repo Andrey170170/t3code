@@ -438,6 +438,7 @@ function SideChatConversation({
               onAnchorReady={noop}
               onAnchorSizeChanged={noop}
               contentInsetEndAdjustment={0}
+              emptyPlaceholderInset={0}
               liveFollowEnabled={liveFollow}
               onIsAtEndChange={setLiveFollow}
               onManualNavigation={stopFollowing}

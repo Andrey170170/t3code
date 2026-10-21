@@ -69,87 +69,86 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
         LIMIT 1
       `.pipe(Effect.map((rows) => rows[0]?.ordinal));
 
-    const allocate: TurnItemPositionStoreV2Shape["allocate"] = ({
-      threadId,
-      turnItemId,
-      runId,
-      runOrdinal,
-      runBand,
-    }) =>
-      Effect.gen(function* () {
-        const existing = yield* existingPosition(threadId, turnItemId);
-        if (existing !== undefined) return existing;
+    const allocate: TurnItemPositionStoreV2Shape["allocate"] =
+      /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
+      Effect.fnUntraced(
+        function* ({ threadId, turnItemId, runId, runOrdinal, runBand }) {
+          const existing = yield* existingPosition(threadId, turnItemId);
+          if (existing !== undefined) return existing;
 
-        // The run's band: the batch's hint, else its placed items' band, else the next free band
-        // (never below its ordinal). Items without a run use band 0. 1000000 is BAND_SIZE.
-        yield* sql`
-          INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
-          WITH band AS (
-            SELECT CASE WHEN ${runId} IS NULL THEN 0 ELSE COALESCE(
-              CAST(${runBand ?? null} AS INTEGER),
-              (
-                -- Positions, not projected ordinals: databases upgraded through the V2
-                -- migration kept provider ordinals on projected items.
-                SELECT MIN(position.ordinal)
-                FROM orchestration_v2_projection_turn_items AS item
-                JOIN orchestration_v2_turn_item_positions AS position
-                  ON position.thread_id = item.thread_id
-                  AND position.turn_item_id = item.turn_item_id
-                WHERE item.thread_id = ${threadId} AND item.run_id = ${runId}
-              ) / 1000000,
-              MAX(
-                COALESCE(
-                  CAST(${runOrdinal ?? null} AS INTEGER),
-                  (
-                    SELECT ordinal
-                    FROM orchestration_v2_projection_runs
-                    WHERE thread_id = ${threadId} AND run_id = ${runId}
+          // The run's band: the batch's hint, else its placed items' band, else the next free band
+          // (never below its ordinal). Items without a run use band 0. 1000000 is BAND_SIZE.
+          yield* sql`
+            INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
+            WITH band AS (
+              SELECT CASE WHEN ${runId} IS NULL THEN 0 ELSE COALESCE(
+                CAST(${runBand ?? null} AS INTEGER),
+                (
+                  -- Positions, not projected ordinals: databases upgraded through the V2
+                  -- migration kept provider ordinals on projected items.
+                  SELECT MIN(position.ordinal)
+                  FROM orchestration_v2_projection_turn_items AS item
+                  JOIN orchestration_v2_turn_item_positions AS position
+                    ON position.thread_id = item.thread_id
+                    AND position.turn_item_id = item.turn_item_id
+                  WHERE item.thread_id = ${threadId} AND item.run_id = ${runId}
+                ) / 1000000,
+                MAX(
+                  COALESCE(
+                    CAST(${runOrdinal ?? null} AS INTEGER),
+                    (
+                      SELECT ordinal
+                      FROM orchestration_v2_projection_runs
+                      WHERE thread_id = ${threadId} AND run_id = ${runId}
+                    ),
+                    0
                   ),
-                  0
-                ),
-                COALESCE(
-                  (
-                    SELECT MAX(ordinal)
-                    FROM orchestration_v2_turn_item_positions
-                    WHERE thread_id = ${threadId}
-                  ) / 1000000 + 1,
-                  0
+                  COALESCE(
+                    (
+                      SELECT MAX(ordinal)
+                      FROM orchestration_v2_turn_item_positions
+                      WHERE thread_id = ${threadId}
+                    ) / 1000000 + 1,
+                    0
+                  )
                 )
-              )
-            ) END AS value
-          )
-          SELECT
-            ${threadId},
-            ${turnItemId},
-            COALESCE(
-              (
-                SELECT MAX(ordinal)
-                FROM orchestration_v2_turn_item_positions
-                WHERE thread_id = ${threadId}
-                  AND ordinal >= band.value * 1000000
-                  AND ordinal < (band.value + 1) * 1000000
-              ),
-              band.value * 1000000
-            ) + 1
-          FROM band
-          WHERE true
-          ON CONFLICT(thread_id, turn_item_id) DO NOTHING
-        `;
-        const ordinal = yield* existingPosition(threadId, turnItemId);
-        if (ordinal === undefined) {
-          return yield* new TurnItemPositionStoreError({
-            threadId,
-            turnItemId,
-            cause: "Position allocation returned no row.",
-          });
-        }
-        return ordinal;
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTurnItemPositionStoreError(cause)
-            ? cause
-            : new TurnItemPositionStoreError({ threadId, turnItemId, cause }),
-        ),
+              ) END AS value
+            )
+            SELECT
+              ${threadId},
+              ${turnItemId},
+              COALESCE(
+                (
+                  SELECT MAX(ordinal)
+                  FROM orchestration_v2_turn_item_positions
+                  WHERE thread_id = ${threadId}
+                    AND ordinal >= band.value * 1000000
+                    AND ordinal < (band.value + 1) * 1000000
+                ),
+                band.value * 1000000
+              ) + 1
+            FROM band
+            WHERE true
+            ON CONFLICT(thread_id, turn_item_id) DO NOTHING
+          `;
+          const ordinal = yield* existingPosition(threadId, turnItemId);
+          if (ordinal === undefined) {
+            return yield* new TurnItemPositionStoreError({
+              threadId,
+              turnItemId,
+              cause: "Position allocation returned no row.",
+            });
+          }
+          return ordinal;
+        },
+        (effect, { threadId, turnItemId }) =>
+          effect.pipe(
+            Effect.mapError((cause) =>
+              isTurnItemPositionStoreError(cause)
+                ? cause
+                : new TurnItemPositionStoreError({ threadId, turnItemId, cause }),
+            ),
+          ),
       );
 
     return TurnItemPositionStoreV2.of({

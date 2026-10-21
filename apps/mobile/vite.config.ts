@@ -2,11 +2,9 @@ import { defineConfig } from "vite-plus";
 import "vite-plus/test/config";
 
 const reactTests = [
-  "src/features/home/home-route-visibility.test.tsx",
+  "src/components/ui/Dialog.android.test.tsx",
   "src/features/settings/SettingsServerControlsRouteScreen.test.tsx",
   "src/features/settings/components/BranchNamingSettings.test.tsx",
-  "src/features/threads/use-visible-second-clock.test.tsx",
-  "src/features/threads/useThreadHeaderOptions.test.tsx",
   "src/native/NativeHeaderToolbar.test.tsx",
   "src/state/use-selected-thread-git-actions.test.tsx",
 ];

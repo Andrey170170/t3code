@@ -19,7 +19,9 @@ import noTestInLoop from "./rules/no-test-in-loop.ts";
 import noRpcPermissionBypass from "./rules/no-rpc-permission-bypass.ts";
 import noUnscopedHas from "./rules/no-unscoped-has.ts";
 import preferCatchTags from "./rules/prefer-catch-tags.ts";
+import preferEffectFn from "./rules/prefer-effect-fn.ts";
 import requireCenteredScrollGutter from "./rules/require-centered-scroll-gutter.ts";
+import requireDisposableRender from "./rules/require-disposable-render.ts";
 import requireSuppressionReason from "./rules/require-suppression-reason.ts";
 
 export default definePlugin({
@@ -46,7 +48,9 @@ export default definePlugin({
     "no-rpc-permission-bypass": noRpcPermissionBypass,
     "no-unscoped-has": noUnscopedHas,
     "prefer-catch-tags": preferCatchTags,
+    "prefer-effect-fn": preferEffectFn,
     "require-centered-scroll-gutter": requireCenteredScrollGutter,
+    "require-disposable-render": requireDisposableRender,
     "require-suppression-reason": requireSuppressionReason,
   },
 });

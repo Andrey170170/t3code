@@ -239,6 +239,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["wide full width column layout messages composer monitor"],
   },
   {
+    id: "math-rendering",
+    title: "Render math",
+    to: "/settings/appearance",
+    searchTerms: ["latex tex katex equations formulas markdown"],
+  },
+  {
     id: "panel-animations",
     title: "Panel animations",
     to: "/settings/appearance",
@@ -329,6 +335,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["sidebar inactivity days no activity automatically"],
     requiresThreadAutoSettlement: true,
     scope: "project-defaults",
+  },
+  {
+    id: "compact-idle-threads",
+    title: "Compact idle Claude threads (beta)",
+    to: "/settings/general",
+    scope: "environment-defaults",
+    searchTerms: ["context compaction idle cache tokens usage summary beta experimental"],
   },
   {
     id: "auto-settle-merged-threads",
