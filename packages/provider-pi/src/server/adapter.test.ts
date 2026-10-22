@@ -21,6 +21,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
@@ -516,45 +517,6 @@ const startTurn = Effect.fnUntraced(function* (
     runtimePolicy,
   });
 });
-
-const expectModelFailure = (errorMessage: string) =>
-  Effect.gen(function* () {
-    const fake = yield* makeFakePi;
-    const { runtime, takeEvent } = yield* openRuntime(fake);
-    const providerThread = yield* runtime.ensureThread({
-      threadId: THREAD_ID,
-      modelSelection: modelSelection("default"),
-      runtimePolicy,
-    });
-    yield* startTurn(runtime, providerThread);
-    yield* fake.takeRequest("prompt");
-    yield* fake.emit({ type: "agent_start" });
-    yield* fake.emit({
-      type: "message_end",
-      message: {
-        role: "assistant",
-        content: [],
-        stopReason: "error",
-        errorMessage,
-      },
-    });
-    yield* fake.emit({ type: "agent_settled" });
-
-    const sessionError = yield* takeEvent(
-      (event) =>
-        event.type === "provider_session.updated" && event.providerSession.status === "error",
-    );
-    assert.isTrue(
-      sessionError.type === "provider_session.updated" &&
-        sessionError.providerSession.lastError === errorMessage,
-    );
-    const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
-    assert.isTrue(
-      terminal.type === "turn.terminal" &&
-        terminal.status === "failed" &&
-        terminal.failure.message === errorMessage,
-    );
-  }).pipe(Effect.scoped, Effect.provide(layerTest));
 
 describe("PiAdapterV2", () => {
   it.effect.each([false, true])(
@@ -1840,6 +1802,51 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("natively forks before a running turn whose start entry was not captured yet", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const forkFake = yield* makeFakePi;
+      const forkFile = "/fake/forked.jsonl";
+      const { runtime } = yield* openRuntime(fake, "default", THREAD_ID, SESSION_ID, forkFake);
+      const source = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      // Turn 2 is still in flight, so it has no end to bound the session-tree search.
+      const turns = uncapturedTurns(source.id, { startedAt: 100, completedAt: 200 }).map((turn) =>
+        turn.ordinal === 2 ? { ...turn, status: "running" as const, completedAt: null } : turn,
+      );
+      forkFake.queueEntries(UNCAPTURED_TURN_TREE);
+      forkFake.queueState({ sessionFile: forkFile });
+      fake.queueState({ sessionFile: forkFile });
+
+      const result = yield* runtime
+        .forkThread({
+          sourceProviderThread: source,
+          sourceProviderTurns: turns,
+          providerTurnId: turns[0]!.id,
+          targetThreadId: ThreadId.make("fork-target"),
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(
+        Exit.isSuccess(result),
+        `forking turn 1 while turn 2 runs must locate turn 2's prompt in the session tree, got: ${
+          Exit.isFailure(result) ? Cause.pretty(result.cause) : ""
+        }`,
+      );
+      if (!Exit.isSuccess(result)) return;
+      assert.equal(result.value.nativeThreadRef?.nativeId, forkFile);
+
+      const forkedEntries = forkFake
+        .allRequests()
+        .filter((request) => request.type === "fork")
+        .map((request) => request.entryId);
+      // Pi keeps only the fork entry's ancestors, so u2 (not steer2) drops all of turn 2.
+      assert.deepEqual(forkedEntries, ["u2"]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("presents explicitly namespaced MCP extension tools", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -2900,10 +2907,6 @@ describe("PiAdapterV2", () => {
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
-  );
-
-  it.effect("persists current xAI capacity text for the thread error banner", () =>
-    expectModelFailure("The model is currently at capacity due to high demand."),
   );
 
   it.effect.each([

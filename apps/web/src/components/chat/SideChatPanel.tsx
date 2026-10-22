@@ -55,7 +55,8 @@ import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ChatCanvasContext } from "./ChatCanvasContext";
-import { ComposerFooterModeControls, runtimeModeOptions } from "./ComposerFooterModeControls";
+import { ComposerFooterModeControls } from "./ComposerFooterControls";
+import { runtimeModeConfig, runtimeModeOptions as runtimeModes } from "./runtimeModeConfig";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
@@ -66,7 +67,7 @@ import type { ExpandedImagePreview } from "./ExpandedImagePreview";
 import { MessagesTimeline } from "./MessagesTimeline";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { SideChatFocusContext } from "./sideChatFocus";
-import { TraitsPicker } from "./TraitsPicker";
+import { readPromptUltrathink, TraitsPicker } from "./TraitsPicker";
 import { useComposerMenuState } from "./useComposerMenuState";
 
 export interface SideChatPanelProps {
@@ -84,6 +85,7 @@ export interface SideChatPanelProps {
 }
 
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
+const runtimeModeOptions = runtimeModes.map((mode) => ({ mode, ...runtimeModeConfig[mode] }));
 const EMPTY_CONTEXT_RECORDS = new Map<string, never>();
 const EMPTY_ARRAY: readonly never[] = [];
 const EMPTY_PENDING: PendingThreadRequests = { approvals: [], userInputs: [] };
@@ -768,8 +770,8 @@ const SideChatComposer = memo(function SideChatComposer({
                 instanceId={modelSelection.instanceId}
                 models={providerStatus?.models ?? EMPTY_ARRAY}
                 model={modelSelection.model}
-                prompt={prompt}
-                onPromptChange={updatePrompt}
+                promptUltrathink={readPromptUltrathink(prompt)}
+                onPromptEdit={(edit) => updatePrompt(edit(prompt))}
                 modelOptions={modelSelection.options}
                 planModeEnabled={interactionMode === "plan"}
                 size="xs"

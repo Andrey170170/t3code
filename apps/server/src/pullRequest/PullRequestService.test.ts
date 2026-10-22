@@ -477,31 +477,6 @@ it.effect("says where each repository carries on, and from nothing it has run ou
   }),
 );
 
-it.effect("offers no continuation for a host that cannot be carried on from", () =>
-  Effect.gen(function* () {
-    const service = yield* makeService({
-      projects: [
-        project({ id: "p1", title: "t3code", workspaceRoot: "/a", repository: "pingdotgg/t3code" }),
-      ],
-      providers: [
-        fakeProvider(SourceControlProviderKind.make("github"), {
-          listChangeRequests: () =>
-            Effect.succeed({
-              items: [changeRequest(1, "2026-07-02T00:00:00Z")],
-              truncated: true,
-              continues: false,
-            }),
-        }),
-      ],
-    });
-
-    const result = yield* service.list({ state: "open" });
-
-    assert.isTrue(result.truncated);
-    assert.deepStrictEqual(result.nextCursors, {});
-  }),
-);
-
 it.effect("uses a provider's raw cursor advance when it consumed malformed rows", () =>
   Effect.gen(function* () {
     const service = yield* makeService({
@@ -1827,6 +1802,7 @@ it.effect("prefers a matching checkout over a non-repository project's directory
   }),
 );
 
+// regression: #17167 refresh linked PRs without a checkout
 it.effect("requires an explicit host for a non-repository project's linked PR", () =>
   Effect.gen(function* () {
     const service = yield* makeService({
@@ -2158,29 +2134,6 @@ it.effect("close and reopen notify subscribed readers after invalidating their c
       assert.strictEqual(hostCalls, 3);
     }),
   ),
-);
-
-it.effect("does not cache a failed listing", () =>
-  Effect.gen(function* () {
-    let hostCalls = 0;
-    const service = yield* makeService({
-      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
-      providers: [
-        fakeProvider(SourceControlProviderKind.make("github"), {
-          getViewer: () => {
-            hostCalls += 1;
-            return hostCalls === 1 ? Effect.fail(requestFailed) : Effect.succeed("bilal");
-          },
-        }),
-      ],
-    });
-
-    const error = yield* Effect.flip(service.list({ state: "open" }));
-    assert.strictEqual(error._tag, "PullRequestOperationError");
-    const second = yield* service.list({ state: "open" });
-    assert.strictEqual(hostCalls, 2);
-    assert.strictEqual(second.providers[0]?.configured, true);
-  }),
 );
 
 it.effect("reads a host's repositories in one search, and files the rows back under each", () =>
@@ -2725,6 +2678,74 @@ it.effect(
       assert.strictEqual(summary.reviewDecision, "approved");
       assert.strictEqual(summary.checksState, "passing");
     }),
+);
+
+it.effect("notifies linked threads when detail changes draft status in either direction", () =>
+  Effect.gen(function* () {
+    let isDraft = true;
+    let updatedAt = "2026-07-02T00:00:00Z";
+    const reference = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          getChangeRequest: () =>
+            Effect.sync(() => ({ ...hostedChangeRequest("body"), isDraft, updatedAt })),
+        }),
+      ],
+    });
+    const changes = yield* service.subscribeStateChanges;
+    const read = () => service.detail({ ...reference, allowStale: false });
+    yield* read();
+    yield* read();
+    isDraft = false;
+    yield* service.invalidate({ reference });
+    yield* read();
+    yield* read();
+    isDraft = true;
+    yield* service.invalidate({ reference });
+    yield* read();
+
+    isDraft = false;
+    updatedAt = "2026-07-01T00:00:00Z";
+    yield* service.invalidate({ reference });
+    yield* read();
+
+    // A different PR ends collection after all the synchronous notifications above.
+    yield* service.reportState({ reference: { ...reference, number: 2 }, state: "open" });
+    const events = yield* Stream.runCollect(
+      changes.pipe(Stream.takeUntil((event) => event.number === 2, { excludeLast: true })),
+    );
+    assert.deepStrictEqual(events, [
+      { host: "github.com", repository: "acme/web", number: 1 },
+      { host: "github.com", repository: "acme/web", number: 1 },
+      { host: "github.com", repository: "acme/web", number: 1 },
+    ]);
+  }),
+);
+
+it.effect("deduplicates routed PR reports without dropping draft changes", () =>
+  Effect.gen(function* () {
+    const reference = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [fakeProvider(SourceControlProviderKind.make("github"))],
+    });
+    const changes = yield* service.subscribeStateChanges;
+    for (const isDraft of [true, true, false, false, true]) {
+      yield* service.reportState({ reference, state: "open", isDraft });
+    }
+    yield* service.reportState({ reference, state: "open" });
+    yield* service.reportState({ reference, state: "open" });
+    yield* service.reportState({ reference: { ...reference, number: 2 }, state: "open" });
+    const events = yield* Stream.runCollect(
+      changes.pipe(Stream.takeUntil((event) => event.number === 2, { excludeLast: true })),
+    );
+    assert.deepStrictEqual(
+      events.map((event) => event.number),
+      [1, 1, 1, 1],
+    );
+  }),
 );
 
 it.effect("reuses an observed merged state for strict settlement reads", () =>

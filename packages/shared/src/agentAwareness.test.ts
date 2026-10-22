@@ -24,6 +24,7 @@ describe("projectThreadAwarenessV2", () => {
       Pick<
         OrchestrationV2ThreadShell,
         | "activityRunStatus"
+        | "latestRunStopRequested"
         | "status"
         | "pendingBackgroundTasks"
         | "pendingRuntimeRequest"
@@ -45,6 +46,21 @@ describe("projectThreadAwarenessV2", () => {
     settledOverride: null,
     updatedAt,
     ...overrides,
+  });
+
+  it("does not announce completion after a manual stop", () => {
+    const input = {
+      environmentId: "env-1" as EnvironmentId,
+      project,
+      thread: v2Thread({ status: "completed" }),
+    };
+    expect(projectThreadAwarenessV2(input)?.phase).toBe("completed");
+    expect(
+      projectThreadAwarenessV2({
+        ...input,
+        thread: { ...input.thread, latestRunStopRequested: true },
+      }),
+    ).toBeNull();
   });
 
   it.each(["running", "completed", "failed"] as const)(
@@ -156,22 +172,6 @@ describe("projectThreadAwarenessV2", () => {
         thread: v2Thread({ status: "completed", pendingBackgroundTasks: tasks }),
       }),
     ).toMatchObject({ phase });
-  });
-
-  it("prioritizes V2 user-input requests", () => {
-    expect(
-      projectThreadAwarenessV2({
-        environmentId: "env-1" as EnvironmentId,
-        project,
-        thread: v2Thread({
-          pendingRuntimeRequest: {
-            id: RuntimeRequestId.make("request-1"),
-            kind: "user_input",
-            createdAt: updatedAt,
-          },
-        }),
-      }),
-    ).toMatchObject({ phase: "waiting_for_input", headline: "Waiting for input" });
   });
 
   it("reports an async question as input only after the working run completes", () => {

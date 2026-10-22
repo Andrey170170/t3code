@@ -138,6 +138,7 @@ describe("evaluatePullRequestWatch", () => {
     ]);
   });
 
+  // regression: #16208 PR watches burned GitHub's rate limit and gave up
   it("does not report passed again for a new passed check where none is required", () => {
     const first = evaluate(watch(), detail({ checks: [check("test", "success")] }), noRemarks);
     assert.deepEqual(first.changes, [{ kind: "checks-passed", count: 1, required: false }]);
