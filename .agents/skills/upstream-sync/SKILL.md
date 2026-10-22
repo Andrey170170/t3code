@@ -9,8 +9,10 @@ Three stages. The scout ends at a report and an **approval gate**: the merge and
 release start only after Andrei approves that report. Each stage's criterion
 says when it is done.
 
-The scratch worktree lives outside the repository (`/tmp/t3-merge-scout`), so
-the main checkout stays clean on `dev_vm` until the merge is approved. Every
+The scratch worktree lives outside the repository (`~/t3-merge-scout`), so
+the main checkout stays clean on `dev_vm` until the merge is approved. Keep it
+off `/tmp`: that is a 12 GB tmpfs that shares this VM's RAM, and one install
+fills it. Every
 command names `dev_vm` rather than `HEAD`, since the skill may run from another
 branch. Shell variables do not survive the approval gate, so recompute `MB`
 when a later stage needs it.
@@ -20,8 +22,8 @@ when a later stage needs it.
 ```bash
 git fetch upstream && git fetch origin   # local dev_vm must equal origin/dev_vm
 MB=$(git merge-base dev_vm upstream/main)
-git worktree add --detach /tmp/t3-merge-scout dev_vm
-cd /tmp/t3-merge-scout && git merge --no-ff --no-commit upstream/main
+git worktree add --detach ~/t3-merge-scout dev_vm
+cd ~/t3-merge-scout && git merge --no-ff --no-commit upstream/main
 ```
 
 Gather, in the scratch worktree:
@@ -63,14 +65,17 @@ stop and wait for approval.
 1. Fetch again. If `upstream/main` moved, copy the resolved files out, stage
    everything, `git merge --abort`, and merge the new tip. Restore a saved
    resolution only for a file that
-   `git diff --name-only <old tip> upstream/main` does not list. Resolve the
+   `git diff --name-only --no-renames <old tip> upstream/main` does not list
+   (without `--no-renames`, a file upstream moved hides its old path, and the
+   restore brings the deleted file back). Resolve the
    listed files again, since a copy would discard upstream's newer content.
    Then rerun typecheck and tests.
 2. Commit in the scratch worktree as
    `merge(upstream): integrate <Month D> updates with fork compatibility`. The
    body names each adaptation and why, with no list of upstream features.
 3. The pre-commit hook formats staged files, so check that the result still
-   differs from upstream only in fork files. This must print nothing:
+   differs from upstream only in fork files. This may list only upstream files
+   that fork code moved into, each named in the commit body:
    `comm -23 <(git diff --name-only upstream/main HEAD | sort) <(git diff --name-only $(git merge-base dev_vm upstream/main) dev_vm | sort)`
    (run before the fast-forward, while `dev_vm` is still the pre-merge tip).
 4. In the main checkout, `git merge --ff-only <merge commit>`, then
@@ -82,7 +87,12 @@ Done when `dev_vm` on origin is the verified merge commit.
 
 Follow [Forgejo package operations](../../../docs/operations/forgejo-packages.md),
 but run its stages one at a time instead of `npm run release:forgejo`, which
-starts Android straight after the WSL desktop build:
+starts Android straight after the WSL desktop build. Run every stage with
+`PATH=$HOME/.volta/bin:$PATH` (an agent's PATH starts with the running server's
+Node, which may not match `engines.node`),
+`PACKAGE_FOGEJO_TOKEN_FILE=$HOME/.config/local_packager/forgejo-token` (publishing
+fails with ENEEDAUTH without it), and `TMPDIR` on disk (the build snapshot and
+its install go to `$TMPDIR`):
 
 1. `node scripts/t3code-forgejo.mjs publish --output /tmp/t3-release-artifact`.
    Read the version and commit from its `build.json`.
@@ -102,7 +112,7 @@ Done when the report gives the version, the commit, the hash match, and each
 client build's outcome. A failed client build is retried on its own, never by
 releasing again. Releasing does not install anything or restart a service.
 
-Finish with `git worktree remove --force /tmp/t3-merge-scout`.
+Finish with `git worktree remove --force ~/t3-merge-scout`.
 
 ## Gotchas
 
@@ -110,7 +120,7 @@ Finish with `git worktree remove --force /tmp/t3-merge-scout`.
   find `vp` in a worktree that has no `node_modules` yet. Install with the main
   checkout's binary:
   `/home/menshikov/projects/t3code/node_modules/.bin/vp i -- --yes`.
-- Typecheck a package with `/tmp/t3-merge-scout/node_modules/.bin/tsc-rs --noEmit`
+- Typecheck a package with `~/t3-merge-scout/node_modules/.bin/tsc-rs --noEmit`
   run from its directory. It prints hundreds of Effect suggestions; only lines
   matching `: error TS` count.
 - Run tests from the scratch root with `./node_modules/.bin/vp test run <files>`.
