@@ -14,32 +14,40 @@ the main checkout stays clean on `dev_vm` until the merge is approved. Keep it
 off `/tmp`: that is a 12 GB tmpfs that shares this VM's RAM, and one install
 fills it. Every
 command names `dev_vm` rather than `HEAD`, since the skill may run from another
-branch. Shell variables do not survive the approval gate, so recompute `MB`
-when a later stage needs it.
+branch. Shell variables do not survive the approval gate, so recompute `U` and
+`MB` when a later stage needs them.
+
+The merge target `U` is upstream's latest published nightly, not the tip of
+`upstream/main`. Upstream's stable channel ships the same commit, and it skips
+the broken states main passes through between merges. Take the published
+release, not the newest tag: a failed release run still leaves its tag.
 
 ## 1. Scout
 
 ```bash
-git fetch upstream && git fetch origin   # local dev_vm must equal origin/dev_vm
-MB=$(git merge-base dev_vm upstream/main)
+git fetch upstream --tags && git fetch origin   # local dev_vm must equal origin/dev_vm
+TAG=$(gh release list -R pingdotgg/t3code --exclude-drafts --json tagName,publishedAt \
+  --jq '[.[] | select(.tagName | test("-nightly\\."))] | sort_by(.publishedAt) | last | .tagName')
+U=$(git rev-parse "$TAG^{commit}")
+MB=$(git merge-base dev_vm $U)
 git worktree add --detach ~/t3-merge-scout dev_vm
-cd ~/t3-merge-scout && git merge --no-ff --no-commit upstream/main
+cd ~/t3-merge-scout && git merge --no-ff --no-commit $U
 ```
 
 Gather, in the scratch worktree:
 
-- **What's new**: `git log --no-merges $MB..upstream/main`, with commit types
+- **What's new**: `git log --no-merges $MB..$U`, with commit types
   counted and every `feat`/`perf` read. Highlight changes that touch fork
   features, migrations, updating, or the mobile native build.
 - **Conflicts**: resolve each one in the scratch tree, keeping the fork's intent
   on upstream's new structure. Use `resolving-merge-conflicts` for anything
   non-trivial.
 - **Overlap**: files changed on both sides,
-  `comm -12 <(git diff --name-only $MB dev_vm | sort) <(git diff --name-only $MB upstream/main | sort)`.
+  `comm -12 <(git diff --name-only $MB dev_vm | sort) <(git diff --name-only $MB $U | sort)`.
   A clean textual merge can still break a fork feature, so read the upstream
   commits behind each overlapping file.
 - **Redundant fork patches**: for each fork feature or fix
-  (`git log --no-merges upstream/main..dev_vm`), check whether upstream now does
+  (`git log --no-merges $U..dev_vm`), check whether upstream now does
   the same thing. If it does, propose dropping the fork's version.
 - **Migration ledger**: list upstream's new migrations, and read the live ledger
   read-only:
@@ -62,10 +70,10 @@ stop and wait for approval.
 
 ## 2. Merge
 
-1. Fetch again. If `upstream/main` moved, copy the resolved files out, stage
-   everything, `git merge --abort`, and merge the new tip. Restore a saved
+1. Fetch again and recompute `U`. If a newer nightly was published, copy the resolved files out, stage
+   everything, `git merge --abort`, and merge the new `U`. Restore a saved
    resolution only for a file that
-   `git diff --name-only --no-renames <old tip> upstream/main` does not list
+   `git diff --name-only --no-renames <old U> $U` does not list
    (without `--no-renames`, a file upstream moved hides its old path, and the
    restore brings the deleted file back). Resolve the
    listed files again, since a copy would discard upstream's newer content.
@@ -76,7 +84,7 @@ stop and wait for approval.
 3. The pre-commit hook formats staged files, so check that the result still
    differs from upstream only in fork files. This may list only upstream files
    that fork code moved into, each named in the commit body:
-   `comm -23 <(git diff --name-only upstream/main HEAD | sort) <(git diff --name-only $(git merge-base dev_vm upstream/main) dev_vm | sort)`
+   `comm -23 <(git diff --name-only $U HEAD | sort) <(git diff --name-only $(git merge-base dev_vm $U) dev_vm | sort)`
    (run before the fast-forward, while `dev_vm` is still the pre-merge tip).
 4. In the main checkout, `git merge --ff-only <merge commit>`, then
    `git push origin dev_vm`.
@@ -120,8 +128,8 @@ Finish with `git worktree remove --force ~/t3-merge-scout`.
   find `vp` in a worktree that has no `node_modules` yet. Install with the main
   checkout's binary:
   `/home/menshikov/projects/t3code/node_modules/.bin/vp i -- --yes`.
-- Typecheck a package with `~/t3-merge-scout/node_modules/.bin/tsc-rs --noEmit`
-  run from its directory. It prints hundreds of Effect suggestions; only lines
+- Typecheck a package with `~/t3-merge-scout/node_modules/.bin/tsc --noEmit`
+  run from its directory (`typescript` resolves to tsc-rs). It prints hundreds of Effect suggestions; only lines
   matching `: error TS` count.
 - Run tests from the scratch root with `./node_modules/.bin/vp test run <files>`.
 - `git merge --abort` refuses while edits are unstaged. Stage them first.

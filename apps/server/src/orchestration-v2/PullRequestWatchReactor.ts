@@ -14,7 +14,7 @@ import {
   normalizeThreadPullRequestKey,
   threadPullRequestKeyOf,
   visibleThreadPullRequests,
-} from "@t3tools/shared/threadPullRequests";
+} from "../sourceControl/threadPullRequests.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -42,22 +42,12 @@ import {
   type PullRequestWatchReport,
 } from "./pullRequestWatch.ts";
 
-/**
- * Checks take minutes, so a faster pass mostly spends the host's rate limit,
- * which every machine on the same account shares.
- */
+/** Checks take minutes; faster sweeps waste the account's shared host quota. */
 const SWEEP_MINUTES = 2;
 const READ_FAILURE_LIMIT = 8;
-/**
- * Without a host fingerprint, a pull request with nothing in flight is read again only when its
- * sync snapshot moves, or after this long, for news the snapshot cannot show, such as a bot
- * editing its review.
- */
+/** Without fingerprints, reread quiet PRs on snapshot changes or this interval to catch edits. */
 const QUIET_REREAD_MS = 10 * 60_000;
-/**
- * With a host fingerprint, how long until the activity is read again anyway: the fingerprint
- * does not see edits to comments inside review threads.
- */
+/** Reread despite unchanged fingerprints; they miss review-thread comment edits. */
 const FINGERPRINT_REREAD_MS = 30 * 60_000;
 
 const isProviderError = Schema.is(PullRequestProviderError);
@@ -177,11 +167,13 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
     left.failedChecks.join("\n") === right.failedChecks.join("\n") &&
     left.passed === right.passed &&
     left.passedChecks.join("\n") === right.passedChecks.join("\n") &&
+    (left.owedChecks ?? []).join("\n") === (right.owedChecks ?? []).join("\n") &&
     left.remarksThrough === right.remarksThrough &&
     left.remarkIds.join("\n") === right.remarkIds.join("\n") &&
     left.thumbsUp?.join("\n") === right.thumbsUp?.join("\n") &&
     left.conflicting === right.conflicting &&
-    left.wakes === right.wakes
+    left.wakes === right.wakes &&
+    left.checksAwaitedSince === right.checksAwaitedSince
   );
 }
 
@@ -204,7 +196,7 @@ export class PullRequestWatchReactor extends Context.Service<
   }
 >()("t3/orchestration-v2/PullRequestWatchReactor") {}
 
-/** @public Service construction is part of the canonical Effect module API. */
+/** @public */
 export const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -333,86 +325,88 @@ export const make = Effect.gen(function* () {
   });
 
   /** The queued wake news can still fold into, or undefined once the agent started on it. */
-  const queuedWakeOf = (target: WatchTarget) =>
-    Effect.gen(function* () {
-      const key = lifeKey(target);
-      const queued = queuedWakes.get(key);
-      if (queued === undefined) return undefined;
-      const { runs } = yield* projections.getThreadRecords(target.thread.id, ["runs"]);
-      if (runs.some((run) => run.userMessageId === queued.messageId && run.status === "queued")) {
-        return queued;
-      }
-      queuedWakes.delete(key);
-      return undefined;
-    });
+  const queuedWakeOf = Effect.fn("PullRequestWatchReactor.queuedWakeOf")(function* (
+    target: WatchTarget,
+  ) {
+    const key = lifeKey(target);
+    const queued = queuedWakes.get(key);
+    if (queued === undefined) return undefined;
+    const { runs } = yield* projections.getThreadRecords(target.thread.id, ["runs"]);
+    if (runs.some((run) => run.userMessageId === queued.messageId && run.status === "queued")) {
+      return queued;
+    }
+    queuedWakes.delete(key);
+    return undefined;
+  });
 
   /** Wakes the agent with what changed since it was last told, folding into a queued wake. */
-  const wake = (
+  const wake = Effect.fn("PullRequestWatchReactor.wake")(function* (
     target: WatchTarget,
     detail: PullRequestDetail,
     remarks: ReadonlyArray<PullRequestComment> | null,
     thumbsUp: ReadonlyArray<string> | null,
     report: PullRequestWatchReport,
-  ) =>
-    Effect.gen(function* () {
-      const queued = yield* queuedWakeOf(target);
-      // A pass that did not read the remarks keeps the ones the queued wake already tells.
-      const foldRemarks = remarks ?? queued?.remarks ?? null;
-      const foldThumbsUp = thumbsUp ?? queued?.thumbsUp ?? null;
-      // A 👍 has no time, so comparing with `before` alone would miss one given again since:
-      // each 👍 a pass reported counts as news for the whole queued wake while it stays.
-      const reportNews = report.changes.find((change) => change.kind === "thumbs-up")?.actors ?? [];
-      const thumbsUpNews = [...new Set([...(queued?.thumbsUpNews ?? []), ...reportNews])];
-      const newsKeys = new Set(thumbsUpNews.map((actor) => actor.toLowerCase()));
-      const combined =
-        queued === undefined
-          ? undefined
-          : evaluatePullRequestWatch(
-              {
-                ...queued.before,
-                thumbsUp:
-                  queued.before.thumbsUp?.filter((actor) => !newsKeys.has(actor.toLowerCase())) ??
-                  null,
-              },
-              detail,
-              foldRemarks,
-              foldThumbsUp,
-            );
-      // News the queued wake told and that has since undone itself can leave nothing to fold.
-      const folded = queued !== undefined && combined !== undefined && combined.changes.length > 0;
-      const told = folded ? combined : report;
-      const messageId = folded
-        ? queued.messageId
-        : MessageId.make(`message:pr-watch:${yield* crypto.randomUUIDv4()}`);
-      // An ending watch keeps what this pass saw, so watching again starts from it.
-      yield* record(
-        target,
-        told.exhausted ? null : told.next,
-        {
-          ...pullRequestWatchMessage({
-            number: target.link.number,
-            url: target.link.url,
-            baseBranch: detail.baseBranch,
-            headSha: told.next.headSha,
-            report: told,
-          }),
-          messageId,
-        },
-        told.exhausted ? told.next : undefined,
-      ).pipe(Effect.tapError(() => Effect.sync(() => queuedWakes.delete(lifeKey(target)))));
-      queuedWakes.set(lifeKey(target), {
+    now: number,
+  ) {
+    const queued = yield* queuedWakeOf(target);
+    // A pass that did not read the remarks keeps the ones the queued wake already tells.
+    const foldRemarks = remarks ?? queued?.remarks ?? null;
+    const foldThumbsUp = thumbsUp ?? queued?.thumbsUp ?? null;
+    // A 👍 has no time, so comparing with `before` alone would miss one given again since:
+    // each 👍 a pass reported counts as news for the whole queued wake while it stays.
+    const reportNews = report.changes.find((change) => change.kind === "thumbs-up")?.actors ?? [];
+    const thumbsUpNews = [...new Set([...(queued?.thumbsUpNews ?? []), ...reportNews])];
+    const newsKeys = new Set(thumbsUpNews.map((actor) => actor.toLowerCase()));
+    const combined =
+      queued === undefined
+        ? undefined
+        : evaluatePullRequestWatch(
+            {
+              ...queued.before,
+              thumbsUp:
+                queued.before.thumbsUp?.filter((actor) => !newsKeys.has(actor.toLowerCase())) ??
+                null,
+            },
+            detail,
+            foldRemarks,
+            foldThumbsUp,
+            now,
+          );
+    // News the queued wake told and that has since undone itself can leave nothing to fold.
+    const folded = queued !== undefined && combined !== undefined && combined.changes.length > 0;
+    const told = folded ? combined : report;
+    const messageId = folded
+      ? queued.messageId
+      : MessageId.make(`message:pr-watch:${yield* crypto.randomUUIDv4()}`);
+    // An ending watch keeps what this pass saw, so watching again starts from it.
+    yield* record(
+      target,
+      told.exhausted ? null : told.next,
+      {
+        ...pullRequestWatchMessage({
+          number: target.link.number,
+          url: target.link.url,
+          baseBranch: detail.baseBranch,
+          headSha: told.next.headSha,
+          report: told,
+        }),
         messageId,
-        // A watch's first complete read records the 👍 already there; later folds compare with it.
-        before: folded
-          ? queued.before
-          : { ...target.watch, thumbsUp: target.watch.thumbsUp ?? report.next.thumbsUp },
-        remarks: folded ? foldRemarks : remarks,
-        thumbsUp: folded ? foldThumbsUp : thumbsUp,
-        thumbsUpNews: folded ? thumbsUpNews : reportNews,
-      });
-      if (!folded) yield* woke(target);
-      if (told.exhausted) yield* ended(target, "comment-limit");
+      },
+      told.exhausted ? told.next : undefined,
+    ).pipe(Effect.tapError(() => Effect.sync(() => queuedWakes.delete(lifeKey(target)))));
+    queuedWakes.set(lifeKey(target), {
+      messageId,
+      // A watch's first complete read records the 👍 already there; later folds compare with it.
+      before: folded
+        ? queued.before
+        : { ...target.watch, thumbsUp: target.watch.thumbsUp ?? report.next.thumbsUp },
+      remarks: folded ? foldRemarks : remarks,
+      thumbsUp: folded ? foldThumbsUp : thumbsUp,
+      thumbsUpNews: folded ? thumbsUpNews : reportNews,
     });
+    if (!folded) yield* woke(target);
+    if (told.exhausted) yield* ended(target, "comment-limit");
+  });
 
   const giveUp = (target: WatchTarget) =>
     record(target, null, {
@@ -593,15 +587,14 @@ export const make = Effect.gen(function* () {
       threadTails.delete(group.key);
     }
     const reference = referenceOf(group);
-    // The reads are recorded against this fingerprint, so a cached answer older than it must not
-    // stand in for them. Clients are not told: this only drops this pull request's cached reads.
+    // Invalidate cached reads before using the newer fingerprint; clients receive no notification.
     if (fingerprint !== null) yield* pullRequests.invalidate({ reference });
     const read = yield* Effect.exit(
       Effect.all(
         [
           pullRequests.detail({ ...reference, allowStale: false }),
           plan.activity
-            ? pullRequests.activity(reference).pipe(Effect.map(Option.some))
+            ? pullRequests.activity(reference).pipe(Effect.asSome)
             : Effect.succeed(Option.none<PullRequestActivity>()),
         ],
         { concurrency: 2 },
@@ -670,8 +663,8 @@ export const make = Effect.gen(function* () {
       remarks: fingerprint?.remarks ?? null,
     });
     yield* eachTarget(group, (target) => {
-      const report = evaluatePullRequestWatch(target.watch, detail, remarks, thumbsUp);
-      if (report.changes.length > 0) return wake(target, detail, remarks, thumbsUp, report);
+      const report = evaluatePullRequestWatch(target.watch, detail, remarks, thumbsUp, now);
+      if (report.changes.length > 0) return wake(target, detail, remarks, thumbsUp, report, now);
       return watchesEqual(report.next, target.watch) ? Effect.void : record(target, report.next);
     });
   });
@@ -698,8 +691,7 @@ export const make = Effect.gen(function* () {
         ending.push([target, reason]);
         continue;
       }
-      // Grouped per project too: each project reads through its own checkout, so one that cannot
-      // read the pull request must not end another project's watches.
+      // Group by project because checkout access differs; one failure must not end another project's watches.
       const key = `${target.thread.projectId} ${threadPullRequestKeyOf(target.link)}`;
       byPullRequest.set(key, [...(byPullRequest.get(key) ?? []), target]);
     }

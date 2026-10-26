@@ -65,6 +65,8 @@ import { ComposerSurface } from "./ComposerSurface";
 import { getComposerPromptLengthValidationMessage } from "./composerSubmission";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { resolveTimelineIsAtEnd } from "./MessagesTimeline.logic";
+import { navigationReleasesFollow, type TimelineViewport } from "./timelineViewport";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { SideChatFocusContext } from "./sideChatFocus";
 import { readPromptUltrathink, TraitsPicker } from "./TraitsPicker";
@@ -181,6 +183,7 @@ function SideChatOpening({
   const open = useAtomCommand(sideChatEnvironment.open, { reportFailure: false });
   const [error, setError] = useState<string | null>(null);
   const { environmentId, threadId } = threadRef;
+  // oxlint-disable-next-line t3code/react-effect-budget -- mounting starts the server-side chat; pendingOpens dedupes remounts
   useEffect(() => {
     const key = scopedThreadKey({ environmentId, threadId });
     let pending = pendingOpens.get(key);
@@ -331,6 +334,7 @@ function SideChatConversation({
   const routeThreadKey = scopedThreadKey(props.threadRef);
   const { parentThreadId, sideChatId } = snapshot;
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- the end arrives from the server snapshot, not from a handler here
   useEffect(() => {
     if (ended) draftsBySideChatId.delete(sideChatId);
   }, [ended, sideChatId]);
@@ -340,7 +344,15 @@ function SideChatConversation({
   const [modelPickerOpen, setModelPickerOpen] = useComposerMenuState(false);
   const listRef = useRef<LegendListRef | null>(null);
   const followLive = () => setLiveFollow(true);
-  const stopFollowing = () => setLiveFollow(false);
+  // Same release rule as the main timeline, without its anchoring and composer collapse.
+  const attachTimelineViewport = (viewport: TimelineViewport) =>
+    viewport.subscribe((navigation) => {
+      const releases = navigationReleasesFollow(navigation, {
+        contentScrollsUp: () => viewport.scrollNode.scrollHeight > viewport.scrollNode.clientHeight,
+        awayFromEnd: () => resolveTimelineIsAtEnd(listRef.current?.getState()) === false,
+      });
+      if (releases) setLiveFollow(false);
+    });
 
   const starting = snapshot.status === "starting";
   const running = !ended && snapshot.status === "running";
@@ -443,7 +455,7 @@ function SideChatConversation({
               emptyPlaceholderInset={0}
               liveFollowEnabled={liveFollow}
               onIsAtEndChange={setLiveFollow}
-              onManualNavigation={stopFollowing}
+              onViewportAttach={attachTimelineViewport}
             />
           </ChatCanvasContext>
         )}

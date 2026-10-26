@@ -276,36 +276,32 @@ const make = Effect.gen(function* () {
    * stopping the provider process can take a while, and callers hold the global `openLock` or
    * an RPC that a disconnect may interrupt.
    */
-  const closeChat = (chat: SideChat) =>
-    Effect.gen(function* () {
-      if (byId.get(chat.sideChatId) !== chat) return;
-      byId.delete(chat.sideChatId);
-      byParent.delete(chat.parentThread.id);
-      yield* modify(chat, (snapshot) => {
-        const closed = patchSideChat(snapshot, { status: "closed", activeProviderTurnId: null });
-        return [
-          undefined,
-          { snapshot: closed.snapshot, events: [{ type: "closed", sideChatId: chat.sideChatId }] },
-        ] as const;
-      });
-      yield* Deferred.fail(
-        chat.session,
-        new SideChatNotFoundError({ sideChatId: chat.sideChatId }),
-      );
-      // Interrupts the event fiber, then stops the side chat's provider process.
-      yield* Scope.close(chat.scope, Exit.void).pipe(
-        Effect.exit,
-        Effect.flatMap((exit) =>
-          Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)
-            ? Effect.logWarning("Failed to stop a side chat's provider process.", {
-                cause: exit.cause,
-              })
-            : Effect.void,
-        ),
-        Effect.ensuring(PubSub.shutdown(chat.changes)),
-        Effect.forkDetach({ startImmediately: true }),
-      );
-    }).pipe(Effect.uninterruptible);
+  const closeChat = Effect.fn("SideChatService.closeChat")(function* (chat: SideChat) {
+    if (byId.get(chat.sideChatId) !== chat) return;
+    byId.delete(chat.sideChatId);
+    byParent.delete(chat.parentThread.id);
+    yield* modify(chat, (snapshot) => {
+      const closed = patchSideChat(snapshot, { status: "closed", activeProviderTurnId: null });
+      return [
+        undefined,
+        { snapshot: closed.snapshot, events: [{ type: "closed", sideChatId: chat.sideChatId }] },
+      ] as const;
+    });
+    yield* Deferred.fail(chat.session, new SideChatNotFoundError({ sideChatId: chat.sideChatId }));
+    // Interrupts the event fiber, then stops the side chat's provider process.
+    yield* Scope.close(chat.scope, Exit.void).pipe(
+      Effect.exit,
+      Effect.flatMap((exit) =>
+        Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)
+          ? Effect.logWarning("Failed to stop a side chat's provider process.", {
+              cause: exit.cause,
+            })
+          : Effect.void,
+      ),
+      Effect.ensuring(PubSub.shutdown(chat.changes)),
+      Effect.forkDetach({ startImmediately: true }),
+    );
+  }, Effect.uninterruptible);
 
   const closeWhere = (matches: (chat: SideChat) => boolean) =>
     openLock.withPermit(
@@ -534,360 +530,352 @@ const make = Effect.gen(function* () {
     );
 
   /** Claims the idle side chat for a turn, records the user's message, and starts the turn. */
-  const startSideTurn = (chat: SideChat, session: SideChatSession, input: SideTurnInput) =>
-    Effect.gen(function* () {
-      const { runtime, providerThread } = session;
-      const current = yield* Ref.get(chat.state);
-      const modelSelection = input.modelSelection ?? current.modelSelection;
-      if (modelSelection.instanceId !== current.modelSelection.instanceId) {
-        return yield* reject(chat.parentThread.id, "A side chat cannot switch providers.")();
-      }
-      const interactionMode = input.interactionMode ?? current.interactionMode;
-      const runtimeMode = input.runtimeMode ?? current.runtimeMode;
-      const appThread: OrchestrationV2AppThread = {
-        ...chat.parentThread,
-        id: chat.sideChatId,
-        modelSelection,
-        interactionMode,
-        runtimeMode,
-        activeProviderThreadId: providerThread.id,
-      };
-      const runtimePolicy = yield* runtimePolicies
-        .resolve({ thread: appThread, modelSelection })
-        .pipe(
-          Effect.mapError(reject(chat.parentThread.id, "The thread's workspace is unavailable.")),
-        );
-      const uuid = yield* randomUuidV4;
-      const runId = RunId.make(`side-run:${uuid}`);
-      const rootNodeId = NodeId.make(`side-node:${uuid}`);
-      const messageId = MessageId.make(`side-message:${uuid}`);
-      const now = yield* DateTime.now;
-
-      // The blocking status, or this turn's 1-based ordinal once the turn is claimed.
-      const claim = yield* modify<SideChatSnapshot["status"] | number>(chat, (snapshot) => {
-        if (snapshot.status !== "idle") return [snapshot.status, unchanged(snapshot)] as const;
-        chat.interruptRequested = false;
-        const ordinal =
-          snapshot.turnItems.filter((item) => item.type === "user_message").length + 1;
-        const userMessage: OrchestrationV2TurnItem = {
-          id: TurnItemId.make(`side-user:${uuid}`),
-          threadId: chat.sideChatId,
-          runId,
-          nodeId: rootNodeId,
-          providerThreadId: providerThread.id,
-          providerTurnId: null,
-          nativeItemRef: null,
-          parentItemId: null,
-          ordinal: ordinal * 100,
-          status: "completed",
-          title: null,
-          type: "user_message",
-          messageId,
-          text: input.text,
-          attachments: [],
-          createdBy: "user",
-          creationSource: "web",
-          inputIntent: "turn_start",
-          startedAt: now,
-          completedAt: now,
-          updatedAt: now,
-        };
-        const running = patchSideChat(snapshot, {
-          status: "running",
-          activeProviderTurnId: null,
-          modelSelection,
-          interactionMode,
-          runtimeMode: runtimePolicy.runtimeMode,
-          clearError: true,
-        });
-        const withMessage = upsertSideChatTurnItem(running.snapshot, userMessage);
-        return [
-          ordinal,
-          {
-            snapshot: withMessage.snapshot,
-            events: [...running.events, ...withMessage.events],
-          },
-        ] as const;
-      });
-      if (typeof claim !== "number") {
-        return yield* reject(
-          chat.parentThread.id,
-          claim === "running"
-            ? "The side chat is still answering."
-            : "This side chat has stopped. Start a new one.",
-        )();
-      }
-      const turnOrdinal = claim;
-
-      yield* runtime
-        .startTurn({
-          appThread,
-          threadId: chat.sideChatId,
-          runId,
-          runOrdinal: turnOrdinal,
-          providerTurnOrdinal: turnOrdinal,
-          attemptId: RunAttemptId.make(`side-attempt:${uuid}`),
-          rootNodeId,
-          providerThread,
-          message: {
-            messageId,
-            text: input.text,
-            attachments: [],
-            createdBy: "user",
-            creationSource: "web",
-          },
-          modelSelection,
-          runtimePolicy,
-        })
-        .pipe(
-          // Release the claim on failure or interruption, or the side chat stays "running".
-          Effect.onError((cause) =>
-            update(chat, (snapshot) => {
-              if (snapshot.status !== "running") return unchanged(snapshot);
-              chat.interruptRequested = false;
-              return patchSideChat(snapshot, {
-                status: "idle",
-                activeProviderTurnId: null,
-                ...(Cause.hasInterruptsOnly(cause)
-                  ? {}
-                  : { error: "Failed to send the side chat message." }),
-              });
-            }),
-          ),
-          // The start belongs to the side chat, not to the request: a dropped RPC must not
-          // leave Codex running a turn nobody tracks. Closing the side chat still interrupts it.
-          Effect.forkIn(chat.scope),
-          Effect.flatMap(Fiber.join),
-          Effect.mapError(
-            (cause) =>
-              new SideChatProviderError({ sideChatId: chat.sideChatId, operation: "send", cause }),
-          ),
-        );
-    });
-
-  /** Adds a message to the running turn, the way the main chat steers an active run. */
-  const steerSideTurn = (
+  const startSideTurn = Effect.fn("SideChatService.startSideTurn")(function* (
     chat: SideChat,
     session: SideChatSession,
-    input: { readonly providerTurnId: ProviderTurnId; readonly text: string },
-  ) =>
-    Effect.gen(function* () {
-      const snapshot = yield* Ref.get(chat.state);
-      const userMessages = snapshot.turnItems.filter((item) => item.type === "user_message");
-      const runId = userMessages.at(-1)?.runId;
-      if (runId === undefined || runId === null) {
-        return yield* reject(chat.parentThread.id, "The side chat is still answering.")();
-      }
-      const uuid = yield* randomUuidV4;
-      const messageId = MessageId.make(`side-message:${uuid}`);
-      const message = {
+    input: SideTurnInput,
+  ) {
+    const { runtime, providerThread } = session;
+    const current = yield* Ref.get(chat.state);
+    const modelSelection = input.modelSelection ?? current.modelSelection;
+    if (modelSelection.instanceId !== current.modelSelection.instanceId) {
+      return yield* reject(chat.parentThread.id, "A side chat cannot switch providers.")();
+    }
+    const interactionMode = input.interactionMode ?? current.interactionMode;
+    const runtimeMode = input.runtimeMode ?? current.runtimeMode;
+    const appThread: OrchestrationV2AppThread = {
+      ...chat.parentThread,
+      id: chat.sideChatId,
+      modelSelection,
+      interactionMode,
+      runtimeMode,
+      activeProviderThreadId: providerThread.id,
+    };
+    const runtimePolicy = yield* runtimePolicies
+      .resolve({ thread: appThread, modelSelection })
+      .pipe(
+        Effect.mapError(reject(chat.parentThread.id, "The thread's workspace is unavailable.")),
+      );
+    const uuid = yield* randomUuidV4;
+    const runId = RunId.make(`side-run:${uuid}`);
+    const rootNodeId = NodeId.make(`side-node:${uuid}`);
+    const messageId = MessageId.make(`side-message:${uuid}`);
+    const now = yield* DateTime.now;
+
+    // The blocking status, or this turn's 1-based ordinal once the turn is claimed.
+    const claim = yield* modify<SideChatSnapshot["status"] | number>(chat, (snapshot) => {
+      if (snapshot.status !== "idle") return [snapshot.status, unchanged(snapshot)] as const;
+      chat.interruptRequested = false;
+      const ordinal = snapshot.turnItems.filter((item) => item.type === "user_message").length + 1;
+      const userMessage: OrchestrationV2TurnItem = {
+        id: TurnItemId.make(`side-user:${uuid}`),
+        threadId: chat.sideChatId,
+        runId,
+        nodeId: rootNodeId,
+        providerThreadId: providerThread.id,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: ordinal * 100,
+        status: "completed",
+        title: null,
+        type: "user_message",
         messageId,
         text: input.text,
         attachments: [],
         createdBy: "user",
         creationSource: "web",
-      } as const;
-      yield* session.runtime
-        .steerTurn({
-          threadId: chat.sideChatId,
-          runId,
-          providerThread: session.providerThread,
-          providerTurnId: input.providerTurnId,
-          message,
-        })
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new SideChatProviderError({ sideChatId: chat.sideChatId, operation: "send", cause }),
-          ),
-        );
-      const now = yield* DateTime.now;
-      yield* update(chat, (current) =>
+        inputIntent: "turn_start",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+      };
+      const running = patchSideChat(snapshot, {
+        status: "running",
+        activeProviderTurnId: null,
+        modelSelection,
+        interactionMode,
+        runtimeMode: runtimePolicy.runtimeMode,
+        clearError: true,
+      });
+      const withMessage = upsertSideChatTurnItem(running.snapshot, userMessage);
+      return [
+        ordinal,
+        {
+          snapshot: withMessage.snapshot,
+          events: [...running.events, ...withMessage.events],
+        },
+      ] as const;
+    });
+    if (typeof claim !== "number") {
+      return yield* reject(
+        chat.parentThread.id,
+        claim === "running"
+          ? "The side chat is still answering."
+          : "This side chat has stopped. Start a new one.",
+      )();
+    }
+    const turnOrdinal = claim;
+
+    yield* runtime
+      .startTurn({
+        appThread,
+        threadId: chat.sideChatId,
+        runId,
+        runOrdinal: turnOrdinal,
+        providerTurnOrdinal: turnOrdinal,
+        attemptId: RunAttemptId.make(`side-attempt:${uuid}`),
+        rootNodeId,
+        providerThread,
+        message: {
+          messageId,
+          text: input.text,
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+        modelSelection,
+        runtimePolicy,
+      })
+      .pipe(
+        // Release the claim on failure or interruption, or the side chat stays "running".
+        Effect.onError((cause) =>
+          update(chat, (snapshot) => {
+            if (snapshot.status !== "running") return unchanged(snapshot);
+            chat.interruptRequested = false;
+            return patchSideChat(snapshot, {
+              status: "idle",
+              activeProviderTurnId: null,
+              ...(Cause.hasInterruptsOnly(cause)
+                ? {}
+                : { error: "Failed to send the side chat message." }),
+            });
+          }),
+        ),
+        // The start belongs to the side chat, not to the request: a dropped RPC must not
+        // leave Codex running a turn nobody tracks. Closing the side chat still interrupts it.
+        Effect.forkIn(chat.scope),
+        Effect.flatMap(Fiber.join),
+        Effect.mapError(
+          (cause) =>
+            new SideChatProviderError({ sideChatId: chat.sideChatId, operation: "send", cause }),
+        ),
+      );
+  });
+
+  /** Adds a message to the running turn, the way the main chat steers an active run. */
+  const steerSideTurn = Effect.fn("SideChatService.steerSideTurn")(function* (
+    chat: SideChat,
+    session: SideChatSession,
+    input: { readonly providerTurnId: ProviderTurnId; readonly text: string },
+  ) {
+    const snapshot = yield* Ref.get(chat.state);
+    const userMessages = snapshot.turnItems.filter((item) => item.type === "user_message");
+    const runId = userMessages.at(-1)?.runId;
+    if (runId === undefined || runId === null) {
+      return yield* reject(chat.parentThread.id, "The side chat is still answering.")();
+    }
+    const uuid = yield* randomUuidV4;
+    const messageId = MessageId.make(`side-message:${uuid}`);
+    const message = {
+      messageId,
+      text: input.text,
+      attachments: [],
+      createdBy: "user",
+      creationSource: "web",
+    } as const;
+    yield* session.runtime
+      .steerTurn({
+        threadId: chat.sideChatId,
+        runId,
+        providerThread: session.providerThread,
+        providerTurnId: input.providerTurnId,
+        message,
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new SideChatProviderError({ sideChatId: chat.sideChatId, operation: "send", cause }),
+        ),
+      );
+    const now = yield* DateTime.now;
+    yield* update(chat, (current) =>
+      upsertSideChatTurnItem(current, {
+        ...message,
+        id: TurnItemId.make(`side-user:${uuid}`),
+        threadId: chat.sideChatId,
+        runId,
+        nodeId: null,
+        providerThreadId: session.providerThread.id,
+        providerTurnId: input.providerTurnId,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: userMessages.length * 100 + 50,
+        status: "completed",
+        title: null,
+        type: "user_message",
+        inputIntent: "steer",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+      }),
+    );
+  });
+
+  const send = Effect.fn("SideChatService.send")(function* (input: SideChatSendInput) {
+    const chat = yield* requireChat(input);
+    const session = yield* Deferred.await(chat.session);
+    yield* startSideTurn(chat, session, {
+      text: input.input,
+      modelSelection: input.modelSelection,
+      interactionMode: input.interactionMode,
+      runtimeMode: input.runtimeMode,
+    });
+  });
+
+  const interrupt = Effect.fn("SideChatService.interrupt")(function* (input: SideChatTargetInput) {
+    const chat = yield* requireChat(input);
+    const { runtime, providerThread } = yield* Deferred.await(chat.session);
+    const providerTurnId = yield* modify(chat, (snapshot) => {
+      if (snapshot.status !== "running") return [null, unchanged(snapshot)] as const;
+      // Codex has not reported the turn yet; stop it as soon as it does.
+      if (snapshot.activeProviderTurnId === null) chat.interruptRequested = true;
+      return [snapshot.activeProviderTurnId, unchanged(snapshot)] as const;
+    });
+    if (providerTurnId === null) return;
+    yield* runtime.interruptTurn({ providerThread, providerTurnId }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new SideChatProviderError({
+            sideChatId: chat.sideChatId,
+            operation: "interrupt",
+            cause,
+          }),
+      ),
+    );
+  });
+
+  /** Records a request's answer the way orchestration does; providers do not report it. */
+  const resolveRequest = Effect.fn("SideChatService.resolveRequest")(function* (
+    chat: SideChat,
+    request: OrchestrationV2RuntimeRequest,
+    input: SideChatRespondInput,
+  ) {
+    const now = yield* DateTime.now;
+    const cancelled = input.decision === "decline" || input.decision === "cancel";
+    yield* update(chat, (snapshot) => {
+      const resolved = upsertSideChatRuntimeRequest(snapshot, {
+        ...request,
+        status: "resolved",
+        resolvedAt: now,
+        ...(input.decision === undefined ? {} : { decision: input.decision }),
+        ...(input.answers === undefined ? {} : { answers: input.answers }),
+      });
+      if (request.responseCapability.type !== "message") return resolved;
+      const item = snapshot.turnItems.findLast(
+        (candidate) =>
+          candidate.type === "user_input_request" && candidate.requestId === request.id,
+      );
+      if (item?.type !== "user_input_request") return resolved;
+      const answers = input.answers;
+      return chain(resolved, (current) =>
         upsertSideChatTurnItem(current, {
-          ...message,
-          id: TurnItemId.make(`side-user:${uuid}`),
-          threadId: chat.sideChatId,
-          runId,
-          nodeId: null,
-          providerThreadId: session.providerThread.id,
-          providerTurnId: input.providerTurnId,
-          nativeItemRef: null,
-          parentItemId: null,
-          ordinal: userMessages.length * 100 + 50,
-          status: "completed",
-          title: null,
-          type: "user_message",
-          inputIntent: "steer",
-          startedAt: now,
+          ...item,
+          ...(!cancelled && answers !== undefined
+            ? {
+                questionAnswer: {
+                  requestId: request.id,
+                  answers,
+                  attachmentsByQuestionId: {},
+                  questionTextById: Object.fromEntries(
+                    item.questions.map((question) => [question.id, question.question]),
+                  ),
+                },
+              }
+            : {}),
+          status: cancelled ? "cancelled" : "completed",
           completedAt: now,
           updatedAt: now,
         }),
       );
     });
-
-  const send: SideChatService["Service"]["send"] = (input) =>
-    Effect.gen(function* () {
-      const chat = yield* requireChat(input);
-      const session = yield* Deferred.await(chat.session);
-      yield* startSideTurn(chat, session, {
-        text: input.input,
-        modelSelection: input.modelSelection,
-        interactionMode: input.interactionMode,
-        runtimeMode: input.runtimeMode,
-      });
-    });
-
-  const interrupt: SideChatService["Service"]["interrupt"] = (input) =>
-    Effect.gen(function* () {
-      const chat = yield* requireChat(input);
-      const { runtime, providerThread } = yield* Deferred.await(chat.session);
-      const providerTurnId = yield* modify(chat, (snapshot) => {
-        if (snapshot.status !== "running") return [null, unchanged(snapshot)] as const;
-        // Codex has not reported the turn yet; stop it as soon as it does.
-        if (snapshot.activeProviderTurnId === null) chat.interruptRequested = true;
-        return [snapshot.activeProviderTurnId, unchanged(snapshot)] as const;
-      });
-      if (providerTurnId === null) return;
-      yield* runtime.interruptTurn({ providerThread, providerTurnId }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new SideChatProviderError({
-              sideChatId: chat.sideChatId,
-              operation: "interrupt",
-              cause,
-            }),
-        ),
-      );
-    });
-
-  /** Records a request's answer the way orchestration does; providers do not report it. */
-  const resolveRequest = (
-    chat: SideChat,
-    request: OrchestrationV2RuntimeRequest,
-    input: SideChatRespondInput,
-  ) =>
-    Effect.gen(function* () {
-      const now = yield* DateTime.now;
-      const cancelled = input.decision === "decline" || input.decision === "cancel";
-      yield* update(chat, (snapshot) => {
-        const resolved = upsertSideChatRuntimeRequest(snapshot, {
-          ...request,
-          status: "resolved",
-          resolvedAt: now,
-          ...(input.decision === undefined ? {} : { decision: input.decision }),
-          ...(input.answers === undefined ? {} : { answers: input.answers }),
-        });
-        if (request.responseCapability.type !== "message") return resolved;
-        const item = snapshot.turnItems.findLast(
-          (candidate) =>
-            candidate.type === "user_input_request" && candidate.requestId === request.id,
-        );
-        if (item?.type !== "user_input_request") return resolved;
-        const answers = input.answers;
-        return chain(resolved, (current) =>
-          upsertSideChatTurnItem(current, {
-            ...item,
-            ...(!cancelled && answers !== undefined
-              ? {
-                  questionAnswer: {
-                    requestId: request.id,
-                    answers,
-                    attachmentsByQuestionId: {},
-                    questionTextById: Object.fromEntries(
-                      item.questions.map((question) => [question.id, question.question]),
-                    ),
-                  },
-                }
-              : {}),
-            status: cancelled ? "cancelled" : "completed",
-            completedAt: now,
-            updatedAt: now,
-          }),
-        );
-      });
-    });
+  });
 
   /**
    * Codex async questions are not live provider requests: the answer is an ordinary user
    * message (steering the running turn when it can, otherwise starting the next turn) and a
    * dismissal only resolves the question here.
    */
-  const respondByMessage = (
+  const respondByMessage = Effect.fn("SideChatService.respondByMessage")(function* (
     chat: SideChat,
     session: SideChatSession,
     request: OrchestrationV2RuntimeRequest,
     input: SideChatRespondInput,
-  ) =>
-    Effect.gen(function* () {
-      if (input.decision === "decline" || input.decision === "cancel") {
-        return yield* resolveRequest(chat, request, input);
+  ) {
+    if (input.decision === "decline" || input.decision === "cancel") {
+      return yield* resolveRequest(chat, request, input);
+    }
+    const snapshot = yield* Ref.get(chat.state);
+    const item = snapshot.turnItems.findLast(
+      (candidate) => candidate.type === "user_input_request" && candidate.requestId === request.id,
+    );
+    if (item?.type !== "user_input_request") {
+      return yield* reject(chat.parentThread.id, "The question for this request was not found.")();
+    }
+    const replies: string[] = [];
+    for (const question of item.questions) {
+      const answer = input.answers?.[question.id];
+      if (typeof answer !== "string" || answer.trim().length === 0) {
+        if (question.required === false) continue;
+        return yield* reject(chat.parentThread.id, "Answer each question before sending.")();
       }
-      const snapshot = yield* Ref.get(chat.state);
-      const item = snapshot.turnItems.findLast(
-        (candidate) =>
-          candidate.type === "user_input_request" && candidate.requestId === request.id,
-      );
-      if (item?.type !== "user_input_request") {
-        return yield* reject(
-          chat.parentThread.id,
-          "The question for this request was not found.",
-        )();
-      }
-      const replies: string[] = [];
-      for (const question of item.questions) {
-        const answer = input.answers?.[question.id];
-        if (typeof answer !== "string" || answer.trim().length === 0) {
-          if (question.required === false) continue;
-          return yield* reject(chat.parentThread.id, "Answer each question before sending.")();
-        }
-        replies.push(`${question.question}\n${answer.trim()}`);
-      }
-      if (replies.length === 0) {
-        return yield* reject(chat.parentThread.id, "Enter an answer before sending.")();
-      }
-      const text = replies.join("\n\n");
-      const activeProviderTurnId =
-        snapshot.status === "running" ? snapshot.activeProviderTurnId : null;
-      if (
-        activeProviderTurnId !== null &&
-        session.runtime.providerSession.capabilities.turns.supportsActiveSteering
-      ) {
-        yield* steerSideTurn(chat, session, { providerTurnId: activeProviderTurnId, text });
-      } else {
-        yield* startSideTurn(chat, session, { text });
-      }
-      yield* resolveRequest(chat, request, input);
-    });
+      replies.push(`${question.question}\n${answer.trim()}`);
+    }
+    if (replies.length === 0) {
+      return yield* reject(chat.parentThread.id, "Enter an answer before sending.")();
+    }
+    const text = replies.join("\n\n");
+    const activeProviderTurnId =
+      snapshot.status === "running" ? snapshot.activeProviderTurnId : null;
+    if (
+      activeProviderTurnId !== null &&
+      session.runtime.providerSession.capabilities.turns.supportsActiveSteering
+    ) {
+      yield* steerSideTurn(chat, session, { providerTurnId: activeProviderTurnId, text });
+    } else {
+      yield* startSideTurn(chat, session, { text });
+    }
+    yield* resolveRequest(chat, request, input);
+  });
 
-  const respond: SideChatService["Service"]["respond"] = (input) =>
-    Effect.gen(function* () {
-      const chat = yield* requireChat(input);
-      const session = yield* Deferred.await(chat.session);
-      const request = (yield* Ref.get(chat.state)).runtimeRequests.find(
-        (candidate) => candidate.id === input.requestId,
+  const respond = Effect.fn("SideChatService.respond")(function* (input: SideChatRespondInput) {
+    const chat = yield* requireChat(input);
+    const session = yield* Deferred.await(chat.session);
+    const request = (yield* Ref.get(chat.state)).runtimeRequests.find(
+      (candidate) => candidate.id === input.requestId,
+    );
+    if (request?.responseCapability.type === "message") {
+      if (request.status !== "pending") return;
+      return yield* respondByMessage(chat, session, request, input);
+    }
+    yield* session.runtime
+      .respondToRuntimeRequest({
+        requestId: input.requestId,
+        ...(input.decision === undefined ? {} : { decision: input.decision }),
+        ...(input.answers === undefined ? {} : { answers: input.answers }),
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new SideChatProviderError({
+              sideChatId: chat.sideChatId,
+              operation: "respond",
+              cause,
+            }),
+        ),
       );
-      if (request?.responseCapability.type === "message") {
-        if (request.status !== "pending") return;
-        return yield* respondByMessage(chat, session, request, input);
-      }
-      yield* session.runtime
-        .respondToRuntimeRequest({
-          requestId: input.requestId,
-          ...(input.decision === undefined ? {} : { decision: input.decision }),
-          ...(input.answers === undefined ? {} : { answers: input.answers }),
-        })
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new SideChatProviderError({
-                sideChatId: chat.sideChatId,
-                operation: "respond",
-                cause,
-              }),
-          ),
-        );
-      if (request !== undefined) yield* resolveRequest(chat, request, input);
-    });
+    if (request !== undefined) yield* resolveRequest(chat, request, input);
+  });
 
   const close: SideChatService["Service"]["close"] = (input) =>
     closeWhere(

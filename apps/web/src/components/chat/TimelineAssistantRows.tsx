@@ -58,12 +58,14 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
             />
           </AssistantCitationSource>
         </div>
-        <AssistantChangedFilesSection
-          turnSummary={row.assistantTurnDiffSummary}
-          routeThreadKey={ctx.routeThreadKey}
-          resolvedTheme={ctx.resolvedTheme}
-          onOpenTurnDiff={ctx.onOpenTurnDiff}
-        />
+        {ctx.onOpenTurnDiff ? (
+          <AssistantChangedFilesSection
+            turnSummary={row.assistantTurnDiffSummary}
+            routeThreadKey={ctx.routeThreadKey}
+            resolvedTheme={ctx.resolvedTheme}
+            onOpenTurnDiff={ctx.onOpenTurnDiff}
+          />
+        ) : null}
         {row.showAssistantMeta ? (
           <AssistantMessageMeta
             className="mt-1.5"
@@ -251,6 +253,9 @@ export function HtmlRenderTimelineRow({
   const { onAppFullscreenChange } = ctx;
   const onFullscreenChange = (fullscreen: boolean) => onAppFullscreenChange(row.id, fullscreen);
 
+  if (ctx.renderHtmlRender) {
+    return <div className="min-w-0 px-1">{ctx.renderHtmlRender(row)}</div>;
+  }
   return (
     <div className="min-w-0 px-1">
       <HtmlRenderFrame

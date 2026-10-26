@@ -9,6 +9,7 @@ import { agentControlledBrowserCloseConfirmation } from "../components/ChatView.
 import { closePreviewSession } from "../components/preview/closePreviewSession";
 import { useThreadTerminalActions } from "../components/terminal/useThreadTerminalActions";
 import { confirmTerminalClose } from "../lib/terminalCloseConfirm";
+import { focusPanelTerminalAfterClose } from "../lib/terminalFocus";
 import { readLocalApi } from "../localApi";
 import { setActivePreviewTab, useThreadPreviewState } from "../previewStateStore";
 import {
@@ -48,9 +49,7 @@ export function useRightPanelSurfaceClose(input: {
   );
 
   const releaseSurfaceResources = (ref: ScopedThreadRef, surface: RightPanelSurface) => {
-    // Without preview access only the local surface goes away. The
-    // server record is in-memory bookkeeping, not a live view, and stays
-    // listed until a client with the scope closes it or the server restarts.
+    // Without preview access, server state remains until an authorized close or restart.
     if (canOperatePreview && surface.kind === "preview" && surface.resourceId) {
       void closePreviewSession({
         closePreview,
@@ -112,6 +111,7 @@ export function useRightPanelSurfaceClose(input: {
     if (nextActiveSurface?.kind === "preview" && nextActiveSurface.resourceId) {
       setActivePreviewTab(threadRef, nextActiveSurface.resourceId);
     }
+    focusPanelTerminalAfterClose(threadRef, activeId);
   };
   const labelFor = (terminalId: string) =>
     terminalLabelsById.get(terminalId) ?? getTerminalLabel(terminalId);

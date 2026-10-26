@@ -155,10 +155,8 @@ export interface UpdateEverythingSteps<Providers, Servers> {
   readonly updateServers: () => Promise<Servers>;
 }
 
-/**
- * Providers finish before any server restarts, so no install is cut off. The caller installs this app afterwards when `localReady`, because
- * the relaunch ends the run; a failed download skips only that install.
- */
+/** Finish provider installs before server restarts. Install this app last when localReady; failed
+ * downloads skip only that install. */
 export async function runUpdateEverything<Providers, Servers>(
   steps: UpdateEverythingSteps<Providers, Servers>,
 ): Promise<{
