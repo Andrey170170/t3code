@@ -50,15 +50,16 @@ import { useEnvironmentScope } from "../../state/session";
 import { closeSideChat, sideChatEnvironment } from "../../state/sideChat";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { resolveComposerInteractionMode } from "../ChatView.logic";
-import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
+import {
+  ComposerPromptEditorTiptap,
+  type ComposerPromptEditorHandle,
+} from "../ComposerPromptEditorTiptap";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ChatCanvasContext } from "./ChatCanvasContext";
 import { ComposerFooterModeControls } from "./ComposerFooterControls";
 import { runtimeModeConfig, runtimeModeOptions as runtimeModes } from "./runtimeModeConfig";
-import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
-import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerSurface } from "./ComposerSurface";
@@ -330,7 +331,9 @@ function SideChatConversation({
   failureMessage: string | null;
 }) {
   const interrupt = useAtomCommand(sideChatEnvironment.interrupt, { reportFailure: false });
+  const respond = useAtomCommand(sideChatEnvironment.respond, { reportFailure: false });
   const environmentId = props.threadRef.environmentId;
+  const canOperateThread = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const routeThreadKey = scopedThreadKey(props.threadRef);
   const { parentThreadId, sideChatId } = snapshot;
 
@@ -340,6 +343,7 @@ function SideChatConversation({
   }, [ended, sideChatId]);
 
   const [error, setError] = useState<string | null>(null);
+  const [respondingRequestIds, setRespondingRequestIds] = useState<RuntimeRequestId[]>([]);
   const [liveFollow, setLiveFollow] = useState(true);
   const [modelPickerOpen, setModelPickerOpen] = useComposerMenuState(false);
   const listRef = useRef<LegendListRef | null>(null);
@@ -386,6 +390,23 @@ function SideChatConversation({
       })
     : EMPTY_PENDING;
 
+  const respondToRequest = async (
+    requestId: RuntimeRequestId,
+    response: { decision: ProviderApprovalDecision } | { answers: Record<string, unknown> },
+  ) => {
+    setRespondingRequestIds((current) => [...current, requestId]);
+    setError(null);
+    const result = await respond({
+      environmentId,
+      input: { parentThreadId, sideChatId, requestId, ...response },
+    });
+    setRespondingRequestIds((current) => current.filter((id) => id !== requestId));
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      setError(errorMessage(squashAtomCommandFailure(result), "Could not send the response."));
+    }
+    return result;
+  };
+
   const handleInterrupt = () => {
     void interrupt({ environmentId, input: { parentThreadId, sideChatId } }).then((result) => {
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -424,7 +445,6 @@ function SideChatConversation({
           <ChatCanvasContext value={null}>
             <MessagesTimeline
               isWorking={running}
-              activeTurnInProgress={running}
               activeTurnStartedAt={activeTurnStartedAt}
               listRef={listRef}
               timelineEntries={timelineEntries}
@@ -436,7 +456,6 @@ function SideChatConversation({
               displayThreadKey={`side-chat:${sideChatId}`}
               onOpenTurnDiff={noop}
               onOpenThread={noop}
-              onRollbackCheckpoint={noop}
               supportsConversationRollback={false}
               onRevertToTurnCount={noop}
               isRevertingCheckpoint={false}
@@ -456,6 +475,12 @@ function SideChatConversation({
               liveFollowEnabled={liveFollow}
               onIsAtEndChange={setLiveFollow}
               onViewportAttach={attachTimelineViewport}
+              pendingApprovals={pending.approvals}
+              respondingRequestIds={respondingRequestIds}
+              canOperateThread={canOperateThread}
+              onRespondToApproval={(requestId, decision) =>
+                respondToRequest(requestId, { decision })
+              }
             />
           </ChatCanvasContext>
         )}
@@ -475,6 +500,9 @@ function SideChatConversation({
           starting={starting}
           running={running}
           pending={pending}
+          respondingRequestIds={respondingRequestIds}
+          respondToRequest={respondToRequest}
+          canOperateThread={canOperateThread}
           visibleError={visibleError}
           setError={setError}
           modelPickerOpen={modelPickerOpen}
@@ -504,6 +532,12 @@ interface SideChatComposerProps {
   starting: boolean;
   running: boolean;
   pending: PendingThreadRequests;
+  respondingRequestIds: RuntimeRequestId[];
+  respondToRequest: (
+    requestId: RuntimeRequestId,
+    response: { decision: ProviderApprovalDecision } | { answers: Record<string, unknown> },
+  ) => Promise<unknown>;
+  canOperateThread: boolean;
   visibleError: string | null;
   setError: Dispatch<SetStateAction<string | null>>;
   modelPickerOpen: boolean;
@@ -528,6 +562,9 @@ const SideChatComposer = memo(function SideChatComposer({
   starting,
   running,
   pending,
+  respondingRequestIds,
+  respondToRequest,
+  canOperateThread,
   visibleError,
   setError,
   modelPickerOpen,
@@ -537,8 +574,6 @@ const SideChatComposer = memo(function SideChatComposer({
   ...props
 }: SideChatComposerProps) {
   const send = useAtomCommand(sideChatEnvironment.send, { reportFailure: false });
-  const respond = useAtomCommand(sideChatEnvironment.respond, { reportFailure: false });
-  const canOperateThread = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const target = { parentThreadId, sideChatId };
 
   const [draft, setDraftState] = useState(() => draftsBySideChatId.get(sideChatId) ?? EMPTY_DRAFT);
@@ -554,7 +589,6 @@ const SideChatComposer = memo(function SideChatComposer({
   const runtimeMode = draft.runtimeMode ?? serverRuntimeMode;
   const [cursor, setCursor] = useState(draft.prompt.length);
   const [sending, setSending] = useState(false);
-  const [respondingRequestIds, setRespondingRequestIds] = useState<RuntimeRequestId[]>([]);
   const editorRef = useRef<ComposerPromptEditorHandle | null>(null);
 
   const providerStatus =
@@ -595,19 +629,6 @@ const SideChatComposer = memo(function SideChatComposer({
     : null;
   const questionResponding = question ? respondingRequestIds.includes(question.requestId) : false;
 
-  const respondToRequest = async (
-    requestId: RuntimeRequestId,
-    response: { decision: ProviderApprovalDecision } | { answers: Record<string, unknown> },
-  ) => {
-    setRespondingRequestIds((current) => [...current, requestId]);
-    setError(null);
-    const result = await respond({ environmentId, input: { ...target, requestId, ...response } });
-    setRespondingRequestIds((current) => current.filter((id) => id !== requestId));
-    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-      setError(errorMessage(squashAtomCommandFailure(result), "Could not send the response."));
-    }
-    return result;
-  };
   const advanceQuestion = async () => {
     if (!question || !progress?.canAdvance || questionResponding) return;
     if (!progress.isLastQuestion) {
@@ -678,25 +699,6 @@ const SideChatComposer = memo(function SideChatComposer({
           {visibleError}
         </p>
       ) : null}
-      {approval ? (
-        <div className="mb-2 flex flex-col gap-2 rounded-lg border border-border p-2">
-          <ComposerPendingApprovalPanel
-            approval={approval}
-            pendingCount={pending.approvals.length}
-          />
-          <div className="flex flex-wrap justify-end gap-1">
-            <ComposerPendingApprovalActions
-              requestId={approval.requestId}
-              options={approval.options}
-              isResponding={respondingRequestIds.includes(approval.requestId)}
-              canRespond={approval.responseCapability === "live"}
-              onRespondToApproval={(requestId, decision) =>
-                respondToRequest(requestId, { decision })
-              }
-            />
-          </div>
-        </div>
-      ) : null}
       <ComposerPendingUserInputPanel
         pendingUserInputs={[...pending.userInputs]}
         cwd={cwd}
@@ -726,7 +728,7 @@ const SideChatComposer = memo(function SideChatComposer({
       <ComposerSurface.Shell>
         <ComposerSurface.Host>
           <ComposerSurface.Main>
-            <ComposerPromptEditor
+            <ComposerPromptEditorTiptap
               ariaLabel="Side chat message"
               value={prompt}
               cursor={cursor}
@@ -844,7 +846,6 @@ const SideChatComposer = memo(function SideChatComposer({
                           ? "Wait for the side chat to finish"
                           : null
                   }
-                  isConnecting={false}
                   isEnvironmentUnavailable={false}
                   isPreparingWorktree={false}
                   hasSendableContent={prompt.trim().length > 0}

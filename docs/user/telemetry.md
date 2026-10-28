@@ -28,10 +28,20 @@ before starting it. Relay tracing also stops when `T3CODE_OTEL_SDK_DISABLED` or
 The desktop app reads these variables from your shell profile (for example `~/.zshrc`) on macOS and
 Linux, so export them there and restart the app. On Windows, set them as user environment variables.
 
+## Mobile app crash reports
+
+When the iOS or Android app crashes or hits an error, it sends a report to T3 Code: the error
+message, the stack trace, the app version, and the device model and OS version. Each launch also
+sends startup timings, and every report carries a random ID for the install. Reports go through
+the T3 Connect relay to Axiom. They do not include your threads, prompts, or connection details,
+but an error message can quote a value the app was handling.
+
+To stop sending them, turn off **Send crash reports** in **Settings > About T3 Code > Diagnostics**.
+
 ## Export diagnostics to your own receiver
 
 To send traces, metrics, or logs to an OpenTelemetry receiver, open
-**Settings > General > Diagnostics**, select an environment, and enter each signal's OTLP HTTP
+**Settings > Maintenance > Diagnostics**, select an environment, and enter each signal's OTLP HTTP
 endpoint under **OpenTelemetry export** (for example `http://localhost:4318/v1/traces`). Save, then
 restart that environment's server. The receiver must be reachable from the server's machine.
 **Test** sends an empty export from the server to check an endpoint before or after you save it;
