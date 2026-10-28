@@ -343,6 +343,9 @@ function SnoozePresetFields(props: {
   // Switching between a duration and a set time keeps the other kind's last value, so a
   // misclick on "When" can be undone without retyping it.
   const [memory, setMemory] = useState<KindMemory>({ minutes: 60, time: "09:00" });
+  // An unfinished or ambiguous entry (such as "7:30" on a 12-hour clock) empties the
+  // field, as elsewhere, while the preset keeps its last valid time.
+  const [timeUnresolved, setTimeUnresolved] = useState(false);
   return (
     <div className="flex items-center gap-2">
       <Select
@@ -351,6 +354,7 @@ function SnoozePresetFields(props: {
         onValueChange={(value) => {
           const next = value === null ? null : withWhen(preset, value, memory);
           if (!next) return;
+          setTimeUnresolved(false);
           if (next.kind !== preset.kind) {
             setMemory(
               preset.kind === "after"
@@ -385,9 +389,9 @@ function SnoozePresetFields(props: {
             className="w-32"
             aria-label="Time"
             timestampFormat={props.timestampFormat}
-            value={preset.time}
+            value={timeUnresolved ? "" : preset.time}
             onValueChange={(time) => {
-              // An unfinished entry reports no time; the preset keeps its last one.
+              setTimeUnresolved(time === "");
               if (time !== "") onChange({ ...preset, time });
             }}
           />
