@@ -116,7 +116,7 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 /** Codex's native side conversation for one parent thread, shown in the right panel. */
-export function SideChatPanel(props: SideChatPanelProps) {
+function SideChatPanel(props: SideChatPanelProps) {
   return (
     <SideChatFocusContext value={true}>
       <section
@@ -184,7 +184,7 @@ function SideChatOpening({
   const open = useAtomCommand(sideChatEnvironment.open, { reportFailure: false });
   const [error, setError] = useState<string | null>(null);
   const { environmentId, threadId } = threadRef;
-  // oxlint-disable-next-line t3code/react-effect-budget -- mounting starts the server-side chat; pendingOpens dedupes remounts
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mounting starts the server-side chat; pendingOpens dedupes remounts
   useEffect(() => {
     const key = scopedThreadKey({ environmentId, threadId });
     let pending = pendingOpens.get(key);
@@ -337,7 +337,7 @@ function SideChatConversation({
   const routeThreadKey = scopedThreadKey(props.threadRef);
   const { parentThreadId, sideChatId } = snapshot;
 
-  // oxlint-disable-next-line t3code/react-effect-budget -- the end arrives from the server snapshot, not from a handler here
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the end arrives from the server snapshot, not from a handler here
   useEffect(() => {
     if (ended) draftsBySideChatId.delete(sideChatId);
   }, [ended, sideChatId]);

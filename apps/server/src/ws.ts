@@ -318,6 +318,7 @@ export const withLateEditorConfig = <E, R>(
   config: ClientServerConfig,
   liveUpdates: Stream.Stream<ServerConfigStreamEvent, E, R>,
   launcher: EditorDiscovery,
+  availableUpdateVersions: Stream.Stream<string | undefined> = Stream.empty,
 ) => {
   const lateEditorConfig = Stream.fromEffect(launcher.resolveAvailableEditors()).pipe(
     Stream.filter(
@@ -337,7 +338,11 @@ export const withLateEditorConfig = <E, R>(
     Stream.map((editorConfig) => ({ type: "editorsResolved" as const, editorConfig })),
   );
 
-  return Stream.merge(liveUpdates, lateEditorConfig).pipe(
+  const availableUpdates = availableUpdateVersions.pipe(
+    Stream.map((version) => ({ type: "availableUpdateChanged" as const, version })),
+  );
+
+  return Stream.merge(liveUpdates, Stream.merge(lateEditorConfig, availableUpdates)).pipe(
     Stream.mapAccum(
       (): ClientServerConfig => config,
       (current, event): readonly [ClientServerConfig, ReadonlyArray<ServerConfigStreamEvent>] => {
@@ -350,6 +355,17 @@ export const withLateEditorConfig = <E, R>(
               ...rest
             } = current;
             const next = { ...rest, ...event.editorConfig };
+            return [next, [{ version: 1, type: "snapshot", config: next }]];
+          }
+          // Rare, and it changes what every update prompt offers, so the whole
+          // config is resent: clients replace theirs on any snapshot.
+          case "availableUpdateChanged": {
+            if (event.version === current.availableUpdateVersion) return [current, []];
+            const { availableUpdateVersion: _previous, ...rest } = current;
+            const next =
+              event.version === undefined
+                ? rest
+                : { ...rest, availableUpdateVersion: event.version };
             return [next, [{ version: 1, type: "snapshot", config: next }]];
           }
           case "keybindingsUpdated":
@@ -3204,29 +3220,13 @@ const layerCoreWsRpc = (
                 ),
               );
 
-              // Rare, and it changes what every update prompt offers, so the
-              // whole config is resent: clients replace theirs on any snapshot.
-              const availableUpdateSnapshots = Stream.concat(
-                Stream.make(config.availableUpdateVersion),
-                serverSelfUpdate.availableVersion,
-              ).pipe(
-                Stream.changes,
-                Stream.drop(1),
-                Stream.mapEffect(() =>
-                  loadServerConfig({ usageLimitsCommand, workspaceSnapshotsOnDemand }),
-                ),
-                Stream.map((config) => ({
-                  version: 1 as const,
-                  type: "snapshot" as const,
-                  config,
-                })),
-              );
-
               return Stream.concat(
                 rpcInitialItems([{ version: 1 as const, type: "snapshot" as const, config }]),
-                Stream.merge(
-                  withLateEditorConfig(config, liveUpdates, externalLauncher),
-                  availableUpdateSnapshots,
+                withLateEditorConfig(
+                  config,
+                  liveUpdates,
+                  externalLauncher,
+                  serverSelfUpdate.availableVersion,
                 ),
               );
             }),

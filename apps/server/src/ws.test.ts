@@ -139,29 +139,38 @@ const settingsUpdated = (settings: object): ServerConfigStreamEvent => ({
 it.effect("resends late editors without rolling back updates already sent", () =>
   Effect.gen(function* () {
     const settingsSent = yield* Deferred.make<void>();
+    const updateOfferSent = yield* Deferred.make<void>();
     const events = yield* withLateEditorConfig(
       snapshotConfig({ settings: { enableProviderUpdateChecks: true } as never }),
       Stream.make(settingsUpdated({ enableProviderUpdateChecks: false })),
       {
         resolveAvailableEditors: () => Effect.succeed(["file-manager"]),
         resolveFileManagerRevealKind: () =>
-          Deferred.await(settingsSent).pipe(Effect.as("file-explorer" as const)),
+          Effect.all([Deferred.await(settingsSent), Deferred.await(updateOfferSent)]).pipe(
+            Effect.as("file-explorer" as const),
+          ),
       },
+      Stream.make(undefined, "0.1.3-forgejo.2", "0.1.3-forgejo.2"),
     ).pipe(
       Stream.tap((event) =>
-        event.type === "settingsUpdated" ? Deferred.succeed(settingsSent, undefined) : Effect.void,
+        event.type === "settingsUpdated"
+          ? Deferred.succeed(settingsSent, undefined)
+          : event.type === "snapshot" && event.config.availableEditors.length === 0
+            ? Deferred.succeed(updateOfferSent, undefined)
+            : Effect.void,
       ),
       Stream.runCollect,
     );
 
-    const [first, second] = Array.from(events);
-    assert.equal(events.length, 2);
-    assert.equal(first?.type, "settingsUpdated");
-    assert.equal(second?.type, "snapshot");
-    if (second?.type === "snapshot") {
-      assert.deepEqual(second.config.availableEditors, ["file-manager"]);
-      assert.equal(second.config.shellRevealInFileManagerKind, "file-explorer");
-      assert.deepEqual(second.config.settings, { enableProviderUpdateChecks: false } as never);
+    // An unchanged offer sends nothing; the late editors keep both earlier updates.
+    assert.equal(events.length, 3);
+    const last = events.at(-1);
+    assert.equal(last?.type, "snapshot");
+    if (last?.type === "snapshot") {
+      assert.deepEqual(last.config.availableEditors, ["file-manager"]);
+      assert.equal(last.config.shellRevealInFileManagerKind, "file-explorer");
+      assert.deepEqual(last.config.settings, { enableProviderUpdateChecks: false } as never);
+      assert.equal(last.config.availableUpdateVersion, "0.1.3-forgejo.2");
     }
   }),
 );

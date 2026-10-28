@@ -19,7 +19,7 @@ import { useNowMinute } from "../../hooks/useNowMinute";
 import { reconcileSnoozeDraft, sortSnoozeRows } from "./SnoozePresetsSettings.logic";
 import { formatShortTimestamp } from "../../timestampFormat";
 import { Button } from "../ui/button";
-import { Input } from "../ui/input";
+import { TimeField } from "../ui/time-field";
 import {
   NumberField,
   NumberFieldDecrement,
@@ -284,7 +284,11 @@ function SnoozePresetList(props: {
             aria-label={`Snooze option ${index + 1}`}
             className="flex flex-wrap items-center gap-2"
           >
-            <SnoozePresetFields preset={preset} onChange={(next) => props.onChange(index, next)} />
+            <SnoozePresetFields
+              preset={preset}
+              timestampFormat={props.timestampFormat}
+              onChange={(next) => props.onChange(index, next)}
+            />
             <div className="ml-auto flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
               {preview.tone === "menu" ? (
                 <span className="truncate">
@@ -331,6 +335,7 @@ function SnoozePresetList(props: {
 
 function SnoozePresetFields(props: {
   preset: SnoozePresetSetting;
+  timestampFormat: Parameters<typeof formatShortTimestamp>[1];
   onChange: (preset: SnoozePresetSetting) => void;
 }) {
   const { preset, onChange } = props;
@@ -338,6 +343,9 @@ function SnoozePresetFields(props: {
   // Switching between a duration and a set time keeps the other kind's last value, so a
   // misclick on "When" can be undone without retyping it.
   const [memory, setMemory] = useState<KindMemory>({ minutes: 60, time: "09:00" });
+  // An unfinished or ambiguous entry (such as "7:30" on a 12-hour clock) empties the
+  // field, as elsewhere, while the preset keeps its last valid time.
+  const [timeUnresolved, setTimeUnresolved] = useState(false);
   return (
     <div className="flex items-center gap-2">
       <Select
@@ -346,6 +354,7 @@ function SnoozePresetFields(props: {
         onValueChange={(value) => {
           const next = value === null ? null : withWhen(preset, value, memory);
           if (!next) return;
+          setTimeUnresolved(false);
           if (next.kind !== preset.kind) {
             setMemory(
               preset.kind === "after"
@@ -375,17 +384,15 @@ function SnoozePresetFields(props: {
       ) : (
         <>
           <span className="text-xs text-muted-foreground">at</span>
-          <Input
-            nativeInput
+          <TimeField
             size="sm"
-            type="time"
             className="w-32"
             aria-label="Time"
-            value={preset.time}
-            onChange={(event) => {
-              if (/^\d{2}:\d{2}$/.test(event.target.value)) {
-                onChange({ ...preset, time: event.target.value });
-              }
+            timestampFormat={props.timestampFormat}
+            value={timeUnresolved ? "" : preset.time}
+            onValueChange={(time) => {
+              setTimeUnresolved(time === "");
+              if (time !== "") onChange({ ...preset, time });
             }}
           />
         </>
