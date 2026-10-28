@@ -19,7 +19,7 @@ import { useNowMinute } from "../../hooks/useNowMinute";
 import { reconcileSnoozeDraft, sortSnoozeRows } from "./SnoozePresetsSettings.logic";
 import { formatShortTimestamp } from "../../timestampFormat";
 import { Button } from "../ui/button";
-import { Input } from "../ui/input";
+import { TimeField } from "../ui/time-field";
 import {
   NumberField,
   NumberFieldDecrement,
@@ -284,7 +284,11 @@ function SnoozePresetList(props: {
             aria-label={`Snooze option ${index + 1}`}
             className="flex flex-wrap items-center gap-2"
           >
-            <SnoozePresetFields preset={preset} onChange={(next) => props.onChange(index, next)} />
+            <SnoozePresetFields
+              preset={preset}
+              timestampFormat={props.timestampFormat}
+              onChange={(next) => props.onChange(index, next)}
+            />
             <div className="ml-auto flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
               {preview.tone === "menu" ? (
                 <span className="truncate">
@@ -331,6 +335,7 @@ function SnoozePresetList(props: {
 
 function SnoozePresetFields(props: {
   preset: SnoozePresetSetting;
+  timestampFormat: Parameters<typeof formatShortTimestamp>[1];
   onChange: (preset: SnoozePresetSetting) => void;
 }) {
   const { preset, onChange } = props;
@@ -375,17 +380,15 @@ function SnoozePresetFields(props: {
       ) : (
         <>
           <span className="text-xs text-muted-foreground">at</span>
-          <Input
-            nativeInput
+          <TimeField
             size="sm"
-            type="time"
             className="w-32"
             aria-label="Time"
+            timestampFormat={props.timestampFormat}
             value={preset.time}
-            onChange={(event) => {
-              if (/^\d{2}:\d{2}$/.test(event.target.value)) {
-                onChange({ ...preset, time: event.target.value });
-              }
+            onValueChange={(time) => {
+              // An unfinished entry reports no time; the preset keeps its last one.
+              if (time !== "") onChange({ ...preset, time });
             }}
           />
         </>

@@ -36,6 +36,7 @@ function TimeField({
   timestampFormat: TimestampFormat;
   id?: string;
   className?: string;
+  size?: "sm" | "default";
   "aria-label"?: string;
 }) {
   // The text being typed, or null while the input shows the committed time.
