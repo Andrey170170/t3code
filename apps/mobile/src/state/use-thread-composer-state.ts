@@ -230,7 +230,9 @@ export function useThreadComposerState() {
   const selectedThreadMessages = selectedThreadProjection?.projection.messages;
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- prunes the app-wide acknowledged store once the thread's projection echoes a sent message
   useEffect(() => {
-    if (acknowledgedMessages.length > 0) forgetEchoedAcknowledgedThreadMessages();
+    if (acknowledgedMessages.length > 0 && selectedThreadMessages) {
+      forgetEchoedAcknowledgedThreadMessages(selectedThreadMessages);
+    }
   }, [acknowledgedMessages, selectedThreadMessages]);
   const selectedThreadAttempts = selectedThreadProjection?.projection.attempts;
   const selectedThreadNodes = selectedThreadProjection?.projection.nodes;

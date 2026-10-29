@@ -360,11 +360,9 @@ describe("thread outbox drain delivery cleanup", () => {
     await harness.manager.enqueue(sent);
     await completeQueuedMessageDelivery(sent, harness.manager.revisionOf(sent.messageId));
 
-    appAtomRegistry.set(harness.threadProjection, {
-      projection: { messages: [{ id: sent.messageId }] },
-    });
-    forgetEchoedAcknowledgedThreadMessages();
-    appAtomRegistry.set(harness.threadProjection, { projection: { messages: [] } });
+    forgetEchoedAcknowledgedThreadMessages([{ id: "unrelated" }]);
+    expect(appAtomRegistry.get(acknowledgedThreadMessagesAtom)).toEqual([sent]);
+    forgetEchoedAcknowledgedThreadMessages([{ id: sent.messageId }]);
 
     expect(appAtomRegistry.get(acknowledgedThreadMessagesAtom)).toEqual([]);
   });

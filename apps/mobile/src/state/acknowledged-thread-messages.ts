@@ -44,8 +44,14 @@ export function retainAcknowledgedThreadMessage(message: QueuedThreadMessage) {
   );
 }
 
-export function forgetEchoedAcknowledgedThreadMessages() {
-  writeAcknowledgedThreadMessages((current) => current);
+export function forgetEchoedAcknowledgedThreadMessages(
+  projectedMessages: ReadonlyArray<{ readonly id: string }>,
+) {
+  writeAcknowledgedThreadMessages((current) =>
+    current.filter(
+      (entry) => !projectedMessages.some((projected) => projected.id === entry.messageId),
+    ),
+  );
 }
 
 export function forgetAcknowledgedThreadMessage(message: QueuedThreadMessage) {
