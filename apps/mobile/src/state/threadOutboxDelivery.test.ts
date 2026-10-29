@@ -1,4 +1,7 @@
-import { acknowledgedThreadMessagesAtom } from "./acknowledged-thread-messages";
+import {
+  acknowledgedThreadMessagesAtom,
+  forgetEchoedAcknowledgedThreadMessages,
+} from "./acknowledged-thread-messages";
 import {
   CommandId,
   EnvironmentId,
@@ -350,6 +353,20 @@ describe("thread outbox drain delivery cleanup", () => {
       completeQueuedMessageDelivery(second, harness.manager.revisionOf(second.messageId)),
     ).resolves.toBe("removed");
     expect(appAtomRegistry.get(acknowledgedThreadMessagesAtom)).toEqual([second]);
+  });
+
+  it("forgets an echoed acknowledged row before a history window can drop its message", async () => {
+    const sent = queuedMessage({ messageId: "echoed-then-paged-out", text: "Delivered" });
+    await harness.manager.enqueue(sent);
+    await completeQueuedMessageDelivery(sent, harness.manager.revisionOf(sent.messageId));
+
+    appAtomRegistry.set(harness.threadProjection, {
+      projection: { messages: [{ id: sent.messageId }] },
+    });
+    forgetEchoedAcknowledgedThreadMessages();
+    appAtomRegistry.set(harness.threadProjection, { projection: { messages: [] } });
+
+    expect(appAtomRegistry.get(acknowledgedThreadMessagesAtom)).toEqual([]);
   });
 
   it("removes an acknowledged outbox item even when the sign-out archive write fails", async () => {

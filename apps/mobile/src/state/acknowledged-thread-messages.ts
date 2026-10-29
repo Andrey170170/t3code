@@ -5,7 +5,8 @@ import type { QueuedThreadMessage } from "./thread-outbox-model";
 import { environmentThreadDetails } from "./threads";
 
 // Keep acknowledged rows until their subscribed projection arrives; command receipts can precede messages.
-// Render hides rows the projection has echoed, so dropping them here only frees memory.
+// Drop a row once echoed: a bounded history window can later omit the message, and a kept row would
+// then render again as the newest message.
 export const acknowledgedThreadMessagesAtom = Atom.make<ReadonlyArray<QueuedThreadMessage>>(
   [],
 ).pipe(Atom.keepAlive);
@@ -41,6 +42,10 @@ export function retainAcknowledgedThreadMessage(message: QueuedThreadMessage) {
       ? current
       : [...current, message],
   );
+}
+
+export function forgetEchoedAcknowledgedThreadMessages() {
+  writeAcknowledgedThreadMessages((current) => current);
 }
 
 export function forgetAcknowledgedThreadMessage(message: QueuedThreadMessage) {
