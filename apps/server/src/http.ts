@@ -58,15 +58,11 @@ import {
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
-// The sandbox gives the document an opaque origin: scripts run, but same-origin
-// cookies, storage, and API calls are out of reach. No modals: agent HTML can
-// open without a click (inline renders, and mobile loads it as the top document),
-// and must not raise blocking dialogs.
-// Clients frame documents from another origin than the environment's, so name
-// the allowed ancestors here: a browser that sees `frame-ancestors` ignores any
-// `X-Frame-Options` a reverse proxy adds. The signed URL is the access control.
-// `*` covers only http(s) ancestors, so the desktop renderer is listed by name.
+// `frame-ancestors` overrides any `X-Frame-Options` a reverse proxy adds; the signed
+// URL is the access control. `*` covers only http(s), so the desktop renderer is named.
 const FRAMEABLE_CONTENT_SECURITY_POLICY = `frame-ancestors * ${DESKTOP_RENDERER_ORIGINS.join(" ")}`;
+// Opaque origin blocks cookies, storage and API access while allowing scripts.
+// Agent HTML can open without a click, so disallow blocking modals.
 const HTML_CONTENT_SECURITY_POLICY = `sandbox allow-scripts allow-forms allow-popups allow-downloads; ${FRAMEABLE_CONTENT_SECURITY_POLICY}`;
 
 // Proxies may strip disposition; force document-capable downloads to octet-stream.
@@ -400,8 +396,13 @@ const UNTRACED_REQUEST_PATHS: ReadonlySet<string> = new Set([OTLP_TRACES_PROXY_P
 const layerUntracedRequests = Layer.succeed(HttpMiddleware.TracerDisabledWhen)((request) => {
   const queryIndex = request.url.indexOf("?");
   const path = queryIndex === -1 ? request.url : request.url.slice(0, queryIndex);
-  // Webhook URLs carry their secret token in the path, so they never reach a trace.
-  return UNTRACED_REQUEST_PATHS.has(path) || path.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`);
+  // Signed URLs carry bearer tokens in the path, so they never reach a trace.
+  return (
+    UNTRACED_REQUEST_PATHS.has(path) ||
+    path.startsWith(`${WEBHOOK_ROUTE_PREFIX}/`) ||
+    path.startsWith(`${ASSET_ROUTE_PREFIX}/`) ||
+    path.startsWith(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/`)
+  );
 });
 
 export const withUntracedRequests = Layer.provide(layerUntracedRequests);

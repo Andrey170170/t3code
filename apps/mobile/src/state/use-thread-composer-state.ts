@@ -13,7 +13,7 @@ import {
   deriveThreadRuntime,
   threadRuntimeHasInterruptibleRun,
 } from "@t3tools/client-runtime/state/thread-execution";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import {
   CommandId,
@@ -47,10 +47,7 @@ import { resolveProviderInteractionMode } from "./legacy-plan-mode";
 import type { DraftComposerImageAttachment } from "../lib/composerImages";
 import { scopedThreadKey } from "../lib/scopedEntities";
 import { buildThreadFeed, createThreadFeedCache } from "../lib/threadActivity";
-import {
-  acknowledgedThreadMessagesAtom,
-  forgetEchoedAcknowledgedThreadMessages,
-} from "./acknowledged-thread-messages";
+import { acknowledgedThreadMessagesAtom } from "./acknowledged-thread-messages";
 import {
   appendPendingThreadMessages,
   selectPendingAcknowledgedMessages,
@@ -113,6 +110,7 @@ const EMPTY_QUEUE_WORKFLOW_ATOM = Atom.make<null>(null).pipe(
   Atom.withLabel("mobile-thread-queue-workflow:empty"),
 );
 const EMPTY_CHECKPOINT_SUMMARIES_ATOM = Atom.make<ReadonlyArray<ThreadCheckpointSummary>>([]);
+const EMPTY_THREAD_SEQUENCE_ATOM = Atom.make(0);
 
 export function appendReviewCommentToDraft(input: {
   readonly environmentId: EnvironmentId;
@@ -228,14 +226,13 @@ export function useThreadComposerState() {
     }));
   };
   const selectedThreadMessages = selectedThreadProjection?.projection.messages;
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- prunes the app-wide acknowledged store once the thread's projection echoes a sent message
-  useEffect(() => {
-    if (acknowledgedMessages.length > 0 && selectedThreadMessages) {
-      forgetEchoedAcknowledgedThreadMessages(selectedThreadMessages);
-    }
-  }, [acknowledgedMessages, selectedThreadMessages]);
   const selectedThreadAttempts = selectedThreadProjection?.projection.attempts;
   const selectedThreadNodes = selectedThreadProjection?.projection.nodes;
+  const selectedThreadSequence = useAtomValue(
+    selectedThreadDetailRef === null
+      ? EMPTY_THREAD_SEQUENCE_ATOM
+      : environmentThreadDetails.sequenceAtom(selectedThreadDetailRef),
+  );
   const checkpointSummaries = useAtomValue(
     selectedThreadDetailRef === null
       ? EMPTY_CHECKPOINT_SUMMARIES_ATOM
@@ -263,6 +260,7 @@ export function useThreadComposerState() {
     const pendingAcknowledgments = selectPendingAcknowledgedMessages(acknowledgedMessages, {
       threadKey: selectedThreadKey,
       queuedMessages: selectedThreadQueuedMessages,
+      sequence: selectedThreadSequence,
       projectedMessages: selectedThreadMessages,
     });
     if (pendingAcknowledgments.length === 0) return feed;

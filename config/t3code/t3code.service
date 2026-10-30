@@ -10,6 +10,16 @@ ExecStart=%h/.local/bin/t3code-run
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+# Mirrors upstream's boot service unit (apps/server/src/cloud/bootService.ts).
+# Helpers share this cgroup; the default OOMPolicy=stop would stop the unit if one is OOM-killed.
+OOMPolicy=continue
+# Favor the server over the sibling agents slice under CPU or disk contention.
+CPUWeight=1000
+IOWeight=1000
+# Reclaim takes the agents' pages first, up to what user.slice grants (see `t3 service protect`).
+MemoryLow=1536M
+OOMScoreAdjust=100
+ManagedOOMPreference=avoid
 
 [Install]
 WantedBy=default.target

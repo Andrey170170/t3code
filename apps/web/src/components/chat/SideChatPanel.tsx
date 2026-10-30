@@ -2,6 +2,12 @@ import { useAtomValue } from "@effect/atom-react";
 import type { LegendListRef } from "@legendapp/list/react";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import {
+  buildPendingUserInputAnswers,
+  setPendingUserInputCustomAnswer,
+  togglePendingUserInputOptionSelection,
+  type PendingUserInputDraftAnswer,
+} from "@t3tools/client-runtime/state/pending-user-input";
+import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
@@ -36,13 +42,7 @@ import { memo, useEffect, useRef, useState, type Dispatch, type SetStateAction }
 
 import { resolveShortcutCommand } from "../../keybindings";
 import { getAppModelOptionsForInstance } from "../../modelSelection";
-import {
-  buildPendingUserInputAnswers,
-  derivePendingUserInputProgress,
-  setPendingUserInputCustomAnswer,
-  togglePendingUserInputOptionSelection,
-  type PendingUserInputDraftAnswer,
-} from "../../pendingUserInput";
+import { derivePendingUserInputProgress } from "../../pendingUserInput";
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import { useRightPanelStore } from "../../rightPanelStore";
 import { deriveTimelineEntriesFromVisibleTurnItems } from "../../session-logic";
@@ -679,7 +679,10 @@ const SideChatComposer = memo(function SideChatComposer({
       setAnswerState({
         requestId: question.requestId,
         index: questionIndex,
-        answers: { ...answers, [id]: setPendingUserInputCustomAnswer(answers[id], value) },
+        answers: {
+          ...answers,
+          [id]: setPendingUserInputCustomAnswer(progress.activeQuestion, answers[id], value),
+        },
       });
     } else {
       updateDraft((current) => ({ ...current, prompt: value }));

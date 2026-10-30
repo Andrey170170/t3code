@@ -125,6 +125,13 @@ working directory. For a remotely reachable first install, set `T3CODE_HOST`,
 after installation to obtain a device pairing link. To start the user service
 at boot, run `sudo scripts/t3code-enable-linger` once.
 
+The unit favors the server over agents, but its memory protection only reaches
+it once root grants protection on `user.slice` and the user manager. Upstream's
+`t3 service protect` sets that up for the default `t3code.service`; run it
+through the installed entry with the variables from `~/.config/t3code/service.env`,
+`"$T3CODE_NODE" "$T3CODE_ENTRY" service protect --base-dir "$T3CODE_BASE"`, then
+restart the service.
+
 For subsequent updates, use `t3code-update --check`, then `t3code-update`
 (prompts before restart) or `t3code-update --yes`. Forgejo is the default;
 `t3code-update --npm` explicitly selects upstream npm releases. Finish active work before installation: it

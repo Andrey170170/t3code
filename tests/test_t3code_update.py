@@ -31,7 +31,13 @@ class T3CodeUpdateTests(unittest.TestCase):
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
-        for name in ("t3code-update", "t3code-install", "t3code-run", "t3code-pair"):
+        for name in (
+            "t3code-update",
+            "t3code-install",
+            "t3code-run",
+            "t3code-pair",
+            "t3code-self-update",
+        ):
             shutil.copy2(ROOT / "scripts" / name, self.root / "scripts" / name)
         shutil.copy2(
             ROOT / "config/t3code/t3code.service",
@@ -114,9 +120,7 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
             T3CODE_WORKDIR=str(self.home / "projects"),
             T3CODE_NODE=str(self.bin / "node"),
         )
-        subprocess.run(
-            ["git", "init", "-q"], cwd=self.root, check=True, env=self.env
-        )
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True, env=self.env)
         subprocess.run(
             ["git", "add", "config/t3code/VERSION"],
             cwd=self.root,
@@ -125,8 +129,14 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         )
         subprocess.run(
             [
-                "git", "-c", "user.name=T3 Test", "-c", "user.email=t3@example.invalid",
-                "commit", "-qm", "test baseline",
+                "git",
+                "-c",
+                "user.name=T3 Test",
+                "-c",
+                "user.email=t3@example.invalid",
+                "commit",
+                "-qm",
+                "test baseline",
             ],
             cwd=self.root,
             check=True,
@@ -138,7 +148,9 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         path.write_text(body)
         path.chmod(0o755)
 
-    def run_update(self, *args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+    def run_update(
+        self, *args: str, **overrides: str
+    ) -> subprocess.CompletedProcess[str]:
         env = self.env | overrides
         return subprocess.run(
             [str(self.root / "scripts/t3code-update"), *args],
@@ -148,7 +160,9 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
             capture_output=True,
         )
 
-    def run_install(self, *args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+    def run_install(
+        self, *args: str, **overrides: str
+    ) -> subprocess.CompletedProcess[str]:
         env = self.env | overrides
         return subprocess.run(
             [str(self.root / "scripts/t3code-install"), *args],
@@ -166,7 +180,12 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
 
     def git(self, repo: Path, *args: str) -> str:
         result = subprocess.run(
-            ["git", *args], cwd=repo, env=self.env, text=True, capture_output=True, check=True
+            ["git", *args],
+            cwd=repo,
+            env=self.env,
+            text=True,
+            capture_output=True,
+            check=True,
         )
         return result.stdout.strip()
 
@@ -177,15 +196,27 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         (source / "selected.txt").write_text("first\n")
         self.git(source, "add", "selected.txt")
         self.git(
-            source, "-c", "user.name=T3 Test", "-c", "user.email=t3@example.invalid",
-            "commit", "-qm", "first",
+            source,
+            "-c",
+            "user.name=T3 Test",
+            "-c",
+            "user.email=t3@example.invalid",
+            "commit",
+            "-qm",
+            "first",
         )
         first = self.git(source, "rev-parse", "HEAD")
         (source / "selected.txt").write_text("second\n")
         self.git(source, "add", "selected.txt")
         self.git(
-            source, "-c", "user.name=T3 Test", "-c", "user.email=t3@example.invalid",
-            "commit", "-qm", "second",
+            source,
+            "-c",
+            "user.name=T3 Test",
+            "-c",
+            "user.email=t3@example.invalid",
+            "commit",
+            "-qm",
+            "second",
         )
         second = self.git(source, "rev-parse", "HEAD")
         return source, first, second
@@ -210,7 +241,10 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
     def test_default_update_yes_installs_forgejo(self) -> None:
         result = self.run_update("--yes", "0.0.40-forgejo.2")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("t3code-forgejo.mjs install --version 0.0.40-forgejo.2 --yes", self.log.read_text())
+        self.assertIn(
+            "t3code-forgejo.mjs install --version 0.0.40-forgejo.2 --yes",
+            self.log.read_text(),
+        )
 
     def test_real_builder_local_head_requires_clean_but_ref_is_exact(self) -> None:
         source, first, _second = self.make_source_repo()
@@ -225,7 +259,9 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         self.assertIn(f"commit={first}\n", selected.stdout)
         self.assertEqual((source / "selected.txt").read_text(), "dirty\n")
 
-    def test_real_builder_remote_tag_and_branch_resolve_without_modifying_repo(self) -> None:
+    def test_real_builder_remote_tag_and_branch_resolve_without_modifying_repo(
+        self,
+    ) -> None:
         source, first, second = self.make_source_repo()
         self.git(source, "tag", "release-test", first)
         self.git(source, "branch", "build-test", second)
@@ -244,7 +280,9 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
 
     def test_source_check_is_read_only(self) -> None:
         before = self.version()
-        result = self.run_update("--source", str(self.source), "--ref", "topic", "--check")
+        result = self.run_update(
+            "--source", str(self.source), "--ref", "topic", "--check"
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.version(), before)
@@ -271,7 +309,11 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         package = b"chosen artifact"
         expected = f"git-{'a' * 40}-{hashlib.sha256(package).hexdigest()[:12]}"
         result = self.run_update(
-            "--repo", "https://example.invalid/fork.git", "--ref", "feature", "--yes",
+            "--repo",
+            "https://example.invalid/fork.git",
+            "--ref",
+            "feature",
+            "--yes",
             MOCK_PACKAGE=package.decode(),
         )
 
@@ -279,7 +321,9 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         self.assertEqual(self.version(), "1.2.3\n")
         service_env = (self.home / ".config/t3code/service.env").read_text()
         self.assertIn(f"T3CODE_BUILD_ID={expected}\n", service_env)
-        self.assertIn(f"runtime/builds/{expected}/node_modules/t3/dist/bin.mjs", service_env)
+        self.assertIn(
+            f"runtime/builds/{expected}/node_modules/t3/dist/bin.mjs", service_env
+        )
         self.assertIn("--repo https://example.invalid/fork.git", self.commands())
         self.assertIn("--ref feature", self.commands())
         self.assertIn(f"runtime/builds/{expected}", self.commands())
@@ -291,7 +335,9 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         service_env = config / "service.env"
         service_env.write_text("T3CODE_BUILD_ID=existing\n")
 
-        result = self.run_update("--source", str(self.source), "--yes", MOCK_BUILD_FAIL="1")
+        result = self.run_update(
+            "--source", str(self.source), "--yes", MOCK_BUILD_FAIL="1"
+        )
 
         self.assertEqual(result.returncode, 42)
         self.assertEqual(service_env.read_text(), "T3CODE_BUILD_ID=existing\n")
@@ -309,10 +355,15 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         self.assertNotIn("npm install", self.commands())
         self.assertNotIn("systemctl", self.commands())
 
-    def test_failed_npm_update_restores_pin_when_custom_runtime_stays_selected(self) -> None:
+    def test_failed_npm_update_restores_pin_when_custom_runtime_stays_selected(
+        self,
+    ) -> None:
         config = self.home / ".config/t3code"
         config.mkdir(parents=True)
-        custom_entry = self.home / "t3data/runtime/builds/git-existing/node_modules/t3/dist/bin.mjs"
+        custom_entry = (
+            self.home
+            / "t3data/runtime/builds/git-existing/node_modules/t3/dist/bin.mjs"
+        )
         service_env = config / "service.env"
         original_config = (
             "T3CODE_BUILD_ID=git-existing\n"
@@ -335,7 +386,9 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         config = self.home / ".config/t3code"
         config.mkdir(parents=True)
         service_env = config / "service.env"
-        service_env.write_text("T3CODE_BUILD_ID=existing\nT3CODE_NODE=" + str(self.bin / "node") + "\n")
+        service_env.write_text(
+            "T3CODE_BUILD_ID=existing\nT3CODE_NODE=" + str(self.bin / "node") + "\n"
+        )
         artifact = Path(self.temp.name) / "broken.tgz"
         artifact.write_text("broken")
 
@@ -344,7 +397,10 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(service_env.read_text(), "T3CODE_BUILD_ID=existing\nT3CODE_NODE=" + str(self.bin / "node") + "\n")
+        self.assertEqual(
+            service_env.read_text(),
+            "T3CODE_BUILD_ID=existing\nT3CODE_NODE=" + str(self.bin / "node") + "\n",
+        )
         self.assertNotIn("systemctl", self.commands())
 
     def test_build_id_collision_rejects_different_artifact_before_switch(self) -> None:
@@ -352,11 +408,15 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
         runtime = self.home / "t3data/runtime/builds" / build_id
         runtime.mkdir(parents=True)
         (runtime / ".install-complete").touch()
-        (runtime / "package.sha256").write_text(hashlib.sha256(b"old").hexdigest() + "\n")
+        (runtime / "package.sha256").write_text(
+            hashlib.sha256(b"old").hexdigest() + "\n"
+        )
         config = self.home / ".config/t3code"
         config.mkdir(parents=True)
         service_env = config / "service.env"
-        service_env.write_text("T3CODE_BUILD_ID=existing\nT3CODE_NODE=" + str(self.bin / "node") + "\n")
+        service_env.write_text(
+            "T3CODE_BUILD_ID=existing\nT3CODE_NODE=" + str(self.bin / "node") + "\n"
+        )
         artifact = Path(self.temp.name) / "new.tgz"
         artifact.write_bytes(b"new")
 
@@ -364,7 +424,10 @@ printf 'systemctl' >> "$MOCK_LOG"; printf ' %q' "$@" >> "$MOCK_LOG"; printf '\\n
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("already exists with a different artifact", result.stderr)
-        self.assertEqual(service_env.read_text(), "T3CODE_BUILD_ID=existing\nT3CODE_NODE=" + str(self.bin / "node") + "\n")
+        self.assertEqual(
+            service_env.read_text(),
+            "T3CODE_BUILD_ID=existing\nT3CODE_NODE=" + str(self.bin / "node") + "\n",
+        )
         self.assertNotIn("npm", self.commands())
         self.assertNotIn("systemctl", self.commands())
 
