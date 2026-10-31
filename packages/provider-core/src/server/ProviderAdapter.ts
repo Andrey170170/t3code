@@ -119,6 +119,14 @@ export const ProviderAdapterV2Event = Schema.Union([
     driver: ProviderDriverKind,
     turnItem: OrchestrationV2TurnItem,
   }),
+  // Start before the root terminal; clear only after the final covered projection.
+  // Consumer lifetime cannot depend on a producer probe that runs ahead of its queue.
+  Schema.Struct({
+    type: Schema.Literal("background_work.updated"),
+    driver: ProviderDriverKind,
+    providerTurnId: ProviderTurnId,
+    pending: Schema.Boolean,
+  }),
   /** Unpersisted deltas go only to clients showing the row; final output arrives in turn_item.updated. */
   Schema.Struct({
     type: Schema.Literal("command_output.delta"),
@@ -418,23 +426,6 @@ export interface ProviderAdapterV2OpenSessionInput {
   readonly resumeFromSession?: OrchestrationV2ProviderSession;
   readonly initialNativeThreadId?: string;
   readonly initialProviderItemIdentityVersion?: 2;
-  /**
-   * The session runs outside orchestration (a side chat), so the adapter must
-   * not offer continuation requests for app threads the orchestrator never sees.
-   */
-  readonly detached?: true;
-}
-
-export interface ProviderAdapterV2EphemeralForkInput {
-  readonly sourceNativeThreadId: string;
-  /** Synthetic app thread the fork's turns project into. */
-  readonly appThreadId: ThreadId;
-  readonly modelSelection: ModelSelection;
-  readonly runtimePolicy: ProviderAdapterV2RuntimePolicy;
-  /** Appended to the configured developer instructions, which a fork would otherwise replace. */
-  readonly developerInstructions: string;
-  /** Injected as a user message after the fork, marking the end of inherited history. */
-  readonly boundaryPrompt?: string;
 }
 
 export interface ProviderAdapterV2EnsureThreadInput {
@@ -660,13 +651,6 @@ export interface ProviderAdapterV2SessionRuntime {
   ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;
   readonly forkThread: (
     input: ProviderAdapterV2ForkThreadInput,
-  ) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;
-  /**
-   * Forks a native thread (possibly owned by another provider process) at its
-   * head into a temporary thread that is never persisted. Side chats use it.
-   */
-  readonly openEphemeralFork?: (
-    input: ProviderAdapterV2EphemeralForkInput,
   ) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;
 }
 

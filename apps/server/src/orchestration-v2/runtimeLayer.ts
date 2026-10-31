@@ -56,7 +56,6 @@ import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
-import * as SideChatService from "../sideChat/SideChatService.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
   OrchestrationEventStore.layer,
@@ -278,16 +277,6 @@ const layerThreadLaunchProvided = ThreadLaunchService.layer.pipe(
     ),
   ),
 );
-const layerSideChatServiceProvided = SideChatService.layer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      layerThreadManagementProvided,
-      ProviderAdapterRegistry.layerFromProviderInstanceRegistry,
-      layerRuntimePolicyProvided,
-      IdAllocator.layer,
-    ),
-  ),
-);
 const layerSecretRequestsProvided = SecretRequests.layer.pipe(
   Layer.provide(layerThreadManagementProvided),
 );
@@ -383,7 +372,6 @@ export const layerProduction = Layer.mergeAll(
   layerProjectService,
   layerManagedProjectFoldersProvided,
   layerThreadLaunchProvided,
-  layerSideChatServiceProvided,
   layerScheduledTaskProvided,
   layerScratchThreadPromotionProvided,
   layerSecretRequestsProvided,

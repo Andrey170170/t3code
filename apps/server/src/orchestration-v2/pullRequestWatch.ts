@@ -14,7 +14,7 @@ import * as DateTime from "effect/DateTime";
  */
 export const PULL_REQUEST_WATCH_WAKE_LIMIT = 10;
 /** How long a head may go without any check before the agent is told none reported. */
-const PULL_REQUEST_WATCH_NO_CHECKS_MS = 15 * 60_000;
+export const PULL_REQUEST_WATCH_NO_CHECKS_MS = 15 * 60_000;
 const LISTED_ITEMS = 10;
 const SNIPPET_LENGTH = 200;
 
@@ -47,12 +47,9 @@ const isFailedCheck = (check: PullRequestCheck) =>
   check.status === "failure" || check.status === "cancelled" || check.status === "action-required";
 
 /**
- * Compares a watched pull request with what its agent was last told. Each check is reported as
- * soon as it fails, so a check that never finishes (an advisory review bot) cannot hold the
- * news back. "Passed" is reported once the checks the base branch requires all passed, or all
- * checks where the host marks none required. Remarks and 👍 count when someone other than the
- * agent's own account gave them, so its own replies never wake it. `remarks` and `thumbsUp` are
- * null when the conversation could not be read in full; their news then waits for a later pass.
+ * Failures report at once so a never-finishing advisory check can't hold news back; "passed"
+ * waits for the required checks (or all, when none are required). Only others' remarks and 👍
+ * count. Null `remarks`/`thumbsUp` mean the conversation was not read in full; that news waits.
  */
 export function evaluatePullRequestWatch(
   watch: ThreadPullRequestWatch,

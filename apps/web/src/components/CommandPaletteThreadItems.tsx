@@ -44,7 +44,7 @@ import {
   ThreadSearchPullRequestNumber,
 } from "./ThreadStatusIndicators";
 
-export function useProviderEntryByEnvironmentAndInstanceId() {
+function useProviderEntryByEnvironmentAndInstanceId() {
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const providers = useAtomValue(primaryServerProvidersAtom);

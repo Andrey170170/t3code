@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./assembly-highlighting": {
+      "types": "./src/assemblyHighlighting.ts",
+      "default": "./src/assemblyHighlighting.ts"
+    },
     "./zip/bounded-zip": {
       "types": "./src/zip/boundedZip.ts",
       "default": "./src/zip/boundedZip.ts"
@@ -282,10 +286,6 @@
     "./state/session": {
       "types": "./src/state/session.ts",
       "default": "./src/state/session.ts"
-    },
-    "./state/side-chat": {
-      "types": "./src/state/sideChat.ts",
-      "default": "./src/state/sideChat.ts"
     },
     "./state/usage-access": {
       "types": "./src/state/usageAccess.ts",

@@ -69,7 +69,6 @@ describe("collectServerUpdateTargets", () => {
         machine("manual", "0.0.40", undefined),
       ],
       "0.0.50",
-      true,
     );
 
     expect(targets.map((target) => [target.serverLabel, target.targetVersion])).toEqual([
@@ -86,7 +85,7 @@ describe("collectServerUpdateTargets", () => {
     ]);
   });
 
-  it("moves a server to the version its own updater offers, without waiting for npm", () => {
+  it("moves a server to the version its own updater offers", () => {
     const offering = (id: string, serverVersion: string, offer: string) => {
       const base = machine(id, serverVersion, "boot-service");
       return {
@@ -94,7 +93,7 @@ describe("collectServerUpdateTargets", () => {
         serverConfig: { ...base.serverConfig!, availableUpdateVersion: offer },
       };
     };
-    const { targets, skipped, waitForNpm } = collectServerUpdateTargets(
+    const { targets, skipped } = collectServerUpdateTargets(
       [
         offering("forgejo", "0.0.45-forgejo.18", "0.0.45-forgejo.19"),
         offering("ahead-of-client", "0.0.45-forgejo.19", "0.0.45-forgejo.20"),
@@ -102,40 +101,15 @@ describe("collectServerUpdateTargets", () => {
         machine("desktop", "0.0.40", "desktop-managed"),
       ],
       "0.0.45",
-      false,
     );
 
-    expect(
-      targets.map((target) => [
-        target.serverLabel,
-        target.targetVersion,
-        waitForNpm.includes(target),
-      ]),
-    ).toEqual([
-      ["forgejo", "0.0.45-forgejo.19", false],
-      ["ahead-of-client", "0.0.45-forgejo.20", false],
-      ["npm", "0.0.45", true],
-      ["desktop", "0.0.45", false],
+    expect(targets.map((target) => [target.serverLabel, target.targetVersion])).toEqual([
+      ["forgejo", "0.0.45-forgejo.19"],
+      ["ahead-of-client", "0.0.45-forgejo.20"],
+      ["npm", "0.0.45"],
+      ["desktop", "0.0.45"],
     ]);
     expect(skipped).toEqual([]);
-  });
-
-  it("waits for npm only for hosts that install from it or when the release may lack archives", () => {
-    const hosts = [
-      machine("archive-service", "0.0.41-nightly.20260914.1700", "boot-service"),
-      machine("npm-service", "0.0.41-nightly.20260914.1699", "boot-service"),
-      machine("legacy-respawn", "0.1.4-nightly.20261027.3796", "respawn"),
-      machine("desktop", "0.1.4-nightly.20261027.3796", "desktop-managed"),
-    ];
-    const waits = (releaseArchivesPublished: boolean) =>
-      collectServerUpdateTargets(
-        hosts,
-        "0.1.5-nightly.20261029.3873",
-        releaseArchivesPublished,
-      ).waitForNpm.map((target) => target.serverLabel);
-
-    expect(waits(true)).toEqual(["npm-service", "legacy-respawn"]);
-    expect(waits(false)).toEqual(["archive-service", "npm-service", "legacy-respawn"]);
   });
 });
 

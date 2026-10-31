@@ -19,7 +19,6 @@ import {
   useComposerDraftStore,
 } from "../../composerDraftStore";
 import { type ComposerPromptEditorHandle } from "../ComposerPromptEditorTiptap";
-import { isSideChatTarget } from "./sideChatFocus";
 import {
   MAX_STASH_ENTRIES,
   type PromptStashEntry,
@@ -62,6 +61,7 @@ import {
   useState,
 } from "react";
 import { BackgroundThreadContext } from "./backgroundThread";
+import { isInSideChatPane } from "../../lib/sideChatPane";
 import { useStableCallback } from "../../hooks/useStableCallback";
 
 /**
@@ -676,9 +676,7 @@ export function useComposerStash(input: {
     // even when the composer is in a state that can't stash.
     event.preventDefault();
     event.stopPropagation();
-    if (isSideChatTarget(event.target) || isCommandPaletteOpen() || isRevertingCheckpoint()) {
-      return;
-    }
+    if (isCommandPaletteOpen() || isRevertingCheckpoint()) return;
     if (pendingUserInputs.length > 0) {
       setIsStashMenuOpen((open) => !open);
       return;
@@ -702,7 +700,11 @@ export function useComposerStash(input: {
     if (backgroundThread) return;
     return registerCommands(
       { "composer.stash": handleStashShortcut },
-      { capture: true, context: readShortcutContext },
+      {
+        capture: true,
+        context: readShortcutContext,
+        when: (event) => !isInSideChatPane(event.target),
+      },
     );
   }, [backgroundThread, handleStashShortcut, readShortcutContext]);
 
