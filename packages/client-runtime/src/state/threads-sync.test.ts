@@ -117,6 +117,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   readonly resumeCache?: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]>;
   readonly loadCached?: ReturnType<Persistence.EnvironmentCacheStore["Service"]["loadThread"]>;
   readonly saveThread?: Persistence.EnvironmentCacheStore["Service"]["saveThread"];
+  readonly removeThread?: ReturnType<Persistence.EnvironmentCacheStore["Service"]["removeThread"]>;
   readonly historyPaging?: "enabled" | "no-http" | "no-controller";
   readonly historyHttpClient?: HttpClient.HttpClient;
   readonly getTurnItem?: (input: {
@@ -225,7 +226,9 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
         Effect.andThen(options?.saveThread?.(environmentId, thread) ?? Effect.void),
       ),
     removeThread: (_environmentId, threadId) =>
-      Ref.update(removedThreads, (current) => [...current, threadId]),
+      Ref.update(removedThreads, (current) => [...current, threadId]).pipe(
+        Effect.andThen(options?.removeThread ?? Effect.void),
+      ),
     loadServerConfig: () => Effect.succeedNone,
     saveServerConfig: () => Effect.void,
     loadVcsRefs: () => Effect.succeedNone,
@@ -681,7 +684,12 @@ describe("EnvironmentThreads", () => {
       };
       yield* Effect.scoped(
         Effect.gen(function* () {
-          const draft = yield* makeHarness({ httpSnapshot: { _tag: "missing" }, resumeCache });
+          // The route leaves on the miss while the disk-cache removal is still pending.
+          const draft = yield* makeHarness({
+            httpSnapshot: { _tag: "missing" },
+            removeThread: Effect.never,
+            resumeCache,
+          });
           yield* awaitThreadState(draft.observed, (value) => value.status === "deleted");
         }),
       );
