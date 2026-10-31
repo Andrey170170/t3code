@@ -447,7 +447,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       history: patch(current.history),
     }));
 
-  const setDeleted = Effect.fn("EnvironmentThreadState.setDeleted")(function* () {
+  const setDeleted = Effect.fn("EnvironmentThreadState.setDeleted")(function* (
+    cause: "event" | "miss",
+  ) {
     yield* Ref.set(awaitingCompletion, false);
     yield* SubscriptionRef.set(state, {
       data: Option.none(),
@@ -457,6 +459,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       sequence: yield* SubscriptionRef.get(lastSequence),
     });
     yield* remember;
+    // Unlike a delete event, a miss may precede creation (a draft's id), so a remount asks again.
+    if (cause === "miss" && resumeCache?.owner === owner) resumeCache.snapshot = undefined;
     if (resumeCache !== undefined && resumeCache.owner !== owner) return;
     yield* cache.removeThread(environmentId, threadId).pipe(
       Effect.catch((error) =>
@@ -581,7 +585,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     );
 
     if (result._tag === "delete") {
-      yield* setDeleted();
+      yield* setDeleted("event");
       return;
     }
     if (result._tag === "applied" && shouldPersistThread(result.projection, result.history)) {
@@ -997,7 +1001,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
               break;
             }
             case "missing": {
-              yield* setDeleted();
+              yield* setDeleted("miss");
               return yield* Effect.never;
             }
             case "unavailable": {

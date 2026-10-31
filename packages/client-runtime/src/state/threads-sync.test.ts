@@ -117,6 +117,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   readonly resumeCache?: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]>;
   readonly loadCached?: ReturnType<Persistence.EnvironmentCacheStore["Service"]["loadThread"]>;
   readonly saveThread?: Persistence.EnvironmentCacheStore["Service"]["saveThread"];
+  readonly removeThread?: ReturnType<Persistence.EnvironmentCacheStore["Service"]["removeThread"]>;
   readonly historyPaging?: "enabled" | "no-http" | "no-controller";
   readonly historyHttpClient?: HttpClient.HttpClient;
   readonly getTurnItem?: (input: {
@@ -225,7 +226,9 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
         Effect.andThen(options?.saveThread?.(environmentId, thread) ?? Effect.void),
       ),
     removeThread: (_environmentId, threadId) =>
-      Ref.update(removedThreads, (current) => [...current, threadId]),
+      Ref.update(removedThreads, (current) => [...current, threadId]).pipe(
+        Effect.andThen(options?.removeThread ?? Effect.void),
+      ),
     loadServerConfig: () => Effect.succeedNone,
     saveServerConfig: () => Effect.void,
     loadVcsRefs: () => Effect.succeedNone,
@@ -670,6 +673,36 @@ describe("EnvironmentThreads", () => {
       );
       expect(Option.isNone(state.data)).toBe(true);
       expect(yield* Ref.get(resumed.loaderCalls)).toBe(0);
+    }),
+  );
+
+  it.effect("checks a missing thread again on remount instead of retaining the miss", () =>
+    Effect.gen(function* () {
+      const resumeCache: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]> = {
+        snapshot: undefined,
+        owner: undefined,
+      };
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          // The route leaves on the miss while the disk-cache removal is still pending.
+          const draft = yield* makeHarness({
+            httpSnapshot: { _tag: "missing" },
+            removeThread: Effect.never,
+            resumeCache,
+          });
+          yield* awaitThreadState(draft.observed, (value) => value.status === "deleted");
+        }),
+      );
+      // A draft's first send creates the thread under the id that just 404ed.
+      const created = yield* makeHarness({
+        httpSnapshot: {
+          _tag: "present",
+          snapshot: { snapshotSequence: CACHED_SNAPSHOT_SEQUENCE, projection: BASE_PROJECTION },
+        },
+        resumeCache,
+      });
+      const state = yield* awaitThreadState(created.observed, (value) => value.status === "live");
+      expect(Option.getOrThrow(state.data)).toEqual(BASE_PROJECTION);
     }),
   );
 
