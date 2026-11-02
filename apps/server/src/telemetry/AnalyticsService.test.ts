@@ -426,14 +426,36 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
   );
 
   // Every other fixture overrides the host, so only this one notices a sync restoring upstream's.
-  it.effect("an opted-in server reports to the fork's collector by default", () =>
+  // The desktop app's login-shell environment lands after startup, and may carry the opt-in.
+  it.effect.each([
+    {
+      label: "via its environment",
+      config: { T3CODE_TELEMETRY_ENABLED: true, T3CODE_POSTHOG_KEY: "phc_test_key" },
+      shell: undefined,
+    },
+    {
+      label: "via the desktop's login shell",
+      config: {},
+      shell: { T3CODE_TELEMETRY_ENABLED: "true", T3CODE_POSTHOG_KEY: "phc_test_key" },
+    },
+  ])("a server opted in $label reports to the fork's collector by default", ({ config, shell }) =>
     Effect.gen(function* () {
-      const sent: Array<{ readonly url: string; readonly apiKey: unknown }> = [];
+      const env: NodeJS.ProcessEnv =
+        shell === undefined ? {} : { T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1" };
+      const sent: Array<{
+        readonly url: string;
+        readonly apiKey: unknown;
+        readonly events: ReadonlyArray<unknown>;
+      }> = [];
       const client = HttpClient.make((request) =>
         Effect.sync(() => {
           if (request.body._tag === "Uint8Array") {
             const body = JSON.parse(new TextDecoder().decode(request.body.body));
-            sent.push({ url: request.url, apiKey: body.api_key });
+            sent.push({
+              url: request.url,
+              apiKey: body.api_key,
+              events: body.batch.map((item: { readonly event: unknown }) => item.event),
+            });
           }
           return HttpClientResponse.fromWeb(request, new Response(null, { status: 204 }));
         }),
@@ -442,18 +464,12 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
         Layer.provideMerge(
           ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-telemetry-host-" }),
         ),
-        Layer.provide(
-          ConfigProvider.layer(
-            ConfigProvider.fromUnknown({
-              T3CODE_TELEMETRY_ENABLED: true,
-              T3CODE_POSTHOG_KEY: "phc_test_key",
-            }),
-          ),
-        ),
+        Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(config))),
         Layer.provide(
           Layer.mergeAll(
             Layer.succeed(HostProcess.Platform, "linux"),
             Layer.succeed(HostProcess.Architecture, "arm64"),
+            Layer.succeed(HostProcess.Environment, env),
             Layer.succeed(HttpClient.HttpClient, client),
             ManagedPolicy.layerTest(),
           ),
@@ -462,12 +478,21 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
 
       yield* Effect.gen(function* () {
         const analytics = yield* AnalyticsService.AnalyticsService;
+        if (shell !== undefined) {
+          yield* analytics.record("test.before_discovery");
+          delete env.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING;
+          Object.assign(env, shell);
+        }
         yield* analytics.record("test.default_host", { index: 1 });
         yield* analytics.flush;
       }).pipe(Effect.provide(layerRuntime));
 
       assert.deepEqual(sent, [
-        { url: "https://t3-telemetry.andrei-homelab.com/batch/", apiKey: "phc_test_key" },
+        {
+          url: "https://t3-telemetry.andrei-homelab.com/batch/",
+          apiKey: "phc_test_key",
+          events: ["test.default_host"],
+        },
       ]);
     }),
   );

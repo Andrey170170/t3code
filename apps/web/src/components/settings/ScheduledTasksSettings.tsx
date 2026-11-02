@@ -1,7 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import { connectionStatusTitle } from "@t3tools/client-runtime/connection";
+import type { TimestampFormat } from "@t3tools/contracts/settings";
 import { AsyncResult } from "effect/reactivity";
 import {
+  CalendarIcon,
   Clock3Icon,
   CopyIcon,
   InboxIcon,
@@ -44,7 +46,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 
-import { formatRelativeTime } from "../../timestampFormat";
+import { formatRelativeTime, weekStartsOn } from "../../timestampFormat";
 import { isTimeOfDay } from "../../timeOfDay";
 import { useClientSettings, useEnvironmentSettings } from "../../hooks/useSettings";
 import { getCustomModelOptionsByInstance } from "../../modelSelection";
@@ -98,6 +100,8 @@ import {
   type WorkspaceMode,
 } from "./scheduledTasksSettings.logic";
 import { Label } from "../ui/label";
+import { Calendar } from "../ui/calendar";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Menu, MenuTrigger, MenuPopup, MenuItem, MenuSeparator } from "../ui/menu";
 import { ToggleGroup, Toggle } from "../ui/toggle-group";
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription, EmptyMedia } from "../ui/empty";
@@ -259,6 +263,62 @@ function WebhookFiltersField({
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/** `value` is local `YYYY-MM-DDTHH:mm`, like `<input type="datetime-local">`. */
+function RunOnceField({
+  id,
+  value,
+  timestampFormat,
+  onValueChange,
+}: {
+  readonly id: string;
+  readonly value: string;
+  readonly timestampFormat: TimestampFormat;
+  readonly onValueChange: (value: string) => void;
+}) {
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [datePart = "", timePart = ""] = value.split("T");
+  const date = new Date(`${datePart}T00:00`);
+  return (
+    <div className="flex items-center gap-2">
+      <div className="w-40">
+        <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
+          <PopoverTrigger
+            render={<Button id={id} variant="outline" className="w-full justify-between" />}
+          >
+            {date.toLocaleDateString(undefined, {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+            })}
+            <CalendarIcon className="size-4 text-muted-foreground" />
+          </PopoverTrigger>
+          <PopoverPopup align="start" aria-label="Choose run date">
+            <Calendar
+              mode="single"
+              required
+              selected={date}
+              defaultMonth={date}
+              {...(weekStartsOn === undefined ? {} : { weekStartsOn })}
+              onSelect={(selected) => {
+                onValueChange(`${toDateTimeLocalValue(selected).slice(0, 10)}T${timePart}`);
+                setCalendarOpen(false);
+              }}
+            />
+          </PopoverPopup>
+        </Popover>
+      </div>
+      <div className="w-32">
+        <TimeField
+          aria-label="Run time"
+          timestampFormat={timestampFormat}
+          value={timePart}
+          onValueChange={(time) => onValueChange(`${datePart}T${time}`)}
+        />
+      </div>
     </div>
   );
 }
@@ -1852,15 +1912,11 @@ function ScheduledTaskEditorForm({
             ) : draft.scheduleMode === "once" ? (
               <div className="flex items-center gap-2">
                 <Label htmlFor="scheduled-task-run-at">Run on</Label>
-                <Input
-                  type="datetime-local"
+                <RunOnceField
                   id="scheduled-task-run-at"
-                  nativeInput
-                  className="w-56"
                   value={draft.runAt}
-                  onChange={(event) =>
-                    setDraft((current) => ({ ...current, runAt: event.target.value }))
-                  }
+                  timestampFormat={timestampFormat}
+                  onValueChange={(runAt) => setDraft((current) => ({ ...current, runAt }))}
                 />
               </div>
             ) : draft.scheduleMode === "fixed" ? (
