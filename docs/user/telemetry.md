@@ -6,11 +6,12 @@ hashed account or installation identifier. To count how many installations one p
 server also sends hashed account identifiers: your T3 Connect account, your OpenAI and Claude
 accounts when you are signed in, and a random identifier for each device that connects. Events
 include the provider, model, reasoning effort,
-permission mode, turn result, duration, release channel, and main-agent token totals when
-available.
+permission mode, turn and request results, duration, release channel, and token counts when
+available. Child-agent token counts are reported separately from the main agent's. Model names
+are sent only when they appear in a provider's public model list.
 
 Events do not include prompts, responses, file contents, authentication tokens, conversation IDs,
-raw provider events, or child-agent output. Child-agent token use is excluded from the totals.
+raw provider events, or child-agent output.
 
 To enable collection, set `T3CODE_TELEMETRY_ENABLED=true` and the collector's key in
 `T3CODE_POSTHOG_KEY` in the server's environment before starting it. Without both, product events
@@ -24,6 +25,9 @@ To turn relay tracing off, set `T3CODE_TELEMETRY_ENABLED=false` in the server's 
 before starting it. Relay tracing also stops when `T3CODE_OTEL_SDK_DISABLED` or
 `OTEL_SDK_DISABLED` turns OpenTelemetry export off. The web app in a browser, including one the
 `t3` CLI opens, does not read these variables.
+
+An administrator can turn product events and relay tracing off for every user on a machine with
+a [managed policy](./managed-policy.md#other-capabilities).
 
 The desktop app reads these variables from your shell profile (for example `~/.zshrc`) on macOS and
 Linux, so export them there and restart the app. On Windows, set them as user environment variables.
