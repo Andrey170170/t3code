@@ -280,9 +280,6 @@ function RunOnceField({
   readonly onValueChange: (value: string) => void;
 }) {
   const [calendarOpen, setCalendarOpen] = useState(false);
-  const nowMinute = useNowMinute();
-  const today = new Date(Date.parse(`${nowMinute}Z`));
-  today.setHours(0, 0, 0, 0);
   const [datePart = "", timePart = ""] = value.split("T");
   const date = new Date(`${datePart}T00:00`);
   return (
@@ -301,7 +298,6 @@ function RunOnceField({
             selected={date}
             defaultMonth={date}
             {...(weekStartsOn === undefined ? {} : { weekStartsOn })}
-            disabled={{ before: today }}
             onSelect={(selected) => {
               onValueChange(`${toDateTimeLocalValue(selected).slice(0, 10)}T${timePart}`);
               setCalendarOpen(false);
