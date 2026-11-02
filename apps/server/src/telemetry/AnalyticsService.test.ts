@@ -442,12 +442,20 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
     Effect.gen(function* () {
       const env: NodeJS.ProcessEnv =
         shell === undefined ? {} : { T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1" };
-      const sent: Array<{ readonly url: string; readonly apiKey: unknown }> = [];
+      const sent: Array<{
+        readonly url: string;
+        readonly apiKey: unknown;
+        readonly events: ReadonlyArray<unknown>;
+      }> = [];
       const client = HttpClient.make((request) =>
         Effect.sync(() => {
           if (request.body._tag === "Uint8Array") {
             const body = JSON.parse(new TextDecoder().decode(request.body.body));
-            sent.push({ url: request.url, apiKey: body.api_key });
+            sent.push({
+              url: request.url,
+              apiKey: body.api_key,
+              events: body.batch.map((item: { readonly event: unknown }) => item.event),
+            });
           }
           return HttpClientResponse.fromWeb(request, new Response(null, { status: 204 }));
         }),
@@ -480,7 +488,11 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
       }).pipe(Effect.provide(layerRuntime));
 
       assert.deepEqual(sent, [
-        { url: "https://t3-telemetry.andrei-homelab.com/batch/", apiKey: "phc_test_key" },
+        {
+          url: "https://t3-telemetry.andrei-homelab.com/batch/",
+          apiKey: "phc_test_key",
+          events: ["test.default_host"],
+        },
       ]);
     }),
   );

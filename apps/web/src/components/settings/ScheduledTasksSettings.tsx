@@ -284,34 +284,41 @@ function RunOnceField({
   const date = new Date(`${datePart}T00:00`);
   return (
     <div className="flex items-center gap-2">
-      <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
-        <PopoverTrigger
-          render={<Button id={id} variant="outline" className="w-40 justify-between" />}
-        >
-          {date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
-          <CalendarIcon className="size-4 text-muted-foreground" />
-        </PopoverTrigger>
-        <PopoverPopup align="start" aria-label="Choose run date">
-          <Calendar
-            mode="single"
-            required
-            selected={date}
-            defaultMonth={date}
-            {...(weekStartsOn === undefined ? {} : { weekStartsOn })}
-            onSelect={(selected) => {
-              onValueChange(`${toDateTimeLocalValue(selected).slice(0, 10)}T${timePart}`);
-              setCalendarOpen(false);
-            }}
-          />
-        </PopoverPopup>
-      </Popover>
-      <TimeField
-        aria-label="Run time"
-        className="w-32"
-        timestampFormat={timestampFormat}
-        value={timePart}
-        onValueChange={(time) => onValueChange(`${datePart}T${time}`)}
-      />
+      <div className="w-40">
+        <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
+          <PopoverTrigger
+            render={<Button id={id} variant="outline" className="w-full justify-between" />}
+          >
+            {date.toLocaleDateString(undefined, {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+            })}
+            <CalendarIcon className="size-4 text-muted-foreground" />
+          </PopoverTrigger>
+          <PopoverPopup align="start" aria-label="Choose run date">
+            <Calendar
+              mode="single"
+              required
+              selected={date}
+              defaultMonth={date}
+              {...(weekStartsOn === undefined ? {} : { weekStartsOn })}
+              onSelect={(selected) => {
+                onValueChange(`${toDateTimeLocalValue(selected).slice(0, 10)}T${timePart}`);
+                setCalendarOpen(false);
+              }}
+            />
+          </PopoverPopup>
+        </Popover>
+      </div>
+      <div className="w-32">
+        <TimeField
+          aria-label="Run time"
+          timestampFormat={timestampFormat}
+          value={timePart}
+          onValueChange={(time) => onValueChange(`${datePart}T${time}`)}
+        />
+      </div>
     </div>
   );
 }
