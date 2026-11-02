@@ -117,33 +117,52 @@ function serverOsFromNodePlatform(platform: string): ClientOs {
 /** @public */
 /** @public */
 export const make = Effect.gen(function* () {
-  const envConfig = yield* TelemetryEnvConfig;
-  const telemetryConfig = {
-    ...envConfig,
-    enabled: envConfig.enabled && envConfig.posthogKey.trim() !== "",
-  };
+  const telemetryConfig = yield* TelemetryEnvConfig;
   const hostEnvironment = yield* HostProcess.Environment;
   const awaitingShellConsent = hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1";
   // A managed policy can switch analytics off over the environment, never on.
   const policyAllows =
     ManagedPolicy.deniedBy(yield* ManagedPolicy.ManagedPolicy, "telemetry") === undefined;
-  // A cached PATH does not establish consent from the current login shell.
-  const telemetryEnabled = Effect.suspend(() => {
-    if (!telemetryConfig.enabled || !policyAllows) return Effect.succeed(false);
-    if (!awaitingShellConsent) return Effect.succeed(true);
-    if (hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1")
-      return Effect.succeed(false);
-    const preference = hostEnvironment.T3CODE_TELEMETRY_ENABLED;
-    return Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(
-      // Fork builds are opt-in, so an unset preference stays off.
-      Config.withDefault(false),
+  const optedIn = (config: {
+    readonly enabled: boolean;
+    readonly posthogKey: string;
+    readonly posthogHost: string;
+  }) =>
+    config.enabled && config.posthogKey.trim() !== ""
+      ? { posthogKey: config.posthogKey, posthogHost: config.posthogHost }
+      : undefined;
+  // Where events go, or undefined while they are not sent. Fork builds send only after an
+  // opt-in with a key. The desktop app delivers its login shell's environment after startup
+  // and does not cache these names, so its opt-in, key and host are read once that lands.
+  const sendTarget = Effect.suspend(() => {
+    if (!policyAllows) return Effect.succeed(undefined);
+    if (!awaitingShellConsent) return Effect.succeed(optedIn(telemetryConfig));
+    if (hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1") {
+      return Effect.succeed(undefined);
+    }
+    const shellEnv = Object.fromEntries(
+      ["T3CODE_TELEMETRY_ENABLED", "T3CODE_POSTHOG_KEY", "T3CODE_POSTHOG_HOST"].flatMap((name) => {
+        const value = hostEnvironment[name];
+        return value === undefined ? [] : [[name, value]];
+      }),
+    );
+    return Config.all({
+      enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(
+        Config.withDefault(telemetryConfig.enabled),
+      ),
+      posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(
+        Config.withDefault(telemetryConfig.posthogKey),
+      ),
+      posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(
+        Config.withDefault(telemetryConfig.posthogHost),
+      ),
+    }).pipe(
+      Effect.map(optedIn),
       Effect.provideService(
         ConfigProvider.ConfigProvider,
-        ConfigProvider.fromEnv({
-          env: preference === undefined ? {} : { T3CODE_TELEMETRY_ENABLED: preference },
-        }),
+        ConfigProvider.fromEnv({ env: shellEnv }),
       ),
-      Effect.orElseSucceed(() => false),
+      Effect.orElseSucceed(() => undefined),
     );
   });
   const httpClient = yield* HttpClient.HttpClient;
@@ -202,10 +221,11 @@ export const make = Effect.gen(function* () {
   const sendBatch = Effect.fn("AnalyticsService.sendBatch")(function* (
     events: ReadonlyArray<BufferedAnalyticsEvent>,
   ) {
-    if (!(yield* telemetryEnabled) || !distinctId) return;
+    const target = yield* sendTarget;
+    if (target === undefined || !distinctId) return;
 
     const payload = {
-      api_key: telemetryConfig.posthogKey,
+      api_key: target.posthogKey,
       batch: events.map((event) => ({
         uuid: event.uuid,
         event: event.event,
@@ -230,7 +250,7 @@ export const make = Effect.gen(function* () {
       })),
     };
 
-    yield* HttpClientRequest.post(`${telemetryConfig.posthogHost}/batch/`).pipe(
+    yield* HttpClientRequest.post(`${target.posthogHost}/batch/`).pipe(
       HttpClientRequest.bodyJson(payload),
       Effect.flatMap(httpClient.execute),
       Effect.flatMap(HttpClientResponse.filterStatusOk),
@@ -314,7 +334,7 @@ export const make = Effect.gen(function* () {
 
   const record: AnalyticsService["Service"]["record"] = Effect.fn("AnalyticsService.record")(
     function* (event, properties) {
-      if (!(yield* telemetryEnabled) || !distinctId) return;
+      if ((yield* sendTarget) === undefined || !distinctId) return;
 
       // Catch Node UUID defects too; best-effort telemetry drops events without UUIDs.
       const uuid = yield* Effect.exit(crypto.randomUUIDv7());
