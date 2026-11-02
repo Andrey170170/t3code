@@ -129,16 +129,16 @@ export const make = Effect.gen(function* () {
     readonly posthogHost: string;
   }) =>
     config.enabled && config.posthogKey.trim() !== ""
-      ? { posthogKey: config.posthogKey, posthogHost: config.posthogHost }
-      : undefined;
-  // Where events go, or undefined while they are not sent. Fork builds send only after an
+      ? Option.some({ posthogKey: config.posthogKey, posthogHost: config.posthogHost })
+      : Option.none();
+  // Where events go, or none while they are not sent. Fork builds send only after an
   // opt-in with a key. The desktop app delivers its login shell's environment after startup
   // and does not cache these names, so its opt-in, key and host are read once that lands.
   const sendTarget = Effect.suspend(() => {
-    if (!policyAllows) return Effect.succeed(undefined);
+    if (!policyAllows) return Effect.succeedNone;
     if (!awaitingShellConsent) return Effect.succeed(optedIn(telemetryConfig));
     if (hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1") {
-      return Effect.succeed(undefined);
+      return Effect.succeedNone;
     }
     const shellEnv = Object.fromEntries(
       ["T3CODE_TELEMETRY_ENABLED", "T3CODE_POSTHOG_KEY", "T3CODE_POSTHOG_HOST"].flatMap((name) => {
@@ -162,7 +162,7 @@ export const make = Effect.gen(function* () {
         ConfigProvider.ConfigProvider,
         ConfigProvider.fromEnv({ env: shellEnv }),
       ),
-      Effect.orElseSucceed(() => undefined),
+      Effect.orElseSucceed(() => Option.none()),
     );
   });
   const httpClient = yield* HttpClient.HttpClient;
@@ -221,7 +221,7 @@ export const make = Effect.gen(function* () {
   const sendBatch = Effect.fn("AnalyticsService.sendBatch")(function* (
     events: ReadonlyArray<BufferedAnalyticsEvent>,
   ) {
-    const target = yield* sendTarget;
+    const target = Option.getOrUndefined(yield* sendTarget);
     if (target === undefined || !distinctId) return;
 
     const payload = {
@@ -334,7 +334,7 @@ export const make = Effect.gen(function* () {
 
   const record: AnalyticsService["Service"]["record"] = Effect.fn("AnalyticsService.record")(
     function* (event, properties) {
-      if ((yield* sendTarget) === undefined || !distinctId) return;
+      if (Option.isNone(yield* sendTarget) || !distinctId) return;
 
       // Catch Node UUID defects too; best-effort telemetry drops events without UUIDs.
       const uuid = yield* Effect.exit(crypto.randomUUIDv7());
