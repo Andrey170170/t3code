@@ -260,7 +260,7 @@ describe("CodexAdapterV2 runtime policy", () => {
 });
 
 describe("CodexAdapterV2 process spawning", () => {
-  it.effect("reports the app-server process exiting to the factory's caller", () =>
+  it.live("reports the app-server process exiting to the factory's caller", () =>
     Effect.gen(function* () {
       const factory = yield* CodexAdapterV2.CodexAppServerClientFactory.pipe(
         Effect.provide(
