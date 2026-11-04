@@ -336,17 +336,57 @@ describe("evaluatePullRequestWatch", () => {
     assert.deepEqual(evaluate(report.next, detail(), comments).changes, []);
   });
 
+  it("cuts a long remark in the wake message without splitting an emoji", () => {
+    const body = `${"x".repeat(196)}🚀 and more`;
+    const report = evaluatePullRequestWatch(watch(), detail(), [
+      remark("reviewer", "2026-10-02T12:06:00Z", body),
+    ]);
+    const { text } = pullRequestWatchMessage({
+      number: 1,
+      url: "https://github.com/o/r/pull/1",
+      baseBranch: "main",
+      headSha: null,
+      report,
+    });
+    assert.isTrue(text.isWellFormed());
+    assert.include(text, `"${"x".repeat(196)}..."`);
+  });
+
   it("reports a conflict once, until the branch is clean again", () => {
     const conflicting = detail({ mergeability: "conflicting" });
     const first = evaluate(watch(), conflicting, noRemarks);
     assert.deepEqual(first.changes, [{ kind: "conflicting" }]);
-    // GitHub answers "unknown" while it recomputes after a push; that is not a resolution.
-    const recomputing = evaluate(first.next, detail({ mergeability: "unknown" }), noRemarks);
-    assert.deepEqual(evaluate(recomputing.next, conflicting, noRemarks).changes, []);
-    const clean = evaluate(first.next, detail(), noRemarks);
-    assert.deepEqual(evaluate(clean.next, conflicting, noRemarks).changes, [
+    const { headSha: _unreadHead, ...headUnread } = conflicting;
+    const unread = evaluatePullRequestWatch(first.next, headUnread, noRemarks);
+    assert.deepEqual(unread.changes, []);
+    assert.deepEqual(evaluatePullRequestWatch(unread.next, conflicting, noRemarks).changes, []);
+    const recomputing = evaluatePullRequestWatch(
+      first.next,
+      detail({ mergeability: "unknown" }),
+      noRemarks,
+    );
+    assert.deepEqual(
+      evaluatePullRequestWatch(recomputing.next, conflicting, noRemarks).changes,
+      [],
+    );
+    const clean = evaluatePullRequestWatch(first.next, detail(), noRemarks);
+    assert.deepEqual(evaluatePullRequestWatch(clean.next, conflicting, noRemarks).changes, [
       { kind: "conflicting" },
     ]);
+    const pushed = { headSha: "bbbbbbbbbb" };
+    const recomputed = evaluatePullRequestWatch(
+      first.next,
+      detail({ ...pushed, mergeability: "unknown" }),
+      noRemarks,
+    );
+    assert.deepEqual(
+      evaluatePullRequestWatch(
+        recomputed.next,
+        detail({ ...pushed, mergeability: "conflicting" }),
+        noRemarks,
+      ).changes,
+      [{ kind: "conflicting" }],
+    );
   });
 
   it("records the 👍 already there, then reports a new one and one given again", () => {
