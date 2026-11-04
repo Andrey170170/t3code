@@ -124,6 +124,12 @@ Finish with `git worktree remove --force ~/t3-merge-scout`.
 
 ## Gotchas
 
+- The checkout is a `blob:none` partial clone of `origin`, and GitHub serves
+  the fork no blobs that only upstream's history reaches, so the worktree
+  checkout or merge fails with `not our ref` / `could not fetch ... from
+  promisor remote`. The main checkout sets `remote.upstream.promisor true` and
+  `remote.upstream.partialclonefilter blob:none` so git lazy-fetches them from
+  upstream; restore those if a fresh clone lacks them.
 - `scripts/setup-worktree.ts` needs `T3CODE_PROJECT_ROOT`, and Volta cannot
   find `vp` in a worktree that has no `node_modules` yet. Install with the main
   checkout's binary:
