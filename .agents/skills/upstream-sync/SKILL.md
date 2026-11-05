@@ -134,10 +134,12 @@ Finish with `git worktree remove --force ~/t3-merge-scout`.
   find `vp` in a worktree that has no `node_modules` yet. Install with the main
   checkout's binary:
   `/home/menshikov/projects/t3code/node_modules/.bin/vp i -- --yes`.
-- Typecheck a package with `~/t3-merge-scout/node_modules/.bin/tsc --noEmit`
-  run from its directory (`typescript` resolves to tsc-rs). It prints hundreds of Effect suggestions; only lines
-  matching `: error TS` count.
+- Typecheck a package with `~/t3-merge-scout/node_modules/.bin/effect-tsgo tsrs --noEmit`
+  run from its directory (tsrs with Effect's rules). It prints hundreds of
+  Effect suggestions; only lines matching `error TS` count.
 - Run tests from the scratch root with `./node_modules/.bin/vp test run <files>`.
+  Run the `apps/desktop` tests in their own pass: on a fresh install, parallel
+  desktop tests race to unpack Electron and fail with `EEXIST`.
 - `git merge --abort` refuses while edits are unstaged. Stage them first.
 - New upstream tests can assert upstream behavior that the fork deliberately
   changed (security headers, version comparison). Update the test to the fork's
