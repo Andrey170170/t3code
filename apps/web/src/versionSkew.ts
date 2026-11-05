@@ -45,17 +45,9 @@ function versionCore(version: string): string {
 }
 
 /**
- * The skew a user can act on: the connected server runs an older T3 Code than
- * this client (or than `clientVersion`, the version this client is about to
- * update to), so the server is the side that needs updating.
- *
- * Two builds of the same numbered line (nightly, or this fork's Forgejo
- * releases) compare their full versions, including the date, run or build
- * number. Other combinations compare their core `major.minor.patch` only, so a
- * stable build and a nightly build with the same core do not cause an update
- * warning.
- * A server ahead of the client does not need an update. Versions that do not
- * parse as semver fall back to plain string inequality.
+ * True when the server runs an older T3 Code than this client (or `clientVersion`).
+ * Builds of one numbered line (nightly, Forgejo) compare full versions; other pairs
+ * compare `major.minor.patch` only. Non-semver versions compare as strings.
  */
 export function resolveVersionMismatch(
   serverVersion: string | null | undefined,

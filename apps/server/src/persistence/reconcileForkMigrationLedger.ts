@@ -32,11 +32,9 @@ const FORK_BASE: ReadonlyArray<readonly [number, string]> = [
 ];
 
 /**
- * Databases from the dev_vm fork recorded fork migrations at ids 50–56, which
- * would mask main's OrchestrationV2 (55) forever. Main's 50–51 schema is already
- * there, from `ReconcileForkSchema` (53) or main's own migrations; apply any of main's 52–54 a fork
- * reconcile did not, then rewrite the ledger to main's so later ids run.
- * Fork leftovers (agent_origin_json, agent_task_operations) are unused and kept.
+ * Old dev_vm databases recorded fork migrations at ids 50–56, masking main's OrchestrationV2 (55).
+ * Main's 50–51 schema is already present; apply any of main's 52–54 still missing, then rewrite
+ * the ledger to main's names so later ids run. Unused fork leftovers stay in place.
  */
 export const reconcileForkMigrationLedger = Effect.fn("reconcileForkMigrationLedger")(function* () {
   const sql = yield* SqlClient.SqlClient;

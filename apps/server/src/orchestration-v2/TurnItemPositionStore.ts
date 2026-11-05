@@ -50,10 +50,8 @@ export class TurnItemPositionStoreV2 extends Context.Service<
 >()("t3/orchestration-v2/TurnItemPositionStore/TurnItemPositionStoreV2") {}
 
 /**
- * Gives each turn item a stable timeline position the first time it is seen. A run takes its
- * band when its first item arrives, after every band already used, so the timeline follows the
- * order runs actually started: a queued run that starts after a later one (delegated results
- * jump the queue) and a message steered into it land at the bottom, not above finished runs.
+ * A run takes the next unused band when its first item arrives, so the timeline follows start
+ * order: a queued run that starts late, and a message steered into it, land at the bottom.
  * The band is never below the run's ordinal, so runs that start in order keep `ordinal` bands.
  */
 export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlClient> = Layer.effect(
