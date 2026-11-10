@@ -142,6 +142,10 @@ Finish with `git worktree remove --force ~/t3-merge-scout`.
   tests use Node 26 APIs (`StatementSync.stat`) and fail on the agent's Node 24.
   Run the `apps/desktop` tests in their own pass: on a fresh install, parallel
   desktop tests race to unpack Electron and fail with `EEXIST`.
+- Browser tests that fail with `Executable doesn't exist` need Playwright's
+  browser: `node node_modules/.pnpm/playwright-core@*/node_modules/playwright-core/cli.js install chromium-headless-shell`
+  from the scratch root. Playwright prunes browsers no live checkout registered,
+  so removing the last scratch tree can drop it.
 - `git merge --abort` refuses while edits are unstaged. Stage them first.
 - New upstream tests can assert upstream behavior that the fork deliberately
   changed (security headers, version comparison). Update the test to the fork's
