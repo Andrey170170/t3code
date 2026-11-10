@@ -28,3 +28,5 @@ export const APP_VERSION = import.meta.env.APP_VERSION || "0.0.0";
 // This fork's builds publish one track on Forgejo, so the Stable/Nightly switch does not apply.
 export const HAS_DESKTOP_UPDATE_TRACKS = !APP_VERSION.includes("-forgejo.");
 export const DESKTOP_DOWNLOAD_URL = "https://t3.codes/download";
+// Redirects to the App Store or Google Play to match the phone that opens it.
+export const MOBILE_APP_URL = "https://t3.codes/mobile";
