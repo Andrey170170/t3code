@@ -137,7 +137,9 @@ Finish with `git worktree remove --force ~/t3-merge-scout`.
 - Typecheck a package with `~/t3-merge-scout/node_modules/.bin/effect-tsgo tsrs --noEmit`
   run from its directory (tsrs with Effect's rules). It prints hundreds of
   Effect suggestions; only lines matching `error TS` count.
-- Run tests from the scratch root with `./node_modules/.bin/vp test run <files>`.
+- Run tests from the scratch root with
+  `PATH=$HOME/.volta/bin:$PATH ./node_modules/.bin/vp test run <files>`. Some
+  tests use Node 26 APIs (`StatementSync.stat`) and fail on the agent's Node 24.
   Run the `apps/desktop` tests in their own pass: on a fresh install, parallel
   desktop tests race to unpack Electron and fail with `EEXIST`.
 - `git merge --abort` refuses while edits are unstaged. Stage them first.
