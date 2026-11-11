@@ -38,6 +38,7 @@ function TimeField({
   className?: string;
   size?: "sm" | "default";
   "aria-label"?: string;
+  "aria-describedby"?: string | undefined;
 }) {
   // The text being typed, or null while the input shows the committed time.
   const [draft, setDraft] = useState<string | null>(null);
