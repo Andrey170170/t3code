@@ -36,6 +36,8 @@ export interface TurnItemPositionStoreV2Shape {
       readonly threadId: ThreadId;
       readonly turnItemId: TurnItemId;
       readonly runId: RunId | null;
+      // `run_start` takes the run's unused first slot, ahead of its items, and appends once it is taken.
+      readonly placement?: "append" | "run_start";
     } & TurnItemPositionHints,
   ) => Effect.Effect<number, TurnItemPositionStoreError>;
   readonly normalize: (
@@ -70,7 +72,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
     const allocate: TurnItemPositionStoreV2Shape["allocate"] =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(
-        function* ({ threadId, turnItemId, runId, runOrdinal, runBand }) {
+        function* ({ threadId, turnItemId, runId, runOrdinal, runBand, placement = "append" }) {
           const existing = yield* existingPosition(threadId, turnItemId);
           if (existing !== undefined) return existing;
 
@@ -112,20 +114,22 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
                 )
               ) END AS value
             )
+            , taken AS (
+              SELECT MIN(ordinal) AS low, MAX(ordinal) AS high
+              FROM orchestration_v2_turn_item_positions, band
+              WHERE thread_id = ${threadId}
+                AND ordinal >= band.value * 1000000
+                AND ordinal < (band.value + 1) * 1000000
+            )
             SELECT
               ${threadId},
               ${turnItemId},
-              COALESCE(
-                (
-                  SELECT MAX(ordinal)
-                  FROM orchestration_v2_turn_item_positions
-                  WHERE thread_id = ${threadId}
-                    AND ordinal >= band.value * 1000000
-                    AND ordinal < (band.value + 1) * 1000000
-                ),
-                band.value * 1000000
-              ) + 1
-            FROM band
+              ${
+                placement === "run_start"
+                  ? sql`CASE WHEN COALESCE(taken.low, band.value * 1000000 + 1) > band.value * 1000000 THEN band.value * 1000000 ELSE taken.high + 1 END`
+                  : sql`COALESCE(taken.high, band.value * 1000000) + 1`
+              }
+            FROM band, taken
             WHERE true
             ON CONFLICT(thread_id, turn_item_id) DO NOTHING
           `;

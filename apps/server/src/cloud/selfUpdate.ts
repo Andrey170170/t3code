@@ -45,9 +45,10 @@ import {
   PinnedRuntimePreflightBlockedError,
   prunePinnedRuntimes,
 } from "./pinnedRuntime.ts";
+import { bootServiceProgramOf, bootServiceUnitPath } from "./bootService.ts";
 import { decodeServicePreflightResult } from "./servicePreflight.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
-import { isExactServiceVersion, SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
+import { isExactServiceVersion } from "./serviceProtocol.ts";
 
 // A staged runtime's cold start can take over a minute on a loaded, swapping host.
 const PREFLIGHT_TIMEOUT = Duration.minutes(3);
@@ -111,9 +112,24 @@ export const pruneRuntimesOnStart = Effect.fn("cloud.server_self_update.prune_on
     if (!input.managed && executablePath !== entryPath && executablePath !== realEntryPath) {
       return [];
     }
+    const unitPath = yield* bootServiceUnitPath();
+    // A stopped service's unit still names the launcher runtime it will start.
+    const unit =
+      unitPath === undefined
+        ? Option.none<string>()
+        : yield* fs.readFileString(unitPath).pipe(Effect.option);
+    const program = Option.flatMapNullishOr(unit, bootServiceProgramOf);
+    // The unit may name it through another spelling of a symlinked T3 home.
+    const references = Option.isNone(program)
+      ? []
+      : [
+          program.value,
+          yield* fs.realPath(program.value).pipe(Effect.orElseSucceed(() => program.value)),
+        ];
     const removed = yield* prunePinnedRuntimes({
       baseDir: input.baseDir,
       keep: [packageJson.version],
+      references,
     });
     if (removed.length > 0) {
       yield* Effect.logInfo("Removed unused t3 runtimes.", { versions: removed });
@@ -274,7 +290,9 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         "This Forgejo build uses custom npm packages. Run `t3code-update` on the server machine, or reinstall the custom package from Forgejo.",
       );
     }
-    if (capability === null) {
+    // The target must accept the launcher that will run it, which can be older than this server.
+    const launcherProtocol = launcher.protocol;
+    if (capability === null || launcherProtocol === undefined) {
       return yield* failWith(
         "Remote updates require the T3 Code background service. Run `t3 service install` on the server machine.",
       );
@@ -313,7 +331,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
                 "--database-path",
                 serverConfig.dbPath,
                 "--launcher-protocol",
-                String(SERVICE_LAUNCHER_PROTOCOL),
+                String(launcherProtocol),
               ],
               timeout: PREFLIGHT_TIMEOUT,
             })
@@ -353,7 +371,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
                       }),
                     );
                   }
-                  const preflight = decodeServicePreflightResult(parsed);
+                  const preflight = decodeServicePreflightResult(parsed, launcherProtocol);
                   if (preflight === undefined || preflight.version !== targetVersion) {
                     return Effect.fail(
                       new PinnedRuntimeInstallError({
