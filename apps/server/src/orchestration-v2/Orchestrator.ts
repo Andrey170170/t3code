@@ -168,6 +168,7 @@ import {
   type ProjectionTimelinePageOptions,
   type ProjectionRecordFilter,
   type ProjectionRecords,
+  type ProjectionStoreV2Error,
   type ProjectionCheckpointContext,
   type OlderSettledThreadsListing,
   type ActiveShellIndexEntry,
@@ -3802,18 +3803,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "The pull request watch ended or its thread settled while it was read.",
         });
       }
+      const projectionError = (cause: ProjectionStoreV2Error) =>
+        new OrchestratorProjectionError({ threadId: command.threadId, cause });
       // A wake that reuses a queued wake's message folds into it rather than queuing another run.
-      const replacedRun =
+      const replacedMessage =
         wake === undefined
           ? undefined
           : (yield* projectionStore
-              .getThreadRecords(command.threadId, ["runs"])
-              .pipe(
-                Effect.mapError(
-                  (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-                ),
-              )).runs.find((run) => run.userMessageId === wake.messageId);
-      if (replacedRun !== undefined && replacedRun.status !== "queued") {
+              .getMessagesById(command.threadId, [wake.messageId])
+              .pipe(Effect.mapError(projectionError))).get(wake.messageId);
+      const replacedRun =
+        replacedMessage?.runId == null
+          ? undefined
+          : yield* projectionStore
+              .getRun(command.threadId, replacedMessage.runId)
+              .pipe(Effect.mapError(projectionError));
+      if (replacedMessage !== undefined && replacedRun?.status !== "queued") {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -3847,21 +3852,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               }
             : wake.notification.source,
       };
-      if (replacedRun !== undefined) {
-        const message = yield* projectionStore
-          .getRunMessage(command.threadId, replacedRun.id)
-          .pipe(
-            Effect.mapError(
-              (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
-            ),
-          );
-        if (message === undefined) {
-          return yield* new OrchestratorDispatchError({
-            commandId: command.commandId,
-            commandType: command.type,
-            cause: `Queued run ${replacedRun.id} has no user message.`,
-          });
-        }
+      if (replacedMessage !== undefined && replacedRun !== undefined) {
         const now = yield* DateTime.now;
         yield* emit(
           events,
@@ -3874,7 +3865,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           providerInstanceId: replacedRun.providerInstanceId,
           occurredAt: now,
           payload: {
-            ...message,
+            ...replacedMessage,
             text: wakeMessage.text,
             notification,
             updatedAt: now,

@@ -396,8 +396,10 @@ export const make = Effect.gen(function* () {
     const key = lifeKey(target);
     const queued = queuedWakes.get(key);
     if (queued === undefined) return undefined;
-    const { runs } = yield* projections.getThreadRecords(target.thread.id, ["runs"]);
-    if (runs.some((run) => run.userMessageId === queued.messageId && run.status === "queued")) {
+    const { runs } = yield* projections.getThreadRecords(target.thread.id, ["runs"], {
+      runStatuses: ["queued"],
+    });
+    if (runs.some((run) => run.userMessageId === queued.messageId)) {
       return queued;
     }
     queuedWakes.delete(key);
