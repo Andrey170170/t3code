@@ -151,6 +151,7 @@ import { Textarea } from "../ui/textarea";
 import { TimeField } from "../ui/time-field";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { searchableSetting } from "./settingsSearch";
 import {
   SettingsPageContainer,
   SettingsRow,
@@ -497,7 +498,7 @@ export function ScheduledTasksSettings(target: {
   return (
     <SettingsPageContainer>
       <SettingsSection
-        title="Scheduled tasks"
+        {...searchableSetting("scheduled-tasks")}
         variant="plain"
         headerAction={
           <Button

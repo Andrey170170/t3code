@@ -39,6 +39,7 @@ import { forkParked } from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import {
+  combinePullRequestWatchWakes,
   evaluatePullRequestWatch,
   PULL_REQUEST_WATCH_NO_CHECKS_MS,
   pullRequestThumbsUp,
@@ -101,6 +102,36 @@ interface ReadPlan {
   readonly activity: boolean;
 }
 
+interface Wake {
+  readonly text: string;
+  readonly notification: OrchestrationV2Notification;
+  readonly messageId?: MessageId;
+  readonly includesRemarks?: boolean;
+}
+
+/** A queued single-PR wake, with the pre-wake watch and the remarks and 👍 its report tells. */
+interface QueuedWake {
+  readonly messageId: MessageId;
+  readonly before: ThreadPullRequestWatch;
+  readonly remarks: ReadonlyArray<PullRequestComment> | null;
+  readonly thumbsUp: ReadonlyArray<string> | null;
+  readonly thumbsUpNews: ReadonlyArray<string>;
+}
+
+/** A wake a pass holds back so each thread gets one for everything the pass found. */
+interface HeldWake {
+  readonly groupKey: string;
+  readonly target: WatchTarget;
+  readonly next: ThreadPullRequestWatch | null;
+  readonly endedWatch?: ThreadPullRequestWatch;
+  readonly wake: Wake;
+  readonly reason?: WatchEndReason;
+  /** Remembered when this wake is sent alone, so later news can fold into it. */
+  readonly queue?: QueuedWake;
+  /** Rewrites the queued wake `wake.messageId`, so it must be sent alone. */
+  readonly folds?: boolean;
+}
+
 const watchKey = ({ thread, watch }: WatchTarget) => `${thread.id} ${watch.startedAt}`;
 
 type WatchEndReason =
@@ -151,11 +182,13 @@ function planRead(
   if (last === undefined || group.targets.some((target) => !last.watches.has(watchKey(target)))) {
     return { detail: true, activity: true };
   }
-  // Nothing on the host changes when the no-checks deadline passes, so it alone prompts a read.
+  // Nothing on the host changes when the no-checks deadline passes, or when a push to another
+  // branch clears a watch's answer, so either alone prompts a read.
   const checksDue = group.targets.some(
     ({ watch }) =>
-      watch.checksAwaitedSince != null &&
-      now - Date.parse(watch.checksAwaitedSince) >= PULL_REQUEST_WATCH_NO_CHECKS_MS,
+      watch.checksPending === undefined ||
+      (watch.checksAwaitedSince != null &&
+        now - Date.parse(watch.checksAwaitedSince) >= PULL_REQUEST_WATCH_NO_CHECKS_MS),
   );
   if (fingerprint === null) {
     const read =
@@ -175,6 +208,33 @@ function planRead(
   };
 }
 
+/**
+ * The watch later news folds against. A first read records the 👍, checks, and conflict already
+ * there without telling them, so folds keep that record but not the news fields the wake tells.
+ */
+function foldBaseOf(
+  watch: ThreadPullRequestWatch,
+  next: ThreadPullRequestWatch,
+): ThreadPullRequestWatch {
+  const thumbsUp = watch.thumbsUp ?? next.thumbsUp;
+  if (watch.awaitingBaseline === undefined) return { ...watch, thumbsUp };
+  const { mergeQueueRemovalId: _, ...recorded } = next;
+  return {
+    ...recorded,
+    remarksThrough: watch.remarksThrough,
+    remarkIds: watch.remarkIds,
+    thumbsUp,
+    wakes: watch.wakes,
+    ...(watch.mergeQueueRemovalId === undefined
+      ? {}
+      : { mergeQueueRemovalId: watch.mergeQueueRemovalId }),
+  };
+}
+
+// Lets the orchestrator tell that a push cleared the answer while this read was in flight.
+const checksPendingBeforeOf = ({ watch }: WatchTarget) =>
+  watch.checksPending === undefined ? {} : { checksPendingBefore: watch.checksPending };
+
 function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatch): boolean {
   return (
     left.startedAt === right.startedAt &&
@@ -189,8 +249,11 @@ function watchesEqual(left: ThreadPullRequestWatch, right: ThreadPullRequestWatc
     left.remarkIds.join("\n") === right.remarkIds.join("\n") &&
     left.thumbsUp?.join("\n") === right.thumbsUp?.join("\n") &&
     left.conflicting === right.conflicting &&
+    left.mergeQueueRemovalId === right.mergeQueueRemovalId &&
     left.wakes === right.wakes &&
-    left.checksAwaitedSince === right.checksAwaitedSince
+    left.awaitingBaseline === right.awaitingBaseline &&
+    left.checksAwaitedSince === right.checksAwaitedSince &&
+    left.checksPending === right.checksPending
   );
 }
 
@@ -221,16 +284,7 @@ export const make = Effect.gen(function* () {
    * the report. Later news folds into a queued wake, so a busy thread gets one combined report.
    * In memory only: after a restart, the next news queues its own wake.
    */
-  const queuedWakes = new Map<
-    string,
-    {
-      readonly messageId: MessageId;
-      readonly before: ThreadPullRequestWatch;
-      readonly remarks: ReadonlyArray<PullRequestComment> | null;
-      readonly thumbsUp: ReadonlyArray<string> | null;
-      readonly thumbsUpNews: ReadonlyArray<string>;
-    }
-  >();
+  const queuedWakes = new Map<string, QueuedWake>();
 
   const lifeOf = (target: WatchTarget): WatchLife => {
     const existing = lives.get(lifeKey(target));
@@ -311,12 +365,7 @@ export const make = Effect.gen(function* () {
   const record = Effect.fn("PullRequestWatchReactor.record")(function* (
     target: WatchTarget,
     next: ThreadPullRequestWatch | null,
-    wake?: {
-      readonly text: string;
-      readonly notification: OrchestrationV2Notification;
-      readonly messageId?: MessageId;
-      readonly includesRemarks?: boolean;
-    },
+    wake?: Wake,
     endedWatch?: ThreadPullRequestWatch,
   ) {
     const uuid = yield* random.uuidV4();
@@ -327,6 +376,7 @@ export const make = Effect.gen(function* () {
       ...identityOf(target.link),
       startedAt: target.watch.startedAt,
       watch: next,
+      ...checksPendingBeforeOf(target),
       ...(endedWatch === undefined ? {} : { endedWatch }),
       ...(wake === undefined
         ? {}
@@ -356,6 +406,7 @@ export const make = Effect.gen(function* () {
 
   /** Wakes the agent with what changed since it was last told, folding into a queued wake. */
   const wake = Effect.fn("PullRequestWatchReactor.wake")(function* (
+    groupKey: string,
     target: WatchTarget,
     detail: PullRequestDetail,
     remarks: ReadonlyArray<PullRequestComment> | null,
@@ -394,10 +445,12 @@ export const make = Effect.gen(function* () {
       ? queued.messageId
       : MessageId.make(`message:pr-watch:${yield* random.uuidV4()}`);
     // An ending watch keeps what this pass saw, so watching again starts from it.
-    yield* record(
+    yield* hold({
+      groupKey,
       target,
-      told.exhausted ? null : told.next,
-      {
+      next: told.exhausted ? null : told.next,
+      ...(told.exhausted ? { endedWatch: told.next, reason: "comment-limit" as const } : {}),
+      wake: {
         ...pullRequestWatchMessage({
           number: target.link.number,
           url: target.link.url,
@@ -408,20 +461,15 @@ export const make = Effect.gen(function* () {
         messageId,
         includesRemarks: told.changes.some((change) => change.kind === "remarks"),
       },
-      told.exhausted ? told.next : undefined,
-    ).pipe(Effect.tapError(() => Effect.sync(() => queuedWakes.delete(lifeKey(target)))));
-    queuedWakes.set(lifeKey(target), {
-      messageId,
-      // A watch's first complete read records the 👍 already there; later folds compare with it.
-      before: folded
-        ? queued.before
-        : { ...target.watch, thumbsUp: target.watch.thumbsUp ?? report.next.thumbsUp },
-      remarks: folded ? foldRemarks : remarks,
-      thumbsUp: folded ? foldThumbsUp : thumbsUp,
-      thumbsUpNews: folded ? thumbsUpNews : reportNews,
+      queue: {
+        messageId,
+        before: folded ? queued.before : foldBaseOf(target.watch, report.next),
+        remarks: folded ? foldRemarks : remarks,
+        thumbsUp: folded ? foldThumbsUp : thumbsUp,
+        thumbsUpNews: folded ? thumbsUpNews : reportNews,
+      },
+      ...(folded ? { folds: true } : {}),
     });
-    if (!folded) yield* woke(target);
-    if (told.exhausted) yield* ended(target, "comment-limit");
   });
 
   const giveUp = (target: WatchTarget) =>
@@ -529,18 +577,121 @@ export const make = Effect.gen(function* () {
       ),
   );
 
-  const closed = (target: WatchTarget) =>
-    record(target, null, {
-      text: `Pull request #${target.link.number} (${target.link.url}) was closed, so T3 Code stopped watching it. Call watch_pull_request if it reopens.`,
-      notification: {
-        source: { kind: "monitor" },
-        outcome: "updated",
-        summary: `#${target.link.number}: closed, stopped watching`,
-      },
-    }).pipe(
-      Effect.tap(() => woke(target)),
-      Effect.tap(() => ended(target, "closed")),
+  /** Wakes the current pass found, sent by `sendHeld` once every read of the pass is done. */
+  let held: Array<HeldWake> = [];
+  const hold = (wake: HeldWake) => Effect.sync(() => void held.push(wake));
+
+  const sendOne = (item: HeldWake) =>
+    record(item.target, item.next, item.wake, item.endedWatch).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          if (item.queue === undefined) queuedWakes.delete(lifeKey(item.target));
+          else queuedWakes.set(lifeKey(item.target), item.queue);
+        }),
+      ),
+      // A fold rewrites a wake the agent has not started on, so it is not another wake.
+      Effect.tap(() => (item.folds === true ? Effect.void : woke(item.target))),
+      Effect.tap(() => (item.reason === undefined ? Effect.void : ended(item.target, item.reason))),
+      Effect.catchCause((cause) => {
+        queuedWakes.delete(lifeKey(item.target));
+        lastReads.delete(item.groupKey);
+        return logFailure("pull request watch update failed", {
+          threadId: item.target.thread.id,
+          pullRequest: item.groupKey,
+        })(cause);
+      }),
     );
+
+  const sendTogether = Effect.fn("PullRequestWatchReactor.sendTogether")(function* (
+    items: readonly [HeldWake, ...ReadonlyArray<HeldWake>],
+  ) {
+    const [first, ...rest] = items;
+    const uuid = yield* random.uuidV4();
+    yield* engine.dispatch({
+      type: "thread.pull-request-watch.sync",
+      commandId: CommandId.make(`server:pr-watch:${first.target.thread.id}:${uuid}`),
+      threadId: first.target.thread.id,
+      ...identityOf(first.target.link),
+      startedAt: first.target.watch.startedAt,
+      watch: first.next,
+      ...checksPendingBeforeOf(first.target),
+      ...(first.endedWatch === undefined ? {} : { endedWatch: first.endedWatch }),
+      others: rest.map((item) => ({
+        ...identityOf(item.target.link),
+        startedAt: item.target.watch.startedAt,
+        watch: item.next,
+        ...checksPendingBeforeOf(item.target),
+        ...(item.endedWatch === undefined ? {} : { endedWatch: item.endedWatch }),
+        ...(item.wake.includesRemarks === true ? { includesRemarks: true } : {}),
+      })),
+      wake: {
+        ...combinePullRequestWatchWakes([first.wake, ...rest.map((item) => item.wake)]),
+        ...(first.wake.includesRemarks === true ? { includesRemarks: true } : {}),
+        sections: items.map(({ wake }) => ({
+          text: wake.text,
+          outcome: wake.notification.outcome,
+          summary: wake.notification.summary,
+        })),
+        messageId: MessageId.make(`message:pr-watch:${uuid}`),
+      },
+    });
+    yield* Effect.forEach(
+      items,
+      (item) =>
+        // One wake for several pull requests cannot be rewritten for just one of them.
+        Effect.sync(() => queuedWakes.delete(lifeKey(item.target))).pipe(
+          Effect.andThen(woke(item.target)),
+          Effect.andThen(item.reason === undefined ? Effect.void : ended(item.target, item.reason)),
+        ),
+      { discard: true },
+    );
+  });
+
+  const sendHeld = Effect.suspend(() => {
+    const byThread = new Map<string, Array<HeldWake>>();
+    for (const item of held) {
+      byThread.set(item.target.thread.id, [...(byThread.get(item.target.thread.id) ?? []), item]);
+    }
+    held = [];
+    return Effect.forEach(
+      byThread.values(),
+      (items) => {
+        const folds = items.filter((item) => item.folds === true);
+        const [first, ...rest] = items.filter((item) => item.folds !== true);
+        const fresh =
+          first === undefined
+            ? Effect.void
+            : rest.length === 0
+              ? sendOne(first)
+              : // A watch that ended or moved during the pass fails the whole command; each then
+                // goes on its own, as the orchestrator decides for it alone.
+                sendTogether([first, ...rest]).pipe(
+                  Effect.catchCauseIf(
+                    (cause) => !Cause.hasInterruptsOnly(cause),
+                    () => Effect.forEach([first, ...rest], sendOne, { discard: true }),
+                  ),
+                );
+        return Effect.forEach(folds, sendOne, { discard: true }).pipe(Effect.andThen(fresh));
+      },
+      { discard: true },
+    );
+  });
+
+  const closed = (groupKey: string, target: WatchTarget) =>
+    hold({
+      groupKey,
+      target,
+      next: null,
+      wake: {
+        text: `Pull request #${target.link.number} (${target.link.url}) was closed, so T3 Code stopped watching it. Call watch_pull_request if it reopens.`,
+        notification: {
+          source: { kind: "monitor" },
+          outcome: "updated",
+          summary: `#${target.link.number}: closed, stopped watching`,
+        },
+      },
+      reason: "closed",
+    });
 
   const endsWithoutRead = ({ thread, link }: WatchTarget): WatchEndReason | undefined =>
     link.snapshot?.state === "merged"
@@ -663,7 +814,7 @@ export const make = Effect.gen(function* () {
       lastReads.delete(group.key);
       return yield* eachTarget(group, (target) =>
         detail.state === "closed"
-          ? closed(target)
+          ? closed(group.key, target)
           : record(target, null).pipe(Effect.tap(() => ended(target, "merged"))),
       );
     }
@@ -695,16 +846,21 @@ export const make = Effect.gen(function* () {
       status: fingerprint?.status ?? null,
       remarks: fingerprint?.remarks ?? null,
     });
-    yield* eachTarget(group, (target) => {
-      const report = evaluatePullRequestWatch(target.watch, detail, remarks, thumbsUp, now);
-      if (report.changes.length > 0) return wake(target, detail, remarks, thumbsUp, report, now);
-      return watchesEqual(report.next, target.watch) ? Effect.void : record(target, report.next);
-    });
+    yield* eachTarget(group, (target) =>
+      Effect.gen(function* () {
+        const report = evaluatePullRequestWatch(target.watch, detail, remarks, thumbsUp, now);
+        if (report.changes.length > 0) {
+          return yield* wake(group.key, target, detail, remarks, thumbsUp, report, now);
+        }
+        if (!watchesEqual(report.next, target.watch)) yield* record(target, report.next);
+      }),
+    );
   });
 
   /** Every watch, or with `changed`, only that pull request's after its host reported a change. */
   // The sweep and change reads each name their own span.
   const pass = Effect.fnUntraced(function* (changed: string | undefined) {
+    held = [];
     const threads = yield* projections.getThreadsWithPullRequests();
     const targets = threads.flatMap((thread) =>
       visibleThreadPullRequests(thread.pullRequests ?? []).flatMap((link) =>
@@ -798,6 +954,7 @@ export const make = Effect.gen(function* () {
         ),
       { concurrency: "unbounded", discard: true },
     );
+    yield* sendHeld;
   }, passes.withPermit);
 
   const sweep = pass(undefined).pipe(

@@ -316,6 +316,13 @@ export const ReactionConnection = Schema.Struct({
 })
 export interface ReactionConnection extends Schema.Struct.Type<typeof ReactionConnection.fields> {}
 
+/** The connection type for PullRequestTimelineItems. */
+export const PullRequestTimelineItemsConnection = Schema.Struct({
+  /** Identifies the count of items after applying `before` and `after` filters. */
+  filteredCount: Shared.Int
+})
+export interface PullRequestTimelineItemsConnection extends Schema.Struct.Type<typeof PullRequestTimelineItemsConnection.fields> {}
+
 /** Represents a count of the state of a check run. */
 export const CheckRunStateCount = Schema.Struct({
   /** The state of a check run. */
@@ -387,6 +394,8 @@ export const PullRequestWatchFingerprintRepositoryPullRequestPullRequest = Schem
   reviewThreads: PullRequestReviewThreadConnection,
   /** A list of Reactions left on the Issue. */
   reactions: ReactionConnection,
+  /** A list of events, comments, commits, etc. associated with the pull request. */
+  mergeQueueRemovals: Schema.optionalKey(PullRequestTimelineItemsConnection),
   /** A list of commits present in this pull request's head branch not present in the base branch. */
   commits: PullRequestWatchFingerprintRepositoryPullRequestCommitsPullRequestCommitConnection
 })
@@ -405,17 +414,19 @@ export const PullRequestWatchFingerprint = GraphQL.query("PullRequestWatchFinger
     variables: [
       { name: "owner", body: "String!" },
       { name: "name", body: "String!" },
-      { name: "number", body: "Int!" }
+      { name: "number", body: "Int!" },
+      { name: "mergeQueue", body: "Boolean!" }
     ],
     selections: [
-      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){pullRequest(number:$", "number", "){state mergeable headRefOid comments(first:100 orderBy:{field:UPDATED_AT direction:DESC}){totalCount nodes{lastEditedAt}}reviews(last:100){totalCount nodes{lastEditedAt}}reviewThreads{totalCount}reactions(content:THUMBS_UP){totalCount}commits(last:1){nodes{commit{statusCheckRollup{contexts{checkRunCountsByState{state count}statusContextCountsByState{state count}}}}}}}}"] }
+      { name: "repository", body: ["(owner:$", "owner", " name:$", "name", "){pullRequest(number:$", "number", "){state mergeable headRefOid comments(first:100 orderBy:{field:UPDATED_AT direction:DESC}){totalCount nodes{lastEditedAt}}reviews(last:100){totalCount nodes{lastEditedAt}}reviewThreads{totalCount}reactions(content:THUMBS_UP){totalCount}mergeQueueRemovals:timelineItems(itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT])@include(if:$", "mergeQueue", "){filteredCount}commits(last:1){nodes{commit{statusCheckRollup{contexts{checkRunCountsByState{state count}statusContextCountsByState{state count}}}}}}}}"] }
     ],
     fragments: []
   },
   variables: {
     owner: Schema.String,
     name: Schema.String,
-    number: Shared.Int
+    number: Shared.Int,
+    mergeQueue: Schema.Boolean
   },
   result: Schema.Struct({
     /** Lookup a given repository by the owner and repository name. */
