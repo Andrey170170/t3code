@@ -7830,16 +7830,41 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           ),
         };
 
-        // Drain final notifications before the session manager retires the dead process.
-        // Queue.fail lets readers take items already buffered before they see the failure.
-        // An idle exit (for example, the app-server stopped with the T3 server) ends the
-        // session as stopped instead, so it does not record an error on the thread.
+        const hasPendingBackgroundWork = Effect.gen(function* () {
+          for (const items of (yield* Ref.get(runningCommandItemsByTurn)).values()) {
+            if (items.size > 0) {
+              return true;
+            }
+          }
+          for (const items of (yield* Ref.get(runningDynamicToolsByTurn)).values()) {
+            if (items.size > 0) {
+              return true;
+            }
+          }
+          if ((yield* Ref.get(pendingMcpAppCaptures)).size > 0) {
+            return true;
+          }
+          for (const state of imageTurns.values()) {
+            if (state.running.size > 0 || state.saved.size > 0) return true;
+          }
+          for (const subagent of (yield* Ref.get(subagentThreads)).values()) {
+            if (subagent.task.status === "running") {
+              return true;
+            }
+          }
+          return false;
+        });
+
+        // Queue.fail lets readers drain buffered notifications before the dead process retires.
+        // An idle exit (the app-server stopped with the T3 server) ends the session as stopped,
+        // with no thread error. Open background work is not idle: only the failure ends it.
         yield* client.awaitTermination.pipe(
           Effect.catch((cause) =>
             Effect.gen(function* () {
               const working =
                 (yield* Ref.get(activeTurns)).size > 0 ||
-                (yield* Ref.get(pendingRootTurns)).size > 0;
+                (yield* Ref.get(pendingRootTurns)).size > 0 ||
+                (yield* hasPendingBackgroundWork);
               if (working) {
                 return yield* Queue.fail(
                   events,
@@ -7870,30 +7895,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           canReuseContextUsage: canReuseCodexContextUsage,
           normalizeThreadLoadModelSelection: normalizeCodexThreadLoadModelSelection,
           // Idle release can beat delayed subagent resumes: Codex reports them completed between turns with no resume-expected signal.
-          hasPendingBackgroundWork: Effect.gen(function* () {
-            for (const items of (yield* Ref.get(runningCommandItemsByTurn)).values()) {
-              if (items.size > 0) {
-                return true;
-              }
-            }
-            for (const items of (yield* Ref.get(runningDynamicToolsByTurn)).values()) {
-              if (items.size > 0) {
-                return true;
-              }
-            }
-            if ((yield* Ref.get(pendingMcpAppCaptures)).size > 0) {
-              return true;
-            }
-            for (const state of imageTurns.values()) {
-              if (state.running.size > 0 || state.saved.size > 0) return true;
-            }
-            for (const subagent of (yield* Ref.get(subagentThreads)).values()) {
-              if (subagent.task.status === "running") {
-                return true;
-              }
-            }
-            return false;
-          }),
+          hasPendingBackgroundWork,
           // Untraced: the run's event stream calls this once per provider event.
           hasPendingBackgroundWorkForThread: Effect.fnUntraced(function* (providerThread) {
             const contexts = [
