@@ -19,8 +19,9 @@ instance uses.
 First install overrides: T3CODE_HOST, T3CODE_PORT, T3CODE_ORIGIN,
 T3CODE_BASE, T3CODE_WORKDIR, T3CODE_NODE (absolute node executable).
 Subsequent installs read the instance's service.env; edit it to reconfigure.
-If the restarted service does not answer, the previous service.env is
-restored and the service restarted with it.
+If the restarted service stops or does not answer within 10 minutes, the
+previous service.env is restored and the service restarted with it, unless
+the new build already migrated the database; then the new build is kept.
 --uninstall stops and removes a named instance's service, helpers and
 configuration; its state folder is kept.
 HELP
@@ -182,18 +183,30 @@ systemctl --user enable "$unit"
 rm -f -- "$config_dir/service.env.previous"
 if [[ -f $config_dir/service.env ]]; then cp -p -- "$config_dir/service.env" "$config_dir/service.env.previous"; fi
 mv -f -- "$env_tmp" "$config_dir/service.env"
+# The newest migration the state database records; empty when it cannot be read.
+db_migration() {
+  "$T3CODE_NODE" --no-warnings -e '
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(process.argv[1], { readOnly: true });
+    console.log(db.prepare("SELECT MAX(migration_id) AS id FROM effect_sql_migrations").get().id ?? "");
+  ' "$T3CODE_BASE/userdata/statev2.sqlite" 2>/dev/null || true
+}
+migration_before=$(db_migration)
 # Failures from here on go through the rollback below.
 restarted=0
 systemctl --user restart "$unit" && restarted=1
 # An IPv6 literal needs brackets in a URL.
 ready_host=$T3CODE_HOST
 [[ $ready_host == *:* && $ready_host != \[* ]] && ready_host="[$ready_host]"
+# Startup runs pending migrations before it listens, which takes minutes on a
+# large database, so wait while the service runs; a crash ends the wait.
 serving() {
-  local port=$1 attempt
-  for ((attempt=0; attempt<30; attempt++)); do
+  local port=$1 deadline=$((SECONDS + 600))
+  while ((SECONDS < deadline)); do
     if curl --noproxy '*' -fsS --connect-timeout 1 --max-time 2 "http://$ready_host:$port/" >/dev/null 2>&1; then
       return 0
     fi
+    systemctl --user is-active -q "$unit" || return 1
     sleep 1
   done
   return 1
@@ -207,6 +220,15 @@ if [[ -f $config_dir/service.env.previous ]]; then
   read -r previous_build previous_host previous_port < <(
     source "$config_dir/service.env.previous"; echo "${T3CODE_BUILD_ID:-} ${T3CODE_HOST:-} ${T3CODE_PORT:-}"
   )
+  # Stopping rolls back a migration in flight, so the record read next is final.
+  systemctl --user stop "$unit" || true
+  migration_after=$(db_migration)
+  # The previous build fails on a schema it does not know, so keep the new one.
+  if [[ -n $migration_before && -n $migration_after && $migration_after != "$migration_before" ]]; then
+    systemctl --user start "$unit" || true
+    echo "Kept $T3CODE_BUILD_ID and started it again: it migrated the database from $migration_before to $migration_after, which $previous_build cannot use. Inspect journalctl --user -u $unit." >&2
+    exit 1
+  fi
   mv -f -- "$config_dir/service.env.previous" "$config_dir/service.env"
   systemctl --user restart "$unit" || true
   ready_host=$previous_host

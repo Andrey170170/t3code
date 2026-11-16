@@ -164,8 +164,11 @@ t3code-v2-pair DEVICE
 ```
 
 Every install keeps the replaced configuration as `service.env.previous`; when
-the restarted service does not answer, it is put back and the service
-restarted with it (a first install is stopped instead).
+the restarted service stops or does not answer within 10 minutes, it is put
+back and the service restarted with it (a first install is stopped instead).
+Startup migrations count toward that wait. A build that already migrated the
+database is kept instead, since the previous build cannot use the newer
+schema.
 `scripts/t3code-install --instance NAME --uninstall` removes a named
 instance's service, helpers and configuration and keeps its state folder.
 
