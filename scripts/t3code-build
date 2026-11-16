@@ -283,10 +283,9 @@ node -e '
   // pnpm patches never reach the npm install of an external dependency, so these ship
   // patched in dist/vendor, where the server loads them, and the package lists their own
   // dependencies. Every other patched external must say why it may ship unpatched.
-  const vendored = ["@ff-labs/fff-node"];
+  const vendored = ["@ff-labs/fff-node", "@cursor/sdk"];
   const unpatched = {
-    "node-pty": "its patch only changes the Windows ConPTY agent",
-    "@cursor/sdk": "follow-up: bundling needs its 21 MB and overlapping dependencies",
+    "node-pty": "its patch only changes the Windows ConPTY agent, and the desktop sidecar installs it patched",
   };
   const { isRuntimeExternalCliDependency } = await import("./scripts/lib/cli-external-packages.ts");
   for (const key of Object.keys(workspace.patchedDependencies ?? {})) {
@@ -305,6 +304,16 @@ node -e '
     Object.assign(lifted.optionalDependencies, manifest.optionalDependencies);
     fs.cpSync(real, `apps/server/dist/vendor/${name}`, { recursive: true, dereference: true });
   }
+  // npm ignores overrides in a dependency manifest, so a direct dependency takes its pinned
+  // override version. Vendored packages leave the list to avoid a second, unpatched install.
+  const overrides = resolve(workspace.overrides, "apps/server");
+  const dependencies = { ...lifted.dependencies, ...resolve(external, "apps/server") };
+  for (const name of Object.keys(dependencies)) {
+    if (vendored.includes(name)) delete dependencies[name];
+    else if (typeof overrides[name] === "string" && !overrides[name].startsWith("$")) {
+      dependencies[name] = overrides[name];
+    }
+  }
   const published = {
     name: server.name,
     repository: server.repository,
@@ -313,9 +322,9 @@ node -e '
     version: server.version,
     engines: server.engines,
     files: Array.from(new Set([...(server.files ?? []), "t3code-build.json"])),
-    dependencies: { ...lifted.dependencies, ...resolve(external, "apps/server") },
+    dependencies,
     optionalDependencies: lifted.optionalDependencies,
-    overrides: resolve(workspace.overrides, "apps/server"),
+    overrides,
   };
   fs.writeFileSync(serverPath, JSON.stringify(published, null, 2) + "\n");
 ')
@@ -373,6 +382,23 @@ node --input-type=module -e '
   }
 ' "$FFF_ENTRY" "$SEARCH_ROOT" >&2 ||
   die "The installed package cannot search files."
+# The Cursor provider loads the vendored, patched SDK too. Its platform binaries stay a
+# normal npm install, found by walking up node_modules from the server entry.
+mapfile -t CURSOR_LOADERS < <(grep -rlF --include='*.mjs' "vendor/@cursor/sdk/package.json" "$INSTALLED_DIST")
+[[ ${#CURSOR_LOADERS[@]} -eq 1 ]] ||
+  die "Expected one bundle file to load the vendored Cursor SDK, found ${#CURSOR_LOADERS[@]}."
+CURSOR_MANIFEST="$(dirname -- "${CURSOR_LOADERS[0]}")/vendor/@cursor/sdk/package.json"
+[[ -f $CURSOR_MANIFEST ]] || die "The vendored Cursor SDK is not beside its loader: $CURSOR_MANIFEST"
+[[ ! -e $SMOKE_DIR/node_modules/@cursor/sdk ]] || die "npm also installed the unpatched Cursor SDK."
+node -e '
+  const requireSdk = require("node:module").createRequire(process.argv[1]);
+  if (typeof requireSdk("@cursor/sdk").Agent !== "function") throw new Error("missing Agent");
+  if (typeof requireSdk("@cursor/sdk/sqlite").SqliteLocalAgentStore !== "function") {
+    throw new Error("missing SqliteLocalAgentStore");
+  }
+  requireSdk.resolve(`@cursor/sdk-${process.platform}-${process.arch}/package.json`);
+' "$CURSOR_MANIFEST" >&2 ||
+  die "The installed package cannot load the Cursor SDK."
 
 SHA256=$(sha256sum "${PACKED[0]}" | awk '{print $1}')
 OUTPUT_METADATA="$TEMP_DIR/build.json"

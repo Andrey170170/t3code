@@ -1,8 +1,25 @@
 // @effect-diagnostics nodeBuiltinImport:off -- The SDK must load from disk beside its Webpack chunks.
+import * as NodeFS from "node:fs";
 import * as NodeModule from "node:module";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 
 // createRequire preserves adjacent Webpack chunks and native modules in bundled/SEA builds.
-const requireCursorSdk = NodeModule.createRequire(import.meta.url);
+// Forgejo npm packages ship the patched SDK in dist/vendor (scripts/t3code-build), as npm
+// installs the unpatched registry copy; requiring from its manifest self-resolves the package.
+let requireFromDisk: NodeJS.Require | undefined;
+const requireCursorSdk = (id: string) => {
+  if (requireFromDisk === undefined) {
+    const vendored = NodePath.join(
+      NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+      "vendor/@cursor/sdk/package.json",
+    );
+    requireFromDisk = NodeModule.createRequire(
+      NodeFS.existsSync(vendored) ? vendored : import.meta.url,
+    );
+  }
+  return requireFromDisk(id);
+};
 let sdk: typeof import("@cursor/sdk") | undefined;
 let sqlite: typeof import("@cursor/sdk/sqlite") | undefined;
 
