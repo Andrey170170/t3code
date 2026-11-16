@@ -51,6 +51,7 @@ export const ThreadPullRequestSnapshot = Schema.Struct({
   reviewDecision: Schema.optional(Schema.NullOr(PullRequestReviewDecision)),
   checksState: Schema.optional(Schema.NullOr(PullRequestChecksState)),
   mergeability: Schema.optional(PullRequestMergeability),
+  rebaseRequired: Schema.optional(Schema.Boolean),
 });
 export type ThreadPullRequestSnapshot = typeof ThreadPullRequestSnapshot.Type;
 
@@ -111,6 +112,7 @@ export const ThreadPullRequestWatch = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   conflicting: Schema.Boolean,
+  rebaseRequired: Schema.optional(Schema.Boolean),
   /** Last removal seen; null after an empty read, absent before the first read. */
   mergeQueueRemovalId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   /** Wakes in a row with only comments or 👍. Watching stops at a limit, so bots cannot loop it. */

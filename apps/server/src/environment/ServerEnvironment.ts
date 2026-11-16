@@ -196,11 +196,12 @@ export const make = Effect.gen(function* () {
   const label = yield* resolveServerEnvironmentLabel({ cwdBaseName });
   const machine = yield* detectServerEnvironmentMachineKind();
   const launcher = yield* resolveServiceLauncherMode();
+  const hostUpdateCommand =
+    ((yield* HostProcess.Environment)[HOST_UPDATE_COMMAND_ENV] ?? "").trim() !== "";
   const serverSelfUpdate = resolveServerSelfUpdateCapability({
     desktopManaged: serverConfig.mode === "desktop",
     launcherManaged: launcher.managed,
-    hostUpdateCommand:
-      ((yield* HostProcess.Environment)[HOST_UPDATE_COMMAND_ENV] ?? "").trim() !== "",
+    hostUpdateCommand,
   });
   const serverInstallation = serverSelfUpdate === null ? yield* resolveServerInstallation : null;
   // The desktop reports whether it can install updates; requests travel over its control fd.
@@ -276,6 +277,7 @@ export const make = Effect.gen(function* () {
       projectCloneTracking: true,
       projectOrganization: true,
       ignoredFileListing: true,
+      ignoredFileSearch: true,
       triage: true,
       oneTimeSchedules: true,
       freshContext: true,
@@ -287,6 +289,10 @@ export const make = Effect.gen(function* () {
       ...(serverInstallation === null ? {} : { serverInstallation }),
       ...(serverSelfUpdate === "boot-service" || desktopAppUpdate
         ? { serverSelfUpdateProgress: true }
+        : {}),
+      // A host updater installs in one step after it detaches, so it has no staging.
+      ...(serverSelfUpdate === "boot-service" && !hostUpdateCommand
+        ? { serverUpdateStaging: true }
         : {}),
       ...(desktopAppUpdate ? { desktopAppUpdate: true, desktopAppChannelSwitch: true } : {}),
       serverBrowser: true,

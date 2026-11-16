@@ -38,6 +38,8 @@ export interface TurnItemPositionStoreV2Shape {
       readonly runId: RunId | null;
       // `run_start` takes the run's unused first slot, ahead of its items, and appends once it is taken.
       readonly placement?: "append" | "run_start";
+      // Keep an existing position even when it lies outside the run's band.
+      readonly keepExisting?: boolean;
     } & TurnItemPositionHints,
   ) => Effect.Effect<number, TurnItemPositionStoreError>;
   readonly normalize: (
@@ -69,51 +71,110 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
         LIMIT 1
       `.pipe(Effect.map((rows) => rows[0]?.ordinal));
 
+    // The position with the item's projection before this batch, which may still be pending.
+    const placedPosition = (threadId: ThreadId, turnItemId: TurnItemId) =>
+      sql<{
+        readonly ordinal: number;
+        readonly runId: string | null;
+        readonly status: string | null;
+      }>`
+        SELECT position.ordinal, item.run_id AS "runId", item.status
+        FROM orchestration_v2_turn_item_positions AS position
+        LEFT JOIN orchestration_v2_projection_turn_items AS item
+          ON item.turn_item_id = position.turn_item_id
+        WHERE position.thread_id = ${threadId} AND position.turn_item_id = ${turnItemId}
+        LIMIT 1
+      `.pipe(Effect.map((rows) => rows[0]));
+
+    // The run's band: the batch's hint, else its other placed items' band, else the next free
+    // band (never below its ordinal). Items without a run use band 0. 1000000 is BAND_SIZE.
+    const bandOf = (input: {
+      readonly threadId: ThreadId;
+      readonly turnItemId: TurnItemId;
+      readonly runId: RunId | null;
+      readonly runOrdinal: number | undefined;
+      readonly runBand: number | undefined;
+    }) => sql`
+      SELECT CASE WHEN ${input.runId} IS NULL THEN 0 ELSE COALESCE(
+        CAST(${input.runBand ?? null} AS INTEGER),
+        (
+          -- Positions, not projected ordinals: databases upgraded through the V2
+          -- migration kept provider ordinals on projected items.
+          SELECT MIN(position.ordinal)
+          FROM orchestration_v2_projection_turn_items AS item
+          JOIN orchestration_v2_turn_item_positions AS position
+            ON position.thread_id = item.thread_id
+            AND position.turn_item_id = item.turn_item_id
+          WHERE item.thread_id = ${input.threadId}
+            AND item.run_id = ${input.runId}
+            AND item.turn_item_id != ${input.turnItemId}
+            -- A queued message holds its submission slot, not its run's band.
+            AND NOT (item.type = 'user_message' AND item.status = 'pending')
+        ) / 1000000,
+        MAX(
+          COALESCE(
+            CAST(${input.runOrdinal ?? null} AS INTEGER),
+            (
+              SELECT ordinal
+              FROM orchestration_v2_projection_runs
+              WHERE thread_id = ${input.threadId} AND run_id = ${input.runId}
+            ),
+            0
+          ),
+          COALESCE(
+            (
+              SELECT MAX(ordinal)
+              FROM orchestration_v2_turn_item_positions
+              WHERE thread_id = ${input.threadId}
+            ) / 1000000 + 1,
+            0
+          )
+        )
+      ) END AS value
+    `;
+
     const allocate: TurnItemPositionStoreV2Shape["allocate"] =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(
-        function* ({ threadId, turnItemId, runId, runOrdinal, runBand, placement = "append" }) {
-          const existing = yield* existingPosition(threadId, turnItemId);
-          if (existing !== undefined) return existing;
+        function* ({
+          threadId,
+          turnItemId,
+          runId,
+          runOrdinal,
+          runBand,
+          placement = "append",
+          keepExisting = false,
+        }) {
+          const band = { threadId, turnItemId, runId, runOrdinal, runBand };
+          const placed = yield* placedPosition(threadId, turnItemId);
+          if (placed !== undefined) {
+            // Only an item that was queued, changed run, or is new in this batch can sit outside
+            // its run's band: a steer that missed its turn moves into the run it starts.
+            const mayHaveMoved =
+              placed.status === null || placed.status === "pending" || placed.runId !== runId;
+            if (keepExisting || runId === null || !mayHaveMoved) return placed.ordinal;
+            const target =
+              runBand ?? (yield* sql<{ readonly value: number }>`${bandOf(band)}`)[0]?.value;
+            if (target === undefined || positionBand(placed.ordinal) === target) {
+              return placed.ordinal;
+            }
+            yield* sql`
+              UPDATE orchestration_v2_turn_item_positions
+              SET ordinal = (
+                SELECT COALESCE(MAX(ordinal), ${target} * 1000000) + 1
+                FROM orchestration_v2_turn_item_positions
+                WHERE thread_id = ${threadId}
+                  AND ordinal >= ${target} * 1000000
+                  AND ordinal < (${target} + 1) * 1000000
+              )
+              WHERE thread_id = ${threadId} AND turn_item_id = ${turnItemId}
+            `;
+            return (yield* existingPosition(threadId, turnItemId)) ?? placed.ordinal;
+          }
 
-          // The run's band: the batch's hint, else its placed items' band, else the next free band
-          // (never below its ordinal). Items without a run use band 0. 1000000 is BAND_SIZE.
           yield* sql`
             INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
-            WITH band AS (
-              SELECT CASE WHEN ${runId} IS NULL THEN 0 ELSE COALESCE(
-                CAST(${runBand ?? null} AS INTEGER),
-                (
-                  -- Positions, not projected ordinals: databases upgraded through the V2
-                  -- migration kept provider ordinals on projected items.
-                  SELECT MIN(position.ordinal)
-                  FROM orchestration_v2_projection_turn_items AS item
-                  JOIN orchestration_v2_turn_item_positions AS position
-                    ON position.thread_id = item.thread_id
-                    AND position.turn_item_id = item.turn_item_id
-                  WHERE item.thread_id = ${threadId} AND item.run_id = ${runId}
-                ) / 1000000,
-                MAX(
-                  COALESCE(
-                    CAST(${runOrdinal ?? null} AS INTEGER),
-                    (
-                      SELECT ordinal
-                      FROM orchestration_v2_projection_runs
-                      WHERE thread_id = ${threadId} AND run_id = ${runId}
-                    ),
-                    0
-                  ),
-                  COALESCE(
-                    (
-                      SELECT MAX(ordinal)
-                      FROM orchestration_v2_turn_item_positions
-                      WHERE thread_id = ${threadId}
-                    ) / 1000000 + 1,
-                    0
-                  )
-                )
-              ) END AS value
-            )
+            WITH band AS (${bandOf(band)})
             , taken AS (
               SELECT MIN(ordinal) AS low, MAX(ordinal) AS high
               FROM orchestration_v2_turn_item_positions, band
@@ -161,6 +222,8 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           threadId: item.threadId,
           turnItemId: item.id,
           runId: item.runId,
+          // Queued steers keep their submission order until their run starts (see Orchestrator).
+          keepExisting: item.status === "pending",
           ...hints,
         }).pipe(Effect.map((ordinal) => (item.ordinal === ordinal ? item : { ...item, ordinal })));
       }),

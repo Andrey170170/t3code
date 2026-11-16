@@ -1,4 +1,5 @@
 import {
+  DESKTOP_UPDATE_IN_PROGRESS_MARKER_FILE,
   ServerSelfUpdateError,
   type ServerSelfUpdateCapability,
   type ServerSelfUpdateInput,
@@ -32,6 +33,7 @@ import {
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
+import * as DesktopUpdateMarker from "../desktopUpdate/DesktopUpdateMarker.ts";
 import { databaseMigrationHead } from "../persistence/databaseMigrationHead.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { managedUpdateMirror, managedUpdateRefusal } from "../policy/managedUpdates.ts";
@@ -250,6 +252,8 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
       if (!isExactServiceVersion(targetVersion)) {
         return yield* failWith(`'${targetVersion}' is not an exact t3 version.`);
       }
+      // The host updater downloads after it detaches, so there is nothing to stage ahead.
+      if (input.stageOnly === true) return { targetVersion, method: "boot-service" as const };
       if (yield* Ref.getAndSet(inFlight, true)) {
         return yield* failWith("A server update is already in progress.");
       }
@@ -414,6 +418,10 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         }),
       );
 
+      if (input.stageOnly === true) {
+        yield* Ref.set(inFlight, false);
+        return { targetVersion, method: "boot-service" as const };
+      }
       yield* reportProgress("installing");
       const updateId = yield* Effect.uninterruptible(
         launcher.requestUpdate({ targetVersion, dbPath: serverConfig.dbPath }).pipe(
@@ -424,6 +432,13 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
                 : "Could not ask the service launcher to activate the prepared update.",
               error,
             ),
+          ),
+          // The launcher stops this server next; one from before its serving lock holds nothing
+          // until the new server starts, so this marker is what an SSH launch waits on.
+          Effect.tap(() =>
+            DesktopUpdateMarker.publish(
+              path.join(serverConfig.baseDir, "runtime", DESKTOP_UPDATE_IN_PROGRESS_MARKER_FILE),
+            ).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.ignore({ log: true })),
           ),
           Effect.tap(() => onHandoffAccepted()),
         ),
