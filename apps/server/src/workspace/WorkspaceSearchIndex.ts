@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - readdir with file types avoids an lstat per child
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
+import * as NodePath from "node:path";
 import * as NodeSea from "node:sea";
 import * as NodeURL from "node:url";
 
@@ -40,13 +42,20 @@ import { scoreSubsequenceMatch } from "@t3tools/shared/searchRanking";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import { type IgnoreDecision, type IgnoreFile, parseIgnoreFile } from "./IgnorePatterns.ts";
 
-// Executable archives carry fff-node's patched require export. npm installs
-// receive its import-only manifest, so resolve the ESM entry before requiring
-// it in plain Node. SEA cannot resolve external ESM specifiers.
+// Executable archives carry fff-node's patched build. Forgejo npm packages ship it in
+// dist/vendor (scripts/t3code-build), as npm installs the unpatched registry copy; other
+// installs resolve the ESM entry before requiring it. SEA cannot resolve external ESM.
 const requireForFff = NodeModule.createRequire(import.meta.url);
-const fffEntry = NodeSea.isSea()
-  ? "@ff-labs/fff-node"
-  : NodeURL.fileURLToPath(import.meta.resolve("@ff-labs/fff-node"));
+const resolveFffEntry = () => {
+  const vendored = NodePath.join(
+    NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+    "vendor/@ff-labs/fff-node/dist/index.js",
+  );
+  return NodeFS.existsSync(vendored)
+    ? vendored
+    : NodeURL.fileURLToPath(import.meta.resolve("@ff-labs/fff-node"));
+};
+const fffEntry = NodeSea.isSea() ? "@ff-labs/fff-node" : resolveFffEntry();
 const { FileFinder } = requireForFff(fffEntry) as typeof import("@ff-labs/fff-node");
 
 // A glob intersects existing extension constraints; fff ORs bare `*.ext` constraints together.

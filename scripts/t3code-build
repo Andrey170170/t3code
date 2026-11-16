@@ -280,6 +280,31 @@ node -e '
       ([, spec]) => typeof spec !== "string" || !spec.startsWith("workspace:"),
     ),
   );
+  // pnpm patches never reach the npm install of an external dependency, so these ship
+  // patched in dist/vendor, where the server loads them, and the package lists their own
+  // dependencies. Every other patched external must say why it may ship unpatched.
+  const vendored = ["@ff-labs/fff-node"];
+  const unpatched = {
+    "node-pty": "its patch only changes the Windows ConPTY agent",
+    "@cursor/sdk": "follow-up: bundling needs its 21 MB and overlapping dependencies",
+  };
+  const { isRuntimeExternalCliDependency } = await import("./scripts/lib/cli-external-packages.ts");
+  for (const key of Object.keys(workspace.patchedDependencies ?? {})) {
+    const name = key.slice(0, key.lastIndexOf("@"));
+    if (!(name in (server.dependencies ?? {})) || !isRuntimeExternalCliDependency(name)) continue;
+    if (!vendored.includes(name) && !(name in unpatched)) {
+      throw new Error(`Patched external dependency ${name} would ship unpatched.`);
+    }
+  }
+  const lifted = { dependencies: {}, optionalDependencies: {} };
+  for (const name of vendored) {
+    const real = fs.realpathSync(`apps/server/node_modules/${name}`);
+    if (!real.includes("_patch_hash=")) throw new Error(`${name} is not the patched copy: ${real}`);
+    const manifest = JSON.parse(fs.readFileSync(`${real}/package.json`, "utf8"));
+    Object.assign(lifted.dependencies, manifest.dependencies);
+    Object.assign(lifted.optionalDependencies, manifest.optionalDependencies);
+    fs.cpSync(real, `apps/server/dist/vendor/${name}`, { recursive: true, dereference: true });
+  }
   const published = {
     name: server.name,
     repository: server.repository,
@@ -288,7 +313,8 @@ node -e '
     version: server.version,
     engines: server.engines,
     files: Array.from(new Set([...(server.files ?? []), "t3code-build.json"])),
-    dependencies: resolve(external, "apps/server"),
+    dependencies: { ...lifted.dependencies, ...resolve(external, "apps/server") },
+    optionalDependencies: lifted.optionalDependencies,
     overrides: resolve(workspace.overrides, "apps/server"),
   };
   fs.writeFileSync(serverPath, JSON.stringify(published, null, 2) + "\n");
@@ -317,6 +343,36 @@ npm install --prefix "$SMOKE_DIR" --omit=dev --no-audit --no-fund "${PACKED[0]}"
 INSTALLED_VERSION=$(cd -- "$SMOKE_DIR" && node node_modules/t3/dist/bin.mjs --version)
 [[ $INSTALLED_VERSION == "t3 v$VERSION" ]] ||
   die "Installed CLI reported an unexpected version: $INSTALLED_VERSION"
+# Workspace search needs fff-node's patched async API. Run one real search through the
+# vendored copy beside the bundle file that loads it.
+INSTALLED_DIST="$SMOKE_DIR/node_modules/t3/dist"
+mapfile -t FFF_LOADERS < <(grep -rlF --include='*.mjs' "vendor/@ff-labs/fff-node/dist/index.js" "$INSTALLED_DIST")
+[[ ${#FFF_LOADERS[@]} -eq 1 ]] ||
+  die "Expected one bundle file to load the vendored fff-node, found ${#FFF_LOADERS[@]}."
+FFF_ENTRY="$(dirname -- "${FFF_LOADERS[0]}")/vendor/@ff-labs/fff-node/dist/index.js"
+[[ -f $FFF_ENTRY ]] || die "The vendored fff-node is not beside its loader: $FFF_ENTRY"
+SEARCH_ROOT="$TEMP_DIR/search-root"
+mkdir -p -- "$SEARCH_ROOT/src"
+: >"$SEARCH_ROOT/src/t3code-smoke-needle.txt"
+node --input-type=module -e '
+  const { FileFinder } = await import(process.argv[1]);
+  const created = FileFinder.create({ basePath: process.argv[2] });
+  if (!created.ok) throw new Error(`FileFinder.create failed: ${created.error}`);
+  const finder = created.value;
+  try {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const progress = await finder.getScanProgressAsync();
+      if (progress.ok && !progress.value.isScanning) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const result = await finder.fileSearchAsync("t3code-smoke-needle", { pageSize: 5 });
+    const found = result.ok && result.value.items.some((item) => item.relativePath === "src/t3code-smoke-needle.txt");
+    if (!found) throw new Error(`search missed the file: ${JSON.stringify(result)}`);
+  } finally {
+    finder.destroy();
+  }
+' "$FFF_ENTRY" "$SEARCH_ROOT" >&2 ||
+  die "The installed package cannot search files."
 
 SHA256=$(sha256sum "${PACKED[0]}" | awk '{print $1}')
 OUTPUT_METADATA="$TEMP_DIR/build.json"
