@@ -99,8 +99,8 @@ starts Android straight after the WSL desktop build. Run every stage with
 `PATH=$HOME/.volta/bin:$PATH` (an agent's PATH starts with the running server's
 Node, which may not match `engines.node`),
 `PACKAGE_FOGEJO_TOKEN_FILE=$HOME/.config/local_packager/forgejo-token` (publishing
-fails with ENEEDAUTH without it), and `TMPDIR` on disk (the build snapshot and
-its install go to `$TMPDIR`):
+fails with ENEEDAUTH without it), and `TMPDIR` on disk in a plain directory
+(the build snapshot and its install go to `$TMPDIR`; see Gotchas):
 
 1. `node scripts/t3code-forgejo.mjs publish --output /tmp/t3-release-artifact`.
    Read the version and commit from its `build.json`.
@@ -146,6 +146,10 @@ Finish with `git worktree remove --force ~/t3-merge-scout`.
   browser: `node node_modules/.pnpm/playwright-core@*/node_modules/playwright-core/cli.js install chromium-headless-shell`
   from the scratch root. Playwright prunes browsers no live checkout registered,
   so removing the last scratch tree can drop it.
+- Give `TMPDIR` a path with no dot-directory in it, such as `~/t3-scout-tmp`.
+  Under `~/.cache`, Windows sidecar packing unpacks nothing, because its asar
+  unpack globs skip dot segments, and 18 `scripts/build-desktop-artifact.test.ts`
+  cases fail with `none were unpacked`.
 - `git merge --abort` refuses while edits are unstaged. Stage them first.
 - New upstream tests can assert upstream behavior that the fork deliberately
   changed (security headers, version comparison). Update the test to the fork's
