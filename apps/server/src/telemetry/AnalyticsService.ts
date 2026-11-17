@@ -135,7 +135,7 @@ export const make = Effect.gen(function* () {
       : Option.none();
   // Where events go, or none while they are not sent. Fork builds send only after an
   // opt-in with a key. The desktop app delivers its login shell's environment after startup
-  // and does not cache these names, so its opt-in, key and host are read once that lands.
+  // and caches only the opt-in, so the opt-in, key and host are read together once that lands.
   const sendTarget = Effect.suspend(() => {
     if (!policyAllows) return Effect.succeedNone;
     if (!awaitingShellConsent) return Effect.succeed(optedIn(telemetryConfig));
