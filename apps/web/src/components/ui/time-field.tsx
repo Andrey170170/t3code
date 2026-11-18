@@ -1,6 +1,7 @@
 "use client";
 
 import type { TimestampFormat } from "@t3tools/contracts/settings";
+import { T, useGT, Var } from "gt-react";
 import { ClockIcon } from "lucide-react";
 import { useRef, useState } from "react";
 
@@ -43,6 +44,7 @@ function TimeField({
   // The text being typed, or null while the input shows the committed time.
   const [draft, setDraft] = useState<string | null>(null);
   const focusedBeforePressRef = useRef(false);
+  const gt = useGT();
   const hour12 = resolveHour12(timestampFormat);
   const items = timeOfDayOptions(value);
   const formatLabel = (item: string) => formatTimeOfDay(item, timestampFormat);
@@ -93,7 +95,7 @@ function TimeField({
       <ComboboxInput
         {...inputProps}
         triggerIcon={<ClockIcon />}
-        triggerLabel="Choose time"
+        triggerLabel={gt("Choose time")}
         onBlur={() => {
           // Leaving keeps an unambiguous typed time. Anything else clears the
           // value, as `<input type="time">` does, so a button pressed next
@@ -135,7 +137,11 @@ function TimeField({
         }}
       />
       <ComboboxPopup className="tabular-nums">
-        <ComboboxEmpty>Enter a time like {hour12 ? "7:30 pm" : "19:30"}</ComboboxEmpty>
+        <ComboboxEmpty>
+          <T>
+            Enter a time like <Var>{hour12 ? "7:30 pm" : "19:30"}</Var>
+          </T>
+        </ComboboxEmpty>
         <ComboboxList>
           {(item: string) => (
             <ComboboxItem key={item} value={item}>

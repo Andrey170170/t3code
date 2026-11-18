@@ -7,9 +7,11 @@ import type {
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Schema from "effect/Schema";
+import { msg } from "gt-react";
 
 import { APP_VERSION } from "./branding";
 import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
+import { m, type MessageResolver } from "./i18n/messages";
 
 export interface VersionMismatch {
   readonly clientVersion: string;
@@ -52,6 +54,7 @@ function versionCore(version: string): string {
 export function resolveVersionMismatch(
   serverVersion: string | null | undefined,
   clientVersion: string = APP_VERSION,
+  resolve: MessageResolver = m,
 ): VersionMismatch | null {
   const normalizedClientVersion = normalizeVersion(clientVersion);
   const normalizedServerVersion = normalizeVersion(serverVersion);
@@ -79,12 +82,13 @@ export function resolveVersionMismatch(
   return {
     clientVersion: normalizedClientVersion,
     serverVersion: normalizedServerVersion,
-    hint: VERSION_MISMATCH_HINT,
+    hint: resolve(VERSION_MISMATCH_HINT),
   };
 }
 
-const VERSION_MISMATCH_HINT =
-  "Version mismatch. Try syncing the client and server to the same T3 Code version.";
+const VERSION_MISMATCH_HINT = msg(
+  "Version mismatch. Try syncing the client and server to the same T3 Code version.",
+);
 
 /**
  * The update to offer for a connected server. A server that reports a newer
@@ -94,13 +98,18 @@ const VERSION_MISMATCH_HINT =
  */
 export function resolveServerConfigVersionMismatch(
   serverConfig: Pick<ServerConfig, "environment" | "availableUpdateVersion"> | null | undefined,
+  resolve: MessageResolver = m,
 ): VersionMismatch | null {
   const serverVersion = normalizeVersion(serverConfig?.environment.serverVersion);
   const availableVersion = normalizeVersion(serverConfig?.availableUpdateVersion);
   if (serverVersion && availableVersion) {
-    return { clientVersion: availableVersion, serverVersion, hint: VERSION_MISMATCH_HINT };
+    return {
+      clientVersion: availableVersion,
+      serverVersion,
+      hint: resolve(VERSION_MISMATCH_HINT),
+    };
   }
-  return resolveVersionMismatch(serverVersion);
+  return resolveVersionMismatch(serverVersion, APP_VERSION, resolve);
 }
 
 export function resolveServerSelfUpdateCapability(
