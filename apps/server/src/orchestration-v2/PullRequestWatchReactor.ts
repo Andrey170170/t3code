@@ -226,16 +226,23 @@ function planRead(
 /**
  * The watch later news folds against. A first read records the 👍, checks, and conflict already
  * there without telling them, so folds keep that record but not the news fields the wake tells.
+ * CI pending at the start makes a first read's failures news, so the record leaves those out.
  */
 function foldBaseOf(
   watch: ThreadPullRequestWatch,
-  next: ThreadPullRequestWatch,
+  { next, changes }: PullRequestWatchReport,
 ): ThreadPullRequestWatch {
   const thumbsUp = watch.thumbsUp ?? next.thumbsUp;
   if (watch.awaitingBaseline === undefined) return { ...watch, thumbsUp };
   const { mergeQueueRemovalId: _, ...recorded } = next;
+  const toldFailed = new Set(
+    changes.flatMap((change) =>
+      change.kind === "checks-failed" ? change.failed.map((check) => check.name) : [],
+    ),
+  );
   return {
     ...recorded,
+    failedChecks: recorded.failedChecks.filter((name) => !toldFailed.has(name)),
     remarksThrough: watch.remarksThrough,
     remarkIds: watch.remarkIds,
     thumbsUp,
@@ -493,7 +500,7 @@ export const make = Effect.gen(function* () {
       },
       queue: {
         messageId,
-        before: folded ? queued.before : foldBaseOf(target.watch, report.next),
+        before: folded ? queued.before : foldBaseOf(target.watch, report),
         remarks: folded ? foldRemarks : remarks,
         thumbsUp: folded ? foldThumbsUp : thumbsUp,
         thumbsUpNews: folded ? thumbsUpNews : reportNews,

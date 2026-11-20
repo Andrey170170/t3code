@@ -58,13 +58,17 @@ const LIMIT_OVERRIDES = {
 
 /**
  * Agents leave ~6 GB free before throttling and ~4 GB before a kill (at least half and three
- * quarters of RAM). Swap is capped, or a slice over high pages forever and never reaches max.
- * Defaults follow RAM at first launch, which a dynamic-memory VM under-reports, so
+ * quarters of RAM). Capped swap stops a slice paging forever over high; without swap high only
+ * stalls agents, so it is lifted. A dynamic-memory VM under-reports RAM, so
  * `T3CODE_AGENT_MEMORY_*` overrides each limit; unparseable values are listed in `ignored`.
  */
-export function agentSliceMemoryLimits(totalBytes: number, env: NodeJS.ProcessEnv = {}) {
+export function agentSliceMemoryLimits(
+  totalBytes: number,
+  env: NodeJS.ProcessEnv = {},
+  hasSwap = true,
+) {
   const defaults: Record<"high" | "max" | "swapMax", number | "infinity"> = {
-    high: Math.max(totalBytes - 6 * GiB, Math.floor(totalBytes / 2)),
+    high: hasSwap ? Math.max(totalBytes - 6 * GiB, Math.floor(totalBytes / 2)) : "infinity",
     max: Math.max(totalBytes - 4 * GiB, Math.floor(totalBytes * 0.75)),
     swapMax: 4 * GiB,
   };
@@ -234,9 +238,15 @@ export const make = Effect.gen(function* () {
         });
         return false;
       });
+      // An unreadable meminfo keeps the throttle, as before swap was checked.
+      const readHasSwap = fileSystem.readFileString("/proc/meminfo").pipe(
+        Effect.map((text) => /^SwapTotal:\s*0 kB$/m.exec(text) === null),
+        Effect.orElseSucceed(() => true),
+      );
       const { ignored, ...startLimits } = agentSliceMemoryLimits(
         NodeOS.totalmem(),
         hostEnvironment,
+        yield* readHasSwap,
       );
       if (ignored.length > 0) {
         yield* Effect.logWarning("Ignored unreadable agent memory limits", { ignored });
@@ -244,12 +254,18 @@ export const make = Effect.gen(function* () {
       // VMs and containers can resize RAM live, so each launch re-checks the total
       // the limits came from. A failed update is retried by the next launch.
       let appliedTotal: number | undefined;
+      let appliedHasSwap: boolean | undefined;
       const memoryLimitsLock = yield* Semaphore.make(1);
       const applyMemoryLimits = memoryLimitsLock.withPermits(1)(
         Effect.gen(function* () {
           const total = NodeOS.totalmem();
-          if (total === appliedTotal) return;
-          const { ignored: _ignored, ...limits } = agentSliceMemoryLimits(total, hostEnvironment);
+          const hasSwap = yield* readHasSwap;
+          if (total === appliedTotal && hasSwap === appliedHasSwap) return;
+          const { ignored: _ignored, ...limits } = agentSliceMemoryLimits(
+            total,
+            hostEnvironment,
+            hasSwap,
+          );
           const applied = yield* setProperties(AGENT_SLICE, [
             `MemoryHigh=${limits.high}`,
             `MemoryMax=${limits.max}`,
@@ -265,6 +281,7 @@ export const make = Effect.gen(function* () {
             });
           }
           appliedTotal = total;
+          appliedHasSwap = hasSwap;
         }),
       );
       yield* applyMemoryLimits;

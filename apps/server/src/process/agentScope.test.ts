@@ -27,7 +27,7 @@ import {
 } from "./agentScope.ts";
 
 const GiB = 1024 ** 3;
-const memory = vi.hoisted(() => ({ total: 16 * 1024 ** 3 }));
+const memory = vi.hoisted(() => ({ total: 16 * 1024 ** 3, swapKb: 2 * 1024 ** 2 }));
 vi.mock("node:os", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:os")>()),
   totalmem: () => memory.total,
@@ -79,6 +79,13 @@ describe("agentSliceMemoryLimits", () => {
       swapMax: 512 * 1024 ** 2,
       ignored: [],
     });
+  });
+
+  it("lifts the throttle without swap unless MemoryHigh is set", () => {
+    expect(agentSliceMemoryLimits(16 * GiB, {}, false)).toMatchObject({ high: "infinity" });
+    expect(
+      agentSliceMemoryLimits(16 * GiB, { T3CODE_AGENT_MEMORY_HIGH: "10G" }, false),
+    ).toMatchObject({ high: 10 * GiB });
   });
 
   it("lifts a limit set to infinity", () => {
@@ -189,7 +196,9 @@ const withFakeSystemd = <A, E>(
       Effect.provideService(FileSystem.FileSystem, {
         ...fileSystem,
         readFileString: (path, encoding) =>
-          fileSystem.readFileString(path.replace("/sys/fs/cgroup", cgroupRoot), encoding),
+          path === "/proc/meminfo"
+            ? Effect.sync(() => `MemTotal:       16384 kB\nSwapTotal:      ${memory.swapKb} kB\n`)
+            : fileSystem.readFileString(path.replace("/sys/fs/cgroup", cgroupRoot), encoding),
         writeFileString: (path, data, options) =>
           fileSystem.writeFileString(path.replace("/sys/fs/cgroup", cgroupRoot), data, options),
       }),
@@ -388,8 +397,9 @@ describe("AgentScope service", () => {
     ),
   );
 
-  it.effect("follows a live memory change at the next launch", () => {
+  it.effect("follows a live memory or swap change at the next launch", () => {
     memory.total = 16 * GiB;
+    memory.swapKb = 2 * 1024 ** 2;
     return withFakeSystemd(({ scope, calls, failingVerbs }) =>
       Effect.gen(function* () {
         // The fork caps swap at its 4 GiB default whatever the RAM total.
@@ -422,6 +432,16 @@ describe("AgentScope service", () => {
           grown,
           grown,
         ]);
+
+        // Without swap, MemoryHigh only throttles; MemoryMax must OOM-kill the runaway.
+        memory.swapKb = 0;
+        yield* launch;
+        expect(memoryLimits().at(-1)).toEqual([
+          "MemoryHigh=infinity",
+          `MemoryMax=${18 * GiB}`,
+          swapMax,
+        ]);
+        memory.swapKb = 2 * 1024 ** 2;
       }),
     );
   });
