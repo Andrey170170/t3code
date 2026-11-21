@@ -126,6 +126,7 @@ const LOGIN_SHELL_ENV_NAMES = [
   "T3CODE_POSTHOG_HOST",
   "T3CODE_POSTHOG_KEY",
   "T3CODE_GITHUB_APP_CLIENT_ID",
+  "T3CODE_TANSTACK_SOURCE",
   "T3CODE_RELEASE_BASE_URL",
   "__MISE_DIFF",
   "JAVA_HOME",
@@ -557,6 +558,7 @@ const installPosixEnvironment = Effect.fn("desktop.shellEnvironment.installPosix
       "T3CODE_POSTHOG_HOST",
       "T3CODE_POSTHOG_KEY",
       "T3CODE_GITHUB_APP_CLIENT_ID",
+      "T3CODE_TANSTACK_SOURCE",
       "T3CODE_RELEASE_BASE_URL",
     ] as const) {
       if (!config.env[name] && shellEnvironment[name]) {
