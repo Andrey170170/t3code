@@ -4,7 +4,7 @@ import { msg } from "gt-react";
 import { DEFAULT_LOCALE } from "./i18n/locales";
 import { getActiveLocale, m, type MessageResolver } from "./i18n/messages";
 
-import { isTimeOfDay, toTimeOfDay } from "./timeOfDay";
+import { toTimeOfDay } from "./timeOfDay";
 
 function getTimestampFormatOptions(
   timestampFormat: TimestampFormat,
@@ -183,10 +183,29 @@ export function formatShortTimestamp(isoDate: string, timestampFormat: Timestamp
   return formatTime(date, timestampFormat);
 }
 
-/** Labels a local `HH:mm` time of day; anything else formats as "". */
+const dateTimeFormatterCache = new Map<TimestampFormat, Intl.DateTimeFormat>();
+
+export function formatDateTimeTimestamp(isoDate: string, timestampFormat: TimestampFormat): string {
+  const date = parseTimestampDate(isoDate);
+  if (!date) return "";
+  let formatter = dateTimeFormatterCache.get(timestampFormat);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(timestampLocale, {
+      dateStyle: "medium",
+      timeStyle: "short",
+      ...(timestampFormat === "locale" ? {} : { hour12: timestampFormat === "12-hour" }),
+    });
+    dateTimeFormatterCache.set(timestampFormat, formatter);
+  }
+  return formatter.format(date);
+}
+
+/** Labels a local `H:MM` or `HH:MM` time of day (the schedule contract form); else "". */
 export function formatTimeOfDay(timeOfDay: string, timestampFormat: TimestampFormat): string {
-  if (!isTimeOfDay(timeOfDay)) return "";
-  const [hour, minute] = timeOfDay.split(":").map(Number);
+  const match = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(timeOfDay);
+  if (!match) return "";
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
   // The default formatter runs in UTC, so a UTC date labels this exact wall-clock time.
   return getTimestampFormatter(timestampFormat, false).format(
     new Date(Date.UTC(2000, 0, 1, hour, minute)),
