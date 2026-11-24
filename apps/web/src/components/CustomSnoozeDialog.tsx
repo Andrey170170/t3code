@@ -14,6 +14,7 @@ import { Calendar } from "./ui/calendar";
 import { useClientSettings } from "../hooks/useSettings";
 import { weekStartsOn } from "../timestampFormat";
 import { useNowMinute } from "../hooks/useNowMinute";
+import { useFormattingLocale } from "../i18n/I18nProvider";
 import { Popover, PopoverTrigger, PopoverPopup } from "./ui/popover";
 import { Label } from "./ui/label";
 import { TimeField } from "./ui/time-field";
@@ -66,6 +67,7 @@ export function CustomSnoozeDialogHost() {
 
 function CustomSnoozeDialog() {
   const gt = useGT();
+  const locale = useFormattingLocale();
   const id = useId();
   const navigate = useNavigate();
   const [initial] = useState(() => new Date(Date.now() + 3_600_000));
@@ -150,7 +152,7 @@ function CustomSnoozeDialog() {
                             />
                           }
                         >
-                          {date.toLocaleDateString(undefined, {
+                          {date.toLocaleDateString(locale, {
                             month: "short",
                             day: "numeric",
                             year: "numeric",

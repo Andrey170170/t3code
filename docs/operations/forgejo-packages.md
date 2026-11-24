@@ -222,7 +222,7 @@ there, checks that the update manifest describes the installer it got back,
 and uploads both. `T3CODE_WINDOWS_BUILD_HOST` (default `wsl_worker`) is an SSH
 host inside WSL on that machine: Windows programs started from WSL run
 natively, so no SSH server is needed on Windows itself. The machine needs the
-[Windows installer prerequisites](./development.md#windows-installer-prerequisites)
+[Windows installer prerequisites](./00_development.md#windows-installer-prerequisites)
 and Node; the WSL runtime archive is not bundled, so this build cannot host WSL
 projects.
 
