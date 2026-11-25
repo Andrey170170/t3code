@@ -34,7 +34,9 @@ Step "unpack source" {
 Set-Location $src
 Step "install vp" {
   $pin = (Select-String -Path pnpm-workspace.yaml -Pattern '^\s*vite-plus:\s*"?(\d[^"\s]*)').Matches[0].Groups[1].Value
-  npm install --global --no-fund --no-audit "vite-plus@$pin"
+  # Since vite-plus 1.8, an npm-installed vp runs only the pnpm it finds on PATH.
+  $pnpm = (Get-Content package.json -Raw | ConvertFrom-Json).packageManager
+  npm install --global --no-fund --no-audit "vite-plus@$pin" $pnpm
 }
 Step "install dependencies" {
   vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts... --filter=@t3tools/web...
