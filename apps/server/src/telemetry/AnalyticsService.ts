@@ -1,5 +1,6 @@
 // T3 ingest retains events and forwards to PostHog; UUIDs deduplicate retries there.
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { isDoNotTrackSet } from "@t3tools/shared/otelEnvironment";
 import type { ClientOs } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
@@ -29,6 +30,8 @@ interface BufferedAnalyticsEvent {
   readonly event: string;
   readonly properties?: Readonly<Record<string, unknown>>;
   readonly capturedAt: string;
+  /** Sent under its own id, without the install id, so it links to nothing else. */
+  readonly anonymous?: true;
 }
 
 interface DeliveryState {
@@ -86,6 +89,7 @@ export class AnalyticsService extends Context.Service<
     readonly record: (
       event: string,
       properties?: Readonly<Record<string, unknown>>,
+      options?: { readonly anonymous?: boolean },
     ) => Effect.Effect<boolean>;
 
     readonly flush: Effect.Effect<void>;
@@ -138,7 +142,7 @@ export const make = Effect.gen(function* () {
   // opt-in with a key. The desktop app delivers its login shell's environment after startup
   // and caches only the opt-in, so the opt-in, key and host are read together once that lands.
   const sendTarget = Effect.suspend(() => {
-    if (!policyAllows) return Effect.succeedNone;
+    if (!policyAllows || isDoNotTrackSet(hostEnvironment)) return Effect.succeedNone;
     if (!awaitingShellConsent) return Effect.succeed(optedIn(telemetryConfig));
     if (hostEnvironment.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING === "1") {
       return Effect.succeedNone;
@@ -192,7 +196,8 @@ export const make = Effect.gen(function* () {
   const enqueueBufferedEvent = (
     uuid: string,
     event: string,
-    properties?: Readonly<Record<string, unknown>>,
+    properties: Readonly<Record<string, unknown>> | undefined,
+    anonymous: boolean,
   ) =>
     Effect.flatMap(DateTime.now, (now) =>
       Ref.modify(bufferRef, (current) => {
@@ -203,6 +208,7 @@ export const make = Effect.gen(function* () {
             event,
             ...(properties ? { properties } : {}),
             capturedAt: DateTime.formatIso(now),
+            ...(anonymous ? { anonymous: true as const } : {}),
           } satisfies BufferedAnalyticsEvent,
         ];
 
@@ -232,23 +238,30 @@ export const make = Effect.gen(function* () {
       batch: events.map((event) => ({
         uuid: event.uuid,
         event: event.event,
-        distinct_id: distinctId,
-        properties: {
-          ...event.properties,
-          ...(installId === null ? {} : { installId }),
-          $process_person_profile: false,
-          platform: hostPlatform,
-          wsl: Option.getOrUndefined(telemetryConfig.wslDistroName),
-          arch: hostArchitecture,
-          t3CodeVersion: packageJson.version,
-          telemetryChannel: ServerConfig.telemetryChannel,
-          clientType,
-          serverOs: serverOsFromNodePlatform(hostPlatform),
-          serverArch: hostArchitecture,
-          serverWslDistro: Option.getOrUndefined(telemetryConfig.wslDistroName),
-          serverAppVersion: packageJson.version,
-          serverMode: serverConfig.mode,
-        },
+        distinct_id: event.anonymous ? event.uuid : distinctId,
+        properties: event.anonymous
+          ? {
+              ...event.properties,
+              $process_person_profile: false,
+              t3CodeVersion: packageJson.version,
+              telemetryChannel: ServerConfig.telemetryChannel,
+            }
+          : {
+              ...event.properties,
+              ...(installId === null ? {} : { installId }),
+              $process_person_profile: false,
+              platform: hostPlatform,
+              wsl: Option.getOrUndefined(telemetryConfig.wslDistroName),
+              arch: hostArchitecture,
+              t3CodeVersion: packageJson.version,
+              telemetryChannel: ServerConfig.telemetryChannel,
+              clientType,
+              serverOs: serverOsFromNodePlatform(hostPlatform),
+              serverArch: hostArchitecture,
+              serverWslDistro: Option.getOrUndefined(telemetryConfig.wslDistroName),
+              serverAppVersion: packageJson.version,
+              serverMode: serverConfig.mode,
+            },
         timestamp: event.capturedAt,
       })),
     };
@@ -261,9 +274,13 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  // An anonymous event goes out alone, or the ingest could link it to the other events by request.
   const takeBatch = Ref.modify(bufferRef, (current) => {
-    const nextBatch = current.slice(0, telemetryConfig.flushBatchSize);
-    return [nextBatch, current.slice(nextBatch.length)] as const;
+    const next = current.findIndex((event) => event.anonymous);
+    if (next === 0) return [current.slice(0, 1), current.slice(1)] as const;
+    const linked = current.slice(0, next === -1 ? current.length : next);
+    const batch = linked.slice(0, telemetryConfig.flushBatchSize);
+    return [batch, current.slice(batch.length)] as const;
   });
 
   // Back off even after dropping rejected batches so bad API keys cannot drain the queue in a tight loop.
@@ -336,14 +353,19 @@ export const make = Effect.gen(function* () {
   });
 
   const record: AnalyticsService["Service"]["record"] = Effect.fn("AnalyticsService.record")(
-    function* (event, properties) {
+    function* (event, properties, options) {
       if (Option.isNone(yield* sendTarget) || !distinctId) return false;
 
       // Catch Node UUID defects too; best-effort telemetry drops events without UUIDs.
       const uuid = yield* Effect.exit(crypto.uuidV7());
       if (Exit.isFailure(uuid)) return false;
 
-      const enqueueResult = yield* enqueueBufferedEvent(uuid.value, event, properties);
+      const enqueueResult = yield* enqueueBufferedEvent(
+        uuid.value,
+        event,
+        properties,
+        options?.anonymous === true,
+      );
       if (enqueueResult.dropped) {
         yield* Effect.logDebug("analytics buffer full; dropping oldest event", {
           size: enqueueResult.size,

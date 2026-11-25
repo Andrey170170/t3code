@@ -96,6 +96,7 @@ const WSL_FORWARDED_ENV_NAMES = [
   "T3CODE_TELEMETRY_ENABLED",
   "T3CODE_POSTHOG_HOST",
   "T3CODE_POSTHOG_KEY",
+  "DO_NOT_TRACK",
   "T3CODE_FEATURE_FLAGS",
   // Otherwise the WSL server keeps exporting to endpoints from the bootstrap.
   "T3CODE_OTEL_SDK_DISABLED",

@@ -3999,7 +3999,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                       renameCalls.push(title);
                     }).pipe(Effect.andThen(() => options?.renameSession?.(title) ?? Effect.void)),
                   backgroundTasks: options?.backgroundTasks ?? (() => Effect.succeed(false)),
-                  mcpServerStatus: Effect.succeed([]),
+                  mcpServerStatus: options?.mcp?.mcpServerStatus ?? Effect.succeed([]),
                   readMcpResource: () => Effect.die("unexpected MCP resource read"),
                   callMcpTool: () => Effect.die("unexpected MCP tool call"),
                   mcpAuthenticate: () => Effect.die("unexpected MCP sign-in"),
@@ -4563,9 +4563,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("reports connecting while a turn's first API request is unanswered", () =>
+  it.effect("reports connecting while a process's first API request is unanswered", () =>
     Effect.gen(function* () {
-      const harness = yield* makeWakeHarnessWithOptions();
+      const harness = yield* makeWakeHarnessWithOptions({
+        freshQueueOnReopen: true,
+        close: (queue) => Queue.shutdown(queue),
+      });
       const status = (uuid: string) =>
         claudeSdkFrame({
           type: "system",
@@ -4574,16 +4577,31 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           uuid,
           session_id: WAKE_NATIVE_SESSION,
         });
-      yield* harness.runtime.startTurn(
+      const latest = (): OrchestrationV2ProviderThread => {
+        const event = harness.events.findLast(
+          (candidate) => candidate.type === "provider_thread.updated",
+        );
+        return event?.type === "provider_thread.updated"
+          ? event.providerThread
+          : harness.providerThread;
+      };
+      const turn = (ordinal: number) =>
         makeClaudeTestTurnInput({
           threadId: harness.threadId,
-          providerThread: harness.providerThread,
+          providerThread: latest(),
           now: DateTime.makeUnsafe(0),
-          attemptId: RunAttemptId.make("connecting-phase"),
-          text: "Hello",
+          attemptId: RunAttemptId.make(`connecting-phase-${ordinal}`),
+          text: `Turn ${ordinal}`,
           attachments: [],
-        }),
-      );
+          providerTurnOrdinal: ordinal,
+        });
+      const phases = () =>
+        harness.events.flatMap((event) =>
+          event.type === "provider_session.updated"
+            ? [event.providerSession.startupPhase ?? null]
+            : [],
+        );
+      yield* harness.runtime.startTurn(turn(1));
       // Init lands before the request and must not count as its answer.
       yield* harness.offerAndWait(wakeTurnInit);
       yield* harness.offerAndWait(status("00000000-0000-4000-8000-000000000901"));
@@ -4594,14 +4612,38 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       yield* harness.offerAndWait(status("00000000-0000-4000-8000-000000000903"));
       yield* harness.offerAndWait(turnOneResult);
       yield* Queue.take(harness.terminalReceipts);
-      assert.deepEqual(
-        harness.events.flatMap((event) =>
-          event.type === "provider_session.updated"
-            ? [event.providerSession.startupPhase ?? null]
-            : [],
-        ),
-        ["connecting", null],
+      assert.deepEqual(phases(), ["connecting", null]);
+      // The next turn reuses the running process, so its request is not startup either.
+      yield* harness.runtime.startTurn(turn(2));
+      yield* harness.offerAndWait(status("00000000-0000-4000-8000-000000000904"));
+      yield* harness.offerAndWait(
+        makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000905", result: "Two." }),
       );
+      yield* Queue.take(harness.terminalReceipts);
+      assert.equal(harness.processQueues.length, 1);
+      assert.deepEqual(phases(), ["connecting", null]);
+      yield* harness.runtime.interruptTurn({
+        providerThread: latest(),
+        providerTurnId: lastProviderTurn(harness.events).id,
+        requestRuntimeRestart: true,
+      });
+      yield* harness.runtime.startTurn(turn(3));
+      assert.equal(harness.processQueues.length, 2);
+      yield* harness.offerAndWait(
+        claudeSdkFrame({
+          type: "system",
+          subtype: "init",
+          cwd: "/workspace",
+          session_id: WAKE_NATIVE_SESSION,
+          uuid: "00000000-0000-4000-8000-000000000906",
+        }),
+      );
+      yield* harness.offerAndWait(status("00000000-0000-4000-8000-000000000907"));
+      yield* harness.offerAndWait(
+        makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000908", result: "Three." }),
+      );
+      yield* Queue.take(harness.terminalReceipts);
+      assert.deepEqual(phases(), ["connecting", null, "connecting", null]);
     }).pipe(
       Effect.scoped,
       Effect.provide(
@@ -7498,6 +7540,108 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect(
+    "asks to sign in to an MCP server once per lost sign-in, even after an idle release reopens Claude",
+    () =>
+      Effect.gen(function* () {
+        let linearStatus: "needs-auth" | "connected" = "needs-auth";
+        const noticesAfterTurn: Array<number> = [];
+        const harness = yield* makeWakeHarnessWithOptions({
+          freshQueueOnReopen: true,
+          mcp: {
+            mcpServerStatus: Effect.sync(() => [{ name: "linear", status: linearStatus }]),
+            readMcpResource: () => Effect.die("unexpected MCP resource read"),
+            callMcpTool: () => Effect.die("unexpected MCP tool call"),
+          },
+        });
+        const runTurn = Effect.fnUntraced(function* (
+          runtime: typeof harness.runtime,
+          providerThread: OrchestrationV2ProviderThread,
+          ordinal: number,
+        ) {
+          yield* runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make(`mcp-sign-in-once-${ordinal}`),
+              providerTurnOrdinal: ordinal,
+              nativeThreadHasTurns: ordinal > 1,
+              text: "Plan the sprint",
+              attachments: [],
+            }),
+          );
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "system",
+              subtype: "init",
+              uuid: `mcp-sign-in-once-init-${ordinal}`,
+              session_id: WAKE_NATIVE_SESSION,
+              mcp_servers: [{ name: "linear", status: linearStatus }],
+            }),
+          );
+          yield* harness.offerAndWait(
+            makeResultFrame({ uuid: `mcp-sign-in-once-result-${ordinal}`, result: "Planned" }),
+          );
+          yield* Queue.take(harness.terminalReceipts);
+          noticesAfterTurn.push(
+            harness.events.filter(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "system_notice" &&
+                event.turnItem.mcpSignIn !== undefined,
+            ).length,
+          );
+        });
+
+        yield* runTurn(harness.runtime, harness.providerThread, 1);
+        const providerThread = harness.events.findLast(
+          (
+            event,
+          ): event is Extract<
+            ProviderAdapter.ProviderAdapterV2Event,
+            { type: "provider_thread.updated" }
+          > => event.type === "provider_thread.updated",
+        )!.providerThread;
+
+        const reopened = yield* harness.adapter.openSession({
+          threadId: harness.threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-claude-wake-2"),
+          modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        });
+        yield* reopened.events.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              harness.events.push(event);
+              if (event.type === "turn.terminal") {
+                yield* Queue.offer(harness.terminalReceipts, event);
+              }
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        const resumed = yield* reopened.resumeThread({ providerThread });
+        yield* runTurn(reopened, resumed, 2);
+        linearStatus = "connected";
+        yield* runTurn(reopened, resumed, 3);
+        linearStatus = "needs-auth";
+        yield* runTurn(reopened, resumed, 4);
+
+        assert.deepEqual(noticesAfterTurn, [1, 1, 1, 2]);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
   // regression: #38284 an MCP app's update-model-context note must reach Claude's next turn
   it.effect("sends MCP app model context with the next Claude turn", () =>
     Effect.gen(function* () {
@@ -7505,6 +7649,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         close: (sdkMessages) => Queue.shutdown(sdkMessages),
         freshQueueOnReopen: true,
       });
+      const noteSetAt = "2026-11-23T14:02:17.000Z";
       const runTurn = Effect.fnUntraced(function* (ordinal: number, note: string) {
         yield* harness.runtime.startTurn({
           ...makeClaudeTestTurnInput({
@@ -7516,7 +7661,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             text: "What did the app report?",
             attachments: [],
           }),
-          appContext: [{ key: "mcp_app_item-1", text: note }],
+          appContext: [{ key: "mcp_app_item-1", text: note, updatedAt: noteSetAt }],
         });
         return lastOffered();
       });
@@ -7587,8 +7732,72 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       );
       yield* finishTurn(4);
       // Compaction summarizes the note away, so the next turn carries it again.
-      assert.include(yield* runTurn(5, "Created Jira issue PROJ-43"), "PROJ-43");
+      // The resent note says when it was set, so it does not read as news.
+      assert.include(
+        yield* runTurn(5, "Created Jira issue PROJ-43"),
+        `<external_mcp_app_item-1 updated_at="${noteSetAt}">Created Jira issue PROJ-43`,
+      );
     }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
+
+  // regression: #42982 a server restart resent every stored note to a session that already had it
+  it.effect("does not resend an MCP app note Claude already has after the adapter restarts", () =>
+    Effect.gen(function* () {
+      const note = "Slack draft card: the message was sent.";
+      const startTurn = Effect.fnUntraced(function* (
+        harness: Effect.Success<ReturnType<typeof makeWakeHarnessWithOptions>>,
+        providerThread: OrchestrationV2ProviderThread,
+        ordinal: number,
+      ) {
+        yield* harness.runtime.startTurn({
+          ...makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make(`mcp-app-restart-${ordinal}`),
+            providerTurnOrdinal: ordinal,
+            text: "Anything new?",
+            attachments: [],
+          }),
+          appContext: [{ key: "mcp_app_item-1", text: note }],
+        });
+        const content = harness.offeredMessages.at(-1)?.message.content;
+        return typeof content === "string"
+          ? content
+          : (content ?? []).map((block) => (block.type === "text" ? block.text : "")).join("\n");
+      });
+
+      const before = yield* makeWakeHarnessWithOptions({
+        close: (sdkMessages) => Queue.shutdown(sdkMessages),
+        freshQueueOnReopen: true,
+      });
+      assert.include(yield* startTurn(before, before.providerThread, 0), note);
+      yield* before.offerAndWait(
+        makeResultFrame({ uuid: "mcp-app-restart-result-0", result: "Done." }),
+      );
+      yield* Queue.take(before.terminalReceipts);
+      const persisted = before.events
+        .filter((event) => event.type === "provider_thread.updated")
+        .at(-1)?.providerThread;
+      assert.isDefined(persisted);
+
+      // A new adapter resumes the same native session, whose history already holds the note.
+      const after = yield* makeWakeHarnessWithOptions({
+        close: (sdkMessages) => Queue.shutdown(sdkMessages),
+        freshQueueOnReopen: true,
+      });
+      assert.notInclude(yield* startTurn(after, persisted!, 1), note);
+    }).pipe(
+      Effect.scoped,
       Effect.provide(
         Layer.mergeAll(
           IdAllocator.layer,
@@ -8042,6 +8251,112 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           harness.runtime.respondToRuntimeRequest({ requestId: request.id, decision: "decline" }),
         );
         assert.include(String(late.cause), "No pending Claude runtime request");
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+
+    it.effect("shows what T3 Code's own tool asks without naming a server", () =>
+      Effect.gen(function* () {
+        const { harness, elicit, awaitCard } = yield* startElicitationTurn();
+        const sessions = yield* McpProviderSessions.McpProviderSessions;
+        const message = "Push tools and run this repository's hook file .husky/pre-push?";
+        const pushHooks = { branch: "tools", files: [".husky/pre-push"], commands: [] };
+        yield* sessions.recordApprovalRequest(harness.threadId, { message, pushHooks });
+        const cards = () =>
+          harness.events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "approval_request"
+              ? [event.turnItem]
+              : [],
+          );
+        const own: ElicitationRequest = {
+          serverName: "t3-code",
+          message,
+          mode: "form",
+          requestedSchema: { type: "object", properties: {} },
+        };
+
+        yield* elicit(own);
+        yield* awaitCard(1);
+        assert.deepInclude(cards().at(-1), { prompt: message, pushHooks });
+        assert.notProperty(cards().at(-1), "appName");
+
+        // Asked by a server T3 Code did not register: its name is shown, as for any server.
+        yield* elicit({ ...own, serverName: "deploys", displayName: "T3 Code" });
+        yield* awaitCard(2);
+        assert.deepInclude(cards().at(-1), { prompt: message, appName: "T3 Code" });
+        assert.notProperty(cards().at(-1), "pushHooks");
+
+        // Under T3 Code's name, but nothing T3 Code asked this thread.
+        yield* elicit({ ...own, message: "Push tools?" });
+        yield* awaitCard(3);
+        assert.deepInclude(cards().at(-1), { prompt: "Push tools?", appName: "t3-code" });
+        assert.notProperty(cards().at(-1), "pushHooks");
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+
+    it.effect("asks the person every time T3 Code's own tool asks", () =>
+      Effect.gen(function* () {
+        const { harness, elicit, awaitCard } = yield* startElicitationTurn();
+        const sessions = yield* McpProviderSessions.McpProviderSessions;
+        const message = "Push tools and run this repository's hook file .husky/pre-push?";
+        const pushHooks = { branch: "tools", files: [".husky/pre-push"], commands: [] };
+        const own: ElicitationRequest = {
+          serverName: "t3-code",
+          message,
+          mode: "form",
+          requestedSchema: { type: "object", properties: {} },
+        };
+        const card = () =>
+          harness.events.findLast(
+            (event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "approval_request",
+          );
+
+        const firstAsked = yield* sessions.recordApprovalRequest(harness.threadId, {
+          message,
+          pushHooks,
+        });
+        const first = yield* elicit(own);
+        const firstRequest = yield* awaitCard(1);
+        // Shown, and not answered by anything but the person.
+        assert.notProperty(
+          yield* sessions.findApprovalRequest(harness.threadId, message),
+          "approved",
+        );
+        // Nothing to remember an answer by: each request is for what the hooks are then.
+        const firstCard = card();
+        assert.deepInclude(firstCard?.type === "turn_item.updated" ? firstCard.turnItem : {}, {
+          options: [
+            { decision: "cancel", label: "Cancel" },
+            { decision: "decline", label: "Decline" },
+            { decision: "accept", label: "Approve" },
+          ],
+        });
+        // A client that answers for the session anyway approves this one request.
+        yield* harness.runtime.respondToRuntimeRequest({
+          requestId: firstRequest.id,
+          decision: "acceptForSession",
+        });
+        assert.deepEqual(yield* Fiber.join(first), { action: "accept", content: {} });
+        // What the person answered in the app stays with the request T3 Code made.
+        assert.deepInclude(yield* sessions.takeApprovalRequest(harness.threadId, firstAsked), {
+          approved: true,
+        });
+
+        const secondAsked = yield* sessions.recordApprovalRequest(harness.threadId, {
+          message,
+          pushHooks,
+        });
+        const second = yield* elicit(own);
+        const secondRequest = yield* awaitCard(2);
+        assert.isUndefined(second.pollUnsafe());
+        yield* harness.runtime.respondToRuntimeRequest({
+          requestId: secondRequest.id,
+          decision: "decline",
+        });
+        assert.deepEqual(yield* Fiber.join(second), { action: "decline" });
+        assert.deepInclude(yield* sessions.takeApprovalRequest(harness.threadId, secondAsked), {
+          approved: false,
+        });
       }).pipe(Effect.scoped, Effect.provide(testLayer)),
     );
 
