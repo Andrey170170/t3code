@@ -54,7 +54,7 @@ import {
 import { msg, T, useGT, useLocale, useMessages, Var } from "gt-react";
 import { m, type MessageResolver } from "../../i18n/messages";
 
-import { formatRelativeTime, weekStartsOn } from "../../timestampFormat";
+import { formatCalendarDate, formatRelativeTime, weekStartsOn } from "../../timestampFormat";
 import { isTimeOfDay } from "../../timeOfDay";
 import { useClientSettings, useEnvironmentSettings } from "../../hooks/useSettings";
 import { getCustomModelOptionsByInstance, selectsPlanAgent } from "../../modelSelection";
@@ -348,11 +348,7 @@ function RunOnceField({
           <PopoverTrigger
             render={<Button id={id} variant="outline" className="w-full justify-between" />}
           >
-            {date.toLocaleDateString(undefined, {
-              month: "short",
-              day: "numeric",
-              year: "numeric",
-            })}
+            {formatCalendarDate(date)}
             <CalendarIcon className="size-4 text-muted-foreground" />
           </PopoverTrigger>
           <PopoverPopup align="start" aria-label={gt("Choose run date")}>
