@@ -75,13 +75,14 @@ describe("timeOfDayForLabel", () => {
   });
 });
 
-it("writes full timestamps in the system locale", async () => {
+it("writes full timestamps and calendar dates in the system locale", async () => {
   using _zone = useTimeZone("UTC");
   vi.stubGlobal("window", { desktopBridge: { getSystemLocale: () => "de-DE" } });
   vi.resetModules();
   try {
-    const { formatFullTimestamp } = await import("./timestampFormat");
+    const { formatCalendarDate, formatFullTimestamp } = await import("./timestampFormat");
     expect(formatFullTimestamp("2026-11-19T18:05:00.000Z", "24-hour")).toBe("19.11.2026, 18:05:00");
+    expect(formatCalendarDate(new Date("2026-11-19T00:00"))).toBe("19. Nov. 2026");
   } finally {
     vi.unstubAllGlobals();
   }

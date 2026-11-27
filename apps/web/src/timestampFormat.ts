@@ -183,6 +183,14 @@ export function formatFullTimestamp(isoDate: string, timestampFormat: TimestampF
   );
 }
 
+export function formatCalendarDate(date: Date): string {
+  return date.toLocaleDateString(timestampLocale, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 export function formatShortTimestamp(
   isoDate: string,
   timestampFormat: TimestampFormat,
