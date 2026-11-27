@@ -70,8 +70,8 @@ function retryDelayMs(failures: number, random: number): number {
 const TelemetryEnvConfig = Config.all({
   // This fork's builds report to the fork's own collector, which needs its key from the
   // environment, and keep product usage private unless a server opts in.
-  posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(Config.withDefault("")),
-  posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(
+  ingestKey: Config.String("T3CODE_TELEMETRY_KEY").pipe(Config.withDefault("")),
+  ingestHost: Config.String("T3CODE_TELEMETRY_HOST").pipe(
     Config.withDefault("https://t3-telemetry.andrei-homelab.com"),
   ),
   enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(Config.withDefault(false)),
@@ -157,11 +157,11 @@ export const make = Effect.gen(function* () {
     ManagedPolicy.deniedBy(yield* ManagedPolicy.ManagedPolicy, "telemetry") === undefined;
   const optedIn = (config: {
     readonly enabled: boolean;
-    readonly posthogKey: string;
-    readonly posthogHost: string;
+    readonly ingestKey: string;
+    readonly ingestHost: string;
   }) =>
-    config.enabled && config.posthogKey.trim() !== ""
-      ? Option.some({ posthogKey: config.posthogKey, posthogHost: config.posthogHost })
+    config.enabled && config.ingestKey.trim() !== ""
+      ? Option.some({ ingestKey: config.ingestKey, ingestHost: config.ingestHost })
       : Option.none();
   // Where events go, or none while they are not sent. Fork builds send only after an
   // opt-in with a key. The desktop app delivers its login shell's environment after startup
@@ -173,20 +173,22 @@ export const make = Effect.gen(function* () {
       return Effect.succeedNone;
     }
     const shellEnv = Object.fromEntries(
-      ["T3CODE_TELEMETRY_ENABLED", "T3CODE_POSTHOG_KEY", "T3CODE_POSTHOG_HOST"].flatMap((name) => {
-        const value = hostEnvironment[name];
-        return value === undefined ? [] : [[name, value]];
-      }),
+      ["T3CODE_TELEMETRY_ENABLED", "T3CODE_TELEMETRY_KEY", "T3CODE_TELEMETRY_HOST"].flatMap(
+        (name) => {
+          const value = hostEnvironment[name];
+          return value === undefined ? [] : [[name, value]];
+        },
+      ),
     );
     return Config.all({
       enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(
         Config.withDefault(telemetryConfig.enabled),
       ),
-      posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(
-        Config.withDefault(telemetryConfig.posthogKey),
+      ingestKey: Config.String("T3CODE_TELEMETRY_KEY").pipe(
+        Config.withDefault(telemetryConfig.ingestKey),
       ),
-      posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(
-        Config.withDefault(telemetryConfig.posthogHost),
+      ingestHost: Config.String("T3CODE_TELEMETRY_HOST").pipe(
+        Config.withDefault(telemetryConfig.ingestHost),
       ),
     }).pipe(
       Effect.map(optedIn),
@@ -262,7 +264,7 @@ export const make = Effect.gen(function* () {
     if (target === undefined || !distinctId) return;
 
     const payload = {
-      api_key: target.posthogKey,
+      api_key: target.ingestKey,
       batch: events.map((event) => ({
         uuid: event.uuid,
         event: event.event,
@@ -294,7 +296,7 @@ export const make = Effect.gen(function* () {
       })),
     };
 
-    yield* HttpClientRequest.post(`${target.posthogHost}/batch/`).pipe(
+    yield* HttpClientRequest.post(`${target.ingestHost}/batch/`).pipe(
       HttpClientRequest.bodyJson(payload),
       Effect.flatMap(httpClient.execute),
       Effect.flatMap(HttpClientResponse.filterStatusOk),

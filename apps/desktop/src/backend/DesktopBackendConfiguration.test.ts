@@ -794,8 +794,8 @@ describe("DesktopBackendConfiguration", () => {
         assert.include((config.env.WSLENV ?? "").split(":"), "OTEL_SDK_DISABLED");
         assert.equal(config.env.T3CODE_TELEMETRY_ENABLED, "false");
         assert.include((config.env.WSLENV ?? "").split(":"), "T3CODE_TELEMETRY_ENABLED");
-        assert.equal(config.env.T3CODE_POSTHOG_KEY, "phc_test_key");
-        assert.include((config.env.WSLENV ?? "").split(":"), "T3CODE_POSTHOG_KEY");
+        assert.equal(config.env.T3CODE_TELEMETRY_KEY, "phc_test_key");
+        assert.include((config.env.WSLENV ?? "").split(":"), "T3CODE_TELEMETRY_KEY");
         assert.equal(config.env.OTEL_RESOURCE_ATTRIBUTES, "deployment.environment.name=staging");
         assert.include((config.env.WSLENV ?? "").split(":"), "OTEL_RESOURCE_ATTRIBUTES");
       }).pipe(
@@ -817,7 +817,7 @@ describe("DesktopBackendConfiguration", () => {
         Effect.provideService(HostProcess.Environment, {
           OTEL_SDK_DISABLED: "true",
           T3CODE_TELEMETRY_ENABLED: "false",
-          T3CODE_POSTHOG_KEY: "phc_test_key",
+          T3CODE_TELEMETRY_KEY: "phc_test_key",
           OTEL_RESOURCE_ATTRIBUTES: "deployment.environment.name=staging",
         }),
       );

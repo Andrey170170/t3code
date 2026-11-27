@@ -43,7 +43,7 @@ count as product use.
   UUID per event, backs off on failure, and drops batches after bounded retries so a stuck batch
   cannot loop forever.
 - This fork's builds default to the fork's own collector instead of `ingest.t3.codes`, send
-  nothing without a `T3CODE_POSTHOG_KEY`, and send nothing unless `T3CODE_TELEMETRY_ENABLED=true`
+  nothing without a `T3CODE_TELEMETRY_KEY`, and send nothing unless `T3CODE_TELEMETRY_ENABLED=true`
   opts in, so the CI-runner default below only matters for relay tracing. `DO_NOT_TRACK=1` and a
   managed policy that denies telemetry override the opt-in.
 - Dev-runner servers and servers on CI runners disable telemetry (and relay tracing) by default so
