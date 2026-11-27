@@ -6,7 +6,7 @@ This build sends no product usage events unless a server opts in, and sends rela
 
 When enabled, the server sends usage events to this fork's collector at `t3-telemetry.andrei-homelab.com` under a hashed random install ID (plus a hashed T3 Connect account ID when signed in, and random client device IDs). Events contain provider, catalog model name (non-catalog models report as custom), reasoning effort, permission mode, turn/request outcome, duration, release channel, and token counts.
 
-To enable them, set `T3CODE_TELEMETRY_ENABLED=true` and the collector's key in `T3CODE_POSTHOG_KEY` in the server's environment before starting it. Without both, product events are neither recorded nor sent. `T3CODE_POSTHOG_HOST` sends them to another PostHog-compatible endpoint instead.
+To enable them, set `T3CODE_TELEMETRY_ENABLED=true` and the collector's key in `T3CODE_TELEMETRY_KEY` in the server's environment before starting it. Without both, product events are neither recorded nor sent. `T3CODE_TELEMETRY_HOST` sends them to another PostHog-compatible endpoint instead.
 
 ## Disable telemetry
 

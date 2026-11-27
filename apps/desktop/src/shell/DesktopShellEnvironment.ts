@@ -123,8 +123,8 @@ const LOGIN_SHELL_ENV_NAMES = [
   "SSL_CERT_DIR",
   "NODE_EXTRA_CA_CERTS",
   "T3CODE_TELEMETRY_ENABLED",
-  "T3CODE_POSTHOG_HOST",
-  "T3CODE_POSTHOG_KEY",
+  "T3CODE_TELEMETRY_HOST",
+  "T3CODE_TELEMETRY_KEY",
   "DO_NOT_TRACK",
   "T3CODE_FEATURE_FLAGS",
   "T3CODE_RELEASE_BASE_URL",
@@ -137,8 +137,8 @@ const WINDOWS_PROFILE_ENV_NAMES = [
   "FNM_DIR",
   "FNM_MULTISHELL_PATH",
   "T3CODE_TELEMETRY_ENABLED",
-  "T3CODE_POSTHOG_HOST",
-  "T3CODE_POSTHOG_KEY",
+  "T3CODE_TELEMETRY_HOST",
+  "T3CODE_TELEMETRY_KEY",
   "DO_NOT_TRACK",
 ] as const;
 const LOCALE_ENV_NAMES = ["LANG", "LC_ALL", "LC_CTYPE"] as const;
@@ -467,8 +467,8 @@ const installWindowsEnvironment = Effect.fn("desktop.shellEnvironment.installWin
     }
     for (const name of [
       "T3CODE_TELEMETRY_ENABLED",
-      "T3CODE_POSTHOG_HOST",
-      "T3CODE_POSTHOG_KEY",
+      "T3CODE_TELEMETRY_HOST",
+      "T3CODE_TELEMETRY_KEY",
       "DO_NOT_TRACK",
     ] as const) {
       if (!config.env[name] && profile[name]) {
@@ -575,8 +575,8 @@ const installPosixEnvironment = Effect.fn("desktop.shellEnvironment.installPosix
       "JAVA_HOME",
       "PNPM_HOME",
       "T3CODE_TELEMETRY_ENABLED",
-      "T3CODE_POSTHOG_HOST",
-      "T3CODE_POSTHOG_KEY",
+      "T3CODE_TELEMETRY_HOST",
+      "T3CODE_TELEMETRY_KEY",
       "DO_NOT_TRACK",
       "T3CODE_FEATURE_FLAGS",
       "T3CODE_RELEASE_BASE_URL",

@@ -1121,19 +1121,19 @@ describe("DesktopShellEnvironment", () => {
         platform: "win32",
         handler: (command) =>
           command._tag === "StandardCommand" &&
-          String(command.args.at(-1)).includes("T3CODE_POSTHOG_KEY")
+          String(command.args.at(-1)).includes("T3CODE_TELEMETRY_KEY")
             ? envOutput({
                 PATH: "C:\\Windows\\System32",
                 T3CODE_TELEMETRY_ENABLED: "true",
-                T3CODE_POSTHOG_HOST: "https://collector.example",
-                T3CODE_POSTHOG_KEY: "phc_test",
+                T3CODE_TELEMETRY_HOST: "https://collector.example",
+                T3CODE_TELEMETRY_KEY: "phc_test",
               })
             : envOutput({ PATH: "C:\\Windows\\System32" }),
       });
 
       assert.equal(env.T3CODE_TELEMETRY_ENABLED, "true");
-      assert.equal(env.T3CODE_POSTHOG_KEY, "phc_test");
-      assert.equal(env.T3CODE_POSTHOG_HOST, "https://collector.example");
+      assert.equal(env.T3CODE_TELEMETRY_KEY, "phc_test");
+      assert.equal(env.T3CODE_TELEMETRY_HOST, "https://collector.example");
     }),
   );
 
